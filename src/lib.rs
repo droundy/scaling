@@ -1513,22 +1513,22 @@ mod tests {
         // for a fast function, and formatting via `Duration` (which has
         // nanosecond resolution) would round it away to `0ns`.
         let fast = shown(71.0, 0.0017);
-        assert!(fast.starts_with("71.0000ns ± 0.12ns"), "{}", fast);
+        assert!(fast.starts_with("71.0000ns ± 0.12ns"), "{fast}");
 
         // Both sides in the same unit, so two results can be compared digit
         // for digit without a unit conversion in the reader's head.
         let slow = shown(100_267_300.0, 0.0002);
-        assert!(slow.starts_with("100.2673ms ± 0.020ms"), "{}", slow);
+        assert!(slow.starts_with("100.2673ms ± 0.020ms"), "{slow}");
 
         // Two significant digits is all an error bar deserves, whatever its
         // magnitude relative to the value.
         let coarse = shown(2_500.0, 0.032);
-        assert!(coarse.starts_with("2.5000µs ± 0.080µs"), "{}", coarse);
+        assert!(coarse.starts_with("2.5000µs ± 0.080µs"), "{coarse}");
 
         // Even an error far below the value's own unit keeps two digits
         // rather than collapsing to zero.
         let tiny = shown(0.4523, 0.02);
-        assert!(tiny.starts_with("0.4523ns ± 0.0090ns"), "{}", tiny);
+        assert!(tiny.starts_with("0.4523ns ± 0.0090ns"), "{tiny}");
     }
 
     #[test]
