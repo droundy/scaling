@@ -191,13 +191,22 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 // benchmark.
 const BENCH_TIME_MIN: Duration = Duration::from_millis(1);
 
-/// Never conclude from fewer samples than this.
+/// Never stop *voluntarily* on fewer samples than this.
 ///
 /// A standard deviation estimated from `k` points is itself uncertain by
 /// roughly `1/sqrt(2(k-1))` - about 32% at `k = 6`, and over 70% at
 /// `k = 2`. Stopping the instant a noisy estimate happens to dip below the
 /// target would systematically favour the runs that got lucky, so we
 /// require a handful of samples before believing the standard error at all.
+///
+/// Note the emphasis: this is a floor on *concluding we are done*, not on
+/// reporting. The selection effect it defends against exists only when the
+/// standard error is the thing that stops us. If instead
+/// [`Config::max_time`] runs out first - which is what happens to a slow
+/// function on a short budget - nothing has been selected for, and the
+/// error bar from the three or four samples we did manage is honest, wide,
+/// and a good deal more use than none at all. So a budget-forced stop
+/// reports whatever standard error it has (and sets [`Stats::hit_limit`]).
 ///
 /// Not a knob: callers control accuracy with [`Config::target_rel_error`]
 /// and cost with [`Config::max_time`], and no useful benchmark wants a
@@ -277,9 +286,15 @@ pub struct Stats {
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
-    /// `true` if the benchmark gave up on its time budget before
-    /// reaching `target_rel_error` - the accuracy you asked for was not
-    /// achieved.
+    /// `true` if the benchmark gave up on its time budget before reaching
+    /// `target_rel_error` - the accuracy you asked for was not achieved.
+    ///
+    /// Also `true` in the conservative case where the budget ran out before
+    /// enough samples had accumulated to trust the standard error, even if
+    /// `rel_std_error` happens to look good: that is precisely the reading
+    /// not to believe. `rel_std_error` is still reported whenever it can be
+    /// computed at all, so a stopped-short run gives you a wide error bar
+    /// rather than none.
     pub hit_limit: bool,
 }
 
@@ -440,8 +455,10 @@ impl Config {
     /// 3. **Stop** once there are at least `MIN_SAMPLES` samples *and*
     ///    `stderr(x) / mean(x) < target_rel_error`, where
     ///    `stderr(x) = sd(x) / sqrt(k)` with a Bessel-corrected `sd`. If
-    ///    `max_time` runs out first, stop anyway and set
-    ///    `hit_limit`.
+    ///    `max_time` runs out first, stop anyway, set `hit_limit`, and
+    ///    report the standard error from however many samples were
+    ///    collected - two is enough for one to exist, and a wide honest
+    ///    error bar beats none.
     ///
     /// Because each `x_j` already averages `unit` iterations,
     /// `sd(x) = sigma_iter / sqrt(unit)`, so the standard error of the mean
@@ -484,27 +501,30 @@ impl Config {
             let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
             per_iter.push(t / unit as f64);
             iterations += unit;
-            let out_of_budget =
-                per_iter.len() >= MAX_SAMPLES || start.elapsed() > self.max_time;
-            if per_iter.len() >= MIN_SAMPLES {
-                let (mean, rel_se) = mean_and_rel_stderr(&per_iter);
-                if rel_se < self.target_rel_error || out_of_budget {
-                    return Stats {
-                        ns_per_iter: mean,
-                        rel_std_error: rel_se,
-                        iterations,
-                        samples: per_iter.len(),
-                        hit_limit: out_of_budget && rel_se >= self.target_rel_error,
-                    };
-                }
-            } else if out_of_budget {
-                let mean = per_iter.iter().sum::<f64>() / per_iter.len() as f64;
+            let (mean, rel_se) = mean_and_rel_stderr(&per_iter);
+
+            let out_of_budget = per_iter.len() >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            // `MIN_SAMPLES` gates only the *voluntary* stop. Its job is to
+            // stop us concluding from a standard error so noisy it might
+            // have dipped below the target by luck - a hazard that exists
+            // only when the standard error is what makes us stop. When the
+            // budget is what makes us stop, that selection effect is absent,
+            // so we report the error bar we have (wide, and honestly so)
+            // rather than discarding it. A slow function with a short
+            // `max_time` may only fit three or four samples, and three
+            // samples' worth of error bar beats none.
+            let precise_enough =
+                per_iter.len() >= MIN_SAMPLES && rel_se < self.target_rel_error;
+            if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
-                    rel_std_error: f64::NAN,
+                    rel_std_error: rel_se,
                     iterations,
                     samples: per_iter.len(),
-                    hit_limit: true,
+                    // Stopping short of `MIN_SAMPLES` counts as hitting the
+                    // limit even if `rel_se` happens to look good, because
+                    // that is exactly the reading we do not yet trust.
+                    hit_limit: !precise_enough,
                 };
             }
         }
@@ -636,6 +656,12 @@ where
 fn mean_and_rel_stderr(xs: &[f64]) -> (f64, f64) {
     let n = xs.len() as f64;
     let mean = xs.iter().sum::<f64>() / n;
+    if xs.len() < 2 {
+        // A standard error needs at least two points to exist at all. The
+        // arithmetic below would reach this answer anyway, via 0.0/0.0, but
+        // that is too subtle to rely on.
+        return (mean, f64::NAN);
+    }
     // Sample variance (Bessel-corrected), then the standard error of the mean.
     let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     (mean, (var / n).sqrt() / mean)
@@ -1321,6 +1347,34 @@ mod tests {
             100.0 * tight_spread
         );
         assert!(tight_spread < loose_spread);
+    }
+
+    #[test]
+    fn a_slow_function_on_a_short_budget_still_gets_an_error_bar() {
+        println!();
+        // ~100ms per iteration against a 350ms budget: calibration takes one
+        // iteration and each sample takes another, so only a handful fit -
+        // fewer than MIN_SAMPLES. We should still get a real error bar out
+        // of the samples we managed, rather than NaN.
+        let cfg = Config {
+            max_time: Duration::from_millis(350),
+            ..Config::default()
+        };
+        let stats = cfg.bench(|| thread::sleep(Duration::from_millis(100)));
+        println!("{stats}");
+        assert!(
+            stats.samples >= 2 && stats.samples < MIN_SAMPLES,
+            "expected to stop short of MIN_SAMPLES, got {} samples",
+            stats.samples
+        );
+        assert!(
+            !stats.rel_std_error.is_nan(),
+            "a standard error exists from {} samples and should be reported",
+            stats.samples
+        );
+        // Stopped short, so we say so regardless of how tight it looks.
+        assert!(stats.hit_limit);
+        assert!(stats.ns_per_iter > 99.0e6);
     }
 
     #[test]
