@@ -9,6 +9,9 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
+# Set by `libc`, which we depend on only to pin benchmarks to a reserved
+# CPU on Linux. The library's own code needs no more than 1.59.
+rust-version = "1.65"
 
 # Only used to set CPU affinity, which only exists on Linux. Elsewhere this
 # crate still has no dependencies at all.
