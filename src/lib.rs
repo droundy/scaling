@@ -32,11 +32,11 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:        50ns (R²=0.995, 20435 iterations in 68 samples)
-fib 500:       144ns (R²=0.999, 7235 iterations in 57 samples)
-fib scaling:   0.30ns/N    (R²=0.999, 8645 iterations in 59 samples)
-reverse:        46ns (R²=0.990, 30550 iterations in 72 samples)
-sort:          137ns (R²=0.991, 187129 iterations in 91 samples)
+fib 200:   71.0000ns ± 0.17% (120000 iterations in 6 samples)
+fib 500:  255.0000ns ± 0.99% (61840 iterations in 16 samples)
+fib scaling:   0.52ns/N    (R²=0.996, 7235 iterations in 57 samples)
+reverse:   39.0000ns ± 0.64% (257004 iterations in 6 samples)
+sort:     100.0000ns ± 0.99% (1023120 iterations in 58 samples)
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
@@ -47,25 +47,35 @@ An *iteration* is a single execution of your code. A *sample* is a measurement,
 during which your code may be run many times. In other words: taking a sample
 means performing some number of iterations and measuring the total time.
 
-The first sample we take performs only 1 iteration, but as we continue
-taking samples we increase the number of iterations with increasing
-rapidity. We
-stop either when a global time limit is reached (currently 10 seconds),
-or when we have collected sufficient statistics (but have run for at
-least a millisecond).
+## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
 
-If a benchmark requires some state to run, `n` copies of the initial state are
-prepared before the sample is taken.
+These first calibrate a batch size (the number of iterations per sample)
+large enough that per-sample overhead is negligible, then take equal-sized
+batches and stop once the *relative standard error* of their mean falls
+below a target (1% by default; see [`Config`] to change it). This directly
+answers "how precisely do I know `ns_per_iter`", which is what you actually
+want, as opposed to the older R²-based rule this replaced: R² asks "is time
+linear in iteration count", which a handful of points satisfy almost
+regardless of how noisy each one is, and says nothing about how well the
+slope is known.
 
-Once we have the data, we perform OLS linear regression to find out how
-the sample time varies with the number of iterations in the sample. The
-gradient of the regression line tells us how long it takes to perform a
-single iteration of the benchmark. The R² value is a measure of how much
-noise there is in the data.
+[`Stats::rel_std_error`] reports the accuracy actually achieved, and
+[`Stats::hit_limit`] tells you if the budget ran out before the target
+accuracy was met. That budget is 10 seconds by default (see [`Config`]).
 
-If the function is too slow (5 or 10 seconds), the linear regression is skipped,
-and a simple average of timings is used.  For slow functions, any overhead will
-be negligible.
+If a benchmark requires some state to run, one copy of the initial state is
+prepared per iteration.
+
+## Scaling benchmarks: `bench_scaling`, `bench_scaling_gen`
+
+These fit several candidate power/exponential laws by OLS linear regression
+and pick the best fit by R², since here we care about the *shape* of the
+scaling relationship rather than just one number, and R² is a reasonable way
+to compare candidate models against each other. The first sample taken
+performs only 1 iteration, but as we continue taking samples we increase the
+number of iterations with increasing rapidity. We stop either when a global
+time limit is reached (currently 10 seconds, or 120 when desperate for a good
+fit), or when the fit is good enough (R² > 0.99).
 
 # Caveats
 
@@ -112,9 +122,9 @@ let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
 The results are a little surprising:
 
 ```none
-fib_1:        110 ns   (R²=1.000, 9131585 iterations in 144 samples)
-fib_2:          0 ns   (R²=1.000, 413289203 iterations in 184 samples)
-fib_3:        109 ns   (R²=1.000, 9131585 iterations in 144 samples)
+fib_1:  260.0000ns ± 0.28% (23154 iterations in 6 samples)
+fib_2:    0.0000ns ± 1.00% (3008000000 iterations in 188 samples)
+fib_3:  262.0000ns ± 1.00% (85030 iterations in 22 samples)
 ```
 
 Oh, `fib_2`, why do you lie? The answer is: `fib(500)` is pure, and its
@@ -159,165 +169,443 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 // benchmark.
 const BENCH_TIME_MIN: Duration = Duration::from_millis(1);
 
+/// Tunables controlling how hard a benchmark works to pin down
+/// `ns_per_iter`, and when it gives up. [`bench`], [`bench_env`] and
+/// [`bench_gen_env`] use [`Config::default`]; call the same-named methods
+/// on a `Config` to choose your own accuracy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    /// Stop once the relative standard error of `ns_per_iter` falls below
+    /// this (0.01 = 1%). This is the knob to turn for a quicker, noisier
+    /// answer or a slower, tighter one.
+    pub target_rel_error: f64,
+    /// Calibrate the batch size so that one sample takes about this long.
+    /// Too short and per-sample overhead (a couple of `Instant::now()`
+    /// calls) pollutes the measurement; too long wastes time that could
+    /// have gone into collecting more samples.
+    pub sample_time: Duration,
+    /// Never conclude from fewer samples than this: a standard error
+    /// estimated from very few points is itself too noisy to stop on.
+    pub min_samples: usize,
+    /// Give up after this many samples even if `target_rel_error` was
+    /// never reached. This is a backstop, not the intended budget: by
+    /// default it is set high enough that `max_time` is what actually
+    /// binds. Lowering it below what `max_time` allows means giving up on
+    /// the requested accuracy while time remains - exactly the "stop early
+    /// and report a number more confident than it deserves" behaviour this
+    /// design exists to avoid - so lower it only when you specifically want
+    /// a cap on iterations rather than on time.
+    pub max_samples: usize,
+    /// Give up after roughly this much wall-clock time even if
+    /// `target_rel_error` was never reached. Normally the binding limit.
+    pub max_time: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            target_rel_error: 0.01,
+            sample_time: Duration::from_millis(1),
+            min_samples: 6,
+            // Deliberately far above what `max_time / sample_time` allows
+            // (10s / 1ms = 10_000), so that time is the binding budget.
+            max_samples: 1_000_000,
+            max_time: BENCH_TIME_MAX,
+        }
+    }
+}
+
 /// Statistics for a benchmark run.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Stats {
-    /// The time, in nanoseconds, per iteration. If the benchmark generated
-    /// fewer than 2 samples in the allotted time then this will be NaN.
+    /// The time, in nanoseconds, per iteration.
     pub ns_per_iter: f64,
-    /// The coefficient of determination, R².
+    /// Relative standard error of `ns_per_iter`, as a fraction (0.01 = 1%).
     ///
-    /// This is an indication of how noisy the benchmark was, where 1 is
-    /// good and 0 is bad. Be suspicious of values below 0.9.
+    /// This is the standard error *of sampling* seen within this call: the
+    /// benchmark's own run-to-run variability plus timer noise. It is *not*
+    /// a bound on systematic differences between separate process runs —
+    /// CPU frequency state, code layout, and cache/allocator state shift
+    /// between runs, and no statistic computed inside one call can see
+    /// them. A very small `rel_std_error` on a deterministic benchmark
+    /// means sampling is no longer the limit, not that the number is
+    /// accurate to that many digits. `NaN` when it cannot be computed at
+    /// all: either fewer than 2 samples were collected (see `hit_limit`),
+    /// or every sample measured as exactly zero.
+    pub rel_std_error: f64,
+    /// Retained for backwards compatibility. Always `NaN`: the stopping
+    /// rule no longer relies on a regression, so there is no
+    /// goodness-of-fit to report. Use `rel_std_error` instead.
     pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
     pub iterations: usize,
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
+    /// `true` if the benchmark gave up on `max_time`/`max_samples` before
+    /// reaching `target_rel_error` - the accuracy you asked for was not
+    /// achieved.
+    pub hit_limit: bool,
 }
 
 impl Display for Stats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.ns_per_iter.is_nan() {
+        let per_iter = Duration::from_nanos(self.ns_per_iter as u64);
+        if self.rel_std_error.is_nan() {
+            // NaN has two distinct causes: too few samples to estimate a
+            // standard error from (only possible via the single-sample
+            // "blew the whole time budget already" path), or - rarer, but
+            // possible for a near-free benchmark on a coarse timer - a
+            // measured time of exactly zero for every sample, which makes
+            // `rel_std_error` a literal 0/0 regardless of sample count.
+            let why = if self.samples < 2 {
+                format!(
+                    "only {} sample{}",
+                    self.samples,
+                    if self.samples == 1 { "" } else { "s" }
+                )
+            } else {
+                "measured time was exactly zero".to_string()
+            };
             write!(
                 f,
-                "Only generated {} sample(s) - we can't fit a regression line to that! \
-                 Try making your benchmark faster.",
-                self.samples
+                "{:>11.4?} (± unknown, {}){}",
+                per_iter,
+                why,
+                if self.hit_limit { " (limit)" } else { "" }
             )
         } else {
-            let per_iter = Duration::from_nanos(self.ns_per_iter as u64);
-            let per_iter = format!("{:?}", per_iter);
             write!(
                 f,
-                "{:>11} (R²={:.3}, {} iterations in {} samples)",
-                per_iter, self.goodness_of_fit, self.iterations, self.samples
+                "{:>11.4?} ± {:.2}%{} ({} iterations in {} samples)",
+                per_iter,
+                100.0 * self.rel_std_error,
+                if self.hit_limit { " (limit)" } else { "" },
+                self.iterations,
+                self.samples
             )
         }
     }
 }
 
-/// Run a benchmark.
+/// Run a benchmark, targeting the default accuracy (see [`Config`]).
 ///
 /// The return value of `f` is not used, but we trick the optimiser into
 /// thinking we're going to use it. Make sure to return enough information
 /// to prevent the optimiser from eliminating code from your benchmark! (See
 /// the module docs for more.)
-pub fn bench<F, O>(mut f: F) -> Stats
+pub fn bench<F, O>(f: F) -> Stats
 where
     F: FnMut() -> O,
 {
-    bench_env((), |_| f())
+    Config::default().bench(f)
 }
 
-/// Run a benchmark with an environment.
+/// Run a benchmark with an environment, targeting the default accuracy (see
+/// [`Config`]).
 ///
-/// The value `env` is a clonable prototype for the "benchmark
-/// environment". Each iteration receives a freshly-cloned mutable copy of
-/// this environment. The time taken to clone the environment is not included
-/// in the results.
-///
-/// Nb: it's very possible that we will end up allocating many (>10,000)
-/// copies of `env` at the same time. Probably best to keep it small.
-///
-/// See `bench` and the module docs for more.
-///
-/// ## Overhead
-///
-/// Every iteration, `bench_env` performs a lookup into a big vector in
-/// order to get the environment for that iteration. If your benchmark
-/// is memory-intensive then this could, in the worst case, amount to a
-/// systematic cache-miss (ie. this vector would have to be fetched from
-/// DRAM at the start of every iteration). In this case the results could be
-/// affected by a hundred nanoseconds. This is a worst-case scenario however,
-/// and I haven't actually been able to trigger it in practice... but it's
-/// good to be aware of the possibility.
+/// See [`Config::bench_env`] for the full documentation.
 pub fn bench_env<F, I, O>(env: I, f: F) -> Stats
 where
     F: FnMut(&mut I) -> O,
     I: Clone,
 {
-    bench_gen_env(move || env.clone(), f)
+    Config::default().bench_env(env, f)
 }
 
-/// Run a benchmark with a generated environment.
+/// Run a benchmark with a generated environment, targeting the default
+/// accuracy (see [`Config`]).
 ///
-/// The function `gen_env` creates the "benchmark environment" for the
-/// computation. Each iteration receives a freshly-created environment. The
-/// time taken to create the environment is not included in the results.
-///
-/// Nb: it's very possible that we will end up generating many (>10,000)
-/// copies of `env` at the same time. Probably best to keep it small.
-///
-/// See `bench` and the module docs for more.
-///
-/// ## Overhead
-///
-/// Every iteration, `bench_gen_env` performs a lookup into a big vector
-/// in order to get the environment for that iteration. If your benchmark
-/// is memory-intensive then this could, in the worst case, amount to a
-/// systematic cache-miss (ie. this vector would have to be fetched from
-/// DRAM at the start of every iteration). In this case the results could be
-/// affected by a hundred nanoseconds. This is a worst-case scenario however,
-/// and I haven't actually been able to trigger it in practice... but it's
-/// good to be aware of the possibility.
-pub fn bench_gen_env<G, F, I, O>(mut gen_env: G, mut f: F) -> Stats
+/// See [`Config::bench_gen_env`] for the full documentation.
+pub fn bench_gen_env<G, F, I, O>(gen_env: G, f: F) -> Stats
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    let mut data = Vec::new();
-    // The time we started the benchmark (not used in results)
-    let bench_start = Instant::now();
+    Config::default().bench_gen_env(gen_env, f)
+}
 
-    // Collect data until BENCH_TIME_MAX is reached.
-    for iters in slow_fib(BENCH_SCALE_TIME) {
-        // Prepare the environments - one per iteration
-        let mut xs = std::iter::repeat_with(&mut gen_env)
-            .take(iters)
-            .collect::<Vec<I>>();
-        // Start the clock
-        let iter_start = Instant::now();
-        // We iterate over `&mut xs` rather than draining it, because we
-        // don't want to drop the env values until after the clock has stopped.
-        for x in &mut xs {
-            // Run the code and pretend to use the output
-            pretend_to_use(f(x));
-        }
-        let time = iter_start.elapsed();
-        data.push((iters, time));
+impl Config {
+    /// Run a benchmark, targeting `self`'s accuracy. See [`bench`] for the
+    /// default-accuracy convenience function, and [`Config::bench_gen_env`]
+    /// for the algorithm.
+    pub fn bench<F, O>(&self, mut f: F) -> Stats
+    where
+        F: FnMut() -> O,
+    {
+        self.bench_env((), |_| f())
+    }
 
-        let elapsed = bench_start.elapsed();
-        if elapsed > BENCH_TIME_MIN && data.len() > 3 {
-            // If the first iter in a sample is consistently slow, that's fine -
-            // that's why we do the linear regression. If the first sample is slower
-            // than the rest, however, that's not fine.  Therefore, we discard the
-            // first sample as a cache-warming exercise.
+    /// Run a benchmark with an environment, targeting `self`'s accuracy.
+    ///
+    /// The value `env` is a clonable prototype for the "benchmark
+    /// environment". Each iteration receives a freshly-cloned mutable copy
+    /// of this environment. The time taken to clone the environment is not
+    /// included in the results.
+    ///
+    /// Nb: it's very possible that we will end up allocating many (>10,000)
+    /// copies of `env` at the same time. Probably best to keep it small.
+    ///
+    /// See [`Config::bench_gen_env`] and the module docs for more.
+    ///
+    /// ## Overhead
+    ///
+    /// Every iteration, `bench_env` performs a lookup into a big vector in
+    /// order to get the environment for that iteration. If your benchmark
+    /// is memory-intensive then this could, in the worst case, amount to a
+    /// systematic cache-miss (ie. this vector would have to be fetched from
+    /// DRAM at the start of every iteration). In this case the results could
+    /// be affected by a hundred nanoseconds. This is a worst-case scenario
+    /// however, and I haven't actually been able to trigger it in
+    /// practice... but it's good to be aware of the possibility.
+    pub fn bench_env<F, I, O>(&self, env: I, f: F) -> Stats
+    where
+        F: FnMut(&mut I) -> O,
+        I: Clone,
+    {
+        self.bench_gen_env(move || env.clone(), f)
+    }
 
-            // Compute some stats
-            let (grad, r2) = regression(&data[1..]);
-            let stats = Stats {
-                ns_per_iter: grad,
-                goodness_of_fit: r2,
-                iterations: data[1..].iter().map(|&(x, _)| x).sum(),
-                samples: data[1..].len(),
-            };
-            if elapsed > BENCH_TIME_MAX || r2 > 0.99 {
-                return stats;
-            }
-        } else if elapsed > BENCH_TIME_MAX {
-            let total_time: f64 = data.iter().map(|(_, t)| t.as_nanos() as f64).sum();
-            let iterations = data.iter().map(|&(x, _)| x).sum();
+    /// Run a benchmark with a generated environment, targeting `self`'s
+    /// accuracy.
+    ///
+    /// The function `gen_env` creates the "benchmark environment" for the
+    /// computation. Each iteration receives a freshly-created environment.
+    /// The time taken to create the environment is not included in the
+    /// results.
+    ///
+    /// Nb: it's very possible that we will end up generating many (>10,000)
+    /// copies of `env` at the same time. Probably best to keep it small.
+    ///
+    /// See `bench` and the module docs for more.
+    ///
+    /// ## Overhead
+    ///
+    /// Every iteration, `bench_gen_env` performs a lookup into a big vector
+    /// in order to get the environment for that iteration. If your
+    /// benchmark is memory-intensive then this could, in the worst case,
+    /// amount to a systematic cache-miss (ie. this vector would have to be
+    /// fetched from DRAM at the start of every iteration). In this case the
+    /// results could be affected by a hundred nanoseconds. This is a
+    /// worst-case scenario however, and I haven't actually been able to
+    /// trigger it in practice... but it's good to be aware of the
+    /// possibility.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Calibrate.** Find the smallest batch size `unit` whose measured
+    ///    duration reaches `sample_time`, extrapolating multiplicatively
+    ///    from the last probe (clamped to [2x, 100x] per step) so a
+    ///    nanosecond-scale function reaches its batch size in a handful of
+    ///    probes.
+    /// 2. **Sample.** Repeatedly time a batch of exactly `unit` iterations,
+    ///    recording the per-iteration time `x_j = t_j / unit`. The batch
+    ///    from step 1 that first reached `sample_time` is reused as the
+    ///    warmup sample and discarded, rather than measured again.
+    /// 3. **Stop** once there are at least `min_samples` samples *and*
+    ///    `stderr(x) / mean(x) < target_rel_error`, where
+    ///    `stderr(x) = sd(x) / sqrt(k)` with a Bessel-corrected `sd`. If
+    ///    `max_samples` or `max_time` runs out first, stop anyway and set
+    ///    `hit_limit`.
+    ///
+    /// Because each `x_j` already averages `unit` iterations,
+    /// `sd(x) = sigma_iter / sqrt(unit)`, so the standard error of the mean
+    /// here equals `sigma_iter / sqrt(k * unit)` - the standard error over
+    /// all `k * unit` raw iterations. The stopping rule is therefore
+    /// correct regardless of what `unit` calibration picked, and needs no
+    /// assumption about the shape of the noise: a randomized-input
+    /// benchmark has `var(batch) ∝ unit` while a deterministic one has
+    /// roughly constant per-sample jitter, and this estimator is right for
+    /// both.
+    pub fn bench_gen_env<G, F, I, O>(&self, mut gen_env: G, mut f: F) -> Stats
+    where
+        G: FnMut() -> I,
+        F: FnMut(&mut I) -> O,
+    {
+        let start = Instant::now();
+        let mut xs: Vec<I> = Vec::new();
+        let (unit, first_ns) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
+        if start.elapsed() > self.max_time {
+            // Even the single calibration probe blew the whole time budget
+            // (an extremely slow benchmark): report it directly rather
+            // than paying for a second full-length call just to "warm up".
             return Stats {
-                ns_per_iter: total_time / iterations as f64,
-                iterations,
-                goodness_of_fit: 0.0,
-                samples: data.len(),
+                ns_per_iter: first_ns / unit as f64,
+                rel_std_error: f64::NAN,
+                goodness_of_fit: f64::NAN,
+                iterations: unit,
+                samples: 1,
+                hit_limit: true,
             };
+        }
+        // Otherwise the probe that finished calibration serves as the
+        // warmup sample and is discarded, same as the regression-based
+        // algorithm discarded its first sample as a cache-warming
+        // exercise.
+
+        let mut per_iter: Vec<f64> = Vec::new();
+        let mut iterations = 0usize;
+        loop {
+            let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
+            per_iter.push(t / unit as f64);
+            iterations += unit;
+            let out_of_budget =
+                per_iter.len() >= self.max_samples || start.elapsed() > self.max_time;
+            if per_iter.len() >= self.min_samples.max(2) {
+                let (mean, rel_se) = mean_and_rel_stderr(&per_iter);
+                if rel_se < self.target_rel_error || out_of_budget {
+                    return Stats {
+                        ns_per_iter: mean,
+                        rel_std_error: rel_se,
+                        goodness_of_fit: f64::NAN,
+                        iterations,
+                        samples: per_iter.len(),
+                        hit_limit: out_of_budget && rel_se >= self.target_rel_error,
+                    };
+                }
+            } else if out_of_budget {
+                let mean = per_iter.iter().sum::<f64>() / per_iter.len() as f64;
+                return Stats {
+                    ns_per_iter: mean,
+                    rel_std_error: f64::NAN,
+                    goodness_of_fit: f64::NAN,
+                    iterations,
+                    samples: per_iter.len(),
+                    hit_limit: true,
+                };
+            }
         }
     }
-    unreachable!()
+}
+
+/// Time `iters` back-to-back calls of `f`, each on its own freshly
+/// generated environment. Returns `(setup_ns, timed_ns)`: the time spent
+/// generating and collecting the `iters` environments (untimed, but still
+/// real wall-clock cost that [`calibrate`] must account for so it cannot be
+/// tricked by a benchmark whose timed cost is optimised away), and the time
+/// spent actually running `f` over them. Environments are all created
+/// before the clock for `timed_ns` starts and all dropped after it stops,
+/// so neither generation nor drop pollutes `timed_ns` itself.
+///
+/// `xs` is a caller-owned scratch buffer, cleared and refilled here rather
+/// than allocated fresh each call. When the same buffer is reused across
+/// many same-sized calls (as the main sampling loop does once `calibrate`
+/// has fixed `unit`), this turns what would otherwise be a repeated
+/// allocate-then-free of a batch-sized buffer - for a large `unit`,
+/// hundreds of megabytes, over and over - into a reused allocation that's
+/// merely cleared and refilled. That matters beyond just being faster: this
+/// crate's own test suite once demonstrated that heavy allocator churn from
+/// one benchmark call can leave enough of a mark on process-wide allocator
+/// state to detectably perturb the *timing* of an unrelated benchmark run
+/// immediately afterward in the same process.
+fn time_batch<G, F, I, O>(gen_env: &mut G, f: &mut F, xs: &mut Vec<I>, iters: usize) -> (f64, f64)
+where
+    G: FnMut() -> I,
+    F: FnMut(&mut I) -> O,
+{
+    let setup_start = Instant::now();
+    xs.clear();
+    xs.extend(std::iter::repeat_with(&mut *gen_env).take(iters));
+    let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
+    let start = Instant::now();
+    // We iterate over `&mut *xs` rather than draining it, because we don't
+    // want to drop the env values until after the clock has stopped.
+    for x in &mut *xs {
+        pretend_to_use(f(x));
+    }
+    let timed_ns = start.elapsed().as_secs_f64() * 1e9;
+    (setup_ns, timed_ns)
+}
+
+/// Find a batch size whose measured duration reaches `cfg.sample_time`.
+/// Returns the batch size and the duration (in nanoseconds) of the probe
+/// that reached it, so that probe can be reused as the warmup sample
+/// instead of being measured a second time. `xs` is the same reusable
+/// scratch buffer described on [`time_batch`].
+fn calibrate<G, F, I, O>(
+    gen_env: &mut G,
+    f: &mut F,
+    xs: &mut Vec<I>,
+    cfg: &Config,
+    start: Instant,
+) -> (usize, f64)
+where
+    G: FnMut() -> I,
+    F: FnMut(&mut I) -> O,
+{
+    // Cap how much wall-clock time a single calibration probe - setup plus
+    // timing - may cost. Ordinarily the extrapolation below is driven
+    // entirely by the timed portion approaching `cfg.sample_time`. But if
+    // `f`'s cost is optimised away (see the module docs' "Pure functions"
+    // caveat, e.g. `bench_env(v, |_| {})`), the timed portion never grows
+    // no matter how large `unit` gets, while untimed environment
+    // construction - which very much does cost real time and memory for a
+    // non-trivial `I` - would otherwise grow without bound before the
+    // `start.elapsed() > cfg.max_time` check below ever gets a chance to
+    // run, since that allocation itself can take unbounded time. This
+    // ceiling bounds the *total* cost of a probe, not just the part we
+    // intend to measure, so it catches that case regardless of what `I` is.
+    // Kept well under `max_time` (rather than some large fraction of it) to
+    // limit *memory*, not just time: on fast hardware a looser ceiling
+    // would let calibration allocate proportionally more before it fires.
+    // This is a heuristic, not a hard memory guarantee - a large `I` whose
+    // per-clone cost is nonzero but small could in principle still reach a
+    // sizeable batch before `probe_ceiling_ns` is hit. As always, keep your
+    // environment small (see the module docs).
+    let probe_ceiling_ns = (cfg.max_time / 20).max(Duration::from_millis(10)).as_secs_f64() * 1e9;
+    // A hard, timing-independent ceiling on `unit` itself. When *both* `f`
+    // and the environment are trivial enough (e.g. `bench(|| {})`, where `I`
+    // is `()`), the optimiser can eliminate essentially the entire batch -
+    // construction and loop alike - up to an enormous `unit`, so setup_ns
+    // and t can both keep reading as ~0 indefinitely; no timing-based check
+    // above can detect that in advance. Without this, the 100x-per-step
+    // extrapolation would keep multiplying unit until it finally became
+    // large enough to cost something, by which point one single probe could
+    // itself take unbounded wall-clock time. 16M is comfortably more
+    // iterations than any realistic benchmark needs to reach `sample_time`.
+    const MAX_CALIBRATION_UNIT: usize = 16_000_000;
+    let target = cfg.sample_time.as_secs_f64() * 1e9;
+    let mut unit = 1usize;
+    loop {
+        let (setup_ns, t) = time_batch(gen_env, f, xs, unit);
+        let total_ns = setup_ns + t;
+        // Accept immediately, without ever retrying at this size, as soon
+        // as *any* ceiling is reached: `t >= target` is the ordinary case,
+        // `total_ns >= probe_ceiling_ns` is what saves us when construction
+        // dominates, and `unit >= MAX_CALIBRATION_UNIT` is the timing-blind
+        // backstop above. Retrying here (rather than accepting) would just
+        // re-pay the same large cost for no benefit.
+        if t >= target
+            || total_ns >= probe_ceiling_ns
+            || unit >= MAX_CALIBRATION_UNIT
+            || start.elapsed() > cfg.max_time
+        {
+            return (unit, t);
+        }
+        // Extrapolate from whichever cost is closer to its own ceiling: the
+        // timed portion approaching `target`, or the *total* probe cost
+        // approaching `probe_ceiling_ns`. Both factors are ceilings on how
+        // much bigger the *next* probe should be, so growth decelerates
+        // smoothly as either limit is approached instead of overshooting
+        // it by up to 100x.
+        let factor_time = (target / t.max(1.0)).clamp(2.0, 100.0);
+        let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
+        let factor = factor_time.min(factor_safety);
+        unit = ((unit as f64 * factor).ceil() as usize)
+            .max(unit + 1)
+            .min(MAX_CALIBRATION_UNIT);
+    }
+}
+
+/// Mean and the relative standard error *of that mean*, given per-iteration
+/// times that are each already the average of one `unit`-sized batch. See
+/// [`bench_gen_env_config`] for why batching does not bias this estimate.
+fn mean_and_rel_stderr(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    // Sample variance (Bessel-corrected), then the standard error of the mean.
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    (mean, (var / n).sqrt() / mean)
 }
 
 /// Statistics for a benchmark run determining the scaling of a function.
@@ -583,38 +871,6 @@ fn compute_scaling_gen(data: &[(usize, usize, Duration)]) -> ScalingStats {
 // Overflows:
 //
 // * sum(x * x): num_samples <= 0.5 * log_k (1 + 2 ^ 64 (FACTOR - 1))
-fn regression(data: &[(usize, Duration)]) -> (f64, f64) {
-    if data.len() < 2 {
-        return (f64::NAN, f64::NAN);
-    }
-    // Do all the arithmetic using f64, because it can happen that the
-    // squared numbers to overflow using integer arithmetic if the
-    // tests are too fast (so we run too many iterations).
-    let data: Vec<_> = data
-        .iter()
-        .map(|&(x, y)| (x as f64, y.as_nanos() as f64))
-        .collect();
-    let n = data.len() as f64;
-    let nxbar = data.iter().map(|&(x, _)| x).sum::<f64>(); // iter_time > 5e-11 ns
-    let nybar = data.iter().map(|&(_, y)| y).sum::<f64>(); // TIME_LIMIT < 2 ^ 64 ns
-    let nxxbar = data.iter().map(|&(x, _)| x * x).sum::<f64>(); // num_iters < 13_000_000_000
-    let nyybar = data.iter().map(|&(_, y)| y * y).sum::<f64>(); // TIME_LIMIT < 4.3 e9 ns
-    let nxybar = data.iter().map(|&(x, y)| x * y).sum::<f64>();
-    let ncovar = nxybar - ((nxbar * nybar) / n);
-    let nxvar = nxxbar - ((nxbar * nxbar) / n);
-    let nyvar = nyybar - ((nybar * nybar) / n);
-    let gradient = ncovar / nxvar;
-    let r2 = (ncovar * ncovar) / (nxvar * nyvar);
-    assert!(r2.is_nan() || r2 <= 1.0);
-    (gradient, r2)
-}
-
-/// Compute the OLS linear regression line for the given data set, returning
-/// the line's gradient and R². Requires at least 2 samples.
-//
-// Overflows:
-//
-// * sum(x * x): num_samples <= 0.5 * log_k (1 + 2 ^ 64 (FACTOR - 1))
 fn fregression(data: &[(f64, Duration)]) -> (f64, f64) {
     if data.len() < 2 {
         return (f64::NAN, f64::NAN);
@@ -792,7 +1048,9 @@ mod tests {
         let stats = bench(|| thread::sleep(Duration::from_millis(400)));
         println!("very slow: {}", stats);
         assert!(stats.ns_per_iter > 399.0e6);
-        assert_eq!(3, stats.samples);
+        // Deterministic, so we expect to stop as soon as `min_samples` is
+        // reached rather than being forced further by the accuracy target.
+        assert!(stats.samples >= 6);
     }
 
     #[test]
@@ -802,7 +1060,12 @@ mod tests {
         println!("painfully slow: {}", stats);
         println!("ns {}", stats.ns_per_iter);
         assert!(stats.ns_per_iter > 11.0e9);
+        // A single call already blows the entire time budget, so we report
+        // it directly rather than pay for a second 11-second call.
         assert_eq!(1, stats.iterations);
+        assert_eq!(1, stats.samples);
+        assert!(stats.hit_limit);
+        assert!(stats.rel_std_error.is_nan());
     }
 
     #[test]
@@ -812,7 +1075,10 @@ mod tests {
         println!("sadly slow: {}", stats);
         println!("ns {}", stats.ns_per_iter);
         assert!(stats.ns_per_iter > 6.0e9);
-        assert_eq!(2, stats.iterations);
+        // The calibration probe (discarded as warmup) plus one real sample
+        // already exceed the 10-second budget.
+        assert_eq!(1, stats.iterations);
+        assert!(stats.hit_limit);
     }
 
     #[test]
@@ -875,6 +1141,204 @@ mod tests {
             "return 50000: {}",
             bench_env(vec![0u64; 50000], |x| x.clone())
         );
+    }
+
+    // Cheap deterministic PRNG so a failure reproduces from its seed.
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// A benchmark with real, injected variance (coefficient of variation
+    /// around 50%): a randomized amount of trivial work. Deterministic
+    /// functions aren't a good fit for testing `rel_std_error`'s honesty -
+    /// their spread is machine noise, not something the estimator controls -
+    /// so these accuracy tests need randomized cost instead.
+    fn variable_cost(seed: u64) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            let n = 1 + (rng.next() % 2000) as usize;
+            let mut acc = 0u64;
+            for i in 0..n {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
+    /// Distinct, well-spread seeds so repeats are independent. Reusing one
+    /// seed across repeats would replay the same random sequence and
+    /// understate the very spread these tests measure.
+    fn seed_for(repeat: usize) -> u64 {
+        0x9e37_79b9_7f4a_7c15u64.wrapping_mul(repeat as u64 + 1) | 1
+    }
+
+    fn mean_and_spread(xs: &[f64]) -> (f64, f64) {
+        let n = xs.len() as f64;
+        let mean = xs.iter().sum::<f64>() / n;
+        let sd = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+        (mean, sd / mean)
+    }
+
+    #[test]
+    fn accuracy_matches_the_request() {
+        println!();
+        const REPEATS: usize = 15;
+        for &target in &[0.05, 0.01] {
+            let cfg = Config {
+                target_rel_error: target,
+                ..Config::default()
+            };
+            let estimates: Vec<f64> = (0..REPEATS)
+                .map(|r| cfg.bench(variable_cost(seed_for(r))).ns_per_iter)
+                .collect();
+            let (_, observed) = mean_and_spread(&estimates);
+            println!(
+                "target {:.1}% -> observed run-to-run spread {:.2}%",
+                100.0 * target,
+                100.0 * observed
+            );
+            // A standard deviation estimated from only REPEATS runs is
+            // itself noisy, so this leaves generous room - the point is to
+            // catch a stopping rule that has become decorative (as the old
+            // R²-based one was), not to pin down the constant precisely.
+            assert!(
+                observed < target * 4.0,
+                "asked for {:.2}% accuracy but observed spread was {:.2}%",
+                100.0 * target,
+                100.0 * observed
+            );
+        }
+    }
+
+    #[test]
+    fn estimates_the_mean_not_the_minimum() {
+        println!();
+        // Ground truth: a long, tight-target run.
+        let truth = Config {
+            target_rel_error: 0.002,
+            max_time: Duration::from_secs(20),
+            ..Config::default()
+        }
+        .bench(variable_cost(0xabcd_ef01))
+        .ns_per_iter;
+
+        const REPEATS: usize = 15;
+        let estimates: Vec<f64> = (0..REPEATS)
+            .map(|r| Config::default().bench(variable_cost(seed_for(r))).ns_per_iter)
+            .collect();
+        let (mean, _) = mean_and_spread(&estimates);
+        let bias = (mean - truth) / truth;
+        println!(
+            "truth {truth:.1} ns/iter, estimated {mean:.1} ns/iter, bias {:+.2}%",
+            100.0 * bias
+        );
+        // An estimator that reported (say) the minimum of each batch rather
+        // than the mean would be biased sharply negative on a workload with
+        // this much variance - well outside this bound.
+        assert!(bias.abs() < 0.1, "bias {:+.2}%", 100.0 * bias);
+    }
+
+    #[test]
+    fn tighter_target_costs_more_and_is_more_precise() {
+        println!();
+        const REPEATS: usize = 10;
+        // Wide gap between targets, and the tight one well below the noise
+        // a single calibrated batch already has on its own: with only a
+        // small gap, both targets get satisfied as soon as `min_samples` is
+        // reached and the test can't distinguish "tighter target costs
+        // more" from "both stopped at the same floor".
+        let loose: Vec<Stats> = (0..REPEATS)
+            .map(|r| {
+                Config {
+                    target_rel_error: 0.05,
+                    ..Config::default()
+                }
+                .bench(variable_cost(seed_for(r)))
+            })
+            .collect();
+        let tight: Vec<Stats> = (0..REPEATS)
+            .map(|r| {
+                Config {
+                    target_rel_error: 0.003,
+                    ..Config::default()
+                }
+                .bench(variable_cost(seed_for(r)))
+            })
+            .collect();
+        let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<usize>();
+        let (loose_iters, tight_iters) = (iters(&loose), iters(&tight));
+        println!("loose iterations {loose_iters}, tight iterations {tight_iters}");
+        assert!(tight_iters > 2 * loose_iters);
+
+        let spread = |v: &[Stats]| mean_and_spread(&v.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>()).1;
+        let (loose_spread, tight_spread) = (spread(&loose), spread(&tight));
+        println!(
+            "loose spread {:.2}%, tight spread {:.2}%",
+            100.0 * loose_spread,
+            100.0 * tight_spread
+        );
+        assert!(tight_spread < loose_spread);
+    }
+
+    #[test]
+    fn unreachable_target_is_flagged() {
+        println!();
+        let cfg = Config {
+            target_rel_error: 1e-9,
+            max_samples: 12,
+            ..Config::default()
+        };
+        let stats = cfg.bench(variable_cost(1));
+        println!("{stats}");
+        assert!(stats.hit_limit);
+        assert!(stats.rel_std_error > cfg.target_rel_error);
+    }
+
+    #[test]
+    fn reported_error_is_honest() {
+        println!();
+        const REPEATS: usize = 40;
+        for &target in &[0.05, 0.02, 0.01] {
+            let cfg = Config {
+                target_rel_error: target,
+                ..Config::default()
+            };
+            let stats: Vec<Stats> = (0..REPEATS)
+                .map(|r| cfg.bench(variable_cost(seed_for(r))))
+                .collect();
+            let claimed = stats.iter().map(|s| s.rel_std_error).sum::<f64>() / REPEATS as f64;
+            let (_, observed) =
+                mean_and_spread(&stats.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>());
+            let ratio = observed / claimed;
+            println!(
+                "target {:.1}%: claimed {:.2}%, observed {:.2}%, ratio {:.2}x",
+                100.0 * target,
+                100.0 * claimed,
+                100.0 * observed,
+                ratio
+            );
+            // `rel_std_error` should describe the spread that actually
+            // occurs, not merely shrink on demand: an estimator that just
+            // claimed whatever the caller asked for would pass every other
+            // test in this module. On a quiesced machine this ratio runs
+            // 0.8-1.0x; on a shared/noisy one, outlier samples inflate the
+            // observed side, so this bound is generous rather than tight.
+            assert!(
+                ratio < 3.0,
+                "claimed {:.2}% but observed spread was {:.2}% ({:.1}x overconfident)",
+                100.0 * claimed,
+                100.0 * observed,
+                ratio
+            );
+        }
     }
 }
 
@@ -954,3 +1418,4 @@ fn test_fib() {
         &[7, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 26, 28, 31, 34, 37, 41,]
     );
 }
+

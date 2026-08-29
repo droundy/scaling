@@ -1,11 +1,11 @@
 [package]
 name = "scaling"
-version = "0.1.3"
+version = "0.2.0"
 authors = ["David Roundy <daveroundy@gmail.com>", "Alex Sayers <alex@asayers.com>"]
 description = "A lightweight benchmarking library that measures scaling behavior"
 edition = "2018"
-documentation = "https://docs.rs/easybench_scaling/"
-repository = "https://github.com/droundy/easybench-rs"
+documentation = "https://docs.rs/scaling/"
+repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
