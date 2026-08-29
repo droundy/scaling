@@ -21,29 +21,41 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
 Running the above yields the following:
 
 ```none
-fib 200:   72.0000ns ± 0.93% (120000 iterations in 6 samples)
-fib 500:  257.0000ns ± 0.31% (23142 iterations in 6 samples)
-reverse:   66.0000ns ± 1.00% (52240000 iterations in 2612 samples)
-sort:     111.0000ns ± 1.00% (2429904 iterations in 284 samples)
+fib 200:   72.5057ns ± 0.72ns (200000 iterations in 10 samples)
+fib 500:  260.2618ns ± 1.0ns (22836 iterations in 6 samples)
+reverse:   64.9718ns ± 0.65ns (54880000 iterations in 2744 samples)
+sort:     105.6411ns ± 1.0ns (382704 iterations in 42 samples)
 ```
 
-The `±` figure is the relative standard error of the reported time: each
-benchmark keeps sampling until that figure drops below the target accuracy
-(1% by default), so cheap-to-measure benchmarks finish quickly and noisy
-ones keep working until they have earned the precision.
+The `±` figure is the standard error of the reported time, in the same unit
+as the time itself. Each benchmark keeps sampling until it is small enough
+(within 1% by default), so cheap-to-measure benchmarks finish quickly and
+noisy ones keep working until they have earned the precision.
 
-To ask for a different accuracy, use a `Config`:
+Printing it absolutely rather than as a percentage is deliberate: to decide
+whether two results really differ you compare the gap between them against
+the `±`, and that is a direct digit-for-digit comparison only when
+everything is in the same unit.
+
+To ask for a different accuracy, use a `Config` — either as a fraction of
+the measurement, or as a flat `Duration`:
 
 ```rust
 use scaling::Config;
+use std::time::Duration;
 
-let cfg = Config { target_rel_error: 0.001, ..Config::default() };
-println!("fib 500: {}", cfg.bench(|| fib(500)));
+println!("fib 500: {}", Config::relative(0.001).bench(|| fib(500)));
+println!("fib 500: {}", Config::absolute(Duration::from_nanos(1)).bench(|| fib(500)));
 ```
 
 ```none
-fib 500:  258.0000ns ± 0.09% (56358 iterations in 9 samples)
+fib 500:  258.8439ns ± 0.11ns (22854 iterations in 6 samples)
+fib 500:  256.9143ns ± 0.94ns (49426 iterations in 13 samples)
 ```
+
+An absolute target is often the more natural request: if you are trying to
+tell apart two implementations you believe differ by about 5 ns, ask for an
+error well under that and stop paying for precision you will not use.
 
 If the target cannot be reached within the time budget, the benchmark says
 so rather than quietly returning an over-confident number: `Stats::hit_limit`
