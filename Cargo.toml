@@ -9,3 +9,8 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
+
+# Only used to set CPU affinity, which only exists on Linux. Elsewhere this
+# crate still has no dependencies at all.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

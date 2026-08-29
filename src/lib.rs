@@ -141,6 +141,23 @@ In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
 environment. This has the desired effect, but looks a bit weird.
 
+## Caveat 3: A busy machine
+
+**TL;DR: on Linux, `sudo bench-quiet reserve 2` then
+`bench-quiet run <your benchmark>`.**
+
+The accuracy `scaling` reports covers noise it can *see* while sampling. It
+cannot see the machine around it: another process on the same core, a CPU
+dropping out of turbo as it heats up, or an interrupt landing mid-sample all
+shift the answer without widening the error bar.
+
+The `bench-quiet` binary shipped with this crate reserves one or more CPUs
+for benchmarking and moves everything else - processes, interrupts - off
+them, and pins the clock frequency. Benchmarks then pin themselves to the
+reserved CPUs automatically, with no code change. See the [`quiet`] module
+for the details, and [`quiet::status`] to check at runtime whether it took
+effect.
+
 ## Bonus caveat: Black box
 
 The function which `scaling` uses to trick the optimiser (`black_box`)
@@ -154,6 +171,8 @@ is stolen from [bencher], which [states]:
 > operation, or it may fail to properly avoid having code optimized out. It
 > is good enough that it is used by default.
 */
+
+pub mod quiet;
 
 use std::f64;
 use std::fmt::{self, Display, Formatter};
@@ -422,6 +441,7 @@ impl Config {
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
     {
+        quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
         let (unit, first_ns) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
@@ -694,6 +714,7 @@ pub fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
 where
     F: Fn(usize) -> O,
 {
+    quiet::pin_if_requested();
     let mut data = Vec::new();
     // The time we started the benchmark (not used in results)
     let bench_start = Instant::now();
@@ -756,6 +777,7 @@ where
     G: FnMut(usize) -> I,
     F: Fn(&mut I) -> O,
 {
+    quiet::pin_if_requested();
     let mut data = Vec::new();
     // The time we started the benchmark (not used in results)
     let bench_start = Instant::now();

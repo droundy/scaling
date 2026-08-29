@@ -49,6 +49,44 @@ If the target cannot be reached within the time budget, the benchmark says
 so rather than quietly returning an over-confident number: `Stats::hit_limit`
 is set and the output is marked `(limit)`.
 
+## Quiescing the machine (Linux)
+
+The `±` figure covers noise `scaling` can see while sampling. It cannot see
+the machine around it — another process sharing your core, the CPU dropping
+out of turbo as it warms up, an interrupt landing mid-sample. Those shift
+the answer without widening the error bar.
+
+This crate ships a `bench-quiet` binary that sets a machine up for
+benchmarking:
+
+```bash
+sudo bench-quiet reserve 2
+```
+
+That reserves CPU 2: it moves every other process and (where the kernel
+allows) every interrupt off it, offlines its SMT sibling, disables turbo,
+pins the minimum frequency to 100%, switches to the performance governor,
+and disables ASLR. Then run your benchmarks through it:
+
+```bash
+bench-quiet run cargo test --release
+```
+
+Benchmarks built against `scaling` **pin themselves to the reserved CPUs
+automatically** — `bench-quiet run` advertises the reservation in
+`SCALING_BENCH_CPUS`, and every benchmark in this crate honours it without
+any code change. Set `SCALING_NO_PIN=1` to opt out.
+
+`bench-quiet status` reports whether a reservation is in effect and whether
+this process is actually on it. When you're done:
+
+```bash
+sudo bench-quiet restore
+```
+
+Everything here is Linux-only and entirely optional; on other platforms, and
+when no reservation is active, benchmarks simply run as before.
+
 ## License
 
 Licensed under either of
