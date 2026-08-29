@@ -21,10 +21,10 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
 Running the above yields the following:
 
 ```none
-fib 200:   72.5057ns ± 0.72ns (200000 iterations in 10 samples)
-fib 500:  260.2618ns ± 1.0ns (22836 iterations in 6 samples)
-reverse:   64.9718ns ± 0.65ns (54880000 iterations in 2744 samples)
-sort:     105.6411ns ± 1.0ns (382704 iterations in 42 samples)
+fib 200:   71.9858ns ± 0.17ns (120000 iterations in 6 samples)
+fib 500:  261.6815ns ± 2.5ns (50245 iterations in 13 samples)
+reverse:   39.4159ns ± 0.39ns (369702 iterations in 9 samples)
+sort:     102.2717ns ± 1.0ns (847228 iterations in 46 samples)
 ```
 
 The `±` figure is the standard error of the reported time, in the same unit
@@ -49,8 +49,8 @@ println!("fib 500: {}", Config::absolute(Duration::from_nanos(1)).bench(|| fib(5
 ```
 
 ```none
-fib 500:  258.8439ns ± 0.11ns (22854 iterations in 6 samples)
-fib 500:  256.9143ns ± 0.94ns (49426 iterations in 13 samples)
+fib 500:  258.6983ns ± 0.099ns (46344 iterations in 6 samples)
+fib 500:  258.3475ns ± 0.067ns (23208 iterations in 6 samples)
 ```
 
 An absolute target is often the more natural request: if you are trying to

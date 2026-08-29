@@ -33,11 +33,11 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:   72.5057ns ± 0.72ns (200000 iterations in 10 samples)
-fib 500:  260.2618ns ± 1.0ns (22836 iterations in 6 samples)
-fib scaling:   0.52ns/N    (R²=0.997, 7235 iterations in 57 samples)
-reverse:   64.9718ns ± 0.65ns (54880000 iterations in 2744 samples)
-sort:     105.6411ns ± 1.0ns (382704 iterations in 42 samples)
+fib 200:   71.9858ns ± 0.17ns (120000 iterations in 6 samples)
+fib 500:  261.6815ns ± 2.5ns (50245 iterations in 13 samples)
+fib scaling:   0.51ns/N    (R²=0.994, 6626 iterations in 56 samples)
+reverse:   39.4159ns ± 0.39ns (369702 iterations in 9 samples)
+sort:     102.2717ns ± 1.0ns (847228 iterations in 46 samples)
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
@@ -102,7 +102,7 @@ via the regression's intercept. However, work which is done once-per-iteration
 *will* be counted in the final times.
 
 * In the case of [`bench()`] this amounts to incrementing the loop counter and
-  [copying the return value](#bonus-caveat-black-box).
+  passing the return value through `std::hint::black_box`.
 * In the case of [`bench_env`] and [`bench_gen_env`], we also do a lookup into a big vector in
   order to get the environment for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
@@ -134,20 +134,22 @@ let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
 The results are a little surprising:
 
 ```none
-fib_1:  259.1650ns ± 0.068ns (22866 iterations in 6 samples)
-fib_2:    0.0000ns ± 2.2e-8ns (1872000000 iterations in 117 samples)
-fib_3:  258.8159ns ± 0.091ns (23178 iterations in 6 samples)
+fib_1:  258.6643ns ± 0.081ns (46440 iterations in 6 samples)
+fib_2:    0.5914ns ± 0.00044ns (12000000 iterations in 6 samples)
+fib_3:  258.5260ns ± 0.14ns (46428 iterations in 6 samples)
 ```
 
 Oh, `fib_2`, why do you lie? The answer is: `fib(500)` is pure, and its
-return value is immediately thrown away, so the optimiser replaces the call
-with a no-op (which clocks in at 0 ns).
+return value is immediately thrown away, so the optimiser deletes the call
+entirely. What is left to measure is an empty loop, which clocks in at a
+fraction of a nanosecond - not the 258 ns the work would have cost.
 
 What about the other two? `fib_1` looks very similar, with one exception:
 the closure which we're benchmarking returns the result of the `fib(500)`
-call. When it runs your code, `scaling` takes the return value and tricks the
-optimiser into thinking it's going to use it for something, before throwing
-it away. This is why `fib_1` is safe from having code accidentally eliminated.
+call. When it runs your code, `scaling` passes that return value through
+[`std::hint::black_box`], which the optimiser must treat as though it were
+used, before throwing it away. This is why `fib_1` is safe from having code
+accidentally eliminated.
 
 In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
@@ -169,25 +171,13 @@ them, and pins the clock frequency. Benchmarks then pin themselves to the
 reserved CPUs automatically, with no code change. See the [`quiet`] module
 for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
-
-## Bonus caveat: Black box
-
-The function which `scaling` uses to trick the optimiser (`black_box`)
-is stolen from [bencher], which [states]:
-
-[bencher]: https://docs.rs/bencher/
-[states]: https://docs.rs/bencher/0.1.2/bencher/fn.black_box.html
-
-> NOTE: We don't have a proper black box in stable Rust. This is a workaround
-> implementation, that may have a too big performance overhead, depending on
-> operation, or it may fail to properly avoid having code optimized out. It
-> is good enough that it is used by default.
 */
 
 pub mod quiet;
 
 use std::f64;
 use std::fmt::{self, Display, Formatter};
+use std::hint::black_box;
 use std::time::*;
 
 // We try to spend at very most this many seconds (roughly) in total on
@@ -707,7 +697,7 @@ where
     // We iterate over `&mut *xs` rather than draining it, because we don't
     // want to drop the env values until after the clock has stopped.
     for x in &mut *xs {
-        pretend_to_use(f(x));
+        black_box(f(x));
     }
     let timed_ns = start.elapsed().as_secs_f64() * 1e9;
     (setup_ns, timed_ns)
@@ -913,7 +903,7 @@ where
         let iter_start = Instant::now();
         for x in xs.into_iter() {
             // Run the code and pretend to use the output
-            pretend_to_use(f(x));
+            black_box(f(x));
         }
         let time = iter_start.elapsed();
         data.push((n, iters, time));
@@ -979,7 +969,7 @@ where
         // don't want to drop the env values until after the clock has stopped.
         for x in &mut xs {
             // Run the code and pretend to use the output
-            pretend_to_use(f(x));
+            black_box(f(x));
         }
         let time = iter_start.elapsed();
         if !am_slow && iters == 1 && time > Duration::from_micros(1) {
@@ -1100,23 +1090,6 @@ fn fregression(data: &[(f64, Duration)]) -> (f64, f64) {
     let r2 = covar.powi(2) / (xvar * yvar);
     assert!(r2.is_nan() || r2 <= 1.0);
     (gradient, r2)
-}
-
-// Stolen from `bencher`, where it's known as `black_box`.
-//
-// NOTE: We don't have a proper black box in stable Rust. This is a workaround
-// implementation, that may have a too big performance overhead, depending
-// on operation, or it may fail to properly avoid having code optimized
-// out. It is good enough that it is used by default.
-//
-// A function that is opaque to the optimizer, to allow benchmarks to pretend
-// to use outputs to assist in avoiding dead-code elimination.
-fn pretend_to_use<T>(dummy: T) -> T {
-    unsafe {
-        let ret = ::std::ptr::read_volatile(&dummy);
-        ::std::mem::forget(dummy);
-        ret
-    }
 }
 
 #[cfg(test)]
