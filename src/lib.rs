@@ -1,7 +1,8 @@
 /*!
 A lightweight micro-benchmarking library which:
 
-* uses linear regression to screen off constant error;
+* measures until it reaches an accuracy you ask for, and tells you the
+  accuracy it achieved;
 * handles benchmarks which mutate state;
 * can measure simple polynomial or exponential scaling behavior
 * is very easy to use!
@@ -85,9 +86,11 @@ fit), or when the fit is good enough (R² > 0.99).
 **noise of your
 benchmark.**
 
-Any work which `scaling` does once-per-sample is ignored (this is the purpose of the linear
-regression technique described above). However, work which is done once-per-iteration *will* be
-counted in the final times.
+Work which `scaling` does once-per-sample is kept negligible: the flat
+benchmarks size each batch so that a sample takes far longer than the two
+`Instant::now()` calls bracketing it, and the scaling benchmarks subtract it
+via the regression's intercept. However, work which is done once-per-iteration
+*will* be counted in the final times.
 
 * In the case of [`bench()`] this amounts to incrementing the loop counter and
   [copying the return value](#bonus-caveat-black-box).
@@ -188,48 +191,65 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 // benchmark.
 const BENCH_TIME_MIN: Duration = Duration::from_millis(1);
 
-/// Tunables controlling how hard a benchmark works to pin down
-/// `ns_per_iter`, and when it gives up. [`bench`], [`bench_env`] and
-/// [`bench_gen_env`] use [`Config::default`]; call the same-named methods
-/// on a `Config` to choose your own accuracy.
+/// Never conclude from fewer samples than this.
+///
+/// A standard deviation estimated from `k` points is itself uncertain by
+/// roughly `1/sqrt(2(k-1))` - about 32% at `k = 6`, and over 70% at
+/// `k = 2`. Stopping the instant a noisy estimate happens to dip below the
+/// target would systematically favour the runs that got lucky, so we
+/// require a handful of samples before believing the standard error at all.
+///
+/// Not a knob: callers control accuracy with [`Config::target_rel_error`]
+/// and cost with [`Config::max_time`], and no useful benchmark wants a
+/// different answer here.
+const MIN_SAMPLES: usize = 6;
+
+/// A backstop on the number of samples, so a pathologically small
+/// [`Config::sample_time`] cannot grow the sample vector without bound.
+///
+/// This is about memory, not about the measurement: `max_time` is the real
+/// budget, and at the default `sample_time` it allows ~10_000 samples, a
+/// hundred times below this.
+const MAX_SAMPLES: usize = 1_000_000;
+
+/// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
+/// up.
+///
+/// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
+/// call the same-named methods on a `Config` to choose your own. The two
+/// fields you are likely to want are `target_rel_error` (how good an answer
+/// do I want) and `max_time` (how long am I willing to wait); everything
+/// else the benchmark works out for itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Stop once the relative standard error of `ns_per_iter` falls below
     /// this (0.01 = 1%). This is the knob to turn for a quicker, noisier
     /// answer or a slower, tighter one.
     pub target_rel_error: f64,
-    /// Calibrate the batch size so that one sample takes about this long.
-    /// Too short and per-sample overhead (a couple of `Instant::now()`
-    /// calls) pollutes the measurement; too long wastes time that could
-    /// have gone into collecting more samples.
-    pub sample_time: Duration,
-    /// Never conclude from fewer samples than this: a standard error
-    /// estimated from very few points is itself too noisy to stop on.
-    pub min_samples: usize,
-    /// Give up after this many samples even if `target_rel_error` was
-    /// never reached. This is a backstop, not the intended budget: by
-    /// default it is set high enough that `max_time` is what actually
-    /// binds. Lowering it below what `max_time` allows means giving up on
-    /// the requested accuracy while time remains - exactly the "stop early
-    /// and report a number more confident than it deserves" behaviour this
-    /// design exists to avoid - so lower it only when you specifically want
-    /// a cap on iterations rather than on time.
-    pub max_samples: usize,
     /// Give up after roughly this much wall-clock time even if
-    /// `target_rel_error` was never reached. Normally the binding limit.
+    /// `target_rel_error` was never reached, setting [`Stats::hit_limit`].
     pub max_time: Duration,
+    /// Calibrate the batch size so that one sample takes about this long.
+    ///
+    /// You should rarely need to touch this. The default is chosen so that
+    /// per-sample overhead - two `Instant::now()` calls, on the order of
+    /// 100 ns - is around 0.01% of a sample, comfortably below any accuracy
+    /// you are likely to ask for.
+    ///
+    /// It is exposed because batch size is not purely an implementation
+    /// detail: a batch is `unit` back-to-back iterations sharing a cache,
+    /// so for a memory-sensitive benchmark this changes *what you are
+    /// measuring*, not just how precisely. Shrink it if you want each
+    /// iteration to see a colder cache.
+    pub sample_time: Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             target_rel_error: 0.01,
-            sample_time: Duration::from_millis(1),
-            min_samples: 6,
-            // Deliberately far above what `max_time / sample_time` allows
-            // (10s / 1ms = 10_000), so that time is the binding budget.
-            max_samples: 1_000_000,
             max_time: BENCH_TIME_MAX,
+            sample_time: Duration::from_millis(1),
         }
     }
 }
@@ -252,16 +272,12 @@ pub struct Stats {
     /// all: either fewer than 2 samples were collected (see `hit_limit`),
     /// or every sample measured as exactly zero.
     pub rel_std_error: f64,
-    /// Retained for backwards compatibility. Always `NaN`: the stopping
-    /// rule no longer relies on a regression, so there is no
-    /// goodness-of-fit to report. Use `rel_std_error` instead.
-    pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
     pub iterations: usize,
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
-    /// `true` if the benchmark gave up on `max_time`/`max_samples` before
+    /// `true` if the benchmark gave up on its time budget before
     /// reaching `target_rel_error` - the accuracy you asked for was not
     /// achieved.
     pub hit_limit: bool,
@@ -421,10 +437,10 @@ impl Config {
     ///    recording the per-iteration time `x_j = t_j / unit`. The batch
     ///    from step 1 that first reached `sample_time` is reused as the
     ///    warmup sample and discarded, rather than measured again.
-    /// 3. **Stop** once there are at least `min_samples` samples *and*
+    /// 3. **Stop** once there are at least `MIN_SAMPLES` samples *and*
     ///    `stderr(x) / mean(x) < target_rel_error`, where
     ///    `stderr(x) = sd(x) / sqrt(k)` with a Bessel-corrected `sd`. If
-    ///    `max_samples` or `max_time` runs out first, stop anyway and set
+    ///    `max_time` runs out first, stop anyway and set
     ///    `hit_limit`.
     ///
     /// Because each `x_j` already averages `unit` iterations,
@@ -452,7 +468,6 @@ impl Config {
             return Stats {
                 ns_per_iter: first_ns / unit as f64,
                 rel_std_error: f64::NAN,
-                goodness_of_fit: f64::NAN,
                 iterations: unit,
                 samples: 1,
                 hit_limit: true,
@@ -470,14 +485,13 @@ impl Config {
             per_iter.push(t / unit as f64);
             iterations += unit;
             let out_of_budget =
-                per_iter.len() >= self.max_samples || start.elapsed() > self.max_time;
-            if per_iter.len() >= self.min_samples.max(2) {
+                per_iter.len() >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            if per_iter.len() >= MIN_SAMPLES {
                 let (mean, rel_se) = mean_and_rel_stderr(&per_iter);
                 if rel_se < self.target_rel_error || out_of_budget {
                     return Stats {
                         ns_per_iter: mean,
                         rel_std_error: rel_se,
-                        goodness_of_fit: f64::NAN,
                         iterations,
                         samples: per_iter.len(),
                         hit_limit: out_of_budget && rel_se >= self.target_rel_error,
@@ -488,7 +502,6 @@ impl Config {
                 return Stats {
                     ns_per_iter: mean,
                     rel_std_error: f64::NAN,
-                    goodness_of_fit: f64::NAN,
                     iterations,
                     samples: per_iter.len(),
                     hit_limit: true,
@@ -1070,7 +1083,7 @@ mod tests {
         let stats = bench(|| thread::sleep(Duration::from_millis(400)));
         println!("very slow: {}", stats);
         assert!(stats.ns_per_iter > 399.0e6);
-        // Deterministic, so we expect to stop as soon as `min_samples` is
+        // Deterministic, so we expect to stop as soon as `MIN_SAMPLES` is
         // reached rather than being forced further by the accuracy target.
         assert!(stats.samples >= 6);
     }
@@ -1274,7 +1287,7 @@ mod tests {
         const REPEATS: usize = 10;
         // Wide gap between targets, and the tight one well below the noise
         // a single calibrated batch already has on its own: with only a
-        // small gap, both targets get satisfied as soon as `min_samples` is
+        // small gap, both targets get satisfied as soon as `MIN_SAMPLES` is
         // reached and the test can't distinguish "tighter target costs
         // more" from "both stopped at the same floor".
         let loose: Vec<Stats> = (0..REPEATS)
@@ -1313,9 +1326,12 @@ mod tests {
     #[test]
     fn unreachable_target_is_flagged() {
         println!();
+        // An accuracy no amount of sampling will reach, and a budget far too
+        // short to try: the benchmark must say it fell short rather than
+        // return a confident-looking number.
         let cfg = Config {
             target_rel_error: 1e-9,
-            max_samples: 12,
+            max_time: Duration::from_millis(50),
             ..Config::default()
         };
         let stats = cfg.bench(variable_cost(1));
