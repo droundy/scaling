@@ -158,49 +158,82 @@ usage:
             );
         }
 
-        save_original_state()?;
-
-        // 1. Pin the clock. On this kind of machine the largest single source
-        //    of run-to-run drift is dropping out of turbo partway through a
-        //    benchmark as the package heats up, so we disable turbo outright
-        //    rather than try to race it.
+        // Everything we are about to change is a file, so describe the whole
+        // reservation as a list of (path, new contents). That list is walked
+        // twice - once to record what was there, once to apply - which is
+        // what makes `restore` able to be a single loop with no knowledge of
+        // any individual setting. Adding a new tweak here is one push, and
+        // it is undone automatically.
+        let mask = affinity_mask(&other);
+        let mut changes: Vec<(String, String)> = Vec::new();
         let mut notes = Vec::new();
+
+        // Pin the clock. On this kind of machine the largest single source of
+        // run-to-run drift is dropping out of turbo partway through a
+        // benchmark as the package heats up, so we disable turbo outright
+        // rather than try to race it.
         if Path::new(PSTATE).is_dir() {
-            try_write(&format!("{PSTATE}/no_turbo"), "1", &mut notes);
-            try_write(&format!("{PSTATE}/min_perf_pct"), "100", &mut notes);
+            changes.push((format!("{PSTATE}/no_turbo"), "1".into()));
+            changes.push((format!("{PSTATE}/min_perf_pct"), "100".into()));
         } else {
             notes.push("no intel_pstate: turbo and minimum frequency left alone".to_string());
         }
 
-        // 2. Performance governor everywhere, so the housekeeping CPUs don't
-        //    drag the package clock around either.
+        // Performance governor everywhere, so the housekeeping CPUs don't
+        // drag the package clock around either.
         for c in 0..ncpu {
-            try_write_quietly(
-                &format!("/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor"),
-                "performance",
-            );
+            changes.push((
+                format!("/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor"),
+                "performance".into(),
+            ));
         }
 
-        // 3. Offline the SMT siblings of the reserved CPUs: a sibling running
-        //    someone else's code shares execution resources with ours.
-        for &c in &bench_cpus {
-            for sib in thread_siblings(c) {
-                if !bench_cpus.contains(&sib) {
-                    try_write_quietly(&format!("/sys/devices/system/cpu/cpu{sib}/online"), "0");
-                    notes.push(format!("offlined SMT sibling cpu{sib} of cpu{c}"));
-                }
-            }
+        // Offline the SMT siblings of the reserved CPUs: a sibling running
+        // someone else's code shares execution resources with ours.
+        for &sib in &offlined_siblings {
+            changes.push((
+                format!("/sys/devices/system/cpu/cpu{sib}/online"),
+                "0".into(),
+            ));
         }
 
-        // 4. Herd existing tasks (and, by inheritance, their children) onto
-        //    the housekeeping CPUs.
+        // Steer interrupts away. Some IRQs are per-CPU or managed by the
+        // kernel and refuse to move; that is expected, not a failure.
+        changes.push(("/proc/irq/default_smp_affinity".into(), mask.clone()));
+        for irq in numbered_irqs() {
+            changes.push((format!("/proc/irq/{irq}/smp_affinity"), mask.clone()));
+        }
+
+        // Deterministic address layout, and let unprivileged `perf` read
+        // counters, since both matter for reproducing a measurement.
+        changes.push(("/proc/sys/kernel/randomize_va_space".into(), "0".into()));
+        changes.push(("/proc/sys/kernel/perf_event_paranoid".into(), "-1".into()));
+
+        // Record originals *before* touching anything, so that a failure
+        // partway through still leaves a state file `restore` can use.
+        save_original_state(&changes)?;
+
+        let _ = Command::new("systemctl").args(["stop", "irqbalance"]).status();
+        let applied = changes
+            .iter()
+            .filter(|(path, value)| fs::write(path, value).is_ok())
+            .count();
+        notes.push(format!(
+            "applied {applied} of {} settings",
+            changes.len()
+        ));
+
+        // Herd existing tasks (and, by inheritance, their children) onto the
+        // housekeeping CPUs. Not part of `changes` because affinity is not a
+        // file, and because there is no fixed set of "the affinities" to
+        // record: tasks come and go for as long as the reservation lasts.
         //
-        //    Deliberately plain per-task affinity rather than a cgroup
-        //    cpuset: a task cannot widen its affinity beyond its cpuset, so a
-        //    cpuset here would lock the benchmark itself out of the very CPUs
-        //    we are reserving for it. Plain affinity is advisory in exactly
-        //    the way we need - everything else is moved aside, but
-        //    `bench-quiet run` can still claim the reserved CPUs.
+        // Deliberately plain per-task affinity rather than a cgroup cpuset: a
+        // task cannot widen its affinity beyond its cpuset, so a cpuset here
+        // would lock the benchmark itself out of the very CPUs we are
+        // reserving for it. Plain affinity is advisory in exactly the way we
+        // need - everything else is moved aside, but `bench-quiet run` can
+        // still claim the reserved CPUs.
         clear_stale_cpusets();
         let moved = move_tasks_to(&other);
         notes.push(format!(
@@ -208,23 +241,27 @@ usage:
             format_cpu_list(&other)
         ));
 
-        // 5. Steer interrupts away. Some IRQs are per-CPU or managed by the
-        //    kernel and refuse to move; that is expected, not a failure.
-        let _ = Command::new("systemctl").args(["stop", "irqbalance"]).status();
-        let mask = affinity_mask(&other);
-        try_write_quietly("/proc/irq/default_smp_affinity", &mask);
-        let (irq_moved, irq_stuck) = steer_irqs(&mask);
-        notes.push(format!(
-            "IRQs steered off the reserved CPUs: {irq_moved} moved, {irq_stuck} immovable"
-        ));
+        // Report what actually happened by reading back, rather than trusting
+        // the writes: cpu0 in particular usually has no `online` file at all
+        // and cannot be offlined, and it is a realistic SMT sibling of a
+        // reserved CPU.
+        if !offlined_siblings.is_empty() {
+            let off = offlined_siblings
+                .iter()
+                .filter(|&&sib| {
+                    fs::read_to_string(format!("/sys/devices/system/cpu/cpu{sib}/online"))
+                        .map(|s| s.trim() == "0")
+                        .unwrap_or(false)
+                })
+                .count();
+            notes.push(format!(
+                "offlined {off} of {} SMT sibling(s)",
+                offlined_siblings.len()
+            ));
+        }
 
-        // 6. Deterministic address layout, and let unprivileged `perf` read
-        //    counters, since both matter for reproducing a measurement.
-        try_write_quietly("/proc/sys/kernel/randomize_va_space", "0");
-        try_write_quietly("/proc/sys/kernel/perf_event_paranoid", "-1");
-
-        // 7. Advertise the reservation. This lives on /run, a tmpfs, so it
-        //    cannot outlive a reboot and become a lie.
+        // Advertise the reservation. This lives on /run, a tmpfs, so it
+        // cannot outlive a reboot and become a lie.
         let canonical = format_cpu_list(&bench_cpus);
         fs::write(CPUS_PATH, format!("{canonical}\n"))
             .map_err(|e| format!("could not write {CPUS_PATH}: {e}"))?;
@@ -255,51 +292,39 @@ usage:
         let ncpu = num_cpus()?;
         let saved = load_original_state();
 
-        // Re-online everything first, so the settings below reach every CPU.
-        for c in 0..ncpu {
-            try_write_quietly(&format!("/sys/devices/system/cpu/cpu{c}/online"), "1");
-        }
+        // Put every file back to exactly what was in it. Because the state
+        // file is keyed by path, this needs to know nothing about what any
+        // individual setting means - and anything `reserve` changed is
+        // necessarily in here, because recording is how `reserve` changes it.
+        //
+        // `online` files go first: a governor write to an offline CPU fails,
+        // so a CPU has to come back before the rest of its settings do.
+        let (online, rest): (Vec<_>, Vec<_>) = saved
+            .iter()
+            .filter(|(key, _)| key.starts_with('/'))
+            .partition(|(path, _)| path.ends_with("/online"));
+        let restored = online
+            .into_iter()
+            .chain(rest)
+            .filter(|(path, value)| fs::write(path, value).is_ok())
+            .count();
 
-        if Path::new(PSTATE).is_dir() {
-            // Fall back to "turbo on", the overwhelmingly common default, if
-            // we have no saved value - better than leaving it disabled.
-            let no_turbo = saved.get("no_turbo").cloned().unwrap_or_else(|| "0".into());
-            try_write_quietly(&format!("{PSTATE}/no_turbo"), &no_turbo);
-            if let Some(min_perf) = saved.get("min_perf_pct") {
-                try_write_quietly(&format!("{PSTATE}/min_perf_pct"), min_perf);
-            }
-        }
-
-        let governor = saved
-            .get("governor")
-            .cloned()
-            .unwrap_or_else(|| "powersave".into());
-        for c in 0..ncpu {
-            try_write_quietly(
-                &format!("/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor"),
-                &governor,
-            );
-        }
-
+        // Widen every task back to every CPU. Unlike the settings above this
+        // is not a restore to a recorded value - see the note in `reserve` -
+        // but erring wide is the safe direction: leaving `reserve`'s
+        // restriction in place would strand every long-running task off the
+        // reserved CPUs for good.
         clear_stale_cpusets();
-        let all: Vec<usize> = (0..ncpu).collect();
-        let moved = move_tasks_to(&all);
+        let moved = move_tasks_to(&(0..ncpu).collect::<Vec<_>>());
 
-        try_write_quietly(
-            "/proc/sys/kernel/randomize_va_space",
-            saved.get("randomize_va_space").map_or("2", |s| s.as_str()),
-        );
-        try_write_quietly(
-            "/proc/sys/kernel/perf_event_paranoid",
-            saved.get("perf_event_paranoid").map_or("2", |s| s.as_str()),
-        );
-
-        let mask = affinity_mask(&all);
-        try_write_quietly("/proc/irq/default_smp_affinity", &mask);
-        steer_irqs(&mask);
-        let _ = Command::new("systemctl")
-            .args(["start", "irqbalance"])
-            .status();
+        // `reserve` stops irqbalance unconditionally, so only start it again
+        // if it was actually running beforehand. Absent a state file - after
+        // a reboot, say - assume it was, which is the common case.
+        if saved.get("irqbalance").map_or(true, |v| v == "active") {
+            let _ = Command::new("systemctl")
+                .args(["start", "irqbalance"])
+                .status();
+        }
 
         let _ = fs::remove_file(STATE_PATH);
         let _ = fs::remove_file(CPUS_PATH);
@@ -307,43 +332,50 @@ usage:
         // machine set up with that script is fully cleaned up by this one.
         let _ = fs::remove_file("/usr/local/bin/bench");
 
-        println!(
-            "restored: all {ncpu} CPUs online, {governor} governor, {moved} tasks unpinned, \
-             irqbalance running"
-        );
+        println!("restored: {restored} settings put back, {moved} tasks unpinned");
         Ok(())
     }
 
     // ------------------------------------------------------------- state
 
-    /// Snapshot the settings we are about to change.
+    /// Record what is in each path `changes` is about to overwrite.
+    ///
+    /// Keyed by path, so `restore` can replay the whole thing without
+    /// knowing what any entry means, and so a setting cannot be changed
+    /// without being recorded - the same list drives both. The one non-path
+    /// key is `irqbalance`, which is a service rather than a file.
     ///
     /// Write-once: on a second `reserve` (or after a partly-failed one) the
     /// live values are already our own, so overwriting the snapshot would
     /// lose the true originals forever.
-    fn save_original_state() -> Result<(), String> {
+    fn save_original_state(changes: &[(String, String)]) -> Result<(), String> {
         if Path::new(STATE_PATH).exists() {
             return Ok(());
         }
         let mut out = String::new();
-        let mut record = |key: &str, path: &str| {
+        for (path, _) in changes {
+            // A path that cannot be read cannot be restored either, so skip
+            // it. Plenty legitimately do not exist: cpu0 usually has no
+            // `online`, and `intel_pstate` is absent on AMD.
             if let Ok(v) = fs::read_to_string(path) {
-                let _ = writeln!(out, "{key}={}", v.trim());
+                let _ = writeln!(out, "{path}={}", v.trim());
             }
-        };
-        record("no_turbo", &format!("{PSTATE}/no_turbo"));
-        record("min_perf_pct", &format!("{PSTATE}/min_perf_pct"));
-        record(
-            "governor",
-            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+        }
+        let irqbalance = Command::new("systemctl")
+            .args(["is-active", "--quiet", "irqbalance"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let _ = writeln!(
+            out,
+            "irqbalance={}",
+            if irqbalance { "active" } else { "inactive" }
         );
-        record("randomize_va_space", "/proc/sys/kernel/randomize_va_space");
-        record("perf_event_paranoid", "/proc/sys/kernel/perf_event_paranoid");
         fs::write(STATE_PATH, out).map_err(|e| format!("could not write {STATE_PATH}: {e}"))
     }
 
-    fn load_original_state() -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
+    fn load_original_state() -> std::collections::BTreeMap<String, String> {
+        let mut map = std::collections::BTreeMap::new();
         if let Ok(text) = fs::read_to_string(STATE_PATH) {
             for line in text.lines() {
                 if let Some((k, v)) = line.split_once('=') {
@@ -445,29 +477,17 @@ usage:
         moved
     }
 
-    fn steer_irqs(mask: &str) -> (usize, usize) {
-        let (mut moved, mut stuck) = (0, 0);
+    /// The numbered IRQs under `/proc/irq`, each of which has its own
+    /// `smp_affinity`.
+    fn numbered_irqs() -> Vec<u32> {
         let entries = match fs::read_dir("/proc/irq") {
             Ok(e) => e,
-            Err(_) => return (0, 0),
+            Err(_) => return Vec::new(),
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let is_numbered_irq = match name.to_str() {
-                Some(n) => n.parse::<u32>().is_ok(),
-                None => false,
-            };
-            if !is_numbered_irq {
-                continue;
-            }
-            let path = entry.path().join("smp_affinity");
-            if fs::write(&path, mask).is_ok() {
-                moved += 1;
-            } else {
-                stuck += 1;
-            }
-        }
-        (moved, stuck)
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok()))
+            .collect()
     }
 
     /// Clear any cpuset left behind by the older shell implementation of
@@ -478,16 +498,6 @@ usage:
                 .args(["set-property", "--runtime", unit, "AllowedCPUs="])
                 .status();
         }
-    }
-
-    fn try_write(path: &str, contents: &str, notes: &mut Vec<String>) {
-        if let Err(e) = fs::write(path, contents) {
-            notes.push(format!("could not set {path} to {contents}: {e}"));
-        }
-    }
-
-    fn try_write_quietly(path: &str, contents: &str) {
-        let _ = fs::write(path, contents);
     }
 
     #[cfg(test)]
