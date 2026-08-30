@@ -363,8 +363,14 @@ pub struct Stats {
     /// all: either fewer than 2 samples were collected (see `hit_limit`),
     /// or every sample measured as exactly zero.
     pub rel_std_error: f64,
-    /// How many times the benchmarked code was actually run.
-    pub iterations: usize,
+    /// How many times the benchmarked code was actually run, including the
+    /// calibration probes whose timings were discarded.
+    ///
+    /// `u64` rather than `usize` because this is a count rather than
+    /// anything memory-sized: a nanosecond-scale benchmark can legitimately
+    /// run past 4.3 billion iterations within its time budget, which a
+    /// 32-bit `usize` could not hold.
+    pub iterations: u64,
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
@@ -622,7 +628,7 @@ impl Config {
         quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, first_ns) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
+        let (unit, first_ns, probed) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
         if start.elapsed() > self.max_time {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
@@ -630,7 +636,7 @@ impl Config {
             return Stats {
                 ns_per_iter: first_ns / unit as f64,
                 rel_std_error: f64::NAN,
-                iterations: unit,
+                iterations: probed,
                 samples: 1,
                 hit_limit: true,
             };
@@ -640,15 +646,13 @@ impl Config {
         // algorithm discarded its first sample as a cache-warming
         // exercise.
 
-        let mut per_iter: Vec<f64> = Vec::new();
-        let mut iterations = 0usize;
+        let mut samples = Running::default();
         loop {
             let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
-            per_iter.push(t / unit as f64);
-            iterations += unit;
-            let (mean, std_error) = mean_and_stderr(&per_iter);
+            samples.push(t / unit as f64);
+            let (mean, std_error) = samples.mean_and_stderr();
 
-            let out_of_budget = per_iter.len() >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            let out_of_budget = samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
             // `MIN_SAMPLES` gates only the *voluntary* stop. Its job is to
             // stop us concluding from a standard error so noisy it might
             // have dipped below the target by luck - a hazard that exists
@@ -659,7 +663,7 @@ impl Config {
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
             let precise_enough =
-                per_iter.len() >= MIN_SAMPLES && self.accuracy.is_met(mean, std_error);
+                samples.count >= MIN_SAMPLES && self.accuracy.is_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
@@ -668,8 +672,12 @@ impl Config {
                     // mean is zero, which is exactly what `rel_std_error`
                     // documents.
                     rel_std_error: std_error / mean,
-                    iterations,
-                    samples: per_iter.len(),
+                    // Derived rather than accumulated, which keeps the
+                    // arithmetic in u64 and out of the loop: `usize` would
+                    // overflow on a 32-bit target, where a fast benchmark
+                    // can legitimately run past 4.3 billion iterations.
+                    iterations: probed + samples.count as u64 * unit as u64,
+                    samples: samples.count,
                     // Stopping short of `MIN_SAMPLES` counts as hitting the
                     // limit even if the error happens to look good, because
                     // that is exactly the reading we do not yet trust.
@@ -730,7 +738,7 @@ fn calibrate<G, F, I, O>(
     xs: &mut Vec<I>,
     cfg: &Config,
     start: Instant,
-) -> (usize, f64)
+) -> (usize, f64, u64)
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
@@ -783,8 +791,12 @@ where
     let unit_cap = MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
     let target = cfg.sample_time.as_secs_f64() * 1e9;
     let mut unit = 1usize;
+    // Every probe really does run the benchmark, so they count towards
+    // `Stats::iterations` even though their timings are discarded.
+    let mut probed = 0u64;
     loop {
         let (setup_ns, t) = time_batch(gen_env, f, xs, unit);
+        probed += unit as u64;
         let total_ns = setup_ns + t;
         // Accept immediately, without ever retrying at this size, as soon
         // as *any* ceiling is reached: `t >= target` is the ordinary case,
@@ -797,7 +809,7 @@ where
             || unit >= unit_cap
             || start.elapsed() > cfg.max_time
         {
-            return (unit, t);
+            return (unit, t, probed);
         }
         // Extrapolate from whichever cost is closer to its own ceiling: the
         // timed portion approaching `target`, or the *total* probe cost
@@ -814,27 +826,53 @@ where
     }
 }
 
-/// Mean and the standard error *of that mean*, in nanoseconds, given
-/// per-iteration times that are each already the average of one
-/// `unit`-sized batch. See [`Config::bench_gen_env`] for why batching does
-/// not bias this estimate.
+/// Running mean and variance of the per-iteration times, updated in O(1)
+/// per sample.
 ///
-/// Absolute rather than relative because that is the primitive quantity:
-/// `sd/sqrt(n)` needs nothing but the samples, whereas dividing it by the
-/// mean is undefined when the mean is zero. [`Stats::rel_std_error`] is
-/// derived from this for reporting.
-fn mean_and_stderr(xs: &[f64]) -> (f64, f64) {
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    if xs.len() < 2 {
-        // A standard error needs at least two points to exist at all. The
-        // arithmetic below would reach this answer anyway, via 0.0/0.0, but
-        // that is too subtle to rely on.
-        return (mean, f64::NAN);
+/// The sampling loop asks whether it can stop after *every* sample, so
+/// recomputing from a stored vector would make the loop O(k²) in the number
+/// of samples - fine at the default `sample_time`, but `sample_time` is a
+/// public knob and shrinking it puts the loop in a regime where it spends
+/// more of the budget on arithmetic than on measuring. Keeping the running
+/// figures also means the samples themselves never need storing.
+///
+/// This is Welford's algorithm rather than accumulating `sum` and
+/// `sum_of_squares`, because the variance we want is a minute difference
+/// between two large numbers in that formulation - a 260 ns benchmark
+/// measured to 0.1% - and would lose most of its significant digits to
+/// cancellation. Welford never forms that difference.
+#[derive(Default)]
+struct Running {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl Running {
+    fn push(&mut self, x: f64) {
+        self.count += 1;
+        let delta = x - self.mean;
+        self.mean += delta / self.count as f64;
+        self.m2 += delta * (x - self.mean);
     }
-    // Sample variance (Bessel-corrected), then the standard error of the mean.
-    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    (mean, (var / n).sqrt())
+
+    /// Mean, and the standard error *of that mean*, in nanoseconds. See
+    /// [`Config::bench_gen_env`] for why batching does not bias this.
+    ///
+    /// The error is absolute rather than relative because that is the
+    /// primitive quantity: it needs nothing but the samples, whereas
+    /// dividing by the mean is undefined when the mean is zero.
+    /// [`Stats::rel_std_error`] is derived from it for reporting.
+    fn mean_and_stderr(&self) -> (f64, f64) {
+        if self.count < 2 {
+            // A standard error needs at least two points to exist at all.
+            return (self.mean, f64::NAN);
+        }
+        // Sample variance (Bessel-corrected), then the standard error of
+        // the mean.
+        let var = self.m2 / (self.count - 1) as f64;
+        (self.mean, (var / self.count as f64).sqrt())
+    }
 }
 
 /// Statistics for a benchmark run determining the scaling of a function.
@@ -1289,9 +1327,11 @@ mod tests {
         println!("sadly slow: {}", stats);
         println!("ns {}", stats.ns_per_iter);
         assert!(stats.ns_per_iter > 6.0e9);
-        // The calibration probe (discarded as warmup) plus one real sample
-        // already exceed the 10-second budget.
-        assert_eq!(1, stats.iterations);
+        // The calibration probe (whose timing is discarded as warmup) plus
+        // one real sample already exceed the 10-second budget - and both of
+        // them really did run the benchmark, so both are counted.
+        assert_eq!(2, stats.iterations);
+        assert_eq!(1, stats.samples);
         assert!(stats.hit_limit);
     }
 
@@ -1487,7 +1527,7 @@ mod tests {
                 .bench(variable_cost(seed_for(r)))
             })
             .collect();
-        let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<usize>();
+        let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<u64>();
         let (loose_iters, tight_iters) = (iters(&loose), iters(&tight));
         println!("loose iterations {loose_iters}, tight iterations {tight_iters}");
         assert!(tight_iters > 2 * loose_iters);
