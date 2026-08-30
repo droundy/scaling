@@ -33,11 +33,11 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:     72.17ns ± 0.46ns
-fib 500:     254.9ns ± 2.5ns
-fib scaling:   0.51ns/N    (R²=0.996, 6626 iterations in 56 samples)
-reverse:     65.12ns ± 0.65ns
-sort:        97.22ns ± 0.96ns
+fib 200:    71.723ns ± 0.057ns
+fib 500:    257.05ns ± 0.87ns
+fib scaling:  (0.5507 ± 0.0055)ns/N (R²=0.999)
+reverse:     75.02ns ± 0.75ns
+sort:        97.59ns ± 0.97ns
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
@@ -88,9 +88,30 @@ and pick the best fit by R², since here we care about the *shape* of the
 scaling relationship rather than just one number, and R² is a reasonable way
 to compare candidate models against each other. The first sample taken
 performs only 1 iteration, but as we continue taking samples we increase the
-number of iterations with increasing rapidity. We stop either when a global
-time limit is reached (currently 10 seconds, or 120 when desperate for a good
-fit), or when the fit is good enough (R² > 0.99).
+number of iterations with increasing rapidity.
+
+Two separate things have to be settled before there is an answer, and the
+output reports them separately:
+
+* **Which law?** R², shown in the output, is the signal for this. When the
+  data cannot tell the candidates apart it is set to zero outright, rather
+  than a law being picked on a coin-toss.
+* **How big is its constant?** [`ScalingStats::rel_std_error`] answers this,
+  and it is what the `±` in the output shows. Sampling continues until it
+  meets the same [`Accuracy`] target the flat benchmarks use, so
+  `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
+  for [`bench`].
+
+The two are deliberately not merged into one number, because an error bar
+cannot speak for the choice of law that it was computed *after*: a run that
+picks the wrong shape can report a very tight `±` on a constant that means
+nothing. Read them together, and be suspicious of a small `±` sitting next
+to `R²=0.000`.
+
+Sampling stops once the law is identified *and* its constant meets the
+accuracy target, or when the time budget runs out - 10 seconds by default,
+extended twelvefold for a sweep that has not managed to identify any law at
+all, since without a shape there is no answer to report.
 
 # Caveats
 
@@ -185,11 +206,9 @@ use std::fmt::{self, Display, Formatter};
 use std::hint::black_box;
 use std::time::*;
 
-// We try to spend at very most this many seconds (roughly) in total on
-// each benchmark.
-const BENCH_TIME_MAX_DESPERATION: Duration = Duration::from_secs(120);
 // We try to spend at most this many seconds (roughly) in total on
-// each benchmark.
+// each benchmark. A scaling sweep that has not yet identified a law will
+// keep going to a multiple of this - see `scaling_verdict`.
 const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 // We try to spend at least this many seconds in total on each
 // benchmark.
@@ -696,6 +715,38 @@ impl Config {
             }
         }
     }
+
+    /// Benchmark the power-law scaling of a function, targeting `self`'s
+    /// accuracy. See [`bench_scaling`] for the default-accuracy version.
+    ///
+    /// The accuracy applies to [`Scaling::ns_per_scale`], the constant in
+    /// front of the fitted law, and only once the law itself has been
+    /// identified - see [`ScalingStats::rel_std_error`] for why those are
+    /// two different questions.
+    ///
+    /// [`Accuracy::Relative`] is the one that makes sense here.
+    /// [`Accuracy::Absolute`] is accepted and well defined, but its units
+    /// are nanoseconds per `Nᴾ Eᴺ`, which change meaning with the law that
+    /// happens to be selected - so a figure chosen for one shape is rarely
+    /// the figure you want for another.
+    pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
+    where
+        F: Fn(usize) -> O,
+    {
+        bench_scaling_with(self, f, nmin)
+    }
+
+    /// Benchmark the power-law scaling of a function with a generated
+    /// input, targeting `self`'s accuracy. See [`bench_scaling_gen`] for
+    /// the default-accuracy version, and [`Config::bench_scaling`] for what
+    /// the accuracy applies to.
+    pub fn bench_scaling_gen<G, F, I, O>(&self, gen_env: G, f: F, nmin: usize) -> ScalingStats
+    where
+        G: FnMut(usize) -> I,
+        F: Fn(&mut I) -> O,
+    {
+        bench_scaling_gen_with(self, gen_env, f, nmin)
+    }
 }
 
 /// Time `iters` back-to-back calls of `f`, each on its own freshly
@@ -889,12 +940,40 @@ impl Running {
 #[derive(Debug, PartialEq, Clone)]
 pub struct ScalingStats {
     pub scaling: Scaling,
+    /// Relative standard error of [`Scaling::ns_per_scale`], as a fraction
+    /// (0.01 = 1%).
+    ///
+    /// **This is conditional on the reported scaling law being the right
+    /// one.** It says how well the constant is known *given* that the
+    /// function really is `O(Nᴾ Eᴺ)` for the reported `P` and `E`; it says
+    /// nothing about whether that law was chosen correctly, because it is
+    /// computed after the choice and cannot see the alternatives that were
+    /// rejected. `goodness_of_fit` is the signal for that half - it is set
+    /// to zero when the fit could not distinguish between candidate laws -
+    /// so read the two together, and treat a tight error bar next to a zero
+    /// `goodness_of_fit` as "precise about a shape I could not pin down".
+    ///
+    /// `NaN` before three samples, where a standard error cannot exist.
+    pub rel_std_error: f64,
     pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
-    pub iterations: usize,
+    pub iterations: u64,
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
+    /// `true` if the benchmark ran out of time before reaching its
+    /// `accuracy` target, or gave up without identifying a scaling law.
+    pub hit_limit: bool,
+}
+
+impl ScalingStats {
+    /// The standard error of [`Scaling::ns_per_scale`], in the same units
+    /// as it - the absolute counterpart of
+    /// [`ScalingStats::rel_std_error`], and what `Display` shows after the
+    /// `±`. See that field for what the figure does and does not cover.
+    pub fn std_error(&self) -> f64 {
+        self.scaling.ns_per_scale * self.rel_std_error
+    }
 }
 /// The timing and scaling results (without statistics) for a benchmark.
 #[derive(Debug, PartialEq, Clone)]
@@ -912,13 +991,66 @@ pub struct Scaling {
 
 impl Display for ScalingStats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{} (R²={:.3}, {} iterations in {} samples)",
-            self.scaling, self.goodness_of_fit, self.iterations, self.samples
-        )
+        // Same rules as `Stats`: value and error in one unit, the error to
+        // two significant figures, and the value to exactly the precision
+        // the error justifies. The unit is written once, outside the
+        // parentheses, since it applies to both.
+        let suffix = self.scaling.scale_suffix();
+        let (div, unit) = unit_for(self.scaling.ns_per_scale);
+        let value = self.scaling.ns_per_scale / div;
+        let limit = if self.hit_limit { " (limit)" } else { "" };
+        // R² stays, unlike on `Stats`, because here it is not a stand-in
+        // for precision - it is the only signal about whether the right
+        // *shape* was found, which no error bar on the constant can give.
+        // Zero means the fit could not tell the candidate laws apart.
+        if self.rel_std_error.is_nan() {
+            write!(
+                f,
+                "{value:>8.2}{unit}{suffix} (± unknown, only {} samples){limit} (R²={:.3})",
+                self.samples, self.goodness_of_fit
+            )
+        } else {
+            let scaled = self.std_error() / div;
+            let decimals = error_decimals(scaled);
+            let error = if scaled > 0.0 && scaled < 1e-4 {
+                format!("{scaled:.1e}")
+            } else {
+                format!("{scaled:.*}", decimals)
+            };
+            let shown = format!("({:.*} ± {}){}{}", decimals, value, error, unit, suffix);
+            write!(f, "{shown:>22}{limit} (R²={:.3})", self.goodness_of_fit)
+        }
     }
 }
+impl Scaling {
+    /// The `/N²`-style suffix naming what `ns_per_scale` is measured per,
+    /// without the number in front of it. Split out so that
+    /// [`ScalingStats`] can print `(0.51 ± 0.02)ns/N` - the error belongs
+    /// inside the parentheses with the value it qualifies, and the unit
+    /// only wants saying once.
+    fn scale_suffix(&self) -> String {
+        let n_power = match self.power {
+            0 => String::new(),
+            1 => "N".to_string(),
+            2 => "N²".to_string(),
+            3 => "N³".to_string(),
+            4 => "N⁴".to_string(),
+            5 => "N⁵".to_string(),
+            6 => "N⁶".to_string(),
+            7 => "N⁷".to_string(),
+            8 => "N⁸".to_string(),
+            9 => "N⁹".to_string(),
+            p => format!("N^{p}"),
+        };
+        match (self.exponential, self.power) {
+            (1, 0) => "/iter".to_string(),
+            (1, _) => format!("/{n_power}"),
+            (e, 0) => format!("/{e}ᴺ"),
+            (e, _) => format!("/({n_power}{e}ᴺ)"),
+        }
+    }
+}
+
 impl Display for Scaling {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let per_iter = Duration::from_nanos(self.ns_per_scale as u64);
@@ -961,13 +1093,23 @@ impl Display for Scaling {
     }
 }
 
-/// Benchmark the power-law scaling of the function
+/// Benchmark the power-law scaling of the function, targeting the default
+/// accuracy (see [`Config`]).
 ///
 /// This function assumes that the function scales as 𝑶(𝑁ᴾ𝐸ᴺ).
 /// It conisders higher powers for faster functions, and tries to
 /// keep the measuring time around 10s.  It measures the power ᴾ and exponential base 𝐸
 /// based on n R² goodness of fit parameter.
+///
+/// See [`Config::bench_scaling`] to choose your own accuracy.
 pub fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
+where
+    F: Fn(usize) -> O,
+{
+    Config::default().bench_scaling(f, nmin)
+}
+
+fn bench_scaling_with<F, O>(cfg: &Config, f: F, nmin: usize) -> ScalingStats
 where
     F: Fn(usize) -> O,
 {
@@ -995,16 +1137,48 @@ where
 
         let elapsed = bench_start.elapsed();
         if elapsed > BENCH_TIME_MIN {
-            let stats = compute_scaling_gen(&data);
-            if elapsed > BENCH_TIME_MAX_DESPERATION
-                || (elapsed > BENCH_TIME_MAX && stats.goodness_of_fit > 0.0)
-                || stats.goodness_of_fit > 0.99
-            {
+            if let Some(stats) = scaling_verdict(compute_scaling_gen(&data), cfg, elapsed) {
                 return stats;
             }
         }
     }
     unreachable!()
+}
+
+/// Should a scaling sweep stop now?
+///
+/// Two independent questions have to come out right, and they are not
+/// interchangeable. `goodness_of_fit` is zeroed by `compute_scaling_gen`
+/// when the data could not tell the candidate laws apart, so it answers
+/// *do I know the shape*; the accuracy target answers *do I know the
+/// constant*. Identification gates the accuracy check rather than sitting
+/// beside it, because a tightly-known constant attached to the wrong
+/// scaling law is worse than useless - it is confidently wrong.
+///
+/// This replaces the old `goodness_of_fit > 0.99` rule, which had the same
+/// flaw here that it had for flat benchmarks: R² asks whether the points
+/// lie on *a* line of the assumed shape, which they can do beautifully
+/// while the gradient itself is barely pinned down. Measured on this
+/// crate's own scaling benchmarks, the R² rule stopped an O(2ᴺ) sweep with
+/// a 7.4% error on the constant, and an O(N log N) sweep at 1.7%.
+fn scaling_verdict(
+    mut stats: ScalingStats,
+    cfg: &Config,
+    elapsed: Duration,
+) -> Option<ScalingStats> {
+    let identified = stats.goodness_of_fit > 0.0;
+    let precise =
+        identified && cfg.accuracy.is_met(stats.scaling.ns_per_scale, stats.std_error());
+    // Keep going well past `max_time` for a sweep that has not even
+    // identified a law yet, exactly as before: without a shape there is no
+    // answer at all, whereas an imprecise constant is at least a number.
+    // 12x reproduces the previous 10s/120s pair at the default budget.
+    if precise || elapsed > cfg.max_time * 12 || (elapsed > cfg.max_time && identified) {
+        stats.hit_limit = !precise;
+        Some(stats)
+    } else {
+        None
+    }
 }
 
 /// Benchmark the power-law scaling of the function with generated input
@@ -1027,9 +1201,24 @@ where
 /// ```
 /// which gives output
 /// ```none
-/// summation:     43ns/N    (R²=0.996, 445 iterations in 29 samples)
+/// summation:    (1.206 ± 0.011)ns/N (R²=0.999)
 /// ```
-pub fn bench_scaling_gen<G, F, I, O>(mut gen_env: G, f: F, nmin: usize) -> ScalingStats
+///
+/// See [`Config::bench_scaling_gen`] to choose your own accuracy.
+pub fn bench_scaling_gen<G, F, I, O>(gen_env: G, f: F, nmin: usize) -> ScalingStats
+where
+    G: FnMut(usize) -> I,
+    F: Fn(&mut I) -> O,
+{
+    Config::default().bench_scaling_gen(gen_env, f, nmin)
+}
+
+fn bench_scaling_gen_with<G, F, I, O>(
+    cfg: &Config,
+    mut gen_env: G,
+    f: F,
+    nmin: usize,
+) -> ScalingStats
 where
     G: FnMut(usize) -> I,
     F: Fn(&mut I) -> O,
@@ -1064,16 +1253,11 @@ where
 
         let elapsed = bench_start.elapsed();
         if elapsed > BENCH_TIME_MIN {
-            let stats = compute_scaling_gen(&data);
-            if elapsed > BENCH_TIME_MAX_DESPERATION
-                || (elapsed > BENCH_TIME_MAX && stats.goodness_of_fit > 0.0)
-                || stats.goodness_of_fit > 0.99
-            {
+            if let Some(stats) = scaling_verdict(compute_scaling_gen(&data), cfg, elapsed) {
                 return stats;
             }
         }
     }
-    println!("how did I get here?!");
     unreachable!()
 }
 
@@ -1111,16 +1295,19 @@ fn compute_scaling_gen(data: &[(usize, usize, Duration)]) -> ScalingStats {
                     )
                 })
                 .collect();
-            let (grad, r2) = fregression(&pdata);
+            let (grad, r2, se) = fregression(&pdata);
             stats.push(ScalingStats {
                 scaling: Scaling {
                     power,
                     exponential,
                     ns_per_scale: grad,
                 },
+                rel_std_error: se / grad,
                 goodness_of_fit: r2,
-                iterations: data[1..].iter().map(|&(x, _, _)| x).sum(),
+                iterations: data[1..].iter().map(|&(x, _, _)| x as u64).sum(),
                 samples: data[1..].len(),
+                // Set by the caller, which is what knows about the budget.
+                hit_limit: false,
             });
             if r2 > stats[best].goodness_of_fit || stats[best].goodness_of_fit.is_nan() {
                 second_best = best;
@@ -1150,31 +1337,75 @@ fn compute_scaling_gen(data: &[(usize, usize, Duration)]) -> ScalingStats {
 // Overflows:
 //
 // * sum(x * x): num_samples <= 0.5 * log_k (1 + 2 ^ 64 (FACTOR - 1))
-fn fregression(data: &[(f64, Duration)]) -> (f64, f64) {
+fn fregression(data: &[(f64, Duration)]) -> (f64, f64, f64) {
     if data.len() < 2 {
-        return (f64::NAN, f64::NAN);
+        return (f64::NAN, f64::NAN, f64::NAN);
     }
     // Do all the arithmetic using f64, because it can happen that the
     // squared numbers to overflow using integer arithmetic if the
     // tests are too fast (so we run too many iterations).
     let data: Vec<_> = data
         .iter()
-        .map(|&(x, y)| (x as f64, y.as_nanos() as f64))
+        .map(|&(x, y)| (x, y.as_nanos() as f64))
         .collect();
     let n = data.len() as f64;
     let xbar = data.iter().map(|&(x, _)| x).sum::<f64>() / n;
-    let xvar = data.iter().map(|&(x, _)| (x - xbar).powi(2)).sum::<f64>() / n;
     let ybar = data.iter().map(|&(_, y)| y).sum::<f64>() / n;
-    let yvar = data.iter().map(|&(_, y)| (y - ybar).powi(2)).sum::<f64>() / n;
-    let covar = data
+    let ssxx = data.iter().map(|&(x, _)| (x - xbar).powi(2)).sum::<f64>();
+    let ssyy = data.iter().map(|&(_, y)| (y - ybar).powi(2)).sum::<f64>();
+    let ssxy = data
         .iter()
         .map(|&(x, y)| (x - xbar) * (y - ybar))
-        .sum::<f64>()
-        / n;
-    let gradient = covar / xvar;
-    let r2 = covar.powi(2) / (xvar * yvar);
+        .sum::<f64>();
+    let gradient = ssxy / ssxx;
+    let r2 = ssxy * ssxy / (ssxx * ssyy);
     assert!(r2.is_nan() || r2 <= 1.0);
-    (gradient, r2)
+
+    // Standard error of the gradient, via White's HC3 estimator:
+    //
+    //     Var(b) = Σ (xᵢ-x̄)² (eᵢ/(1-hᵢ))² / SSxx²,   hᵢ = 1/n + (xᵢ-x̄)²/SSxx
+    //
+    // rather than the textbook `sqrt(SSE/(n-2)/SSxx)`. The textbook form
+    // assumes every point scatters equally about the line, and a scaling
+    // sweep breaks that assumption on purpose: later samples do more work,
+    // so they are noisier in absolute terms, and they are also the
+    // high-leverage points because the sizes grow geometrically. Those two
+    // facts compound.
+    //
+    // Measured over synthetic fits at this crate's own sample spacing,
+    // comparing each estimator against the actual run-to-run spread of the
+    // fitted gradient:
+    //
+    //     samples   noise model        textbook   HC3
+    //        40     constant             1.00x    0.94x
+    //        40     var ∝ x              1.67x    0.97x
+    //        40     sd ∝ x               2.27x    0.99x
+    //        60     sd ∝ x               2.24x    1.01x
+    //
+    // where >1 means the estimator claims a tighter error than really
+    // occurs. The textbook form gets worse as samples accumulate, which is
+    // the opposite of what a reader expects; HC3 stays honest, erring
+    // slightly wide - the safe direction for an error bar.
+    //
+    // HC3 divides by `1 - hᵢ`, so it needs enough points for every leverage
+    // to stay below 1; with two points the fit is exact, every residual is
+    // zero, and there is no information about scatter at all.
+    let std_error = if data.len() < 3 {
+        f64::NAN
+    } else {
+        let intercept = ybar - gradient * xbar;
+        let acc: f64 = data
+            .iter()
+            .map(|&(x, y)| {
+                let dx = x - xbar;
+                let leverage = 1.0 / n + dx * dx / ssxx;
+                let adjusted = (y - (intercept + gradient * x)) / (1.0 - leverage);
+                dx * dx * adjusted * adjusted
+            })
+            .sum();
+        acc.sqrt() / ssxx
+    };
+    (gradient, r2, std_error)
 }
 
 #[cfg(test)]
@@ -1234,7 +1465,15 @@ mod tests {
         assert_eq!(stats.scaling.power, 0);
         println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
         assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e6);
-        assert!(format!("{}", stats).contains("samples"));
+        // A constant function gives the fit nothing to distinguish the
+        // candidate laws with, so it should say so rather than pick one:
+        // `goodness_of_fit` zeroed, and `hit_limit` set because it never
+        // reached an answer it was willing to stand behind.
+        assert_eq!(0.0, stats.goodness_of_fit);
+        assert!(stats.hit_limit);
+        let shown = format!("{stats}");
+        assert!(shown.contains('±'), "{shown}");
+        assert!(shown.contains("R²"), "{shown}");
     }
 
     #[test]
@@ -1680,6 +1919,64 @@ mod tests {
         println!("{stats}");
         assert!(stats.hit_limit);
         assert!(!cfg.accuracy.is_met(stats.ns_per_iter, stats.rel_std_error));
+    }
+
+    /// The scaling error bar has to describe the spread that actually
+    /// occurs, not merely be a number that shrinks when asked. This is the
+    /// property that cannot be checked by reading the code: the estimator
+    /// is HC3 precisely because the textbook OLS standard error is roughly
+    /// 2x optimistic once the samples are heteroscedastic, which they are
+    /// here, and only a repeated-measurement check can tell the two apart.
+    #[test]
+    fn scaling_error_bar_is_honest() {
+        println!();
+        const REPEATS: usize = 12;
+        // A genuinely linear workload with real per-sample noise, so the
+        // spread being measured is the estimator's, not the machine's.
+        let runs: Vec<ScalingStats> = (0..REPEATS)
+            .map(|_| {
+                bench_scaling_gen(
+                    |n| (0..n as u64).collect::<Vec<_>>(),
+                    |v| v.iter().cloned().sum::<u64>(),
+                    1,
+                )
+            })
+            .collect();
+
+        // Only compare runs that agreed on the law. `ns_per_scale` is
+        // measured per `Nᴾ Eᴺ`, so a run that picked a different P is
+        // reporting a different quantity in different units, and pooling
+        // them would be comparing nanoseconds-per-N with
+        // nanoseconds-per-N². Model selection here really is occasionally
+        // wrong - roughly one run in twelve picks N² for this linear
+        // workload - and when it is, its error bar is tight and
+        // confidently wrong, which is the whole reason
+        // `ScalingStats::rel_std_error` documents itself as conditional on
+        // the law being right.
+        let linear: Vec<&ScalingStats> = runs.iter().filter(|s| s.scaling.power == 1).collect();
+        assert!(
+            linear.len() * 2 > REPEATS,
+            "only {} of {REPEATS} runs identified the linear law",
+            linear.len()
+        );
+
+        let (_, observed) = mean_and_spread(
+            &linear.iter().map(|s| s.scaling.ns_per_scale).collect::<Vec<_>>(),
+        );
+        let claimed = linear.iter().map(|s| s.rel_std_error).sum::<f64>() / linear.len() as f64;
+        let ratio = observed / claimed;
+        println!("claimed {:.3}%, observed {:.3}%, ratio {ratio:.2}x", 100.0 * claimed, 100.0 * observed);
+        // Generous, like its flat-benchmark counterpart: a spread estimated
+        // from a dozen runs is itself noisy, and run-to-run drift the
+        // estimator cannot see (cache state, frequency) inflates the
+        // observed side. The point is to catch an error bar that has gone
+        // decorative, which is where the textbook OLS form was heading.
+        assert!(
+            ratio < 4.0,
+            "claimed {:.3}% but observed spread was {:.3}% ({ratio:.1}x overconfident)",
+            100.0 * claimed,
+            100.0 * observed
+        );
     }
 
     #[test]

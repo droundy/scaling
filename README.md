@@ -45,6 +45,24 @@ about how well the answer is known; now that the `±` states the precision
 outright, they are clutter on a line meant to be scanned down a column.
 Both are still on `Stats` if you want them.
 
+## Scaling behaviour
+
+`bench_scaling` fits the measurements to `O(Nᴾ Eᴺ)` and reports the constant
+in front of the law it picked, with the same kind of error bar:
+
+```none
+fib scaling:  (0.5507 ± 0.0055)ns/N (R²=0.999)
+```
+
+Here the R² *does* stay, because it answers a question the `±` cannot. Two
+things have to be settled — which law, and how big its constant is — and
+they can fail independently. R² is the signal for the first, and is set to
+zero outright when the data cannot tell the candidate laws apart; the `±` is
+the signal for the second. An error bar computed *after* a law was chosen
+cannot vouch for that choice, so a tight `±` next to `R²=0.000` means
+"precise about a shape I could not pin down", and deserves suspicion rather
+than trust.
+
 To ask for a different accuracy, use a `Config` — either as a fraction of
 the measurement, or as a flat `Duration`:
 
