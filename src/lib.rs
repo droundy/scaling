@@ -1616,6 +1616,104 @@ fn two_point_exponent(n1: f64, t1: f64, n2: f64, t2: f64) -> Option<f64> {
     Some((t2 / t1).ln() / (n2 / n1).ln())
 }
 
+/// Never let one step multiply the problem size by more than this.
+///
+/// The extrapolation below is only as good as an exponent estimated from
+/// two noisy points, and its error enters as an exponent - so a modest
+/// mistake in `p` is a large mistake in predicted cost. Capping the step
+/// bounds what a wrong guess can cost: worst case we take an extra
+/// measurement or two, rather than launching a single evaluation that eats
+/// the entire budget.
+const MAX_SIZE_GROWTH: f64 = 8.0;
+
+/// The most of the remaining budget one measurement may be predicted to
+/// consume.
+///
+/// Overshooting is far worse than undershooting. A size that turns out too
+/// small costs one cheap measurement and is immediately corrected; a size
+/// that turns out too large can spend the whole budget on a single point
+/// and leave nothing to fit. So the prediction has to fit several times
+/// over into what is left.
+const BUDGET_SHARE_PER_SIZE: f64 = 0.25;
+
+/// Choose the next problem size to measure during size discovery.
+///
+/// Extrapolates from `exponent`: if cost grows as `Nᵖ`, then reaching
+/// `target` from `(last_n, last_t)` wants `last_n · (target/last_t)^(1/p)`.
+///
+/// Deliberately timid, in three separate ways, because the prediction is
+/// built on an exponent estimated from two noisy measurements and enters
+/// the answer as a reciprocal exponent:
+///
+/// * `p` is floored at 1. A sublinear estimate - which noise alone can
+///   produce at small sizes, where fixed overheads still dominate and cost
+///   barely moves - would give `1/p > 1` and demand an enormous jump.
+/// * The step is capped at [`MAX_SIZE_GROWTH`] regardless.
+/// * The predicted cost must fit [`BUDGET_SHARE_PER_SIZE`] of what remains,
+///   so no single measurement can consume the budget even if the estimate
+///   is badly wrong.
+///
+/// Returns `None` when even the smallest useful step - one more than the
+/// last size - is predicted to overrun the budget, which is how discovery
+/// learns it has reached the largest size it can afford.
+#[allow(dead_code)]
+fn next_size(
+    last_n: f64,
+    last_t: f64,
+    exponent: f64,
+    target: Duration,
+    budget_left: Duration,
+) -> Option<usize> {
+    if !(last_n >= 1.0 && last_t > 0.0) || !exponent.is_finite() {
+        return None;
+    }
+    let target_ns = target.as_secs_f64() * 1e9;
+    let affordable_ns = budget_left.as_secs_f64() * 1e9 * BUDGET_SHARE_PER_SIZE;
+    if affordable_ns <= 0.0 {
+        return None;
+    }
+    // Never plan a measurement we cannot pay for, whatever the target says.
+    let aim_ns = target_ns.min(affordable_ns);
+    if aim_ns <= last_t {
+        // The size we have already measured costs as much as we can afford
+        // to spend on the next one; there is no room to grow.
+        return None;
+    }
+    let p = exponent.max(1.0);
+    // Three ceilings, whichever is lowest:
+    //
+    // * the step that reaches the target under the measured exponent;
+    // * the step that stays affordable under a *pessimistic* exponent, one
+    //   whole power above the measured one;
+    // * the flat cap.
+    //
+    // The pessimistic term deserves its place because the estimate comes
+    // from two noisy points and enters the cost as an exponent, so being
+    // wrong about it is expensive in one direction only: too small a size
+    // wastes one cheap measurement and corrects itself next step, while too
+    // large a size can spend the entire budget on a single point and leave
+    // nothing to fit. Budgeting as though the cost climbs a power faster
+    // than measured makes the step affordable *by construction* rather than
+    // proposing one and hoping.
+    let to_target = (aim_ns / last_t).powf(1.0 / p);
+    let affordable_growth = (affordable_ns / last_t).powf(1.0 / (p + 1.0));
+    let growth = to_target.min(affordable_growth).min(MAX_SIZE_GROWTH);
+    // `is_finite` first so the comparison never has to reason about NaN.
+    if !growth.is_finite() || growth <= 1.0 {
+        return None;
+    }
+    // Round down, not up: rounding up can push a step that was affordable
+    // by a hair over the line, and undershooting is the cheap mistake.
+    let next = (last_n * growth).floor().max(last_n + 1.0);
+    if !next.is_finite() || next > usize::MAX as f64 {
+        return None;
+    }
+    // A last check in the currency the budget is paid in, which also covers
+    // the rounding-up above.
+    let predicted = last_t * (next / last_n).powf(p + 1.0);
+    (predicted <= affordable_ns).then_some(next as usize)
+}
+
 const SIGNIFICANT: f64 = 6.0;
 
 /// Orthonormalise the basis columns *in the weighted inner product over
@@ -2346,6 +2444,89 @@ mod tests {
                 ses.push(truth * rel);
             }
             (ts, ses)
+        }
+
+        const HUGE: Duration = Duration::from_secs(3600);
+
+        #[test]
+        fn the_next_size_aims_at_the_target_using_the_measured_power() {
+            // Quadratic: to go from 1ms to 16ms, a 16x in time, wants a 4x
+            // in size - inside the cap, so the power is what decides.
+            let n = next_size(100.0, 1e6, 2.0, Duration::from_millis(16), HUGE).unwrap();
+            assert!((390..=410).contains(&n), "quadratic step gave {n}");
+            // Cubic: the same 16x in time is only a 2.5x in size, because
+            // the cost climbs faster with each unit of N.
+            let n = next_size(100.0, 1e6, 3.0, Duration::from_millis(16), HUGE).unwrap();
+            assert!((245..=260).contains(&n), "cubic step gave {n}");
+            // Linear: a 100x in time would want a 100x in size, so here the
+            // cap is what decides instead.
+            let n = next_size(100.0, 1e6, 1.0, Duration::from_millis(100), HUGE).unwrap();
+            assert_eq!(800, n, "linear step should be capped at 8x");
+        }
+
+        #[test]
+        fn a_wild_exponent_cannot_provoke_a_wild_step() {
+            // A sublinear estimate is what noise produces at small sizes,
+            // where fixed overheads still dominate and cost barely moves.
+            // Taken literally it asks for an enormous jump; the floor at
+            // p = 1 and the growth cap between them refuse.
+            for exponent in [0.01, 0.2, 0.5, 1.0] {
+                let n = next_size(100.0, 1e3, exponent, HUGE, HUGE).unwrap();
+                assert!(n <= 800, "exponent {exponent} gave {n}");
+            }
+            // Nonsense in, nothing out - rather than a nonsensical size.
+            assert_eq!(None, next_size(100.0, 1e6, f64::NAN, HUGE, HUGE));
+            assert_eq!(None, next_size(100.0, 0.0, 2.0, HUGE, HUGE));
+
+            // With the budget rather than the cap deciding, the floor at
+            // p = 1 is what keeps the step honest. A measured exponent of
+            // 0.01 says "cost barely moves with N", so budgeting on it
+            // would license nearly doubling the size; treating the cost as
+            // at least linear - and charging a power above that - keeps the
+            // step to something a wrong guess can survive.
+            let budget = Duration::from_nanos(8_000_000);
+            let n = next_size(100.0, 1e6, 0.01, HUGE, budget).unwrap();
+            assert!(
+                n <= 150,
+                "a near-zero exponent should not license a {n}-sized step"
+            );
+        }
+
+        #[test]
+        fn one_measurement_cannot_eat_the_whole_budget() {
+            // The last measurement took 1s and only 2s remain. A quarter of
+            // what is left is 500ms, less than the point we already have,
+            // so there is no affordable step and discovery stops.
+            assert_eq!(
+                None,
+                next_size(100.0, 1e9, 2.0, HUGE, Duration::from_secs(2))
+            );
+            // With plenty of budget the same call proceeds, and what it
+            // picks is predicted to cost well under the whole of it.
+            let budget = Duration::from_secs(600);
+            let n = next_size(100.0, 1e9, 2.0, HUGE, budget).unwrap();
+            let predicted = 1e9 * ((n as f64) / 100.0).powi(3);
+            assert!(
+                predicted <= budget.as_secs_f64() * 1e9 * 0.25 + 1.0,
+                "picked {n}, predicted {predicted}ns of a {budget:?} budget"
+            );
+        }
+
+        #[test]
+        fn size_discovery_always_makes_progress_or_stops() {
+            // Never returns the size it was given: either a strictly larger
+            // one, or `None`. A loop built on this cannot spin.
+            let mut n = 1.0f64;
+            let mut steps = 0;
+            while let Some(next) = next_size(n, 1e3 * n * n, 2.0, HUGE, HUGE) {
+                assert!(next as f64 > n, "{next} did not advance past {n}");
+                n = next as f64;
+                steps += 1;
+                if steps > 200 {
+                    break;
+                }
+            }
+            assert!(steps > 0, "should have taken at least one step");
         }
 
         #[test]
