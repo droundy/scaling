@@ -111,14 +111,35 @@ pub fn reserved_cpus() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// The CPUs this thread is currently allowed to run on, as Linux formats
-/// them (e.g. `"0-1,3-15"`).
+/// The CPUs this thread is currently allowed to run on, as a Linux CPU
+/// list (e.g. `"0-1,3-15"`).
+///
+/// Asks the kernel with `sched_getaffinity`, the exact counterpart of the
+/// `sched_setaffinity` in [`pin_current_thread`] - so it reports the same
+/// thread that pinning affects. Reading `/proc/self/status` instead would
+/// answer for the thread-*group leader*, which is a different thread
+/// whenever a benchmark runs anywhere but the main thread - as it does in
+/// every `#[test]`, since the test harness gives each test its own thread.
+#[cfg(target_os = "linux")]
 pub fn current_affinity() -> Option<String> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    status
-        .lines()
-        .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
-        .map(|s| s.trim().to_string())
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
+    };
+    if rc != 0 {
+        return None;
+    }
+    let cpus: Vec<usize> = (0..libc::CPU_SETSIZE as usize)
+        .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
+        .collect();
+    Some(format_cpu_list(&cpus))
+}
+
+/// The CPUs this thread is currently allowed to run on. Always `None` on
+/// non-Linux platforms, which have no reservation to report against.
+#[cfg(not(target_os = "linux"))]
+pub fn current_affinity() -> Option<String> {
+    None
 }
 
 /// Expand a Linux CPU list like `"1,3-5"` into `[1, 3, 4, 5]`.
