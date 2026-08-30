@@ -2,18 +2,18 @@
 Detecting and honouring a quiesced benchmarking environment.
 
 Benchmark timings are only as stable as the machine underneath them. The
-`bench-quiet` binary shipped with this crate reserves one or more CPUs for
+`quiet-bench` binary shipped with this crate reserves one or more CPUs for
 benchmarking - moving other processes and interrupts off them, pinning the
 clock frequency, and so on - and then advertises the reservation in the
 environment:
 
 ```none
-sudo bench-quiet reserve 2      # set the machine up, reserving CPU 2
-bench-quiet run cargo test --release
-sudo bench-quiet restore        # put everything back
+sudo quiet-bench reserve 2      # set the machine up, reserving CPU 2
+quiet-bench run cargo test --release
+sudo quiet-bench restore        # put everything back
 ```
 
-`bench-quiet run` sets [`CPUS_VAR`] for the command it launches. Every
+`quiet-bench run` sets [`CPUS_VAR`] for the command it launches. Every
 benchmark in this crate checks that variable and, if it is set, **pins
 itself to those CPUs automatically** - so a program built against `scaling`
 lands on the reserved CPU without needing a `taskset` wrapper, and without
@@ -39,7 +39,7 @@ match scaling::quiet::status() {
 use std::fmt::{self, Display, Formatter};
 
 /// Environment variable naming the reserved CPU list, e.g. `"2"` or
-/// `"2,5-7"`. Set by `bench-quiet run`; read by every benchmark in this
+/// `"2,5-7"`. Set by `quiet-bench run`; read by every benchmark in this
 /// crate.
 pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
 
@@ -47,9 +47,9 @@ pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
 /// is set.
 pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
 
-/// Where `bench-quiet` records the reserved CPUs. On `/run`, which is a
+/// Where `quiet-bench` records the reserved CPUs. On `/run`, which is a
 /// tmpfs, so the record cannot survive a reboot and go stale.
-pub const CPUS_PATH: &str = "/run/bench-quiet.cpus";
+pub const CPUS_PATH: &str = "/run/quiet-bench.cpus";
 
 /// What `scaling` found when it looked for a quiesced environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +85,7 @@ impl Display for Status {
             ),
             Status::NotQuiesced => write!(
                 f,
-                "machine is not quiesced (see `bench-quiet reserve`); \
+                "machine is not quiesced (see `quiet-bench reserve`); \
                  timings will include whatever else it is doing"
             ),
             Status::Unsupported => write!(f, "CPU reservation is only supported on Linux"),
@@ -95,7 +95,7 @@ impl Display for Status {
 
 /// The reserved CPU list, if there is one.
 ///
-/// Prefers [`CPUS_VAR`], which `bench-quiet run` sets for its child, and
+/// Prefers [`CPUS_VAR`], which `quiet-bench run` sets for its child, and
 /// falls back to [`CPUS_PATH`], so a benchmark launched some other way
 /// still notices a machine-wide reservation.
 pub fn reserved_cpus() -> Option<String> {

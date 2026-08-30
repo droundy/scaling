@@ -183,15 +183,15 @@ environment. This has the desired effect, but looks a bit weird.
 
 ## Caveat 3: A busy machine
 
-**TL;DR: on Linux, `sudo bench-quiet reserve 2` then
-`bench-quiet run <your benchmark>`.**
+**TL;DR: on Linux, `sudo quiet-bench reserve 2` then
+`quiet-bench run <your benchmark>`.**
 
 The accuracy `scaling` reports covers noise it can *see* while sampling. It
 cannot see the machine around it: another process on the same core, a CPU
 dropping out of turbo as it heats up, or an interrupt landing mid-sample all
 shift the answer without widening the error bar.
 
-The `bench-quiet` binary shipped with this crate reserves one or more CPUs
+The `quiet-bench` binary shipped with this crate reserves one or more CPUs
 for benchmarking and moves everything else - processes, interrupts - off
 them, and pins the clock frequency. Benchmarks then pin themselves to the
 reserved CPUs automatically, with no code change. See the [`quiet`] module

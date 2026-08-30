@@ -2,17 +2,17 @@
 Set up (or tear down) a low-noise benchmarking environment on Linux.
 
 ```none
-sudo bench-quiet reserve 2      # quiesce the machine, reserving CPU 2
-sudo bench-quiet reserve 2,3    # reserve CPUs 2 and 3
-bench-quiet run cargo test --release
-bench-quiet status
-sudo bench-quiet restore        # undo everything
+sudo quiet-bench reserve 2      # quiesce the machine, reserving CPU 2
+sudo quiet-bench reserve 2,3    # reserve CPUs 2 and 3
+quiet-bench run cargo test --release
+quiet-bench status
+sudo quiet-bench restore        # undo everything
 ```
 
 `reserve` and `restore` need root; `run` and `status` do not.
 
 Benchmarks built against the `scaling` crate pin themselves to the reserved
-CPUs automatically when launched through `bench-quiet run`, which sets
+CPUs automatically when launched through `quiet-bench run`, which sets
 [`scaling::quiet::CPUS_VAR`] in the environment. `run` also sets the
 affinity of the command it launches, so programs that know nothing about
 `scaling` land on the reserved CPUs too.
@@ -20,7 +20,7 @@ affinity of the command it launches, so programs that know nothing about
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("bench-quiet only works on Linux.");
+    eprintln!("quiet-bench only works on Linux.");
     std::process::exit(1);
 }
 
@@ -39,15 +39,15 @@ mod linux {
 
     /// Saved original settings, so `restore` can put back what was actually
     /// there rather than guessing at defaults.
-    const STATE_PATH: &str = "/run/bench-quiet.state";
+    const STATE_PATH: &str = "/run/quiet-bench.state";
     const PSTATE: &str = "/sys/devices/system/cpu/intel_pstate";
 
     const USAGE: &str = "\
 usage:
-  sudo bench-quiet reserve <cpu-list>   quiesce the machine (e.g. `reserve 2`)
-  sudo bench-quiet restore              undo it
-  bench-quiet run <command> [args...]   run a command on the reserved CPUs
-  bench-quiet status                    report whether a reservation is active
+  sudo quiet-bench reserve <cpu-list>   quiesce the machine (e.g. `reserve 2`)
+  sudo quiet-bench restore              undo it
+  quiet-bench run <command> [args...]   run a command on the reserved CPUs
+  quiet-bench status                    report whether a reservation is active
 ";
 
     pub fn run() -> i32 {
@@ -75,7 +75,7 @@ usage:
     }
 
     fn fail(msg: &str) -> i32 {
-        eprintln!("bench-quiet: {msg}");
+        eprintln!("quiet-bench: {msg}");
         1
     }
 
@@ -83,7 +83,7 @@ usage:
 
     fn cmd_run(argv: &[String]) -> Result<i32, String> {
         let cpus_str = scaling::quiet::reserved_cpus().ok_or_else(|| {
-            "machine is not quiesced; run `sudo bench-quiet reserve <cpu-list>` first".to_string()
+            "machine is not quiesced; run `sudo quiet-bench reserve <cpu-list>` first".to_string()
         })?;
         let cpus = parse_cpu_list(&cpus_str)?;
 
@@ -232,7 +232,7 @@ usage:
         // task cannot widen its affinity beyond its cpuset, so a cpuset here
         // would lock the benchmark itself out of the very CPUs we are
         // reserving for it. Plain affinity is advisory in exactly the way we
-        // need - everything else is moved aside, but `bench-quiet run` can
+        // need - everything else is moved aside, but `quiet-bench run` can
         // still claim the reserved CPUs.
         clear_stale_cpusets();
         let moved = move_tasks_to(&other);
@@ -274,14 +274,14 @@ usage:
         println!();
         println!("Run benchmarks through the pinning wrapper (as your normal user):");
         println!();
-        println!("  bench-quiet run cargo test --release");
+        println!("  quiet-bench run cargo test --release");
         println!();
         println!(
             "Anything not run that way lands on the housekeeping CPUs ({}) \nand gains nothing.",
             format_cpu_list(&other)
         );
         println!();
-        println!("Undo with:  sudo bench-quiet restore");
+        println!("Undo with:  sudo quiet-bench restore");
         Ok(())
     }
 

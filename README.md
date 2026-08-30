@@ -94,11 +94,11 @@ the machine around it — another process sharing your core, the CPU dropping
 out of turbo as it warms up, an interrupt landing mid-sample. Those shift
 the answer without widening the error bar.
 
-This crate ships a `bench-quiet` binary that sets a machine up for
+This crate ships a `quiet-bench` binary that sets a machine up for
 benchmarking:
 
 ```bash
-sudo bench-quiet reserve 2
+sudo quiet-bench reserve 2
 ```
 
 That reserves CPU 2: it moves every other process and (where the kernel
@@ -107,19 +107,19 @@ pins the minimum frequency to 100%, switches to the performance governor,
 and disables ASLR. Then run your benchmarks through it:
 
 ```bash
-bench-quiet run cargo test --release
+quiet-bench run cargo test --release
 ```
 
 Benchmarks built against `scaling` **pin themselves to the reserved CPUs
-automatically** — `bench-quiet run` advertises the reservation in
+automatically** — `quiet-bench run` advertises the reservation in
 `SCALING_BENCH_CPUS`, and every benchmark in this crate honours it without
 any code change. Set `SCALING_NO_PIN=1` to opt out.
 
-`bench-quiet status` reports whether a reservation is in effect and whether
+`quiet-bench status` reports whether a reservation is in effect and whether
 this process is actually on it. When you're done:
 
 ```bash
-sudo bench-quiet restore
+sudo quiet-bench restore
 ```
 
 Everything here is Linux-only and entirely optional; on other platforms, and
