@@ -1438,8 +1438,155 @@ fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
 /// (`5N + 0.001N²`, which shows up at 7.2) is still caught, accepting that
 /// `N log N` reads as a little worse than linear rather than exactly
 /// linear, which it genuinely is.
+/// A candidate growth rate, ordered slowest to fastest.
+///
+/// Deliberately not just polynomial degrees: `N log N` and `2ᴺ` are not
+/// polynomials, so a basis of powers alone has to approximate them with
+/// high-order terms and reports the wrong answer - synthetic `N log N`
+/// comes back as `N⁴`. Listing them as terms of their own costs nothing,
+/// because least squares is linear in the *coefficients*, not in the
+/// predictor, and a `N log N` column is as ordinary as an `N²` one.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Growth {
+    /// Cost that does not grow with `N`.
+    Constant,
+    /// `N`.
+    Linear,
+    /// `N log N`.
+    Linearithmic,
+    /// `Nᵖ` for `p >= 2`.
+    Power(usize),
+    /// `2ᴺ`.
+    Exponential,
+}
+
+impl Growth {
+    /// The terms this crate will consider, slowest-growing first.
+    ///
+    /// Order matters: the basis is orthogonalised in this sequence, so each
+    /// term is judged on what it explains *beyond everything that grows
+    /// more slowly*. That is precisely the question "what is the
+    /// asymptotically dominant term", and it is why the answer is the
+    /// highest significant entry rather than the largest one.
+    #[allow(dead_code)]
+    fn candidates(max_power: usize) -> Vec<Growth> {
+        let mut v = vec![Growth::Constant, Growth::Linear, Growth::Linearithmic];
+        v.extend((2..=max_power).map(Growth::Power));
+        v.push(Growth::Exponential);
+        v
+    }
+
+    /// This term's value at `n`, given the largest `n` in the sample.
+    ///
+    /// `2ᴺ` is normalised against `largest` because a sweep reaching
+    /// `N = 470` would otherwise overflow to infinity; scaling a basis
+    /// column changes only its coefficient, never the fit.
+    #[allow(dead_code)]
+    fn value(self, n: f64, largest: f64) -> f64 {
+        match self {
+            Growth::Constant => 1.0,
+            Growth::Linear => n,
+            Growth::Linearithmic => n * n.max(2.0).ln(),
+            Growth::Power(p) => n.powi(p as i32),
+            Growth::Exponential => ((n - largest) * std::f64::consts::LN_2).exp(),
+        }
+    }
+}
+
 #[allow(dead_code)]
 const SIGNIFICANT: f64 = 6.0;
+
+/// Orthonormalise the basis columns *in the weighted inner product over
+/// the sampled points*, by modified Gram-Schmidt.
+///
+/// Emphatically not orthogonal polynomials on a continuous interval:
+/// Legendre or Chebyshev families are orthogonal with respect to an
+/// integral over a range, and a benchmark's sizes are neither uniformly
+/// spaced nor equally weighted - they grow geometrically and are weighted
+/// by `1/y²`. A basis orthogonal for that integral is not orthogonal for
+/// *this sample*, which is the only thing that makes the fitted
+/// coefficients uncorrelated and their significance separately readable.
+///
+/// A column that is entirely explained by earlier ones - which is how an
+/// unidentifiable term announces itself - comes back as zeros, and so
+/// scores no significance at all.
+#[allow(dead_code)]
+fn orthonormalise(cols: &[Vec<f64>], ws: &[f64]) -> Vec<Vec<f64>> {
+    let dot = |a: &[f64], b: &[f64]| -> f64 {
+        a.iter().zip(b).zip(ws).map(|((x, y), w)| w * x * y).sum()
+    };
+    let mut q: Vec<Vec<f64>> = Vec::with_capacity(cols.len());
+    for col in cols {
+        let mut v = col.clone();
+        for prev in &q {
+            let d = dot(&v, prev);
+            for (vi, pi) in v.iter_mut().zip(prev) {
+                *vi -= d * pi;
+            }
+        }
+        let norm = dot(&v, &v).max(0.0).sqrt();
+        if norm.is_finite() && norm > 1e-12 {
+            for vi in v.iter_mut() {
+                *vi /= norm;
+            }
+            q.push(v);
+        } else {
+            q.push(vec![0.0; col.len()]);
+        }
+    }
+    q
+}
+
+/// The fastest-growing term the data actually supports.
+///
+/// Because the basis is orthonormalised in growth order, the coefficient on
+/// each term measures what that term adds beyond every slower one, and
+/// every coefficient shares the same standard error - so comparing them is
+/// a single division. The answer is the *highest* significant term, not the
+/// largest: a quadratic cost makes the `N log N` term look significant too,
+/// since it is partly absorbing the curvature, but nothing above `N²`
+/// survives and that is what settles it.
+#[allow(dead_code)]
+fn dominant_growth(xs: &[f64], ys: &[f64], ws: &[f64], max_power: usize) -> Option<Growth> {
+    let terms = Growth::candidates(max_power);
+    if xs.len() <= terms.len() {
+        return None;
+    }
+    let largest = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if !largest.is_finite() {
+        return None;
+    }
+    let cols: Vec<Vec<f64>> = terms
+        .iter()
+        .map(|t| xs.iter().map(|&x| t.value(x, largest)).collect())
+        .collect();
+    let q = orthonormalise(&cols, ws);
+    let dot = |a: &[f64], b: &[f64]| -> f64 {
+        a.iter().zip(b).zip(ws).map(|((x, y), w)| w * x * y).sum()
+    };
+    let coef: Vec<f64> = q.iter().map(|qi| dot(qi, ys)).collect();
+    let fitted: Vec<f64> = (0..ys.len())
+        .map(|i| coef.iter().zip(&q).map(|(c, qi)| c * qi[i]).sum())
+        .collect();
+    let dof = xs.len() - terms.len();
+    let chi2: f64 = ys
+        .iter()
+        .zip(&fitted)
+        .zip(ws)
+        .map(|((y, f), w)| w * (y - f).powi(2))
+        .sum();
+    let se = (chi2 / dof as f64).sqrt();
+    if !se.is_finite() || se <= 0.0 {
+        return None;
+    }
+    terms
+        .iter()
+        .zip(&coef)
+        .filter(|(_, c)| c.abs() / se > SIGNIFICANT)
+        .map(|(t, _)| *t)
+        .next_back()
+}
 
 /// The highest polynomial degree whose coefficient the data actually
 /// supports - the asymptotically dominant term.
@@ -2042,6 +2189,88 @@ mod tests {
             let xs = sizes(count);
             let ys = noisy(f, &xs, 0.05, seed);
             dominant_degree(&xs, &ys, &weights(&ys), 4)
+        }
+
+        fn growth_of(f: impl Fn(f64) -> f64, count: usize, seed: u64) -> Option<Growth> {
+            let xs = sizes(count);
+            let ys = noisy(f, &xs, 0.05, seed);
+            dominant_growth(&xs, &ys, &weights(&ys), 3)
+        }
+
+        #[test]
+        fn names_the_fastest_growing_term_the_data_supports() {
+            for seed in 1..5 {
+                assert_eq!(Some(Growth::Constant), growth_of(|_| 42.0, 20, seed), "constant");
+                assert_eq!(Some(Growth::Linear), growth_of(|n| 3.0 * n, 20, seed), "linear");
+                assert_eq!(
+                    Some(Growth::Power(2)),
+                    growth_of(|n| 0.02 * n * n, 20, seed),
+                    "quadratic"
+                );
+                assert_eq!(
+                    Some(Growth::Power(3)),
+                    growth_of(|n| 1e-4 * n * n * n, 20, seed),
+                    "cubic"
+                );
+            }
+        }
+
+        #[test]
+        fn n_log_n_is_named_rather_than_approximated() {
+            // A basis of powers alone cannot represent this, and reports it
+            // as N^4 - faster-growing than the truth, which is the failure
+            // that motivated giving it a term of its own.
+            for seed in 1..5 {
+                assert_eq!(
+                    Some(Growth::Linearithmic),
+                    growth_of(|n| 2.0 * n * n.max(2.0).ln(), 20, seed),
+                    "seed {seed}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_exponential_is_named_rather_than_approximated() {
+            // 2^N needs a small range of N or it overflows every f64 in
+            // sight; the basis normalises the column against the largest N
+            // for exactly that reason.
+            let xs: Vec<f64> = (1..26).map(|k| k as f64).collect();
+            for seed in 1..5 {
+                let ys = noisy(|n| 1e3 * (n * std::f64::consts::LN_2).exp(), &xs, 0.03, seed);
+                assert_eq!(
+                    Some(Growth::Exponential),
+                    dominant_growth(&xs, &ys, &weights(&ys), 3),
+                    "seed {seed}"
+                );
+            }
+            // ...and a merely-quadratic cost over that same range must not
+            // be mistaken for one.
+            for seed in 1..5 {
+                let ys = noisy(|n| 0.02 * n * n, &xs, 0.03, seed);
+                assert_eq!(
+                    Some(Growth::Power(2)),
+                    dominant_growth(&xs, &ys, &weights(&ys), 3),
+                    "seed {seed}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_mixed_cost_is_named_by_its_fastest_term() {
+            for seed in 1..5 {
+                assert_eq!(
+                    Some(Growth::Power(2)),
+                    growth_of(|n| 5.0 * n + 0.05 * n * n, 20, seed),
+                    "5N + 0.05N^2, seed {seed}"
+                );
+                // Linear plus linearithmic is linearithmic, which a
+                // power-only basis could not say at all.
+                assert_eq!(
+                    Some(Growth::Linearithmic),
+                    growth_of(|n| 20.0 * n + 2.0 * n * n.max(2.0).ln(), 20, seed),
+                    "20N + 2N logN, seed {seed}"
+                );
+            }
         }
 
         #[test]
