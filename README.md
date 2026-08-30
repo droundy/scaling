@@ -21,10 +21,10 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
 Running the above yields the following:
 
 ```none
-fib 200:   71.9858ns ± 0.17ns (120000 iterations in 6 samples)
-fib 500:  261.6815ns ± 2.5ns (50245 iterations in 13 samples)
-reverse:   39.4159ns ± 0.39ns (369702 iterations in 9 samples)
-sort:     102.2717ns ± 1.0ns (847228 iterations in 46 samples)
+fib 200:     72.17ns ± 0.46ns
+fib 500:     254.9ns ± 2.5ns
+reverse:     65.12ns ± 0.65ns
+sort:        97.22ns ± 0.96ns
 ```
 
 The `±` figure is the standard error of the reported time, in the same unit
@@ -35,7 +35,15 @@ noisy ones keep working until they have earned the precision.
 Printing it absolutely rather than as a percentage is deliberate: to decide
 whether two results really differ you compare the gap between them against
 the `±`, and that is a direct digit-for-digit comparison only when
-everything is in the same unit.
+everything is in the same unit. The time itself is printed to exactly the
+precision the error justifies — `72.17ns ± 0.46ns`, never `72.1683ns`,
+since those last digits are noise wearing the costume of signal.
+
+Iteration and sample counts are deliberately not printed. They were worth
+showing back when the only quality signal was an R², which says nothing
+about how well the answer is known; now that the `±` states the precision
+outright, they are clutter on a line meant to be scanned down a column.
+Both are still on `Stats` if you want them.
 
 To ask for a different accuracy, use a `Config` — either as a fraction of
 the measurement, or as a flat `Duration`:
@@ -49,8 +57,8 @@ println!("fib 500: {}", Config::absolute(Duration::from_nanos(1)).bench(|| fib(5
 ```
 
 ```none
-fib 500:  258.6983ns ± 0.099ns (46344 iterations in 6 samples)
-fib 500:  258.3475ns ± 0.067ns (23208 iterations in 6 samples)
+fib 500:     250.49ns ± 0.25ns
+fib 500:    258.389ns ± 0.037ns
 ```
 
 An absolute target is often the more natural request: if you are trying to

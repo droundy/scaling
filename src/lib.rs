@@ -33,11 +33,11 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:   71.9858ns ± 0.17ns (120000 iterations in 6 samples)
-fib 500:  261.6815ns ± 2.5ns (50245 iterations in 13 samples)
-fib scaling:   0.51ns/N    (R²=0.994, 6626 iterations in 56 samples)
-reverse:   39.4159ns ± 0.39ns (369702 iterations in 9 samples)
-sort:     102.2717ns ± 1.0ns (847228 iterations in 46 samples)
+fib 200:     72.17ns ± 0.46ns
+fib 500:     254.9ns ± 2.5ns
+fib scaling:   0.51ns/N    (R²=0.996, 6626 iterations in 56 samples)
+reverse:     65.12ns ± 0.65ns
+sort:        97.22ns ± 0.96ns
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
@@ -68,10 +68,15 @@ resolve.
 The reported figure is the standard error of the measurement, printed after
 the `±` in the same unit as the measurement itself so that two results can
 be compared by eye: they differ by more than their noise when the gap
-between them is several times the larger `±`. [`Stats::std_error`] and
-[`Stats::rel_std_error`] give it to you absolutely and relatively, and
-[`Stats::hit_limit`] tells you if the budget ran out before the target
-accuracy was met. That budget is 10 seconds by default (see [`Config`]).
+between them is several times the larger `±`. The measurement is printed to
+exactly the precision that error justifies and no further, so every digit
+you see is one the benchmark actually stands behind.
+
+[`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
+and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
+work it took, and [`Stats::hit_limit`] tells you if the budget ran out
+before the target accuracy was met - in which case the line is marked
+`(limit)`. That budget is 10 seconds by default (see [`Config`]).
 
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
@@ -134,9 +139,9 @@ let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
 The results are a little surprising:
 
 ```none
-fib_1:  258.6643ns ± 0.081ns (46440 iterations in 6 samples)
-fib_2:    0.5914ns ± 0.00044ns (12000000 iterations in 6 samples)
-fib_3:  258.5260ns ± 0.14ns (46428 iterations in 6 samples)
+fib_1:    261.77ns ± 0.92ns
+fib_2:   0.59161ns ± 0.00033ns
+fib_3:   258.509ns ± 0.093ns
 ```
 
 Oh, `fib_2`, why do you lie? The answer is: `fib(500)` is pure, and its
@@ -441,7 +446,7 @@ impl Display for Stats {
         // makes them do a unit conversion in their head first, and
         // "± 0.02%" makes them do arithmetic.
         let (div, unit) = unit_for(self.ns_per_iter);
-        let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
+        let limit = if self.hit_limit { " (limit)" } else { "" };
         if self.rel_std_error.is_nan() {
             // NaN has two distinct causes: too few samples to estimate a
             // standard error from (only possible via the single-sample
@@ -449,6 +454,9 @@ impl Display for Stats {
             // possible for a near-free benchmark on a coarse timer - a
             // measured time of exactly zero for every sample, which makes
             // `rel_std_error` a literal 0/0 regardless of sample count.
+            //
+            // With no error bar there is nothing to set the precision, so
+            // fall back to a fixed four decimals.
             let why = if self.samples < 2 {
                 format!(
                     "only {} sample{}",
@@ -458,33 +466,35 @@ impl Display for Stats {
             } else {
                 "measured time was exactly zero".to_string()
             };
-            write!(
-                f,
-                "{:>11} (± unknown, {}){}",
-                value,
-                why,
-                if self.hit_limit { " (limit)" } else { "" }
-            )
+            let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
+            write!(f, "{value:>11} (± unknown, {why}){limit}")
         } else {
             let scaled = self.std_error() / div;
-            // Below about four decimal places, spelling the number out
-            // costs a run of leading zeroes that conveys nothing (an
+            // The error's own precision sets the measurement's: digits of
+            // the value beyond where the uncertainty starts are noise
+            // dressed up as signal. So `71.9858ns ± 0.17ns` is really only
+            // known to `71.99ns ± 0.17ns`, and printing the extra two
+            // digits invites a reader to believe them.
+            let decimals = error_decimals(scaled);
+            // Below about four decimal places, spelling the error out costs
+            // a run of leading zeroes that conveys nothing (an
             // optimised-away benchmark can reach `0.000000021`). Scientific
-            // notation stays short and says the same thing.
+            // notation stays short and says the same thing - but the value
+            // still wants plain digits, so it keeps the decimal count that
+            // matches.
             let error = if scaled > 0.0 && scaled < 1e-4 {
-                format!("{:.1e}{}", scaled, unit)
+                format!("{scaled:.1e}{unit}")
             } else {
-                format!("{:.*}{}", error_decimals(scaled), scaled, unit)
+                format!("{:.*}{}", decimals, scaled, unit)
             };
-            write!(
-                f,
-                "{:>11} ± {}{} ({} iterations in {} samples)",
-                value,
-                error,
-                if self.hit_limit { " (limit)" } else { "" },
-                self.iterations,
-                self.samples
-            )
+            let value = format!("{:.*}{}", decimals, self.ns_per_iter / div, unit);
+            // Deliberately no iteration or sample count. Those were worth
+            // showing when the only quality signal was an R², which says
+            // nothing about how well the answer is known; now that the `±`
+            // states the precision outright they are just noise on a line
+            // meant to be scanned in a column. Both remain on [`Stats`] for
+            // anyone who wants them.
+            write!(f, "{value:>11} ± {error}{limit}")
         }
     }
 }
@@ -1580,24 +1590,25 @@ mod tests {
 
         // A sub-nanosecond error bar has to survive: it is the ordinary case
         // for a fast function, and formatting via `Duration` (which has
-        // nanosecond resolution) would round it away to `0ns`.
-        let fast = shown(71.0, 0.0017);
-        assert!(fast.starts_with("71.0000ns ± 0.12ns"), "{fast}");
+        // nanosecond resolution) would round it away to `0ns`. The value is
+        // shown to the same two decimals as the error, not to more: `71.0000`
+        // would be claiming four digits the measurement does not support.
+        assert_eq!(shown(71.0, 0.0017), "71.00ns ± 0.12ns");
 
         // Both sides in the same unit, so two results can be compared digit
-        // for digit without a unit conversion in the reader's head.
-        let slow = shown(100_267_300.0, 0.0002);
-        assert!(slow.starts_with("100.2673ms ± 0.020ms"), "{slow}");
+        // for digit without a unit conversion in the reader's head - and to
+        // the same precision, so every digit printed is one the measurement
+        // actually justifies.
+        assert_eq!(shown(100_267_300.0, 0.0002), "100.267ms ± 0.020ms");
 
         // Two significant digits is all an error bar deserves, whatever its
         // magnitude relative to the value.
-        let coarse = shown(2_500.0, 0.032);
-        assert!(coarse.starts_with("2.5000µs ± 0.080µs"), "{coarse}");
+        assert_eq!(shown(2_500.0, 0.032), "2.500µs ± 0.080µs");
 
         // Even an error far below the value's own unit keeps two digits
-        // rather than collapsing to zero.
-        let tiny = shown(0.4523, 0.02);
-        assert!(tiny.starts_with("0.4523ns ± 0.0090ns"), "{tiny}");
+        // rather than collapsing to zero - and here that does mean four
+        // decimals on the value, because the error genuinely reaches them.
+        assert_eq!(shown(0.4523, 0.02), "0.4523ns ± 0.0090ns");
     }
 
     #[test]
