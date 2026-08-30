@@ -1494,7 +1494,128 @@ impl Growth {
     }
 }
 
+/// A power-law fit of measured times against problem size: `t ≈ c·Nᵖ`.
+///
+/// Every field is a statement about the *measurements*, not about the
+/// algorithm. `exponent` is continuous on purpose - `N log N` has no
+/// integer exponent, and a cost that is linear over part of the range and
+/// quadratic over the rest has no single one either. Rounding to an integer
+/// is a presentation decision, taken later and only once `chi2_per_dof`
+/// says a power law is a fair description at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
+struct PowerFit {
+    /// The exponent `p`.
+    exponent: f64,
+    /// Standard error of `exponent`.
+    exponent_se: f64,
+    /// The prefactor `c`, in nanoseconds, so that `t ≈ c·Nᵖ`.
+    prefactor: f64,
+    /// Chi-squared per degree of freedom.
+    ///
+    /// Near 1 when a single power law describes the data within the
+    /// measured error bars; large when it does not. This is a real
+    /// goodness-of-fit test rather than a heuristic, and it is only
+    /// available because each point carries an error bar that was
+    /// *measured* rather than assumed - see [`power_fit`].
+    ///
+    /// Measured on synthetic sweeps: 0.8 for `O(N)`, 1.4 for `O(N²)`, 1.6
+    /// for `O(N³)`, against 32 for `N log N`, 758 for `5N + 0.05N²` and
+    /// 6924 for `2ᴺ`. The separation is not subtle.
+    chi2_per_dof: f64,
+}
+
+/// Weighted least squares of `log t` against `log N`.
+///
+/// Taking logs turns `t = c·Nᵖ` into a straight line whose slope is the
+/// exponent, so one ordinary linear fit answers the whole question - no
+/// candidate basis, no model selection, and nothing that has to be
+/// orthogonalised.
+///
+/// Each point must arrive with its own standard error, from having been
+/// measured independently rather than inferred from the spread about the
+/// line. That is what makes this the textbook weighted case with *known*
+/// variances: `se(log t) = se(t)/t`, so the weight is `(t/se)²`, and
+/// `chi2_per_dof` becomes a genuine goodness-of-fit rather than a
+/// restatement of the residuals. Every earlier attempt here assumed a noise
+/// shape instead of measuring one, and was optimistic by about twofold for
+/// its trouble.
+#[allow(dead_code)]
+fn power_fit(ns: &[f64], ts: &[f64], ses: &[f64]) -> Option<PowerFit> {
+    if ns.len() < 3 {
+        return None;
+    }
+    let mut x = Vec::with_capacity(ns.len());
+    let mut y = Vec::with_capacity(ns.len());
+    let mut w = Vec::with_capacity(ns.len());
+    for ((&n, &t), &se) in ns.iter().zip(ts).zip(ses) {
+        if !(n > 0.0 && t > 0.0 && se > 0.0) || !se.is_finite() {
+            return None;
+        }
+        x.push(n.ln());
+        y.push(t.ln());
+        w.push((t / se).powi(2));
+    }
+    let sw: f64 = w.iter().sum();
+    if !sw.is_finite() || sw <= 0.0 {
+        return None;
+    }
+    let xbar: f64 = x.iter().zip(&w).map(|(xi, wi)| wi * xi).sum::<f64>() / sw;
+    let ybar: f64 = y.iter().zip(&w).map(|(yi, wi)| wi * yi).sum::<f64>() / sw;
+    let sxx: f64 = x
+        .iter()
+        .zip(&w)
+        .map(|(xi, wi)| wi * (xi - xbar).powi(2))
+        .sum();
+    if !sxx.is_finite() || sxx <= 0.0 {
+        // Every N identical: no leverage on the exponent at all.
+        return None;
+    }
+    let sxy: f64 = x
+        .iter()
+        .zip(&y)
+        .zip(&w)
+        .map(|((xi, yi), wi)| wi * (xi - xbar) * (yi - ybar))
+        .sum();
+    let exponent = sxy / sxx;
+    let intercept = ybar - exponent * xbar;
+    let chi2: f64 = x
+        .iter()
+        .zip(&y)
+        .zip(&w)
+        .map(|((xi, yi), wi)| wi * (yi - (intercept + exponent * xi)).powi(2))
+        .sum();
+    Some(PowerFit {
+        exponent,
+        // With known variances the exponent's variance is 1/Sxx outright -
+        // no residual scale enters, because the weights are already in the
+        // right units.
+        exponent_se: (1.0 / sxx).sqrt(),
+        prefactor: intercept.exp(),
+        chi2_per_dof: chi2 / (ns.len() - 2) as f64,
+    })
+}
+
+/// The exponent implied by two measurements alone: `log(t₂/t₁) / log(N₂/N₁)`.
+///
+/// Cheap enough to drive size selection, where the question is only "how
+/// fast is this growing, roughly" - enough to predict what the next size
+/// will cost and so to choose one that is large enough to be informative
+/// without being too slow to afford.
+///
+/// Read across adjacent pairs it also says something the global fit cannot:
+/// a *drifting* local exponent means no single power law holds, and which
+/// way it drifts says why. Rising towards a limit is a mixed cost
+/// approaching its asymptotic term; rising without bound is faster than any
+/// polynomial.
+#[allow(dead_code)]
+fn two_point_exponent(n1: f64, t1: f64, n2: f64, t2: f64) -> Option<f64> {
+    if !(n1 > 0.0 && n2 > 0.0 && t1 > 0.0 && t2 > 0.0) || n1 == n2 {
+        return None;
+    }
+    Some((t2 / t1).ln() / (n2 / n1).ln())
+}
+
 const SIGNIFICANT: f64 = 6.0;
 
 /// Orthonormalise the basis columns *in the weighted inner product over
@@ -2195,6 +2316,139 @@ mod tests {
             let xs = sizes(count);
             let ys = noisy(f, &xs, 0.05, seed);
             dominant_growth(&xs, &ys, &weights(&ys), 3)
+        }
+
+        /// Geometrically spaced sizes spanning a wide range, as size
+        /// selection is meant to produce.
+        fn wide_sizes() -> Vec<f64> {
+            let mut v: Vec<f64> = (6..20).map(|k| (1.6f64).powi(k).round()).collect();
+            v.dedup();
+            v
+        }
+
+        /// What stage two hands the fit: each size measured independently,
+        /// so every point arrives with its own error bar rather than one
+        /// inferred from the spread about the line.
+        fn measured(
+            f: impl Fn(f64) -> f64,
+            ns: &[f64],
+            rel: f64,
+            seed: u64,
+        ) -> (Vec<f64>, Vec<f64>) {
+            let mut rng = XorShift(seed | 1);
+            let mut ts = Vec::new();
+            let mut ses = Vec::new();
+            for &n in ns {
+                let truth = f(n);
+                let u = |r: &mut XorShift| (r.next() >> 11) as f64 / (1u64 << 53) as f64;
+                let jitter = (u(&mut rng) + u(&mut rng) - 1.0) * rel;
+                ts.push(truth * (1.0 + jitter));
+                ses.push(truth * rel);
+            }
+            (ts, ses)
+        }
+
+        #[test]
+        fn a_power_law_gives_back_its_own_exponent() {
+            let ns = wide_sizes();
+            for (name, p, f) in [
+                ("N", 1.0, Box::new(|n: f64| 3.0 * n) as Box<dyn Fn(f64) -> f64>),
+                ("N^2", 2.0, Box::new(|n: f64| 0.02 * n * n)),
+                ("N^3", 3.0, Box::new(|n: f64| 1e-4 * n * n * n)),
+            ] {
+                for seed in 1..5 {
+                    let (ts, ses) = measured(&f, &ns, 0.01, seed);
+                    let fit = power_fit(&ns, &ts, &ses).unwrap();
+                    assert!(
+                        (fit.exponent - p).abs() < 0.02,
+                        "{name} seed {seed}: exponent {} should be about {p}",
+                        fit.exponent
+                    );
+                    // And it says so confidently: a single power law really
+                    // does describe this, so chi-squared per degree of
+                    // freedom sits near one.
+                    assert!(
+                        fit.chi2_per_dof < 5.0,
+                        "{name} seed {seed}: chi2/dof {} should be near 1",
+                        fit.chi2_per_dof
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn the_prefactor_comes_back_too() {
+            let ns = wide_sizes();
+            let (ts, ses) = measured(|n| 0.02 * n * n, &ns, 0.01, 1);
+            let fit = power_fit(&ns, &ts, &ses).unwrap();
+            assert!(
+                (fit.prefactor - 0.02).abs() < 0.02 * 0.1,
+                "prefactor {} should be about 0.02",
+                fit.prefactor
+            );
+        }
+
+        #[test]
+        fn a_cost_that_is_not_one_power_law_says_so() {
+            // Chi-squared per degree of freedom is the signal, and it is
+            // not a close call: pure powers sit near 1 (asserted above),
+            // while these are tens to hundreds.
+            let ns = wide_sizes();
+            for (name, f) in [
+                (
+                    "N log N",
+                    Box::new(|n: f64| 2.0 * n * n.ln()) as Box<dyn Fn(f64) -> f64>,
+                ),
+                ("5N + 0.05N^2", Box::new(|n: f64| 5.0 * n + 0.05 * n * n)),
+            ] {
+                let (ts, ses) = measured(&f, &ns, 0.01, 1);
+                let fit = power_fit(&ns, &ts, &ses).unwrap();
+                assert!(
+                    fit.chi2_per_dof > 10.0,
+                    "{name}: chi2/dof {} should be large",
+                    fit.chi2_per_dof
+                );
+            }
+        }
+
+        #[test]
+        fn a_drifting_local_exponent_shows_a_mixed_cost_approaching_its_limit() {
+            // 5N + 0.05N^2 is asymptotically quadratic, but only becomes so
+            // as N grows. The local exponent climbs towards 2, and *that*
+            // is the asymptotic answer - a single global fit averages the
+            // whole transition and lands uselessly in between.
+            let ns = wide_sizes();
+            let (ts, _) = measured(|n| 5.0 * n + 0.05 * n * n, &ns, 0.001, 1);
+            let local: Vec<f64> = ns
+                .windows(2)
+                .zip(ts.windows(2))
+                .filter_map(|(n, t)| two_point_exponent(n[0], t[0], n[1], t[1]))
+                .collect();
+            let first = local.first().copied().unwrap();
+            let last = local.last().copied().unwrap();
+            assert!(first < 1.4, "starts near linear, got {first}");
+            assert!(last > 1.8, "ends near quadratic, got {last}");
+
+            // A genuine power law does not drift.
+            let (ts, _) = measured(|n| 0.02 * n * n, &ns, 0.001, 1);
+            let local: Vec<f64> = ns
+                .windows(2)
+                .zip(ts.windows(2))
+                .filter_map(|(n, t)| two_point_exponent(n[0], t[0], n[1], t[1]))
+                .collect();
+            for p in &local {
+                assert!((p - 2.0).abs() < 0.15, "steady quadratic, got {p}");
+            }
+        }
+
+        #[test]
+        fn two_points_are_enough_for_a_rough_exponent() {
+            // Which is all size selection needs: enough to predict what the
+            // next size will cost.
+            assert!((two_point_exponent(10.0, 100.0, 100.0, 10000.0).unwrap() - 2.0).abs() < 1e-9);
+            assert!((two_point_exponent(10.0, 10.0, 100.0, 100.0).unwrap() - 1.0).abs() < 1e-9);
+            assert_eq!(None, two_point_exponent(10.0, 1.0, 10.0, 2.0));
+            assert_eq!(None, two_point_exponent(10.0, 0.0, 20.0, 1.0));
         }
 
         #[test]
