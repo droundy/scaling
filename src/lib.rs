@@ -246,14 +246,26 @@ pub enum Accuracy {
 }
 
 impl Accuracy {
-    /// Is a measurement of `ns_per_iter` with relative standard error
-    /// `rel_se` good enough?
-    fn is_met(&self, ns_per_iter: f64, rel_se: f64) -> bool {
+    /// Is a measurement of `ns_per_iter` with standard error `std_error`
+    /// (both in nanoseconds) good enough?
+    ///
+    /// Both variants compare absolute quantities, so neither has to divide
+    /// by `ns_per_iter` - which matters, because that division is what made
+    /// a zero-cost benchmark impossible to satisfy.
+    fn is_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
+        // A standard error of exactly zero means every sample agreed to the
+        // limit of the timer's resolution. No amount of further sampling can
+        // improve on that, so any target is as met as it is ever going to
+        // be. Without this, a benchmark whose cost is optimised away
+        // entirely - `bench(|| {})`, the module docs' "Pure functions"
+        // caveat - would never stop voluntarily under *either* variant and
+        // would silently burn its whole time budget on every run.
+        if std_error == 0.0 {
+            return true;
+        }
         match *self {
-            Accuracy::Relative(target) => rel_se < target,
-            Accuracy::Absolute(target) => {
-                (ns_per_iter * rel_se) < target.as_secs_f64() * 1e9
-            }
+            Accuracy::Relative(target) => std_error < target * ns_per_iter,
+            Accuracy::Absolute(target) => std_error < target.as_secs_f64() * 1e9,
         }
     }
 }
@@ -634,7 +646,7 @@ impl Config {
             let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
             per_iter.push(t / unit as f64);
             iterations += unit;
-            let (mean, rel_se) = mean_and_rel_stderr(&per_iter);
+            let (mean, std_error) = mean_and_stderr(&per_iter);
 
             let out_of_budget = per_iter.len() >= MAX_SAMPLES || start.elapsed() > self.max_time;
             // `MIN_SAMPLES` gates only the *voluntary* stop. Its job is to
@@ -647,15 +659,19 @@ impl Config {
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
             let precise_enough =
-                per_iter.len() >= MIN_SAMPLES && self.accuracy.is_met(mean, rel_se);
+                per_iter.len() >= MIN_SAMPLES && self.accuracy.is_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
-                    rel_std_error: rel_se,
+                    // Derived, not primitive: `NaN` both when there were too
+                    // few samples for a standard error to exist and when the
+                    // mean is zero, which is exactly what `rel_std_error`
+                    // documents.
+                    rel_std_error: std_error / mean,
                     iterations,
                     samples: per_iter.len(),
                     // Stopping short of `MIN_SAMPLES` counts as hitting the
-                    // limit even if `rel_se` happens to look good, because
+                    // limit even if the error happens to look good, because
                     // that is exactly the reading we do not yet trust.
                     hit_limit: !precise_enough,
                 };
@@ -798,10 +814,16 @@ where
     }
 }
 
-/// Mean and the relative standard error *of that mean*, given per-iteration
-/// times that are each already the average of one `unit`-sized batch. See
-/// [`bench_gen_env_config`] for why batching does not bias this estimate.
-fn mean_and_rel_stderr(xs: &[f64]) -> (f64, f64) {
+/// Mean and the standard error *of that mean*, in nanoseconds, given
+/// per-iteration times that are each already the average of one
+/// `unit`-sized batch. See [`Config::bench_gen_env`] for why batching does
+/// not bias this estimate.
+///
+/// Absolute rather than relative because that is the primitive quantity:
+/// `sd/sqrt(n)` needs nothing but the samples, whereas dividing it by the
+/// mean is undefined when the mean is zero. [`Stats::rel_std_error`] is
+/// derived from this for reporting.
+fn mean_and_stderr(xs: &[f64]) -> (f64, f64) {
     let n = xs.len() as f64;
     let mean = xs.iter().sum::<f64>() / n;
     if xs.len() < 2 {
@@ -812,7 +834,7 @@ fn mean_and_rel_stderr(xs: &[f64]) -> (f64, f64) {
     }
     // Sample variance (Bessel-corrected), then the standard error of the mean.
     let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    (mean, (var / n).sqrt() / mean)
+    (mean, (var / n).sqrt())
 }
 
 /// Statistics for a benchmark run determining the scaling of a function.
@@ -1478,6 +1500,25 @@ mod tests {
             100.0 * tight_spread
         );
         assert!(tight_spread < loose_spread);
+    }
+
+    #[test]
+    fn a_zero_standard_error_meets_any_target() {
+        // A benchmark optimised away entirely measures identically every
+        // time, so its standard error is exactly zero and no further
+        // sampling can improve it. Both variants have to accept that.
+        // Deciding this by dividing the error by the (also zero) mean gave
+        // NaN, which compares false against everything, so such a benchmark
+        // could never stop voluntarily and burned its whole budget on every
+        // run - under `Relative` just as much as `Absolute`.
+        assert!(Accuracy::Relative(0.01).is_met(0.0, 0.0));
+        assert!(Accuracy::Absolute(Duration::from_nanos(50)).is_met(0.0, 0.0));
+
+        // A real error still has to clear the bar, either way round.
+        assert!(!Accuracy::Relative(0.01).is_met(100.0, 5.0));
+        assert!(Accuracy::Relative(0.01).is_met(100.0, 0.5));
+        assert!(!Accuracy::Absolute(Duration::from_nanos(1)).is_met(100.0, 5.0));
+        assert!(Accuracy::Absolute(Duration::from_nanos(10)).is_met(100.0, 5.0));
     }
 
     #[test]
