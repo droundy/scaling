@@ -734,22 +734,37 @@ where
     // Kept well under `max_time` (rather than some large fraction of it) to
     // limit *memory*, not just time: on fast hardware a looser ceiling
     // would let calibration allocate proportionally more before it fires.
-    // This is a heuristic, not a hard memory guarantee - a large `I` whose
-    // per-clone cost is nonzero but small could in principle still reach a
-    // sizeable batch before `probe_ceiling_ns` is hit. As always, keep your
-    // environment small (see the module docs).
-    let probe_ceiling_ns = (cfg.max_time / 20).max(Duration::from_millis(10)).as_secs_f64() * 1e9;
-    // A hard, timing-independent ceiling on `unit` itself. When *both* `f`
-    // and the environment are trivial enough (e.g. `bench(|| {})`, where `I`
-    // is `()`), the optimiser can eliminate essentially the entire batch -
-    // construction and loop alike - up to an enormous `unit`, so setup_ns
-    // and t can both keep reading as ~0 indefinitely; no timing-based check
-    // above can detect that in advance. Without this, the 100x-per-step
-    // extrapolation would keep multiplying unit until it finally became
-    // large enough to cost something, by which point one single probe could
-    // itself take unbounded wall-clock time. 16M is comfortably more
-    // iterations than any realistic benchmark needs to reach `sample_time`.
-    const MAX_CALIBRATION_UNIT: usize = 16_000_000;
+    let probe_ceiling_ns = (cfg.max_time / 100)
+        .max(Duration::from_millis(5))
+        .as_secs_f64()
+        * 1e9;
+    // Two independent, timing-blind ceilings on `unit` itself, combined by
+    // taking whichever is smaller. Neither is a hard memory guarantee on its
+    // own - see below - but together they cover far more real cases than
+    // either alone:
+    //
+    // `MAX_CALIBRATION_UNIT` catches the case the time-based ceiling above
+    // cannot: when *both* `f` and the environment are trivial enough (e.g.
+    // `bench(|| {})`, where `I` is `()`), the optimiser can eliminate the
+    // entire batch - construction and loop alike - up to an enormous `unit`,
+    // so `setup_ns` and `t` can both keep reading as ~0 indefinitely and no
+    // timing-based check can detect that in advance.
+    //
+    // `MAX_CALIBRATION_BYTES / size_of::<I>()` catches the complementary
+    // case: a non-trivial, non-heap-indirect `I` (an array, a plain struct)
+    // whose per-clone cost is real but small, where `probe_ceiling_ns`
+    // alone would still permit millions of copies before firing. For a
+    // heap-indirect `I` (`Vec<T>`, `Box<T>`, `String`) `size_of::<I>()` only
+    // sees the inline handle, not what it points to, so this cap cannot see
+    // that memory either - the time-based ceiling above is what bounds that
+    // case, imperfectly, by keeping the *wall-clock cost* of construction
+    // bounded even when its *size* is invisible to us. Between the three,
+    // every case has at least one real backstop, but none of them alone is
+    // a hard guarantee for every `I` - as always, keep your environment
+    // small (see the module docs).
+    const MAX_CALIBRATION_UNIT: usize = 2_000_000;
+    const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
+    let unit_cap = MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
     let target = cfg.sample_time.as_secs_f64() * 1e9;
     let mut unit = 1usize;
     loop {
@@ -758,12 +773,12 @@ where
         // Accept immediately, without ever retrying at this size, as soon
         // as *any* ceiling is reached: `t >= target` is the ordinary case,
         // `total_ns >= probe_ceiling_ns` is what saves us when construction
-        // dominates, and `unit >= MAX_CALIBRATION_UNIT` is the timing-blind
-        // backstop above. Retrying here (rather than accepting) would just
-        // re-pay the same large cost for no benefit.
+        // dominates, and `unit >= unit_cap` is the timing-blind backstop
+        // above. Retrying here (rather than accepting) would just re-pay
+        // the same large cost for no benefit.
         if t >= target
             || total_ns >= probe_ceiling_ns
-            || unit >= MAX_CALIBRATION_UNIT
+            || unit >= unit_cap
             || start.elapsed() > cfg.max_time
         {
             return (unit, t);
@@ -779,7 +794,7 @@ where
         let factor = factor_time.min(factor_safety);
         unit = ((unit as f64 * factor).ceil() as usize)
             .max(unit + 1)
-            .min(MAX_CALIBRATION_UNIT);
+            .min(unit_cap);
     }
 }
 
