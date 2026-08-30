@@ -2,14 +2,21 @@
 Set up (or tear down) a low-noise benchmarking environment on Linux.
 
 ```none
-sudo quiet-bench reserve 2      # quiesce the machine, reserving CPU 2
-sudo quiet-bench reserve 2,3    # reserve CPUs 2 and 3
+sudo `which quiet-bench` reserve 2    # quiesce the machine, reserving CPU 2
+sudo `which quiet-bench` reserve 2,3  # reserve CPUs 2 and 3
 quiet-bench run cargo test --release
 quiet-bench status
-sudo quiet-bench restore        # undo everything
+sudo `which quiet-bench` restore      # undo everything
 ```
 
 `reserve` and `restore` need root; `run` and `status` do not.
+
+Note the `` `which quiet-bench` ``. `cargo install` puts binaries in
+`~/.cargo/bin`, which is on *your* PATH but not on root's, so a plain
+`sudo quiet-bench ...` will usually fail with "command not found".
+Substituting the full path sidesteps that. If you would rather type the
+short form, copy the binary somewhere root can see it, e.g.
+`sudo cp ~/.cargo/bin/quiet-bench /usr/local/bin/`.
 
 Benchmarks built against the `scaling` crate pin themselves to the reserved
 CPUs automatically when launched through `quiet-bench run`, which sets
@@ -44,10 +51,13 @@ mod linux {
 
     const USAGE: &str = "\
 usage:
-  sudo quiet-bench reserve <cpu-list>   quiesce the machine (e.g. `reserve 2`)
-  sudo quiet-bench restore              undo it
-  quiet-bench run <command> [args...]   run a command on the reserved CPUs
-  quiet-bench status                    report whether a reservation is active
+  sudo `which quiet-bench` reserve <cpu-list>   quiesce the machine (e.g. 2)
+  sudo `which quiet-bench` restore              undo it
+  quiet-bench run <command> [args...]           run on the reserved CPUs
+  quiet-bench status                            is a reservation active?
+
+`cargo install` puts this on your PATH but not on root's, hence the
+backticks; or copy it to /usr/local/bin to type the short form.
 ";
 
     pub fn run() -> i32 {

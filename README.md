@@ -21,10 +21,10 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
 Running the above yields the following:
 
 ```none
-fib 200:     72.17ns ± 0.46ns
-fib 500:     254.9ns ± 2.5ns
-reverse:     65.12ns ± 0.65ns
-sort:        97.22ns ± 0.96ns
+fib 200:    71.716ns ± 0.057ns
+fib 500:    262.75ns ± 0.14ns
+reverse:     51.80ns ± 0.62ns
+sort:        111.3ns ± 1.1ns
 ```
 
 The `±` figure is the standard error of the reported time, in the same unit
@@ -51,7 +51,7 @@ Both are still on `Stats` if you want them.
 in front of the law it picked, with the same kind of error bar:
 
 ```none
-fib scaling:  (0.5507 ± 0.0055)ns/N (R²=0.999)
+fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
 Here the R² *does* stay, because it answers a question the `±` cannot. Two
@@ -75,8 +75,8 @@ println!("fib 500: {}", Config::absolute(Duration::from_nanos(1)).bench(|| fib(5
 ```
 
 ```none
-fib 500:     250.49ns ± 0.25ns
-fib 500:    258.389ns ± 0.037ns
+fib 500:     262.61ns ± 0.24ns
+fib 500:      253.6ns ± 2.3ns
 ```
 
 An absolute target is often the more natural request: if you are trying to
@@ -98,8 +98,12 @@ This crate ships a `quiet-bench` binary that sets a machine up for
 benchmarking:
 
 ```bash
-sudo quiet-bench reserve 2
+sudo `which quiet-bench` reserve 2
 ```
+
+(`cargo install` puts the binary on your PATH but not on root's, so a plain
+`sudo quiet-bench` usually fails with "command not found". Copy it to
+`/usr/local/bin` if you would rather type the short form.)
 
 That reserves CPU 2: it moves every other process and (where the kernel
 allows) every interrupt off it, offlines its SMT sibling, disables turbo,
@@ -119,7 +123,7 @@ any code change. Set `SCALING_NO_PIN=1` to opt out.
 this process is actually on it. When you're done:
 
 ```bash
-sudo quiet-bench restore
+sudo `which quiet-bench` restore
 ```
 
 Everything here is Linux-only and entirely optional; on other platforms, and

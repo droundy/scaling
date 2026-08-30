@@ -33,11 +33,11 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:    71.723ns ± 0.057ns
-fib 500:    257.05ns ± 0.87ns
-fib scaling:  (0.5507 ± 0.0055)ns/N (R²=0.999)
-reverse:     75.02ns ± 0.75ns
-sort:        97.59ns ± 0.97ns
+fib 200:    71.716ns ± 0.057ns
+fib 500:    262.75ns ± 0.14ns
+fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
+reverse:     51.80ns ± 0.62ns
+sort:        111.3ns ± 1.1ns
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
@@ -50,33 +50,30 @@ means performing some number of iterations and measuring the total time.
 
 ## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
 
-These first calibrate a batch size (the number of iterations per sample)
-large enough that per-sample overhead is negligible, then take equal-sized
-batches and stop once the *standard error* of their mean is small enough.
-This directly answers "how precisely do I know `ns_per_iter`", which is
-what you actually want, as opposed to the older R²-based rule this
-replaced: R² asks "is time linear in iteration count", which a handful of
-points satisfy almost regardless of how noisy each one is, and says nothing
-about how well the slope is known.
+An *iteration* is a single execution of your code. A *sample* is a
+measurement, during which your code may be run many times.
 
-"Small enough" is yours to define, either way round (see [`Accuracy`]):
-[`Accuracy::Relative`] for a fraction of the measurement (1% by default),
-or [`Accuracy::Absolute`] for a plain `Duration`, which is often the more
-natural request when you already know the difference you are trying to
-resolve.
+We first calibrate a batch size: the number of iterations per sample, chosen
+so that the two clock reads bracketing a sample are a rounding error against
+it. We then take equal-sized batches, and stop once the *standard error* of
+their mean is small enough. This directly answers "how precisely do I know
+`ns_per_iter`", which is what you actually want.
 
-The reported figure is the standard error of the measurement, printed after
-the `±` in the same unit as the measurement itself so that two results can
-be compared by eye: they differ by more than their noise when the gap
-between them is several times the larger `±`. The measurement is printed to
-exactly the precision that error justifies and no further, so every digit
-you see is one the benchmark actually stands behind.
+You may choose how accurate you want your benchmarks to be (see [`Config`])
+or you may accept a reasonable default. Both a relative and an absolute goal
+are available, and sampling stops as soon as either is met, so the coarser
+one governs.
+
+The output includes the standard error of the measurement, printed after
+the `±` in the same unit as the measurement itself, and the measurement is
+printed to exactly the precision that error justifies.
 
 [`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
 and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
-work it took, and [`Stats::hit_limit`] tells you if the budget ran out
-before the target accuracy was met - in which case the line is marked
-`(limit)`. That budget is 10 seconds by default (see [`Config`]).
+work it took, [`Stats::hit_limit`] tells you if the budget ran out before
+the target accuracy was met, and [`Stats::untrustworthy`] tells you if too
+few samples were collected for the error bar itself to mean anything.
+Those are marked `(limit)` and `(untrusted)` in the output.
 
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
@@ -98,7 +95,7 @@ output reports them separately:
   than a law being picked on a coin-toss.
 * **How big is its constant?** [`ScalingStats::rel_std_error`] answers this,
   and it is what the `±` in the output shows. Sampling continues until it
-  meets the same [`Accuracy`] target the flat benchmarks use, so
+  meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
   for [`bench`].
 
@@ -160,9 +157,9 @@ let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
 The results are a little surprising:
 
 ```none
-fib_1:    261.77ns ± 0.92ns
-fib_2:   0.59161ns ± 0.00033ns
-fib_3:   258.509ns ± 0.093ns
+fib_1:   262.759ns ± 0.079ns
+fib_2:   0.59300ns ± 0.00075ns
+fib_3:   262.805ns ± 0.025ns
 ```
 
 Oh, `fib_2`, why do you lie? The answer is: `fib(500)` is pure, and its
@@ -183,7 +180,7 @@ environment. This has the desired effect, but looks a bit weird.
 
 ## Caveat 3: A busy machine
 
-**TL;DR: on Linux, `sudo quiet-bench reserve 2` then
+**TL;DR: on Linux, ``sudo `which quiet-bench` reserve 2`` then
 `quiet-bench run <your benchmark>`.**
 
 The accuracy `scaling` reports covers noise it can *see* while sampling. It
@@ -236,75 +233,30 @@ const BENCH_TIME_MIN: Duration = Duration::from_millis(1);
 /// different answer here.
 const MIN_SAMPLES: usize = 6;
 
-/// A backstop on the number of samples, so a pathologically small
-/// [`Config::sample_time`] cannot grow the sample vector without bound.
+/// How long one sample should take: calibration picks a batch size aiming
+/// for this.
+///
+/// Long enough that the two `Instant::now()` calls bracketing a sample -
+/// on the order of 100 ns together - are a rounding error against it, and
+/// short enough that a 10 second budget still fits thousands of samples.
+const SAMPLE_TIME: Duration = Duration::from_millis(1);
+
+/// A backstop on the number of samples, so the vector of them cannot grow
+/// without bound.
 ///
 /// This is about memory, not about the measurement: `max_time` is the real
-/// budget, and at the default `sample_time` it allows ~10_000 samples, a
-/// hundred times below this.
+/// budget, and at [`SAMPLE_TIME`] it allows ~10_000 samples, a hundred
+/// times below this.
 const MAX_SAMPLES: usize = 1_000_000;
-
-/// How good an answer a benchmark should work for, expressed either way
-/// round.
-///
-/// Both forms describe the same quantity - the standard error of
-/// `ns_per_iter` - so exactly one of them applies to any given run. They
-/// are an enum rather than two fields for that reason: with independent
-/// fields, "stop when either is satisfied" quietly lets the looser one win
-/// (defeating the point of setting a tight one), and "stop when both are"
-/// makes a purely absolute target impossible to ask for without also
-/// disabling the relative one.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Accuracy {
-    /// Stop once the standard error falls below this fraction of the
-    /// measurement (`0.01` = 1%). Good when you care about proportional
-    /// precision regardless of scale.
-    Relative(f64),
-    /// Stop once the standard error falls below this absolute duration.
-    ///
-    /// Often the more natural request when you already know the difference
-    /// you are trying to resolve: to tell apart two implementations you
-    /// believe differ by ~1 µs, ask for an error well under that and stop
-    /// paying for precision you will not use.
-    Absolute(Duration),
-}
-
-impl Accuracy {
-    /// Is a measurement of `ns_per_iter` with standard error `std_error`
-    /// (both in nanoseconds) good enough?
-    ///
-    /// Both variants compare absolute quantities, so neither has to divide
-    /// by `ns_per_iter` - which matters, because that division is what made
-    /// a zero-cost benchmark impossible to satisfy.
-    fn is_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
-        // A standard error of exactly zero means every sample agreed to the
-        // limit of the timer's resolution. No amount of further sampling can
-        // improve on that, so any target is as met as it is ever going to
-        // be. Without this, a benchmark whose cost is optimised away
-        // entirely - `bench(|| {})`, the module docs' "Pure functions"
-        // caveat - would never stop voluntarily under *either* variant and
-        // would silently burn its whole time budget on every run.
-        if std_error == 0.0 {
-            return true;
-        }
-        match *self {
-            Accuracy::Relative(target) => std_error < target * ns_per_iter,
-            Accuracy::Absolute(target) => std_error < target.as_secs_f64() * 1e9,
-        }
-    }
-}
 
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
 /// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
-/// call the same-named methods on a `Config` to choose your own. The two
-/// fields you are likely to want are `accuracy` (how good an answer do I
-/// want) and `max_time` (how long am I willing to wait); everything else
-/// the benchmark works out for itself.
+/// call the same-named methods on a `Config` to choose your own.
 ///
 /// ```
-/// use scaling::{Accuracy, Config};
+/// use scaling::Config;
 /// use std::time::Duration;
 ///
 /// # fn fib(_: usize) -> usize { 0 }
@@ -315,57 +267,72 @@ impl Accuracy {
 ///     max_time: Duration::from_secs(1),
 ///     ..Config::absolute(Duration::from_nanos(50))
 /// };
-/// # let _ = (tight.accuracy, quick.accuracy, Accuracy::Relative(0.01));
+/// # let _ = (tight.target_rel_error, quick.target_abs_error);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    /// How good an answer to work for. See [`Accuracy`].
-    pub accuracy: Accuracy,
-    /// Give up after roughly this much wall-clock time even if `accuracy`
-    /// was never reached, setting [`Stats::hit_limit`].
+    /// Stop once the standard error falls below this fraction of the
+    /// measurement (`0.01` = 1%).
+    pub target_rel_error: f64,
+    /// Stop once the standard error falls below this duration.
+    ///
+    /// Sampling stops as soon as *either* goal is met, so whichever is
+    /// coarser for the function at hand is the one that ends up governing.
+    /// That is the point of having both: a 1% relative goal on a 1 ns
+    /// function asks for a precision finer than the clock can resolve, and
+    /// would otherwise spend the whole budget failing to reach it. An
+    /// absolute floor puts a bound on how much precision is worth chasing.
+    ///
+    /// `Duration::ZERO` disables it, leaving `target_rel_error` alone in
+    /// charge.
+    pub target_abs_error: Duration,
+    /// Give up after roughly this much wall-clock time even if neither goal
+    /// was reached, setting [`Stats::hit_limit`].
     pub max_time: Duration,
-    /// Calibrate the batch size so that one sample takes about this long.
-    ///
-    /// You should rarely need to touch this. The default is chosen so that
-    /// per-sample overhead - two `Instant::now()` calls, on the order of
-    /// 100 ns - is around 0.01% of a sample, comfortably below any accuracy
-    /// you are likely to ask for.
-    ///
-    /// It is exposed because batch size is not purely an implementation
-    /// detail: a batch is `unit` back-to-back iterations sharing a cache,
-    /// so for a memory-sensitive benchmark this changes *what you are
-    /// measuring*, not just how precisely. Shrink it if you want each
-    /// iteration to see a colder cache.
-    pub sample_time: Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accuracy: Accuracy::Relative(0.01),
+            target_rel_error: 0.01,
+            target_abs_error: Duration::ZERO,
             max_time: BENCH_TIME_MAX,
-            sample_time: Duration::from_millis(1),
         }
     }
 }
 
 impl Config {
-    /// A [`Config::default`] asking for a standard error below `fraction`
-    /// of the measurement (`0.001` = 0.1%).
+    /// Ask for a standard error below `fraction` of the measurement
+    /// (`0.001` = 0.1%).
     pub fn relative(fraction: f64) -> Self {
         Config {
-            accuracy: Accuracy::Relative(fraction),
+            target_rel_error: fraction,
             ..Config::default()
         }
     }
 
-    /// A [`Config::default`] asking for a standard error below `error` in
-    /// absolute terms.
+    /// Ask for a standard error below `error` in absolute terms.
+    ///
+    /// This sets only the absolute goal, leaving the relative one at its
+    /// default, so sampling stops at whichever of the two is reached first.
     pub fn absolute(error: Duration) -> Self {
         Config {
-            accuracy: Accuracy::Absolute(error),
+            target_abs_error: error,
             ..Config::default()
         }
+    }
+
+    /// Is a measurement of `ns_per_iter` with standard error `std_error`
+    /// (both in nanoseconds) precise enough to stop?
+    fn accuracy_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
+        // A standard error of exactly zero means every sample agreed to the
+        // limit of the timer's resolution, and no further sampling can
+        // improve on that.
+        if std_error == 0.0 {
+            return true;
+        }
+        std_error < self.target_rel_error * ns_per_iter
+            || std_error < self.target_abs_error.as_secs_f64() * 1e9
     }
 }
 
@@ -374,19 +341,21 @@ impl Config {
 pub struct Stats {
     /// The time, in nanoseconds, per iteration.
     pub ns_per_iter: f64,
-    /// Relative standard error of `ns_per_iter`, as a fraction (0.01 = 1%).
+    /// Standard error of `ns_per_iter`, in nanoseconds - the figure shown
+    /// after the `±`.
     ///
     /// This is the standard error *of sampling* seen within this call: the
     /// benchmark's own run-to-run variability plus timer noise. It is *not*
     /// a bound on systematic differences between separate process runs —
     /// CPU frequency state, code layout, and cache/allocator state shift
     /// between runs, and no statistic computed inside one call can see
-    /// them. A very small `rel_std_error` on a deterministic benchmark
-    /// means sampling is no longer the limit, not that the number is
-    /// accurate to that many digits. `NaN` when it cannot be computed at
-    /// all: either fewer than 2 samples were collected (see `hit_limit`),
-    /// or every sample measured as exactly zero.
-    pub rel_std_error: f64,
+    /// them. A very small `std_error` on a deterministic benchmark means
+    /// sampling is no longer the limit, not that the number is accurate to
+    /// that many digits. `NaN` when fewer than 2 samples were collected
+    /// (see `hit_limit`), where a standard error cannot exist.
+    ///
+    /// [`Stats::rel_std_error`] gives the same figure as a fraction.
+    pub std_error: f64,
     /// How many times the benchmarked code was actually run, including the
     /// calibration probes whose timings were discarded.
     ///
@@ -398,29 +367,33 @@ pub struct Stats {
     /// How many samples were taken (ie. how many times we allocated the
     /// environment and measured the time).
     pub samples: usize,
-    /// `true` if the benchmark gave up on its time budget before reaching
-    /// its `accuracy` target - the accuracy you asked for was not achieved.
+    /// `true` if the benchmark ran out of time before reaching its accuracy
+    /// target: the answer is real, just less precise than you asked for.
     ///
-    /// Also `true` in the conservative case where the budget ran out before
-    /// enough samples had accumulated to trust the standard error, even if
-    /// `rel_std_error` happens to look good: that is precisely the reading
-    /// not to believe. `rel_std_error` is still reported whenever it can be
-    /// computed at all, so a stopped-short run gives you a wide error bar
-    /// rather than none.
+    /// Look at `std_error` to see how much less. Distinct from
+    /// [`Stats::untrustworthy`], which is about whether to believe
+    /// `std_error` in the first place.
     pub hit_limit: bool,
+    /// `true` if too few samples were collected for the standard error
+    /// itself to be worth believing.
+    ///
+    /// A standard error estimated from two or three samples is so noisy
+    /// that it may look small purely by luck, so this says "the `±` on this
+    /// line is not evidence of anything", regardless of how tight it
+    /// appears. It is a different question from `hit_limit`: a slow
+    /// function on a short budget sets both, but a fast noisy one that
+    /// simply needed longer sets only `hit_limit`, and its error bar is
+    /// perfectly believable - just wider than requested.
+    pub untrustworthy: bool,
 }
 
 impl Stats {
-    /// The standard error of [`Stats::ns_per_iter`] in nanoseconds - the
-    /// absolute counterpart of [`Stats::rel_std_error`], and what `Display`
-    /// shows after the `±`.
+    /// Standard error as a fraction of the measurement (0.01 = 1%).
     ///
-    /// Use this to compare two measurements: they differ by more than their
-    /// noise when the gap between their `ns_per_iter` is several times the
-    /// larger of their standard errors. `NaN` exactly when `rel_std_error`
-    /// is.
-    pub fn std_error(&self) -> f64 {
-        self.ns_per_iter * self.rel_std_error
+    /// `NaN` when [`Stats::std_error`] is, and also when `ns_per_iter` is
+    /// zero, where a relative error is undefined.
+    pub fn rel_std_error(&self) -> f64 {
+        self.std_error / self.ns_per_iter
     }
 }
 
@@ -465,14 +438,23 @@ impl Display for Stats {
         // makes them do a unit conversion in their head first, and
         // "± 0.02%" makes them do arithmetic.
         let (div, unit) = unit_for(self.ns_per_iter);
-        let limit = if self.hit_limit { " (limit)" } else { "" };
-        if self.rel_std_error.is_nan() {
+        // Two separate things can be wrong with a line, so they get two
+        // separate marks: `(limit)` means the answer is less precise than
+        // requested, `(untrusted)` means the `±` itself is not worth
+        // reading. A slow function on a short budget earns both.
+        let limit = match (self.hit_limit, self.untrustworthy) {
+            (true, true) => " (limit, untrusted)",
+            (true, false) => " (limit)",
+            (false, true) => " (untrusted)",
+            (false, false) => "",
+        };
+        if self.std_error.is_nan() {
             // NaN has two distinct causes: too few samples to estimate a
             // standard error from (only possible via the single-sample
             // "blew the whole time budget already" path), or - rarer, but
             // possible for a near-free benchmark on a coarse timer - a
             // measured time of exactly zero for every sample, which makes
-            // `rel_std_error` a literal 0/0 regardless of sample count.
+            // the relative error a literal 0/0 regardless of sample count.
             //
             // With no error bar there is nothing to set the precision, so
             // fall back to a fixed four decimals.
@@ -488,7 +470,7 @@ impl Display for Stats {
             let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
             write!(f, "{value:>11} (± unknown, {why}){limit}")
         } else {
-            let scaled = self.std_error() / div;
+            let scaled = self.std_error / div;
             // The error's own precision sets the measurement's: digits of
             // the value beyond where the uncertainty starts are noise
             // dressed up as signal. So `71.9858ns ± 0.17ns` is really only
@@ -518,7 +500,7 @@ impl Display for Stats {
     }
 }
 
-/// Run a benchmark, targeting the default accuracy (see [`Config`]).
+/// Run a benchmark, with default accuracy (see [`Config`]).
 ///
 /// The return value of `f` is not used, but we trick the optimiser into
 /// thinking we're going to use it. Make sure to return enough information
@@ -531,7 +513,7 @@ where
     Config::default().bench(f)
 }
 
-/// Run a benchmark with an environment, targeting the default accuracy (see
+/// Run a benchmark with an environment, with default accuracy (see
 /// [`Config`]).
 ///
 /// See [`Config::bench_env`] for the full documentation.
@@ -543,7 +525,7 @@ where
     Config::default().bench_env(env, f)
 }
 
-/// Run a benchmark with a generated environment, targeting the default
+/// Run a benchmark with a generated environment, with default
 /// accuracy (see [`Config`]).
 ///
 /// See [`Config::bench_gen_env`] for the full documentation.
@@ -556,9 +538,10 @@ where
 }
 
 impl Config {
-    /// Run a benchmark, targeting `self`'s accuracy. See [`bench`] for the
-    /// default-accuracy convenience function, and [`Config::bench_gen_env`]
-    /// for the algorithm.
+    /// Run a benchmark.
+    ///
+    /// See [`bench`] for the default-accuracy version, and
+    /// [`Config::bench_gen_env`] for the algorithm.
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where
         F: FnMut() -> O,
@@ -566,7 +549,7 @@ impl Config {
         self.bench_env((), |_| f())
     }
 
-    /// Run a benchmark with an environment, targeting `self`'s accuracy.
+    /// Run a benchmark with an environment.
     ///
     /// The value `env` is a clonable prototype for the "benchmark
     /// environment". Each iteration receives a freshly-cloned mutable copy
@@ -596,8 +579,7 @@ impl Config {
         self.bench_gen_env(move || env.clone(), f)
     }
 
-    /// Run a benchmark with a generated environment, targeting `self`'s
-    /// accuracy.
+    /// Run a benchmark with a generated environment.
     ///
     /// The function `gen_env` creates the "benchmark environment" for the
     /// computation. Each iteration receives a freshly-created environment.
@@ -664,16 +646,15 @@ impl Config {
             // than paying for a second full-length call just to "warm up".
             return Stats {
                 ns_per_iter: first_ns / unit as f64,
-                rel_std_error: f64::NAN,
+                std_error: f64::NAN,
                 iterations: probed,
                 samples: 1,
                 hit_limit: true,
+                untrustworthy: true,
             };
         }
         // Otherwise the probe that finished calibration serves as the
-        // warmup sample and is discarded, same as the regression-based
-        // algorithm discarded its first sample as a cache-warming
-        // exercise.
+        // warmup sample and is discarded.
 
         let mut samples = Running::default();
         loop {
@@ -692,43 +673,40 @@ impl Config {
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
             let precise_enough =
-                samples.count >= MIN_SAMPLES && self.accuracy.is_met(mean, std_error);
+                samples.count >= MIN_SAMPLES && self.accuracy_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
-                    // Derived, not primitive: `NaN` both when there were too
-                    // few samples for a standard error to exist and when the
-                    // mean is zero, which is exactly what `rel_std_error`
-                    // documents.
-                    rel_std_error: std_error / mean,
+                    std_error,
                     // Derived rather than accumulated, which keeps the
                     // arithmetic in u64 and out of the loop: `usize` would
                     // overflow on a 32-bit target, where a fast benchmark
                     // can legitimately run past 4.3 billion iterations.
                     iterations: probed + samples.count as u64 * unit as u64,
                     samples: samples.count,
-                    // Stopping short of `MIN_SAMPLES` counts as hitting the
-                    // limit even if the error happens to look good, because
-                    // that is exactly the reading we do not yet trust.
                     hit_limit: !precise_enough,
+                    // Two different complaints. Running out of clock leaves
+                    // a wider error bar than asked for, but one that still
+                    // means what it says; stopping below `MIN_SAMPLES`
+                    // leaves an error bar too noisy to read at all.
+                    untrustworthy: samples.count < MIN_SAMPLES,
                 };
             }
         }
     }
 
-    /// Benchmark the power-law scaling of a function, targeting `self`'s
-    /// accuracy. See [`bench_scaling`] for the default-accuracy version.
+    /// Benchmark the power-law scaling of a function.
+    ///
+    /// See [`bench_scaling`] for the default-accuracy version.
     ///
     /// The accuracy applies to [`Scaling::ns_per_scale`], the constant in
     /// front of the fitted law, and only once the law itself has been
     /// identified - see [`ScalingStats::rel_std_error`] for why those are
     /// two different questions.
     ///
-    /// [`Accuracy::Relative`] is the one that makes sense here.
-    /// [`Accuracy::Absolute`] is accepted and well defined, but its units
-    /// are nanoseconds per `Nᴾ Eᴺ`, which change meaning with the law that
-    /// happens to be selected - so a figure chosen for one shape is rarely
-    /// the figure you want for another.
+    /// `target_rel_error` is the one that makes sense here.
+    /// `target_abs_error` is accepted and well defined, but its units are
+    /// nanoseconds per `Nᴾ Eᴺ`, which makes it confusing.
     pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
         F: Fn(usize) -> O,
@@ -736,10 +714,10 @@ impl Config {
         bench_scaling_with(self, f, nmin)
     }
 
-    /// Benchmark the power-law scaling of a function with a generated
-    /// input, targeting `self`'s accuracy. See [`bench_scaling_gen`] for
-    /// the default-accuracy version, and [`Config::bench_scaling`] for what
-    /// the accuracy applies to.
+    /// Benchmark the power-law scaling of a function with a generated input.
+    ///
+    /// See [`bench_scaling_gen`] for the default-accuracy version, and
+    /// [`Config::bench_scaling`] for what the accuracy applies to.
     pub fn bench_scaling_gen<G, F, I, O>(&self, gen_env: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
@@ -806,7 +784,7 @@ where
 {
     // Cap how much wall-clock time a single calibration probe - setup plus
     // timing - may cost. Ordinarily the extrapolation below is driven
-    // entirely by the timed portion approaching `cfg.sample_time`. But if
+    // entirely by the timed portion approaching `SAMPLE_TIME`. But if
     // `f`'s cost is optimised away (see the module docs' "Pure functions"
     // caveat, e.g. `bench_env(v, |_| {})`), the timed portion never grows
     // no matter how large `unit` gets, while untimed environment
@@ -850,7 +828,7 @@ where
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap = MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
-    let target = cfg.sample_time.as_secs_f64() * 1e9;
+    let target = SAMPLE_TIME.as_secs_f64() * 1e9;
     let mut unit = 1usize;
     // Every probe really does run the benchmark, so they count towards
     // `Stats::iterations` even though their timings are discarded.
@@ -1003,7 +981,7 @@ impl Display for ScalingStats {
         // for precision - it is the only signal about whether the right
         // *shape* was found, which no error bar on the constant can give.
         // Zero means the fit could not tell the candidate laws apart.
-        if self.rel_std_error.is_nan() {
+        if self.std_error().is_nan() {
             write!(
                 f,
                 "{value:>8.2}{unit}{suffix} (± unknown, only {} samples){limit} (R²={:.3})",
@@ -1093,8 +1071,9 @@ impl Display for Scaling {
     }
 }
 
-/// Benchmark the power-law scaling of the function, targeting the default
-/// accuracy (see [`Config`]).
+/// Benchmark the power-law scaling of the function.
+///
+/// Uses the default accuracy (see [`Config`]).
 ///
 /// This function assumes that the function scales as 𝑶(𝑁ᴾ𝐸ᴺ).
 /// It conisders higher powers for faster functions, and tries to
@@ -1168,7 +1147,7 @@ fn scaling_verdict(
 ) -> Option<ScalingStats> {
     let identified = stats.goodness_of_fit > 0.0;
     let precise =
-        identified && cfg.accuracy.is_met(stats.scaling.ns_per_scale, stats.std_error());
+        identified && cfg.accuracy_met(stats.scaling.ns_per_scale, stats.std_error());
     // Keep going well past `max_time` for a sweep that has not even
     // identified a law yet, exactly as before: without a shape there is no
     // answer at all, whereas an imprecise constant is at least a number.
@@ -1566,7 +1545,10 @@ mod tests {
         assert_eq!(1, stats.iterations);
         assert_eq!(1, stats.samples);
         assert!(stats.hit_limit);
-        assert!(stats.rel_std_error.is_nan());
+        // One sample is far too few to trust an error bar, and there is not
+        // even one to report.
+        assert!(stats.untrustworthy);
+        assert!(stats.std_error.is_nan());
     }
 
     #[test]
@@ -1683,6 +1665,22 @@ mod tests {
         0x9e37_79b9_7f4a_7c15u64.wrapping_mul(repeat as u64 + 1) | 1
     }
 
+    /// Whether this machine is quiesced enough for a calibration check to
+    /// mean anything.
+    ///
+    /// The tests that compare a claimed error bar against the spread
+    /// actually observed across repeated runs are measuring *between-run*
+    /// variation, which is precisely what no within-run statistic can see -
+    /// it is the documented limit of `std_error`. On a machine that is
+    /// merely idle rather than reserved, that variation swamps what is
+    /// being tested: measured 12.2x on the flat check and 5.2x on the
+    /// scaling one, against 1.25x when pinned. So these skip rather than
+    /// fail, and are exercised by running the suite under
+    /// `quiet-bench run` - which is what `quiet-bench` is for.
+    fn quiesced() -> bool {
+        matches!(quiet::status(), quiet::Status::Pinned { .. })
+    }
+
     fn mean_and_spread(xs: &[f64]) -> (f64, f64) {
         let n = xs.len() as f64;
         let mean = xs.iter().sum::<f64>() / n;
@@ -1693,10 +1691,14 @@ mod tests {
     #[test]
     fn accuracy_matches_the_request() {
         println!();
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
         const REPEATS: usize = 15;
         for &target in &[0.05, 0.01] {
             let cfg = Config {
-                accuracy: Accuracy::Relative(target),
+                target_rel_error: target,
                 ..Config::default()
             };
             let estimates: Vec<f64> = (0..REPEATS)
@@ -1726,7 +1728,7 @@ mod tests {
         println!();
         // Ground truth: a long, tight-target run.
         let truth = Config {
-            accuracy: Accuracy::Relative(0.002),
+            target_rel_error: 0.002,
             max_time: Duration::from_secs(20),
             ..Config::default()
         }
@@ -1752,6 +1754,10 @@ mod tests {
     #[test]
     fn tighter_target_costs_more_and_is_more_precise() {
         println!();
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
         const REPEATS: usize = 10;
         // Wide gap between targets, and the tight one well below the noise
         // a single calibrated batch already has on its own: with only a
@@ -1761,7 +1767,7 @@ mod tests {
         let loose: Vec<Stats> = (0..REPEATS)
             .map(|r| {
                 Config {
-                    accuracy: Accuracy::Relative(0.05),
+                    target_rel_error: 0.05,
                     ..Config::default()
                 }
                 .bench(variable_cost(seed_for(r)))
@@ -1770,7 +1776,7 @@ mod tests {
         let tight: Vec<Stats> = (0..REPEATS)
             .map(|r| {
                 Config {
-                    accuracy: Accuracy::Relative(0.003),
+                    target_rel_error: 0.003,
                     ..Config::default()
                 }
                 .bench(variable_cost(seed_for(r)))
@@ -1800,14 +1806,34 @@ mod tests {
         // NaN, which compares false against everything, so such a benchmark
         // could never stop voluntarily and burned its whole budget on every
         // run - under `Relative` just as much as `Absolute`.
-        assert!(Accuracy::Relative(0.01).is_met(0.0, 0.0));
-        assert!(Accuracy::Absolute(Duration::from_nanos(50)).is_met(0.0, 0.0));
+        assert!(Config::relative(0.01).accuracy_met(0.0, 0.0));
+        assert!(Config::absolute(Duration::from_nanos(50)).accuracy_met(0.0, 0.0));
 
         // A real error still has to clear the bar, either way round.
-        assert!(!Accuracy::Relative(0.01).is_met(100.0, 5.0));
-        assert!(Accuracy::Relative(0.01).is_met(100.0, 0.5));
-        assert!(!Accuracy::Absolute(Duration::from_nanos(1)).is_met(100.0, 5.0));
-        assert!(Accuracy::Absolute(Duration::from_nanos(10)).is_met(100.0, 5.0));
+        assert!(!Config::relative(0.01).accuracy_met(100.0, 5.0));
+        assert!(Config::relative(0.01).accuracy_met(100.0, 0.5));
+        assert!(!Config {
+            target_rel_error: 0.0,
+            target_abs_error: Duration::from_nanos(1),
+            ..Config::default()
+        }
+        .accuracy_met(100.0, 5.0));
+        assert!(Config {
+            target_rel_error: 0.0,
+            target_abs_error: Duration::from_nanos(10),
+            ..Config::default()
+        }
+        .accuracy_met(100.0, 5.0));
+
+        // The two goals are independent, and the coarser one wins: a 1%
+        // goal on a 100ns measurement wants the error under 1ns, but a
+        // 5ns absolute floor says 5ns is close enough, so it stops.
+        assert!(Config {
+            target_rel_error: 0.01,
+            target_abs_error: Duration::from_nanos(5),
+            ..Config::default()
+        }
+        .accuracy_met(100.0, 4.0));
     }
 
     #[test]
@@ -1817,10 +1843,11 @@ mod tests {
                 "{}",
                 Stats {
                     ns_per_iter: ns,
-                    rel_std_error: rel,
+                    std_error: ns * rel,
                     iterations: 10,
                     samples: 6,
                     hit_limit: false,
+                    untrustworthy: false,
                 }
             )
             .trim_start()
@@ -1853,20 +1880,26 @@ mod tests {
     #[test]
     fn an_absolute_accuracy_target_is_honoured() {
         println!();
-        let tight = Config::absolute(Duration::from_nanos(5));
-        let stats = tight.bench(variable_cost(7));
+        // Only the absolute goal: the relative one is disabled, since
+        // sampling stops at whichever goal is coarser and the 1% default
+        // would otherwise govern for a workload of this size.
+        let only_absolute = |ns| Config {
+            target_rel_error: 0.0,
+            target_abs_error: Duration::from_nanos(ns),
+            ..Config::default()
+        };
+        let stats = only_absolute(5).bench(variable_cost(7));
         println!("absolute 5ns: {stats}");
         assert!(!stats.hit_limit, "should have reached +-5ns in the budget");
         assert!(
-            stats.std_error() < 5.0,
+            stats.std_error < 5.0,
             "asked for +-5ns, got +-{:.2}ns",
-            stats.std_error()
+            stats.std_error
         );
 
         // A looser absolute ask must be cheaper - the target is doing the
         // work, not some fixed amount of sampling.
-        let loose = Config::absolute(Duration::from_nanos(100));
-        let cheap = loose.bench(variable_cost(7));
+        let cheap = only_absolute(100).bench(variable_cost(7));
         println!("absolute 100ns: {cheap}");
         assert!(
             cheap.iterations < stats.iterations,
@@ -1895,12 +1928,15 @@ mod tests {
             stats.samples
         );
         assert!(
-            !stats.rel_std_error.is_nan(),
+            !stats.std_error.is_nan(),
             "a standard error exists from {} samples and should be reported",
             stats.samples
         );
-        // Stopped short, so we say so regardless of how tight it looks.
+        // Both marks: the clock ran out (hit_limit) *and* there were too
+        // few samples to believe the error bar (untrustworthy). The error
+        // bar is still reported - a wide honest one beats none.
         assert!(stats.hit_limit);
+        assert!(stats.untrustworthy);
         assert!(stats.ns_per_iter > 99.0e6);
     }
 
@@ -1911,14 +1947,19 @@ mod tests {
         // short to try: the benchmark must say it fell short rather than
         // return a confident-looking number.
         let cfg = Config {
-            accuracy: Accuracy::Relative(1e-9),
+            target_rel_error: 1e-9,
             max_time: Duration::from_millis(50),
             ..Config::default()
         };
         let stats = cfg.bench(variable_cost(1));
         println!("{stats}");
         assert!(stats.hit_limit);
-        assert!(!cfg.accuracy.is_met(stats.ns_per_iter, stats.rel_std_error));
+        assert!(!cfg.accuracy_met(stats.ns_per_iter, stats.std_error));
+        // This one collected plenty of samples, it just needed longer than
+        // the budget allowed: the error bar is wider than asked for but
+        // perfectly believable, which is exactly the case `hit_limit`
+        // covers and `untrustworthy` does not.
+        assert!(!stats.untrustworthy);
     }
 
     /// The scaling error bar has to describe the spread that actually
@@ -1930,6 +1971,10 @@ mod tests {
     #[test]
     fn scaling_error_bar_is_honest() {
         println!();
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
         const REPEATS: usize = 12;
         // A genuinely linear workload with real per-sample noise, so the
         // spread being measured is the estimator's, not the machine's.
@@ -1982,16 +2027,20 @@ mod tests {
     #[test]
     fn reported_error_is_honest() {
         println!();
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
         const REPEATS: usize = 40;
         for &target in &[0.05, 0.02, 0.01] {
             let cfg = Config {
-                accuracy: Accuracy::Relative(target),
+                target_rel_error: target,
                 ..Config::default()
             };
             let stats: Vec<Stats> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))))
                 .collect();
-            let claimed = stats.iter().map(|s| s.rel_std_error).sum::<f64>() / REPEATS as f64;
+            let claimed = stats.iter().map(|s| s.rel_std_error()).sum::<f64>() / REPEATS as f64;
             let (_, observed) =
                 mean_and_spread(&stats.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>());
             let ratio = observed / claimed;

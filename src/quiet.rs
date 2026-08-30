@@ -8,9 +8,9 @@ clock frequency, and so on - and then advertises the reservation in the
 environment:
 
 ```none
-sudo quiet-bench reserve 2      # set the machine up, reserving CPU 2
+sudo `which quiet-bench` reserve 2   # set up, reserving CPU 2
 quiet-bench run cargo test --release
-sudo quiet-bench restore        # put everything back
+sudo `which quiet-bench` restore     # put everything back
 ```
 
 `quiet-bench run` sets [`CPUS_VAR`] for the command it launches. Every
