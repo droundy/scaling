@@ -1310,6 +1310,166 @@ fn compute_scaling_gen(data: &[(usize, usize, Duration)]) -> ScalingStats {
     stats[best].clone()
 }
 
+// The polynomial fit below is validated against synthetic data in
+// `tests::fitting`, but does not yet drive `compute_scaling_gen`: wiring it
+// in changes what gets reported for real workloads (notably `N log N`, which
+// is not a polynomial at all), so it lands separately from the machinery.
+
+/// Fit `y = c0 + c1 x + ... + c_degree x^degree` by weighted least
+/// squares, returning each coefficient with its standard error.
+///
+/// `x` is rescaled to `(0, 1]` before fitting and the coefficients scaled
+/// back afterwards. A raw Vandermonde matrix over `N` up to a few thousand
+/// is catastrophically ill-conditioned; over `(0, 1]` it is merely awkward,
+/// and comfortably within `f64` for the handful of degrees considered here.
+///
+/// The standard errors come from the diagonal of `(XᵀWX)⁻¹`, so they
+/// account for the correlation between powers - which is the whole
+/// difficulty with polynomial fits, since `N` and `N²` are far from
+/// independent over a bounded range.
+#[allow(dead_code)]
+fn poly_fit(xs: &[f64], ys: &[f64], ws: &[f64], degree: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    let terms = degree + 1;
+    let n = xs.len();
+    if n <= terms {
+        return None;
+    }
+    let scale = xs.iter().cloned().fold(0.0, f64::max);
+    // `is_finite` first so the comparison never has to reason about NaN.
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    // Design matrix rows, in the rescaled variable.
+    let rows: Vec<Vec<f64>> = xs
+        .iter()
+        .map(|&x| {
+            let u = x / scale;
+            (0..terms).map(|j| u.powi(j as i32)).collect()
+        })
+        .collect();
+
+    // Normal equations: (XᵀWX) c = XᵀWy.
+    let mut a = vec![vec![0.0; terms]; terms];
+    let mut b = vec![0.0; terms];
+    for i in 0..n {
+        let w = ws[i];
+        for j in 0..terms {
+            b[j] += w * rows[i][j] * ys[i];
+            for k in 0..terms {
+                a[j][k] += w * rows[i][j] * rows[i][k];
+            }
+        }
+    }
+    let inv = invert(&a)?;
+    let coef: Vec<f64> = (0..terms)
+        .map(|j| (0..terms).map(|k| inv[j][k] * b[k]).sum())
+        .collect();
+
+    // Weighted residual variance, then scale the inverse by it.
+    let mut chi2 = 0.0;
+    for i in 0..n {
+        let pred: f64 = (0..terms).map(|j| coef[j] * rows[i][j]).sum();
+        chi2 += ws[i] * (ys[i] - pred).powi(2);
+    }
+    let s2 = chi2 / (n - terms) as f64;
+    let se: Vec<f64> = (0..terms).map(|j| (s2 * inv[j][j]).sqrt()).collect();
+
+    // Undo the rescaling: a coefficient on u^j is one on x^j / scale^j.
+    let unscale = |v: &Vec<f64>| -> Vec<f64> {
+        (0..terms).map(|j| v[j] / scale.powi(j as i32)).collect()
+    };
+    Some((unscale(&coef), unscale(&se)))
+}
+
+/// Invert a small symmetric positive-definite matrix by Gauss-Jordan with
+/// partial pivoting. `None` if it is singular to working precision, which
+/// is how an unidentifiable fit reports itself.
+#[allow(dead_code)]
+fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = a.len();
+    let mut m: Vec<Vec<f64>> = a
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut r = row.clone();
+            r.extend((0..n).map(|j| if i == j { 1.0 } else { 0.0 }));
+            r
+        })
+        .collect();
+    for col in 0..n {
+        let pivot = (col..n).max_by(|&i, &j| m[i][col].abs().total_cmp(&m[j][col].abs()))?;
+        if m[pivot][col].abs() < 1e-300 {
+            return None;
+        }
+        m.swap(col, pivot);
+        let d = m[col][col];
+        for v in m[col].iter_mut() {
+            *v /= d;
+        }
+        for row in 0..n {
+            if row != col {
+                let f = m[row][col];
+                if f != 0.0 {
+                    let (pivot_row, target) = if row < col {
+                        let (a, b) = m.split_at_mut(col);
+                        (&b[0], &mut a[row])
+                    } else {
+                        let (a, b) = m.split_at_mut(row);
+                        (&a[col], &mut b[0])
+                    };
+                    for (t, p) in target.iter_mut().zip(pivot_row.iter()) {
+                        *t -= f * p;
+                    }
+                }
+            }
+        }
+    }
+    Some(m.into_iter().map(|r| r[n..].to_vec()).collect())
+}
+
+/// A coefficient must exceed its own standard error by this factor to count
+/// as real.
+///
+/// The knob that decides how much non-polynomial growth gets absorbed into
+/// spurious high-order terms. Measured on synthetic `N log N` - which is
+/// genuinely faster than `N` but is not a polynomial at all, so *some*
+/// answer has to be wrong - this reports `N⁴` at 3, `N³` at 5, `N²` at 8
+/// and `N` at 12. Set here so that a real but weak quadratic
+/// (`5N + 0.001N²`, which shows up at 7.2) is still caught, accepting that
+/// `N log N` reads as a little worse than linear rather than exactly
+/// linear, which it genuinely is.
+#[allow(dead_code)]
+const SIGNIFICANT: f64 = 6.0;
+
+/// The highest polynomial degree whose coefficient the data actually
+/// supports - the asymptotically dominant term.
+///
+/// This is what makes a mixed cost like `aN + bN²` come out as `N²`: every
+/// term is fitted at once, so the quadratic is found on top of the linear
+/// rather than having to beat it outright, which is what a search over
+/// single-term models can never do.
+///
+/// Degrees the sampled range cannot support disqualify themselves: their
+/// coefficients come out with standard errors as large as themselves. So a
+/// short sweep under-reports rather than inventing structure, and no
+/// separate "maximum degree for this range" rule is needed.
+#[allow(dead_code)]
+fn dominant_degree(xs: &[f64], ys: &[f64], ws: &[f64], max_degree: usize) -> Option<usize> {
+    let mut best = None;
+    for degree in 0..=max_degree {
+        let Some((coef, se)) = poly_fit(xs, ys, ws, degree) else {
+            break;
+        };
+        // Only the leading term is asked about here; the lower ones are
+        // present so that it is judged on what it adds, not on what the
+        // whole curve looks like.
+        if se[degree] > 0.0 && coef[degree].abs() / se[degree] > SIGNIFICANT {
+            best = Some(degree);
+        }
+    }
+    best
+}
+
 /// Compute the OLS linear regression line for the given data set, returning
 /// the line's gradient and R². Requires at least 2 samples.
 //
@@ -1795,6 +1955,120 @@ mod tests {
             100.0 * tight_spread
         );
         assert!(tight_spread < loose_spread);
+    }
+
+    /// Synthetic data with a known answer, which is the only way to check
+    /// that the fit reports the *asymptotically dominant* term rather than
+    /// whichever single power happens to fit best.
+    mod fitting {
+        use super::*;
+
+        /// Geometrically spaced sizes, as a real sweep produces.
+        fn sizes(count: usize) -> Vec<f64> {
+            let mut v: Vec<f64> = (2..)
+                .map(|k| (1.35f64).powi(k).round())
+                .take_while(|_| true)
+                .take(count * 3)
+                .collect();
+            v.dedup();
+            v.truncate(count);
+            v
+        }
+
+        /// Deterministic multiplicative noise, so a failure reproduces.
+        fn noisy(f: impl Fn(f64) -> f64, xs: &[f64], rel: f64, seed: u64) -> Vec<f64> {
+            let mut rng = XorShift(seed | 1);
+            xs.iter()
+                .map(|&x| {
+                    // Two uniforms averaged: crude, but symmetric about 0
+                    // and bounded, which is all this needs.
+                    let u = |r: &mut XorShift| (r.next() >> 11) as f64 / (1u64 << 53) as f64;
+                    let jitter = (u(&mut rng) + u(&mut rng) - 1.0) * rel;
+                    f(x) * (1.0 + jitter)
+                })
+                .collect()
+        }
+
+        /// Timing noise is multiplicative, so weight by 1/y²: that makes
+        /// every point contribute its *relative* error, instead of letting
+        /// the largest sizes dominate simply by being largest.
+        fn weights(ys: &[f64]) -> Vec<f64> {
+            ys.iter().map(|&y| 1.0 / (y * y)).collect()
+        }
+
+        fn degree_of(f: impl Fn(f64) -> f64, count: usize, seed: u64) -> Option<usize> {
+            let xs = sizes(count);
+            let ys = noisy(f, &xs, 0.05, seed);
+            dominant_degree(&xs, &ys, &weights(&ys), 4)
+        }
+
+        #[test]
+        fn finds_the_degree_of_a_pure_power_law() {
+            for seed in 1..6 {
+                assert_eq!(Some(1), degree_of(|n| 3.0 * n, 20, seed), "linear, seed {seed}");
+                assert_eq!(Some(2), degree_of(|n| 0.02 * n * n, 20, seed), "quadratic, seed {seed}");
+            }
+        }
+
+        #[test]
+        fn a_mixed_cost_reports_its_dominant_term() {
+            // The case a single-term search cannot get right: the linear
+            // part is larger over most of the range, but the quadratic is
+            // what the cost is asymptotically.
+            for seed in 1..6 {
+                assert_eq!(
+                    Some(2),
+                    degree_of(|n| 5.0 * n + 0.05 * n * n, 20, seed),
+                    "5N + 0.05N^2, seed {seed}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_range_too_short_to_see_a_term_does_not_invent_one() {
+            // A genuine cubic, but sampled over too small a span of N to be
+            // distinguishable. Under-reporting is the safe direction, and
+            // it should never come back as *more* than cubic.
+            let short = degree_of(|n| 1e-4 * n * n * n + 2.0 * n, 8, 1);
+            assert!(
+                matches!(short, Some(0..=3)),
+                "short range should not overreach, got {short:?}"
+            );
+            // Given enough range the same cost is identified.
+            assert_eq!(Some(3), degree_of(|n| 1e-4 * n * n * n + 2.0 * n, 20, 1));
+        }
+
+        #[test]
+        fn a_constant_cost_has_no_growing_term() {
+            assert_eq!(Some(0), degree_of(|_| 42.0, 20, 1));
+        }
+
+        #[test]
+        fn coefficients_come_back_with_believable_error_bars() {
+            let xs = sizes(20);
+            let ys = noisy(|n| 0.02 * n * n, &xs, 0.05, 3);
+            let (coef, se) = poly_fit(&xs, &ys, &weights(&ys), 2).unwrap();
+            // The quadratic coefficient is recovered to within a few of its
+            // own standard errors - the error bar means what it says.
+            assert!(
+                (coef[2] - 0.02).abs() < 4.0 * se[2],
+                "coef {} +- {} should bracket 0.02",
+                coef[2],
+                se[2]
+            );
+            assert!(se[2] > 0.0 && se[2] < 0.02, "se {} implausible", se[2]);
+        }
+
+        #[test]
+        fn a_singular_fit_reports_failure_rather_than_nonsense() {
+            // Every x identical: no range at all, so nothing is
+            // identifiable and the normal equations are singular.
+            let xs = vec![5.0; 12];
+            let ys = vec![1.0; 12];
+            assert!(poly_fit(&xs, &ys, &[1.0; 12], 2).is_none());
+            // Fewer points than coefficients.
+            assert!(poly_fit(&[1.0, 2.0], &[1.0, 2.0], &[1.0, 1.0], 3).is_none());
+        }
     }
 
     #[test]
