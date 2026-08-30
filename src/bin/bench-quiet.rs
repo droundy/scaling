@@ -135,9 +135,27 @@ usage:
                 return Err(format!("no such CPU: {c}"));
             }
         }
-        let other: Vec<usize> = (0..ncpu).filter(|c| !bench_cpus.contains(c)).collect();
+        // The SMT siblings of the reserved CPUs get offlined in step 3, so
+        // they are not really available to the rest of the system even
+        // though they aren't in `bench_cpus`. `other` must exclude them
+        // *before* the "at least one CPU left" check below, or the check
+        // validates the wrong set - one `reserve` on a small SMT machine
+        // could offline every remaining CPU while still reporting success.
+        let offlined_siblings: Vec<usize> = bench_cpus
+            .iter()
+            .flat_map(|&c| thread_siblings(c))
+            .filter(|sib| !bench_cpus.contains(sib))
+            .collect();
+        let other: Vec<usize> = (0..ncpu)
+            .filter(|c| !bench_cpus.contains(c) && !offlined_siblings.contains(c))
+            .collect();
         if other.is_empty() {
-            return Err("must leave at least one CPU for the rest of the system".to_string());
+            return Err(
+                "reserving these CPU(s) would offline every remaining CPU via their SMT \
+                 siblings, leaving nothing for the rest of the system; reserve fewer CPUs \
+                 or include their siblings in the reservation"
+                    .to_string(),
+            );
         }
 
         save_original_state()?;
