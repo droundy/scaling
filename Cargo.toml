@@ -9,3 +9,11 @@ repository = "https://github.com/droundy/easybench-rs"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
+
+# Measures the library itself: what it costs to take a benchmark, and how
+# reproducible the answer is. Not a `#[bench]` harness - it is a plain
+# `main` that times `bench` with an `Instant`, because measuring the
+# harness with the harness would hide a regression in the harness.
+[[bench]]
+name = "harness-cost"
+harness = false
