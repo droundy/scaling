@@ -918,19 +918,41 @@ mod tests {
             target_abs_error: Duration::from_nanos(ns),
             ..Config::default()
         };
-        let stats = only_absolute(5).bench(variable_cost(7));
-        println!("absolute 5ns: {stats}");
-        assert!(!stats.hit_limit, "should have reached +-5ns in the budget");
+        // 25ns, not the 5ns this used to ask for. `variable_cost` has a
+        // coefficient of variation around 50%, so the standard error falls
+        // as the square root of the sample count and the last factor of two
+        // costs four times what the one before it did. Swept on one machine
+        // against the default budget:
+        //
+        //   target      se reached   iterations
+        //        5ns      6.975ns      912848 (limit)
+        //       10ns     10.000ns      419017
+        //       25ns     24.995ns       62929
+        //      100ns     99.886ns        4873
+        //      500ns    499.284ns         169
+        //
+        // 5ns was not reachable there at all, and was only ever reached on
+        // a machine fast enough to buy it - so the test passed or failed on
+        // the hardware rather than on the library, which is what it went on
+        // doing, about half the time, on CI. 25ns costs a fourteenth of the
+        // iterations the budget demonstrably supports, so what is being
+        // tested is that the target governs sampling, not that this
+        // particular machine is quick.
+        let stats = only_absolute(25).bench(variable_cost(7));
+        println!("absolute 25ns: {stats}");
+        assert!(!stats.hit_limit, "should have reached +-25ns in the budget");
         assert!(
-            stats.std_error < 5.0,
-            "asked for +-5ns, got +-{:.2}ns",
+            stats.std_error < 25.0,
+            "asked for +-25ns, got +-{:.2}ns",
             stats.std_error
         );
 
         // A looser absolute ask must be cheaper - the target is doing the
-        // work, not some fixed amount of sampling.
-        let cheap = only_absolute(100).bench(variable_cost(7));
-        println!("absolute 100ns: {cheap}");
+        // work, not some fixed amount of sampling. 500ns is met by the
+        // minimum sampling every run takes, so this comparison cannot come
+        // down to noise either.
+        let cheap = only_absolute(500).bench(variable_cost(7));
+        println!("absolute 500ns: {cheap}");
         assert!(
             cheap.iterations < stats.iterations,
             "loose target used {} iterations, tight used {}",
