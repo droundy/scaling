@@ -47,7 +47,15 @@ impl Config {
 /// Statistics for a benchmark run determining the scaling of a function.
 #[derive(Debug, PartialEq, Clone)]
 pub struct ScalingStats {
-    pub scaling: Scaling,
+    /// The scaling law, if one was found.
+    ///
+    /// `None` when the sweep could not identify one at all - the cost did
+    /// not measurably grow, and did not measurably do anything else either.
+    /// That case used to be reported as `power: 0, ns_per_scale: 0.0`,
+    /// which no caller could tell apart from a function that really is
+    /// free; `None` says it outright. [`ScalingStats::hit_limit`] is always
+    /// set alongside it.
+    pub scaling: Option<Scaling>,
     /// Relative standard error of [`Scaling::ns_per_scale`], as a fraction
     /// (0.01 = 1%).
     ///
@@ -79,15 +87,20 @@ impl ScalingStats {
     /// as it - the absolute counterpart of
     /// [`ScalingStats::rel_std_error`], and what `Display` shows after the
     /// `±`. See that field for what the figure does and does not cover.
+    ///
+    /// `NaN` when there is no scaling law to put an error bar on.
     pub fn std_error(&self) -> f64 {
-        // `abs` because a fit is free to land on a negative coefficient -
-        // a term the data does not really support can come out either side
-        // of zero - and an error bar is a width, which has no sign.
-        self.scaling.ns_per_scale.abs() * self.rel_std_error
+        match self.scaling {
+            // `abs` because a fit is free to land on a negative coefficient
+            // - a term the data does not really support can come out either
+            // side of zero - and an error bar is a width, which has no sign.
+            Some(s) => s.ns_per_scale.abs() * self.rel_std_error,
+            None => f64::NAN,
+        }
     }
 }
 /// The timing and scaling results (without statistics) for a benchmark.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Scaling {
     /// The scaling power.
     ///
@@ -104,35 +117,39 @@ pub struct Scaling {
 
 impl Display for ScalingStats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let limit = if self.hit_limit { " (limit)" } else { "" };
+        // Nothing identified means there is no value, no unit and no error
+        // bar to show - only how much work went into finding that out.
+        // Printing a zero here is what used to make "gave up" read exactly
+        // like "measured as free".
+        let Some(scaling) = self.scaling else {
+            return write!(
+                f,
+                "no scaling law identified after {} samples{limit}",
+                self.samples
+            );
+        };
         // Same rules as `Stats`: value and error in one unit, the error to
         // two significant figures, and the value to exactly the precision
         // the error justifies. The unit is written once, outside the
         // parentheses, since it applies to both.
-        let suffix = self.scaling.scale_suffix();
-        let (div, unit) = unit_for(self.scaling.ns_per_scale);
-        let value = self.scaling.ns_per_scale / div;
-        let limit = if self.hit_limit { " (limit)" } else { "" };
+        let suffix = scaling.scale_suffix();
+        let (div, unit) = unit_for(scaling.ns_per_scale);
+        let value = scaling.ns_per_scale / div;
         // R² stays, unlike on `Stats`, because here it is not a stand-in
         // for precision - it is the only signal about whether the right
         // *shape* was found, which no error bar on the constant can give.
         // Zero means the fit could not tell the candidate laws apart.
         if self.std_error().is_nan() {
-            // Two different things bring us here, and "take more samples" is
-            // the right advice for neither. `rel_std_error` is NaN when no
-            // scaling law was identified at all, which more sampling of the
-            // same shape will not fix; otherwise the fitted coefficient
-            // landed on exactly zero, which makes the relative error
-            // infinite and the absolute one `0 * inf`. A scaling sweep
-            // always takes at least two rounds across every size, so it is
-            // never the sample count that is missing.
-            let why = if self.rel_std_error.is_nan() {
-                "no scaling law identified"
-            } else {
-                "the fitted coefficient is zero"
-            };
+            // A law was found, so the only way here is a coefficient fitted
+            // to exactly zero: the relative error is then infinite and the
+            // absolute one `0 * inf`. "Take more samples" would be the
+            // wrong advice, and a sweep measures every size at least twice
+            // anyway, so the count is never what is missing.
             write!(
                 f,
-                "{value:>8.2}{unit}{suffix} (± unknown, {why} after {} samples){limit} (R²={:.3})",
+                "{value:>8.2}{unit}{suffix} (± unknown, the fitted coefficient is zero \
+                 after {} samples){limit} (R²={:.3})",
                 self.samples, self.goodness_of_fit
             )
         } else {
@@ -293,10 +310,7 @@ fn scaling_sweep(
         // No degree cleared its own error bar - the cost did not measurably
         // grow, and did not measurably do anything else either.
         return ScalingStats {
-            scaling: Scaling {
-                power: 0,
-                    ns_per_scale: 0.0,
-            },
+            scaling: None,
             rel_std_error: f64::NAN,
             goodness_of_fit: 0.0,
             iterations: calls,
@@ -314,10 +328,10 @@ fn scaling_sweep(
     // Rejection changes what we claim, not what we measured.
     let rejected = !(fit.chi2_per_dof <= CHI2_REJECT);
     ScalingStats {
-        scaling: Scaling {
+        scaling: Some(Scaling {
             power: fit.power,
             ns_per_scale: fit.ns_per_scale,
-        },
+        }),
         rel_std_error: fit.std_error / fit.ns_per_scale.abs(),
         // R² is the share of the spread a model accounts for, and a
         // constant model accounts for none of it by construction - the fit
@@ -382,12 +396,21 @@ fn scaling_sweep(
 /// character is the first thing to try.
 ///
 /// # Example
-/// ```
+///
+/// `no_run` because summing a vector is memory-bound, so on a machine that
+/// is not quiesced the growth this measures can be a neighbouring process's
+/// rather than the sum's - the same reason this crate's own tests of it
+/// skip unless `quiet-bench` has reserved a CPU. The example is still
+/// compiled, so it cannot go stale; it is only the timing that is not
+/// trustworthy enough to assert on wherever the docs happen to be built.
+///
+/// ```no_run
 /// use scaling::bench_scaling_gen;
 ///
 /// let summation = bench_scaling_gen(|n| vec![3.0; n], |v| v.iter().cloned().sum::<f64>(),0);
 /// println!("summation: {}", summation);
-/// assert_eq!(1, summation.scaling.power); // summation must run in linear time.
+/// // Summation must run in linear time.
+/// assert_eq!(1, summation.scaling.expect("a power law").power);
 /// ```
 /// which gives output
 /// ```none
@@ -466,6 +489,40 @@ struct PolyFit {
 /// the coefficients are known, and `chi2_per_dof` independently says
 /// whether the model fits at all. Conflated, a bad model quietly inflates
 /// the error bars instead of admitting it is the wrong shape.
+/// The narrowest error bar a fit will believe, used to weight a rung whose
+/// own came out as exactly zero.
+///
+/// Zero is a real result, not bad data: repeat a fast call on a coarse
+/// clock and every sample can land on the same tick, which says the spread
+/// is below what we can see rather than that the measurement failed.
+/// [`Config::accuracy_met`] has always read it that way - a zero standard
+/// error meets any target - and this is the fitting side of the same rule.
+///
+/// It cannot be used as a weight directly, though, because `1/se²` is
+/// infinite there: one silent rung would outvote every other, and the fit
+/// would pass through it exactly whatever the rest of the ladder said. So
+/// it borrows the smallest spread any other rung did show - the tightest
+/// error bar the data gives grounds to believe - which keeps that rung the
+/// most heavily weighted of them without letting it be the only one.
+///
+/// `None` if any rung's error is not a number, or if no rung showed any
+/// spread at all: there is then no scale to borrow and nothing to weight
+/// the fit by.
+fn weight_floor(ses: &[f64]) -> Option<f64> {
+    for &se in ses {
+        // Infinite or NaN is not a measurement, and a spread has no sign.
+        if !se.is_finite() || se < 0.0 {
+            return None;
+        }
+    }
+    let floor = ses
+        .iter()
+        .copied()
+        .filter(|&se| se > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    floor.is_finite().then_some(floor)
+}
+
 fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> Option<PolyFit> {
     let terms = degree + 1;
     let n = ns.len();
@@ -476,13 +533,14 @@ fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> O
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    let mut ws = Vec::with_capacity(n);
-    for &se in ses {
-        if !se.is_finite() || se <= 0.0 {
-            return None;
-        }
-        ws.push(1.0 / (se * se));
-    }
+    let floor = weight_floor(ses)?;
+    let ws: Vec<f64> = ses
+        .iter()
+        .map(|&se| {
+            let se = if se > 0.0 { se } else { floor };
+            1.0 / (se * se)
+        })
+        .collect();
     // Rescale sizes into (0, 1] before building the design: a raw
     // Vandermonde over sizes in the thousands is hopeless in f64.
     let rows: Vec<Vec<f64>> = ns
@@ -692,6 +750,12 @@ fn discover_sizes(
     let mut lo = (last_n, last_t);
     let mut prev: Option<(f64, f64)> = None;
     let mut exponent = 1.0;
+    // Whether that 1.0 is a measurement or still the assumption it starts
+    // as. Two points are not enough to tell: a pair that were both too fast
+    // to time gives no rate either, so what matters is whether
+    // `two_point_exponent` ever actually answered, not whether we have been
+    // round the loop twice.
+    let mut exponent_measured = false;
     // See `measure_scaling`: the calls are not the only thing that costs
     // time here either.
     let started = Instant::now();
@@ -703,6 +767,7 @@ fn discover_sizes(
         if let Some((pn, pt)) = prev {
             if let Some(p) = two_point_exponent(pn, pt, last_n as f64, last_t) {
                 exponent = p;
+                exponent_measured = true;
             }
         }
         // Measurable, and affordable: done climbing.
@@ -713,9 +778,21 @@ fn discover_sizes(
         let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
         // Aim each step at the floor we are trying to clear; `next_size`
         // caps the growth and keeps the step affordable.
-        let Some(next) = next_size(last_n as f64, last_t, exponent, MIN_MEASURABLE, left)
-        else {
-            break;
+        let next = match next_size(last_n as f64, last_t, exponent, MIN_MEASURABLE, left) {
+            Some(next) => next,
+            // A call that measured as exactly zero gives `next_size`
+            // nothing to work with: every step it could plan is a multiple
+            // of a cost of zero, which is zero. Giving up here is what left
+            // the ladder starting at `nmin` for anything too fast to time
+            // there - and left `exponent` at the assumed 1.0, never
+            // measured, for `choose_sizes` to budget the whole ladder with.
+            //
+            // So double instead, and let the next measurement say whether
+            // that was enough. Doubling needs no estimate of a cost we do
+            // not have, and it reaches any size worth reaching in a
+            // logarithmic number of steps, which `MAX_CLIMB_STEPS` bounds.
+            None if last_t <= 0.0 => last_n.saturating_mul(2),
+            None => break,
         };
         // Sizes are multiples of `nmin`, which is the caller's unit.
         let next = (next / step).max(1) * step;
@@ -730,15 +807,19 @@ fn discover_sizes(
         lo = (last_n, last_t);
     }
 
-    // A climb that never took a step has a floor but no growth rate, and
-    // `exponent` is still the assumed 1.0. That assumption is not harmless:
-    // `choose_sizes` budgets with it, so believing an N-cubed cost to be
-    // linear plans a ladder whose top rung costs hundreds of times what was
-    // predicted. One probe upward buys the real rate. It aims at the
-    // ceiling rather than the floor, which is already behind us, and `lo`
-    // does not move - the probe is reconnaissance, not a rung, and may well
-    // land somewhere too expensive to be one.
-    if prev.is_none() {
+    // A climb that never measured a growth rate has a floor but no rate,
+    // and `exponent` is still the assumed 1.0. That assumption is not
+    // harmless: `choose_sizes` budgets with it, so believing an N-cubed
+    // cost to be linear plans a ladder whose top rung costs hundreds of
+    // times what was predicted. One probe upward buys the real rate. It
+    // aims at the ceiling rather than the floor, which is already behind
+    // us, and `lo` does not move - the probe is reconnaissance, not a rung,
+    // and may well land somewhere too expensive to be one.
+    //
+    // Two ways to arrive here with nothing measured: a climb that never
+    // took a step, and one whose steps were all too fast to time until the
+    // last, leaving a single usable point among several taken.
+    if !exponent_measured {
         let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
         // Aim at where the ladder's top will be - `TIME_SPAN` times the
         // cost we are at. The floor is behind us, so aiming there would ask
@@ -1098,13 +1179,21 @@ fn power_fit(ns: &[f64], ts: &[f64], ses: &[f64]) -> Option<PowerFit> {
     if ns.len() < 3 {
         return None;
     }
+    // The same floor as the polynomial refit, from the same rule: a rung
+    // that showed no spread is weighted as if it showed the least any rung
+    // did, rather than infinitely or not at all.
+    let floor = weight_floor(ses)?;
     let mut x = Vec::with_capacity(ns.len());
     let mut y = Vec::with_capacity(ns.len());
     let mut w = Vec::with_capacity(ns.len());
     for ((&n, &t), &se) in ns.iter().zip(ts).zip(ses) {
-        if !(n > 0.0 && t > 0.0 && se > 0.0) || !se.is_finite() {
+        // A size and a time still have to be positive, unlike the error:
+        // these are about to be logged, and the log of zero is not a number
+        // that any weighting can rescue.
+        if !(n > 0.0 && t > 0.0) {
             return None;
         }
+        let se = if se > 0.0 { se } else { floor };
         x.push(n.ln());
         y.push(t.ln());
         w.push((t / se).powi(2));
@@ -1281,9 +1370,10 @@ mod tests {
         println!();
         let stats = bench_scaling(|_| thread::sleep(Duration::from_millis(10)), 1);
         println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 0);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e6);
+        let scaling = stats.scaling.expect("a sleep has a scaling law");
+        assert_eq!(scaling.power, 0);
+        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        assert!((scaling.ns_per_scale - 1e7).abs() < 1e6);
         // A constant used to be the case the fit could say least about:
         // with only an R² to go on, nothing distinguished "flat" from
         // "could not tell", so it reported itself clueless. Measured error
@@ -1311,9 +1401,10 @@ mod tests {
         println!();
         let stats = bench_scaling(|n| thread::sleep(Duration::from_millis(10 * n as u64)), 1);
         println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 1);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e5);
+        let scaling = stats.scaling.expect("a sleep has a scaling law");
+        assert_eq!(scaling.power, 1);
+        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        assert!((scaling.ns_per_scale - 1e7).abs() < 1e5);
 
         // The sleep above is immune to a busy machine; this is not.
         // Summing a vector is memory-bound, so its per-element cost is set
@@ -1331,8 +1422,9 @@ mod tests {
             1,
         );
         println!("O(N): {}", stats);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert_eq!(stats.scaling.power, 1);
+        let scaling = stats.scaling.expect("a sum has a scaling law");
+        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        assert_eq!(scaling.power, 1);
     }
 
     #[test]
@@ -1354,8 +1446,9 @@ mod tests {
             1,
         );
         println!("O(N log N): {}", stats);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert_eq!(stats.scaling.power, 1);
+        let scaling = stats.scaling.expect("a sort has a scaling law");
+        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        assert_eq!(scaling.power, 1);
     }
 
 
@@ -1367,9 +1460,10 @@ mod tests {
             1,
         );
         println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 2);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e5);
+        let scaling = stats.scaling.expect("a sleep has a scaling law");
+        assert_eq!(scaling.power, 2);
+        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        assert!((scaling.ns_per_scale - 1e7).abs() < 1e5);
     }
 
     /// Synthetic data with a known answer, which is the only way to check
@@ -1606,6 +1700,94 @@ mod tests {
                 target_abs_error: Duration::ZERO,
                 max_time: Duration::from_secs(1),
             }
+        }
+
+        #[test]
+        fn a_rung_that_showed_no_spread_does_not_lose_the_fit() {
+            // A fast call on a coarse clock can put every sample of one size
+            // on the same tick, making that rung's standard error exactly
+            // zero. That is a measurement - the spread is below what we can
+            // see - and it used to throw away the whole ladder, five good
+            // rungs with it, because `1/se²` was infinite.
+            let ns = [64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0];
+            let (means, mut ses) = measured(|n| 3.0 * n, &ns, 0.02, 11);
+            ses[2] = 0.0;
+
+            let fit = scaling_fit(&ns, &means, &ses, 3).expect("one silent rung is not fatal");
+            assert_eq!(1, fit.power);
+            assert!(
+                (fit.ns_per_scale - 3.0).abs() < 5.0 * fit.std_error,
+                "{} +- {} should bracket 3.0",
+                fit.ns_per_scale,
+                fit.std_error
+            );
+            // The silent rung is weighted the most heavily of them, but not
+            // infinitely: the answer still has an error bar, which is what
+            // an infinite weight would have collapsed to zero.
+            assert!(fit.std_error > 0.0 && fit.std_error.is_finite());
+        }
+
+        #[test]
+        fn a_ladder_with_no_spread_at_all_has_nothing_to_weight_by() {
+            // The floor is borrowed from whichever rung did show a spread,
+            // so when none did there is nothing to borrow and no honest
+            // weighting to be had.
+            let ns = [64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0];
+            let means: Vec<f64> = ns.iter().map(|&n| 3.0 * n).collect();
+            let ses = vec![0.0; ns.len()];
+            assert_eq!(None, weight_floor(&ses));
+            assert!(scaling_fit(&ns, &means, &ses, 3).is_none());
+        }
+
+        #[test]
+        fn a_first_size_too_fast_to_time_is_climbed_away_from() {
+            // Below the clock's resolution every measurement is zero, and a
+            // step planned from a cost of zero is zero - so the climb used
+            // to stop where it started, handing over the assumed exponent
+            // of 1.0 that it had never measured. Doubling needs no estimate
+            // of a cost we do not have.
+            let calls = std::cell::Cell::new(0usize);
+            let (range, tried) = climb(
+                1,
+                |n| {
+                    calls.set(calls.get() + 1);
+                    // Nothing measurable until the size is large enough,
+                    // then a clean quadratic.
+                    if n < 100.0 {
+                        0.0
+                    } else {
+                        1e3 * n * n
+                    }
+                },
+                Duration::from_secs(3600),
+            );
+            assert!(
+                tried.len() > 1,
+                "must keep climbing past a size that measures as zero: {tried:?}"
+            );
+            assert!(
+                range.lo >= 100,
+                "should have climbed to something measurable, got {}",
+                range.lo
+            );
+            assert!(
+                (range.exponent - 2.0).abs() < 0.5,
+                "exponent should be measured, not assumed: {}",
+                range.exponent
+            );
+        }
+
+        #[test]
+        fn a_climb_that_never_finds_a_cost_still_stops() {
+            // The other end of the same case: doubling must not become an
+            // unbounded search when the function really is free.
+            let (range, tried) = climb(1, |_| 0.0, Duration::from_secs(3600));
+            assert!(
+                tried.len() <= MAX_CLIMB_STEPS + 2,
+                "doubling must stay bounded: {} calls",
+                tried.len()
+            );
+            assert_eq!(0.0, range.lo_time);
         }
 
         #[test]
@@ -2052,6 +2234,29 @@ mod tests {
         }
 
         #[test]
+        fn nothing_identified_reads_as_nothing_identified() {
+            // The case that used to come back as `power: 0, ns_per_scale:
+            // 0.0` - a specific, plausible-looking answer that a caller
+            // could not tell from a function that really is free.
+            let stats = ScalingStats {
+                scaling: None,
+                rel_std_error: f64::NAN,
+                goodness_of_fit: 0.0,
+                iterations: 72,
+                samples: 72,
+                hit_limit: true,
+            };
+            assert!(stats.std_error().is_nan());
+            let shown = format!("{stats}");
+            assert!(shown.contains("no scaling law identified"), "{shown}");
+            assert!(shown.contains("72 samples"), "{shown}");
+            // No fabricated value, and so no unit or error bar pretending
+            // to qualify one.
+            assert!(!shown.contains('±'), "{shown}");
+            assert!(!shown.contains("0.00"), "{shown}");
+        }
+
+        #[test]
         fn a_whole_sweep_says_whether_it_believes_itself() {
             // Both stages end to end, on costs of known shape, driven by a
             // synthetic clock. Chi-squared no longer picks the model, so
@@ -2066,13 +2271,14 @@ mod tests {
             // A real power law: identified, believed, and not flagged.
             let mut clock = one_call(|n| 50.0 * n * n, 0.02, 1);
             let stats = scaling_sweep(&cfg, 1, |n| clock(n));
-            assert_eq!(2, stats.scaling.power);
+            let scaling = stats.scaling.expect("a real power law is identified");
+            assert_eq!(2, scaling.power);
             assert!(stats.goodness_of_fit > 0.9, "{}", stats.goodness_of_fit);
             assert!(!stats.hit_limit);
             assert!(
-                (stats.scaling.ns_per_scale - 50.0).abs() < 0.1 * 50.0,
+                (scaling.ns_per_scale - 50.0).abs() < 0.1 * 50.0,
                 "{}",
-                stats.scaling.ns_per_scale
+                scaling.ns_per_scale
             );
 
             // A cost no polynomial describes. It still reports the power it
@@ -2315,7 +2521,7 @@ mod tests {
         // would compare nanoseconds-per-N with nanoseconds-per-N².
         let good: Vec<&ScalingStats> = runs
             .iter()
-            .filter(|s| s.goodness_of_fit > 0.0 && s.scaling.power == 1)
+            .filter(|s| s.goodness_of_fit > 0.0 && s.scaling.map_or(false, |sc| sc.power == 1))
             .collect();
         assert!(
             good.len() * 2 > REPEATS,
@@ -2323,8 +2529,12 @@ mod tests {
             good.len()
         );
 
-        let (_, observed) =
-            mean_and_spread(&good.iter().map(|s| s.scaling.ns_per_scale).collect::<Vec<_>>());
+        let (_, observed) = mean_and_spread(
+            &good
+                .iter()
+                .map(|s| s.scaling.expect("filtered to identified runs").ns_per_scale)
+                .collect::<Vec<_>>(),
+        );
         let claimed = good.iter().map(|s| s.rel_std_error).sum::<f64>() / good.len() as f64;
         let ratio = observed / claimed;
         println!(
@@ -2377,8 +2587,21 @@ mod tests {
             })
             .collect();
 
-        let (_, observed) =
-            mean_and_spread(&runs.iter().map(|s| s.scaling.ns_per_scale).collect::<Vec<_>>());
+        // Every run reports a coefficient here - the fit is rejected, not
+        // absent, which is the whole point of the case. `expect` rather than
+        // a default keeps that a stated premise: a run that identified
+        // nothing would otherwise contribute a fabricated zero and widen the
+        // spread this test is measuring.
+        let (_, observed) = mean_and_spread(
+            &runs
+                .iter()
+                .map(|s| {
+                    s.scaling
+                        .expect("a rejected fit still has a coefficient")
+                        .ns_per_scale
+                })
+                .collect::<Vec<_>>(),
+        );
         let claimed = runs.iter().map(|s| s.rel_std_error).sum::<f64>() / runs.len() as f64;
         println!(
             "claimed {:.3}%, observed {:.3}%",

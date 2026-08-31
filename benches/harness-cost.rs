@@ -245,9 +245,13 @@ fn main() {
     // so a row whose power wanders between runs will show a large spread,
     // which is the right answer: it did not reliably identify anything.
     // ----------------------------------------------------------------
-    let note = |s: &scaling::ScalingStats| {
-        format!("power {} (R²={:.3})", s.scaling.power, s.goodness_of_fit)
+    let note = |s: &scaling::ScalingStats| match s.scaling {
+        Some(sc) => format!("power {} (R²={:.3})", sc.power, s.goodness_of_fit),
+        None => "no scaling law identified".to_string(),
     };
+    // NaN when nothing was identified, rather than a zero that would read as
+    // a measurement of a free function and quietly drag the mean down.
+    let reported = |s: &scaling::ScalingStats| s.scaling.map_or(f64::NAN, |sc| sc.ns_per_scale);
     let scaling = [
         Row::measure_noting("O(N) sum, cheap", || {
             let s = bench_scaling_gen(
@@ -255,7 +259,7 @@ fn main() {
                 |v| v.iter().sum::<u64>(),
                 1,
             );
-            (s.scaling.ns_per_scale, note(&s))
+            (reported(&s), note(&s))
         }),
         Row::measure_noting("O(N log N) sort", || {
             let s = bench_scaling_gen(
@@ -263,12 +267,12 @@ fn main() {
                 |v| v.sort(),
                 1,
             );
-            (s.scaling.ns_per_scale, note(&s))
+            (reported(&s), note(&s))
         }),
         Row::measure_noting("O(N) sleep", || {
             let s =
                 bench_scaling(|n| std::thread::sleep(Duration::from_millis(n as u64)), 1);
-            (s.scaling.ns_per_scale, note(&s))
+            (reported(&s), note(&s))
         }),
     ];
     table("bench_scaling(), by benchmark", "/N^p", &scaling);
