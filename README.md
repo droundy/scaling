@@ -47,21 +47,58 @@ Both are still on `Stats` if you want them.
 
 ## Scaling behaviour
 
-`bench_scaling` fits the measurements to `O(Nᴾ Eᴺ)` and reports the constant
-in front of the law it picked, with the same kind of error bar:
+`bench_scaling` measures how the cost grows with `N` and reports the
+constant in front of the law it found, with the same kind of error bar:
 
 ```none
 fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
-Here the R² *does* stay, because it answers a question the `±` cannot. Two
-things have to be settled — which law, and how big its constant is — and
-they can fail independently. R² is the signal for the first, and is set to
-zero outright when the data cannot tell the candidate laws apart; the `±` is
-the signal for the second. An error bar computed *after* a law was chosen
-cannot vouch for that choice, so a tight `±` next to `R²=0.000` means
-"precise about a shape I could not pin down", and deserves suspicion rather
-than trust.
+It works in two stages. The first climbs from small sizes, timing one call
+at each, until a call is long enough to time properly, and notes how fast
+cost is growing; those measurements steer and are not part of the answer.
+The second lays out six log-spaced sizes and times a single call at each,
+repeatedly - six rounds to start with, more until the answer is precise
+enough.
+
+The range is picked in *time* rather than in size: far enough up that the
+largest size takes four times as long as the smallest, which the measured
+growth rate turns into a size range. A fixed size range would mean a
+different time range for every benchmark, since four times the size is four
+times the work for a linear cost and sixty-four times for a cubic one. It
+consults no time budget, and a benchmark at the bottom of the measurable
+range is done in under two milliseconds.
+
+Repeating each size is what makes the rest work: every size ends up with an
+error bar that was *measured* rather than assumed. That turns "is this the
+right shape?" into a real test instead of a heuristic. Chi-squared asks
+whether what the model failed to explain is as small as the error bars say
+it should be, and a cost that no polynomial describes is rejected outright
+rather than being fitted anyway.
+
+Measuring stops only when the shape is settled *and* the constant is precise
+enough. Both, because a wrong model does not present as an imprecise one -
+fit a constant to a cost that grows and its prefactor is essentially the
+mean of every measurement, precise straight away and quite wrong.
+
+Nothing is batched: one call per sample. A benchmark worth asking about the
+scaling of gets slow as `N` grows, so where a batch would have been needed
+to out-measure the clock, a larger `N` does the same job and tells you
+something you wanted to know anyway.
+
+The `R²` figure answers a question the `±` cannot. Two things have to be
+settled - which law, and how big its constant is - and they can fail
+independently. `R²` is set to zero outright when the shape was rejected; the
+`±` is the signal for the constant. Crucially, the `±` is computed from the
+sizes and their error bars alone and never sees the timings, so a wrong
+shape cannot hide inside a wider error bar - it has nowhere to go but the
+`R²`. A tight `±` next to `R²=0.000` means "precise about a shape I could
+not pin down", and deserves suspicion rather than trust.
+
+Only polynomial costs are fitted at present. An `O(2ᴺ)` cost is not
+identified as such; it is reported as the integer power that best
+approximates it over the range measured, with `R²=0.000` and `(limit)` to
+say so.
 
 To ask for a different accuracy, use a `Config` — either as a fraction of
 the measurement, or as a flat `Duration`:
