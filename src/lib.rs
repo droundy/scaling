@@ -243,8 +243,14 @@ pub mod quiet;
 mod bench;
 mod scaling;
 
-pub use bench::{Stats, bench, bench_env, bench_gen_env};
-pub use scaling::{Scaling, ScalingStats, bench_scaling, bench_scaling_gen};
+// `self::` because the crate is called `scaling` too, and rustdoc builds
+// doctests with `--extern scaling` pointing at this very crate - which
+// leaves a bare `scaling::` ambiguous between the module below and the
+// whole crate. Rust 1.66 calls that ambiguity an error; later compilers
+// quietly pick one, so this only ever failed on the oldest supported
+// toolchain, and only when building doctests rather than the library.
+pub use self::bench::{bench, bench_env, bench_gen_env, Stats};
+pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 
 use std::f64;
 use std::time::*;
