@@ -2,7 +2,7 @@ A lightweight benchmarking library which:
 
 * measures until it reaches an accuracy you ask for, and tells you the
   accuracy it achieved;
-* can measure simple polynomial or exponential scaling behavior;
+* can measure how a benchmark scales, as a power of its input size;
 * handles benchmarks which must mutate some state;
 * has a very simple API!
 
@@ -95,10 +95,35 @@ shape cannot hide inside a wider error bar - it has nowhere to go but the
 `R²`. A tight `±` next to `R²=0.000` means "precise about a shape I could
 not pin down", and deserves suspicion rather than trust.
 
-Only polynomial costs are fitted at present. An `O(2ᴺ)` cost is not
-identified as such; it is reported as the integer power that best
-approximates it over the range measured, with `R²=0.000` and `(limit)` to
-say so.
+Only power laws are fitted. A cost that is not one - `O(N log N)`, or
+`O(2ᴺ)` - is reported as the integer power it most behaves like over the
+range measured, with `R²=0.000` and `(limit)` to say that nothing described
+it exactly.
+
+### `nmin`, and workloads that change character
+
+Sizes are measured in multiples of `nmin`, and nothing smaller is tried.
+That matters more than it looks: many costs do not behave the same way at
+small sizes, and a vector that fits in cache is a different machine from one
+that does not.
+
+Summing a vector is the clearest case. From `nmin` of 1 it is not a power
+law at all — rejected on every run, with a constant that moves by tens of
+percent between runs while the reported `±` claims well under one:
+
+```none
+nmin           reported   spread over 8 runs   claimed ±
+      1     0.303 ns/N          39.5%            0.74%
+  1_000     0.371 ns/N           8.9%            0.60%
+100_000     0.423 ns/N           2.8%            0.73%
+1_000_000   0.686 ns/N           0.7%            0.58%
+```
+
+The answer *changes* as `nmin` rises, and that is not a mistake being
+corrected — per-element cost really is higher once the vector no longer fits
+in cache. There is no single true number, only one per regime, and `nmin` is
+how you say which you meant. If a result comes back flagged, an `nmin` above
+wherever your workload changes character is the first thing to try.
 
 To ask for a different accuracy, use a `Config` — either as a fraction of
 the measurement, or as a flat `Duration`:

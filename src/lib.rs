@@ -4,7 +4,7 @@ A lightweight micro-benchmarking library which:
 * measures until it reaches an accuracy you ask for, and tells you the
   accuracy it achieved;
 * handles benchmarks which mutate state;
-* can measure simple polynomial or exponential scaling behavior
+* can measure how a benchmark scales, as a power of its input size
 * is very easy to use!
 
 `scaling` is designed to work with either slow or fast functions.
@@ -146,9 +146,12 @@ needed, because a wrong model does not present as an imprecise one: fit a
 constant to a cost that grows and its prefactor is near enough the mean of
 every measurement, precise immediately and quite wrong.
 
-Only polynomial costs are fitted at present. An `O(2ᴺ)` cost is not
-identified as such; it is rejected, and reported as the integer power that
-best approximates it over the range measured.
+Only power laws are fitted. A cost that is not one - `O(N log N)`, or
+`O(2ᴺ)` - is reported as the integer power it most behaves like over the
+range measured, with `goodness_of_fit` zeroed and the `(limit)` mark to say
+that nothing described it exactly. Naming those shapes needs a different
+kind of fit and would be a different feature; measuring a power well is the
+thing this does.
 
 # Caveats
 

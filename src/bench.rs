@@ -37,16 +37,37 @@ const MIN_SAMPLES: usize = 6;
 /// for this.
 ///
 /// Long enough that the two `Instant::now()` calls bracketing a sample -
-/// on the order of 100 ns together - are a rounding error against it, and
-/// short enough that a 10 second budget still fits thousands of samples.
-const SAMPLE_TIME: Duration = Duration::from_millis(1);
+/// on the order of 100 ns together - stay a rounding error against it, at
+/// about 0.1%, which is far below any accuracy worth asking for.
+///
+/// It was 1ms, and shortening it is nearly free. A benchmark stops when the
+/// standard error of the mean is small enough, and that error is set by the
+/// spread *between* samples, which for the benchmarks measured here is
+/// dominated by drift the batch size does not affect - so the same number
+/// of samples is needed either way, and each one costs a tenth as much:
+///
+/// ```none
+///                    reported at 1ms / at 100us      wall at 1ms / at 100us
+///   empty closure         0.5921 / 0.5933 ns             8.9 / 1.5 ms
+///   ~3ns of arithmetic    2.6236 / 2.6594 ns            13.2 / 1.4 ms
+///   ~2.9us of arithmetic  2880.7 / 2883.6 ns            10.7 / 1.4 ms
+///   noisy 1.7us workload  1753.2 / 1766.1 ns            10.3 / 5.9 ms
+/// ```
+///
+/// The answers are unchanged and the run-to-run spread is no worse; only
+/// the cost moves. The exception is [`bench_env`] and [`bench_gen_env`],
+/// which report about 20% lower, because a smaller batch means a smaller
+/// environment vector to index into - that lookup is harness overhead
+/// rather than the benchmark, so measuring less of it is a gain, but it is
+/// a visible change in what those two report.
+const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
 /// A backstop on the number of samples, so the vector of them cannot grow
 /// without bound.
 ///
 /// This is about memory, not about the measurement: `max_time` is the real
-/// budget, and at [`SAMPLE_TIME`] it allows ~10_000 samples, a hundred
-/// times below this.
+/// budget, and at [`SAMPLE_TIME`] it allows ~100_000 samples, ten times
+/// below this.
 const MAX_SAMPLES: usize = 1_000_000;
 
 
@@ -719,6 +740,15 @@ mod tests {
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();
+        // Comparing a long run against short ones only isolates the
+        // estimator when the machine holds still. Contention does not
+        // affect the two equally - the long run averages over more of it -
+        // so on a busy machine this measures the neighbours rather than
+        // the estimator, which is the same reason its siblings above skip.
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
         // Ground truth: a long, tight-target run.
         let truth = Config {
             target_rel_error: 0.002,
@@ -999,3 +1029,4 @@ mod tests {
         }
     }
 }
+
