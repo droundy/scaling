@@ -38,7 +38,9 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use scaling::quiet::{format_cpu_list, parse_cpu_list, status, Status, CPUS_PATH, CPUS_VAR};
+    use scaling::quiet::{
+        format_cpu_list, parse_cpu_list, pin_thread, status, Status, CPUS_PATH, CPUS_VAR,
+    };
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
@@ -447,15 +449,6 @@ backticks; or copy it to /usr/local/bin to type the short form.
     /// refuse to move (kernel threads, mostly) are skipped silently - that
     /// is normal and not worth reporting.
     fn move_tasks_to(cpus: &[usize]) -> usize {
-        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        unsafe { libc::CPU_ZERO(&mut set) };
-        for &c in cpus {
-            if c < libc::CPU_SETSIZE as usize {
-                unsafe { libc::CPU_SET(c, &mut set) };
-            }
-        }
-        let size = std::mem::size_of::<libc::cpu_set_t>();
-
         let mut moved = 0;
         let entries = match fs::read_dir("/proc") {
             Ok(e) => e,
@@ -478,7 +471,7 @@ backticks; or copy it to /usr/local/bin to type the short form.
             };
             for task in tasks.flatten() {
                 if let Some(tid) = task.file_name().to_str().and_then(|t| t.parse::<i32>().ok()) {
-                    if unsafe { libc::sched_setaffinity(tid, size, &set) } == 0 {
+                    if pin_thread(tid, cpus).is_ok() {
                         moved += 1;
                     }
                 }

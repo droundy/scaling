@@ -370,7 +370,10 @@ fn error_decimals(x: f64) -> usize {
     if !x.is_finite() || x <= 0.0 {
         return 4;
     }
-    (1 - x.log10().floor() as i64).clamp(1, 9) as usize
+    // The floor is zero, not one: an error of 25 in its own unit wants no
+    // decimals at all, and forcing one on it prints `25.0`, which is three
+    // significant digits claiming to be two.
+    (1 - x.log10().floor() as i64).clamp(0, 9) as usize
 }
 
 

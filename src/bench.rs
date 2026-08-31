@@ -899,6 +899,12 @@ mod tests {
         // rather than collapsing to zero - and here that does mean four
         // decimals on the value, because the error genuinely reaches them.
         assert_eq!(shown(0.4523, 0.02), "0.4523ns ± 0.0090ns");
+
+        // Two digits is also all it gets when the error is large enough to
+        // need none: a noisy benchmark whose error reaches the tens of its
+        // own unit says `± 25ns`, not `± 25.0ns`, which would be a third
+        // digit the measurement cannot support.
+        assert_eq!(shown(500.0, 0.05), "500ns ± 25ns");
     }
 
     #[test]

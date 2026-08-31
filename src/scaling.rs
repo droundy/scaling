@@ -117,9 +117,22 @@ impl Display for ScalingStats {
         // *shape* was found, which no error bar on the constant can give.
         // Zero means the fit could not tell the candidate laws apart.
         if self.std_error().is_nan() {
+            // Two different things bring us here, and "take more samples" is
+            // the right advice for neither. `rel_std_error` is NaN when no
+            // scaling law was identified at all, which more sampling of the
+            // same shape will not fix; otherwise the fitted coefficient
+            // landed on exactly zero, which makes the relative error
+            // infinite and the absolute one `0 * inf`. A scaling sweep
+            // always takes at least two rounds across every size, so it is
+            // never the sample count that is missing.
+            let why = if self.rel_std_error.is_nan() {
+                "no scaling law identified"
+            } else {
+                "the fitted coefficient is zero"
+            };
             write!(
                 f,
-                "{value:>8.2}{unit}{suffix} (± unknown, only {} samples){limit} (R²={:.3})",
+                "{value:>8.2}{unit}{suffix} (± unknown, {why} after {} samples){limit} (R²={:.3})",
                 self.samples, self.goodness_of_fit
             )
         } else {
@@ -160,15 +173,17 @@ impl Scaling {
 
 impl Display for Scaling {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let per_iter = Duration::from_nanos(self.ns_per_scale as u64);
-        let per_iter = if self.ns_per_scale < 1.0 {
-            format!("{:.2}ns", self.ns_per_scale)
-        } else if self.ns_per_scale < 10.0 {
-            format!("{:.1}ns", self.ns_per_scale)
-        } else {
-            format!("{:?}", per_iter)
-        };
-        write!(f, "{:>8}{}", per_iter, self.scale_suffix())
+        // The same unit rule as [`ScalingStats`], via the same helper.
+        // Formatting through `Duration`'s `Debug` instead - which is what
+        // this did - reintroduces exactly the problem `unit_for` exists to
+        // avoid, and left the two impls disagreeing about the unit for one
+        // and the same magnitude.
+        //
+        // Three decimals, fixed, because there is no error bar here to set
+        // the precision: this type is the answer without the statistics.
+        let (div, unit) = unit_for(self.ns_per_scale);
+        let value = format!("{:.3}{}", self.ns_per_scale / div, unit);
+        write!(f, "{:>8}{}", value, self.scale_suffix())
     }
 }
 
@@ -498,7 +513,22 @@ fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> O
         })
         .sum();
     // No residual-variance factor here - see the note above.
-    let se: Vec<f64> = (0..terms).map(|j| inv[j][j].max(0.0).sqrt()).collect();
+    //
+    // A covariance diagonal is a variance, so it is positive whenever the
+    // arithmetic held up; a zero or negative one means it did not, and the
+    // matrix was too ill-conditioned for `invert`'s pivot test to catch.
+    // Clamping such a value to zero would report the coefficient as known
+    // exactly, which the refinement loop reads as "precise enough" and stops
+    // on - fabricating certainty out of a numerical breakdown. An
+    // unidentifiable fit says so instead, the same way `invert` does.
+    let mut se = Vec::with_capacity(terms);
+    for j in 0..terms {
+        let var = inv[j][j];
+        if !(var > 0.0) || !var.is_finite() {
+            return None;
+        }
+        se.push(var.sqrt());
+    }
     let unscale = |v: &[f64]| -> Vec<f64> {
         (0..terms).map(|j| v[j] / scale.powi(j as i32)).collect()
     };
@@ -888,9 +918,11 @@ fn measure_scaling(
             ses.push(se);
         }
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
-        let precise = fit
-            .as_ref()
-            .is_some_and(|f| f.std_error < cfg.target_rel_error * f.ns_per_scale.abs());
+        // `map_or` rather than `is_some_and`, which needs a newer compiler
+        // than the `rust-version` in `Cargo.toml` promises.
+        let precise = fit.as_ref().map_or(false, |f| {
+            f.std_error < cfg.target_rel_error * f.ns_per_scale.abs()
+        });
         // Check the budget only after a fit that was not good enough, so a
         // benchmark that is already precise enough never reports having hit
         // a limit it did not need.

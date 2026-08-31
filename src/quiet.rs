@@ -206,12 +206,15 @@ pub fn format_cpu_list(cpus: &[usize]) -> String {
     parts.join(",")
 }
 
-/// Pin the calling thread to `cpus`.
+/// Pin the thread with kernel task id `tid` to `cpus`. A `tid` of 0 means
+/// the calling thread.
 ///
-/// Only the calling thread is affected; other threads, and the process as a
-/// whole, are left alone.
+/// The one place the affinity mask is built, because getting it wrong is a
+/// memory-safety question rather than a behavioural one: `CPU_SET` writes
+/// into a fixed-size bitmap, so a cpu id past its end has to be dropped
+/// here rather than written past the end of the set.
 #[cfg(target_os = "linux")]
-pub fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
+pub fn pin_thread(tid: i32, cpus: &[usize]) -> Result<(), std::io::Error> {
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut set);
@@ -220,21 +223,29 @@ pub fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
                 libc::CPU_SET(c, &mut set);
             }
         }
-        // A pid of 0 means "the calling thread".
-        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+        if libc::sched_setaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
     Ok(())
 }
 
-/// Pin the calling thread to `cpus`. Always fails on non-Linux platforms.
+/// Pin the thread with kernel task id `tid` to `cpus`. Always fails on
+/// non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub fn pin_current_thread(_cpus: &[usize]) -> Result<(), std::io::Error> {
+pub fn pin_thread(_tid: i32, _cpus: &[usize]) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "CPU pinning is only supported on Linux",
     ))
+}
+
+/// Pin the calling thread to `cpus`.
+///
+/// Only the calling thread is affected; other threads, and the process as a
+/// whole, are left alone.
+pub fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
+    pin_thread(0, cpus)
 }
 
 /// What `scaling` found when it looked for a quiesced environment. See the
