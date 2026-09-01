@@ -84,13 +84,26 @@ impl Row {
             values.push(v);
             notes.push(note);
         }
-        let n = values.len() as f64;
-        let mean = values.iter().sum::<f64>() / n;
-        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        // A run that identified nothing reports NaN (see `reported` above),
+        // and averaging a NaN into a sum is itself NaN - one such repeat
+        // among `REPEATS` would otherwise blank out the mean and spread
+        // that the *other*, successful repeats did earn. Mean and spread
+        // are computed over the successful repeats only; `notes` still
+        // carries every repeat's own account, failures included, so a row
+        // that is mostly failures still says so on the line below it.
+        let good: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+        let n = good.len() as f64;
+        let (mean, spread) = if good.len() < 2 {
+            (f64::NAN, f64::NAN)
+        } else {
+            let mean = good.iter().sum::<f64>() / n;
+            let var = good.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            (mean, var.sqrt())
+        };
         Row {
             name,
             reported: mean,
-            spread: var.sqrt(),
+            spread,
             wall: total / REPEATS as u32,
             notes,
         }
@@ -98,6 +111,14 @@ impl Row {
 }
 
 /// Nanoseconds, in whatever unit reads most naturally.
+///
+/// This bench is a separate compilation unit from the library, driven only
+/// through its public API, so it cannot call the library's own private
+/// `unit_for` and has to pick units itself. Kept to the *same* thresholds
+/// and the same unit spelling (`µs`, not the ASCII `us` this once printed)
+/// deliberately: a reader comparing this table against a `Display`ed
+/// `Stats`/`ScalingStats` line should never have to convert units in their
+/// head to tell whether the two agree.
 fn ns(v: f64) -> String {
     if !v.is_finite() {
         return "     -".to_string();
@@ -108,7 +129,7 @@ fn ns(v: f64) -> String {
     } else if a >= 1e6 {
         format!("{:.3}ms", v / 1e6)
     } else if a >= 1e3 {
-        format!("{:.3}us", v / 1e3)
+        format!("{:.3}µs", v / 1e3)
     } else if a >= 1.0 {
         format!("{v:.3}ns")
     } else {

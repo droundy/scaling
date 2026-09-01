@@ -154,46 +154,24 @@ impl Display for Stats {
             (false, false) => "",
         };
         if self.std_error.is_nan() {
-            // NaN has two distinct causes: too few samples to estimate a
-            // standard error from (only possible via the single-sample
-            // "blew the whole time budget already" path), or - rarer, but
-            // possible for a near-free benchmark on a coarse timer - a
-            // measured time of exactly zero for every sample, which makes
-            // the relative error a literal 0/0 regardless of sample count.
+            // `Running::mean_and_stderr` gives NaN for exactly one reason:
+            // fewer than two samples to estimate a standard error from,
+            // only possible via the single-sample "blew the whole time
+            // budget already" path.
             //
             // With no error bar there is nothing to set the precision, so
             // fall back to a fixed four decimals.
-            let why = if self.samples < 2 {
-                format!(
-                    "only {} sample{}",
-                    self.samples,
-                    if self.samples == 1 { "" } else { "s" }
-                )
-            } else {
-                "measured time was exactly zero".to_string()
-            };
             let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
-            write!(f, "{value:>11} (± unknown, {why}){limit}")
+            write!(
+                f,
+                "{value:>11} (± unknown, only {} sample{}){limit}",
+                self.samples,
+                if self.samples == 1 { "" } else { "s" }
+            )
         } else {
-            let scaled = self.std_error / div;
-            // The error's own precision sets the measurement's: digits of
-            // the value beyond where the uncertainty starts are noise
-            // dressed up as signal. So `71.9858ns ± 0.17ns` is really only
-            // known to `71.99ns ± 0.17ns`, and printing the extra two
-            // digits invites a reader to believe them.
-            let decimals = error_decimals(scaled);
-            // Below about four decimal places, spelling the error out costs
-            // a run of leading zeroes that conveys nothing (an
-            // optimised-away benchmark can reach `0.000000021`). Scientific
-            // notation stays short and says the same thing - but the value
-            // still wants plain digits, so it keeps the decimal count that
-            // matches.
-            let error = if scaled > 0.0 && scaled < 1e-4 {
-                format!("{scaled:.1e}{unit}")
-            } else {
-                format!("{:.*}{}", decimals, scaled, unit)
-            };
-            let value = format!("{:.*}{}", decimals, self.ns_per_iter / div, unit);
+            let (value, error) = value_and_error(self.ns_per_iter / div, self.std_error / div);
+            let value = format!("{value}{unit}");
+            let error = format!("{error}{unit}");
             // Deliberately no iteration or sample count. Those were worth
             // showing when the only quality signal was an R², which says
             // nothing about how well the answer is known; now that the `±`

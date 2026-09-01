@@ -153,14 +153,8 @@ impl Display for ScalingStats {
                 self.samples, self.goodness_of_fit
             )
         } else {
-            let scaled = self.std_error() / div;
-            let decimals = error_decimals(scaled);
-            let error = if scaled > 0.0 && scaled < 1e-4 {
-                format!("{scaled:.1e}")
-            } else {
-                format!("{scaled:.*}", decimals)
-            };
-            let shown = format!("({:.*} ± {}){}{}", decimals, value, error, unit, suffix);
+            let (value, error) = value_and_error(value, self.std_error() / div);
+            let shown = format!("({value} ± {error}){unit}{suffix}");
             write!(f, "{shown:>22}{limit} (R²={:.3})", self.goodness_of_fit)
         }
     }
@@ -474,21 +468,6 @@ struct PolyFit {
     r2: f64,
 }
 
-/// Fit `t = c₀ + c₁N + ... + c_degree·N^degree` to sizes measured with
-/// known standard errors.
-///
-/// Differs from a plain weighted least squares in where the coefficient
-/// errors come from. When the point errors are only *assumed*, the usual
-/// move is to scale the covariance by the residual variance - the fit
-/// grades its own uncertainty from how well it happened to fit. Here each
-/// `se` was measured by repeating the benchmark at that size, so the
-/// covariance is `(XᵀWX)⁻¹` outright with `W = 1/se²`, and no rescaling is
-/// wanted.
-///
-/// That separation is the point: the coefficient errors then say how well
-/// the coefficients are known, and `chi2_per_dof` independently says
-/// whether the model fits at all. Conflated, a bad model quietly inflates
-/// the error bars instead of admitting it is the wrong shape.
 /// The narrowest error bar a fit will believe, used to weight a rung whose
 /// own came out as exactly zero.
 ///
@@ -523,6 +502,21 @@ fn weight_floor(ses: &[f64]) -> Option<f64> {
     floor.is_finite().then_some(floor)
 }
 
+/// Fit `t = c₀ + c₁N + ... + c_degree·N^degree` to sizes measured with
+/// known standard errors.
+///
+/// Differs from a plain weighted least squares in where the coefficient
+/// errors come from. When the point errors are only *assumed*, the usual
+/// move is to scale the covariance by the residual variance - the fit
+/// grades its own uncertainty from how well it happened to fit. Here each
+/// `se` was measured by repeating the benchmark at that size, so the
+/// covariance is `(XᵀWX)⁻¹` outright with `W = 1/se²`, and no rescaling is
+/// wanted.
+///
+/// That separation is the point: the coefficient errors then say how well
+/// the coefficients are known, and `chi2_per_dof` independently says
+/// whether the model fits at all. Conflated, a bad model quietly inflates
+/// the error bars instead of admitting it is the wrong shape.
 fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> Option<PolyFit> {
     let terms = degree + 1;
     let n = ns.len();
@@ -715,12 +709,14 @@ struct SizeRange {
     /// ladder. Stage one keeps it under a ceiling set from that budget, so
     /// a full opening round is affordable however the ladder comes out.
     lo_time: f64,
-    /// Continuous exponent: cost grows about as `N^exponent`.
+    /// Continuous exponent: cost grows about as `N^exponent`. `None` if the
+    /// climb never measured one - two points that were both too fast to
+    /// time give no rate either - in which case [`choose_sizes`] is on its
+    /// own for how expensive a larger size will turn out to be.
     ///
-    /// Continuous, not rounded. Rounding here would throw away exactly the
-    /// information [`choose_sizes`] needs, which is not what the answer is
-    /// but how expensive a larger size will turn out to be.
-    exponent: f64,
+    /// Continuous, not rounded, when present. Rounding here would throw
+    /// away exactly the information [`choose_sizes`] needs.
+    exponent: Option<f64>,
 }
 
 /// Stage one: find the smallest size worth measuring, and how fast cost
@@ -749,13 +745,11 @@ fn discover_sizes(
     // we have is the best we can offer, however untrustworthy its timing.
     let mut lo = (last_n, last_t);
     let mut prev: Option<(f64, f64)> = None;
-    let mut exponent = 1.0;
-    // Whether that 1.0 is a measurement or still the assumption it starts
-    // as. Two points are not enough to tell: a pair that were both too fast
-    // to time gives no rate either, so what matters is whether
-    // `two_point_exponent` ever actually answered, not whether we have been
-    // round the loop twice.
-    let mut exponent_measured = false;
+    // `None` until `two_point_exponent` actually answers. Two points are
+    // not enough on their own - a pair that were both too fast to time
+    // gives no rate either - so this tracks whether a rate was measured,
+    // not merely whether the loop has been round twice.
+    let mut exponent: Option<f64> = None;
     // See `measure_scaling`: the calls are not the only thing that costs
     // time here either.
     let started = Instant::now();
@@ -766,8 +760,7 @@ fn discover_sizes(
         }
         if let Some((pn, pt)) = prev {
             if let Some(p) = two_point_exponent(pn, pt, last_n as f64, last_t) {
-                exponent = p;
-                exponent_measured = true;
+                exponent = Some(p);
             }
         }
         // Measurable, and affordable: done climbing.
@@ -777,20 +770,41 @@ fn discover_sizes(
         }
         let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
         // Aim each step at the floor we are trying to clear; `next_size`
-        // caps the growth and keeps the step affordable.
-        let next = match next_size(last_n as f64, last_t, exponent, MIN_MEASURABLE, left) {
+        // caps the growth and keeps the step affordable. 1.0 is a fine
+        // assumption to plan a *discovery* step with when nothing better is
+        // known yet - being wrong about it here just wastes one cheap
+        // measurement and corrects itself next step, the same asymmetry
+        // `next_size`'s own docs lean on.
+        let next = match next_size(
+            last_n as f64,
+            last_t,
+            exponent.unwrap_or(1.0),
+            MIN_MEASURABLE,
+            left,
+        ) {
             Some(next) => next,
             // A call that measured as exactly zero gives `next_size`
             // nothing to work with: every step it could plan is a multiple
             // of a cost of zero, which is zero. Giving up here is what left
             // the ladder starting at `nmin` for anything too fast to time
-            // there - and left `exponent` at the assumed 1.0, never
-            // measured, for `choose_sizes` to budget the whole ladder with.
+            // there - and left `exponent` unmeasured for `choose_sizes` to
+            // budget the whole ladder without.
             //
             // So double instead, and let the next measurement say whether
             // that was enough. Doubling needs no estimate of a cost we do
             // not have, and it reaches any size worth reaching in a
-            // logarithmic number of steps, which `MAX_CLIMB_STEPS` bounds.
+            // logarithmic number of steps, which `MAX_CLIMB_STEPS` bounds -
+            // *for the cost this function can see*. `bench_scaling_gen`
+            // times only `f`, not `gen_env` (see `bench_scaling_gen_with`),
+            // so a `gen_env` that grows with `n` while `f` stays too fast to
+            // time is invisible here: doubling will keep asking for larger
+            // `n` on `gen_env`'s behalf with nothing to weigh that cost
+            // against, up to `nmin · 2^MAX_CLIMB_STEPS`. Budgeting that
+            // properly needs `gen_env` in the clock, which is deliberately
+            // excluded elsewhere for good reason (measurement purity), so
+            // this is a known gap rather than an oversight: keep `gen_env`
+            // cheap relative to `f`, the same assumption the crate already
+            // asks of it for the timed region to mean anything.
             None if last_t <= 0.0 => last_n.saturating_mul(2),
             None => break,
         };
@@ -807,32 +821,30 @@ fn discover_sizes(
         lo = (last_n, last_t);
     }
 
-    // A climb that never measured a growth rate has a floor but no rate,
-    // and `exponent` is still the assumed 1.0. That assumption is not
-    // harmless: `choose_sizes` budgets with it, so believing an N-cubed
-    // cost to be linear plans a ladder whose top rung costs hundreds of
-    // times what was predicted. One probe upward buys the real rate. It
-    // aims at the ceiling rather than the floor, which is already behind
-    // us, and `lo` does not move - the probe is reconnaissance, not a rung,
-    // and may well land somewhere too expensive to be one.
+    // A climb that never measured a growth rate has a floor but no rate.
+    // Leaving `exponent` unmeasured is not harmless: `choose_sizes` still
+    // has to plan a ladder from *something*, and a wrong guess there is not
+    // symmetric - see its own handling of `None`. One probe upward buys the
+    // real rate before guessing is the only option left. It aims at the
+    // ceiling rather than the floor, which is already behind us, and `lo`
+    // does not move - the probe is reconnaissance, not a rung, and may well
+    // land somewhere too expensive to be one.
     //
     // Two ways to arrive here with nothing measured: a climb that never
     // took a step, and one whose steps were all too fast to time until the
     // last, leaving a single usable point among several taken.
-    if !exponent_measured {
+    if exponent.is_none() {
         let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
         // Aim at where the ladder's top will be - `TIME_SPAN` times the
         // cost we are at. The floor is behind us, so aiming there would ask
         // for a step backwards and get none; aiming at the top measures the
         // growth rate across exactly the range it will be used to describe.
         let aim = Duration::from_secs_f64(last_t * TIME_SPAN / 1e9);
-        if let Some(next) = next_size(last_n as f64, last_t, exponent, aim, left) {
+        if let Some(next) = next_size(last_n as f64, last_t, 1.0, aim, left) {
             let next = (next / step).max(1) * step;
             if next > last_n {
                 let t = measure(next);
-                if let Some(p) = two_point_exponent(last_n as f64, last_t, next as f64, t) {
-                    exponent = p;
-                }
+                exponent = two_point_exponent(last_n as f64, last_t, next as f64, t);
             }
         }
     }
@@ -866,10 +878,20 @@ fn discover_sizes(
 /// each rung contribute comparably.
 fn choose_sizes(range: SizeRange, nmin: usize) -> Vec<usize> {
     let step = nmin.max(1);
+    // An unmeasured exponent is planned for at `MAX_DEGREE`, not at 1.0.
+    // The mistake is not symmetric: a span planned for a lower exponent
+    // than the true one reaches too far and can cost far more than
+    // predicted (the whole reason stage one spends a probe trying to avoid
+    // this), while planning for a higher exponent than the true one only
+    // asks for a narrower span - fewer sizes separated by less, corrected
+    // by the refinement loop noticing it needs more precision. Assuming the
+    // steepest cost this crate ever fits is the same asymmetry `next_size`
+    // leans on for its own pessimistic ceiling.
+    let assumed_exponent = range.exponent.unwrap_or(MAX_DEGREE as f64);
     // A cost that barely grows would need an unbounded size range to reach
     // `TIME_SPAN`; `MAX_SIZE_SPAN` is where we stop asking.
-    let span = if range.exponent > 0.0 {
-        TIME_SPAN.powf(1.0 / range.exponent).min(MAX_SIZE_SPAN)
+    let span = if assumed_exponent > 0.0 {
+        TIME_SPAN.powf(1.0 / assumed_exponent).min(MAX_SIZE_SPAN)
     } else {
         MAX_SIZE_SPAN
     };
@@ -1499,8 +1521,7 @@ mod tests {
             let mut ses = Vec::new();
             for &n in ns {
                 let truth = f(n);
-                let u = |r: &mut XorShift| (r.next() >> 11) as f64 / (1u64 << 53) as f64;
-                let jitter = (u(&mut rng) + u(&mut rng) - 1.0) * rel;
+                let jitter = rng.jitter(rel);
                 ts.push(truth * (1.0 + jitter));
                 ses.push(truth * rel);
             }
@@ -1606,8 +1627,7 @@ mod tests {
                 let truth = f(n);
                 let mut acc = Running::default();
                 for _ in 0..repeats {
-                    let u = |r: &mut XorShift| (r.next() >> 11) as f64 / (1u64 << 53) as f64;
-                    let jitter = (u(&mut rng) + u(&mut rng) - 1.0) * rel;
+                    let jitter = rng.jitter(rel);
                     acc.push(truth * (1.0 + jitter));
                 }
                 let (mean, se) = acc.mean_and_stderr();
@@ -1678,8 +1698,7 @@ mod tests {
         fn one_call(f: impl Fn(f64) -> f64, rel: f64, seed: u64) -> impl FnMut(usize) -> f64 {
             let mut rng = XorShift(seed | 1);
             move |n| {
-                let u = |r: &mut XorShift| (r.next() >> 11) as f64 / (1u64 << 53) as f64;
-                let jitter = (u(&mut rng) + u(&mut rng) - 1.0) * rel;
+                let jitter = rng.jitter(rel);
                 f(n as f64) * (1.0 + jitter)
             }
         }
@@ -1770,10 +1789,12 @@ mod tests {
                 "should have climbed to something measurable, got {}",
                 range.lo
             );
+            let exponent = range
+                .exponent
+                .expect("exponent should be measured, not assumed");
             assert!(
-                (range.exponent - 2.0).abs() < 0.5,
-                "exponent should be measured, not assumed: {}",
-                range.exponent
+                (exponent - 2.0).abs() < 0.5,
+                "exponent should read as roughly quadratic: {exponent}"
             );
         }
 
@@ -1788,6 +1809,10 @@ mod tests {
                 tried.len()
             );
             assert_eq!(0.0, range.lo_time);
+            // Never any two points to compare - there is nothing to say an
+            // exponent was measured, and this reports that honestly rather
+            // than falling back to an assumed value with no flag on it.
+            assert_eq!(None, range.exponent);
         }
 
         #[test]
@@ -2010,10 +2035,10 @@ mod tests {
                     tried.len() > 1,
                     "{name}: must probe upward to learn the growth rate"
                 );
+                let exponent = range.exponent.expect("a probed climb measures a rate");
                 assert!(
-                    (range.exponent - p).abs() < 0.2,
-                    "{name}: exponent came out {}",
-                    range.exponent
+                    (exponent - p).abs() < 0.2,
+                    "{name}: exponent came out {exponent}"
                 );
             }
         }
@@ -2032,7 +2057,7 @@ mod tests {
                         let range = SizeRange {
                             lo,
                             lo_time: 1e7,
-                            exponent: p,
+                            exponent: Some(p),
                         };
                         let sizes = choose_sizes(range, 1);
                         assert_eq!(
@@ -2060,7 +2085,7 @@ mod tests {
                     let range = SizeRange {
                         lo: nmin,
                         lo_time: 1e7,
-                        exponent: p,
+                        exponent: Some(p),
                     };
                     let sizes = choose_sizes(range, nmin);
                     assert!(
@@ -2087,7 +2112,7 @@ mod tests {
                 let range = SizeRange {
                     lo: 20_000,
                     lo_time: 1e7,
-                    exponent: p,
+                    exponent: Some(p),
                 };
                 let sizes = choose_sizes(range, 1);
                 assert_eq!(NUM_SIZES, sizes.len(), "p={p}: {sizes:?} collapsed");
@@ -2116,7 +2141,7 @@ mod tests {
             let range = SizeRange {
                 lo: 1000,
                 lo_time,
-                exponent: 1.0,
+                exponent: Some(1.0),
             };
             let sizes = choose_sizes(range, 1);
             let round: f64 = sizes
@@ -2141,7 +2166,7 @@ mod tests {
             let range = SizeRange {
                 lo: 1,
                 lo_time: 1e7,
-                exponent: 3.0,
+                exponent: Some(3.0),
             };
             let sizes = choose_sizes(range, 1);
             assert_eq!(vec![1, 2, 3, 4, 5, 6], sizes);

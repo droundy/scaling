@@ -382,6 +382,29 @@ fn error_decimals(x: f64) -> usize {
     (1 - x.log10().floor() as i64).clamp(0, 9) as usize
 }
 
+/// A value and its error, formatted to the precision the error justifies:
+/// digits of the value beyond where the uncertainty starts are noise
+/// dressed up as signal, so `71.9858 ± 0.17` is really only known to
+/// `71.99 ± 0.17`, and printing the extra two digits would invite a reader
+/// to believe them.
+///
+/// The error switches to scientific notation below `1e-4` rather than
+/// spelling out a run of leading zeroes - an optimised-away benchmark can
+/// reach `0.000000021` - but the value keeps plain digits at the same
+/// decimal count, which is what the scientific notation stands in for.
+///
+/// Callers own the unit: this only picks how many digits to show, in
+/// whatever unit `value` and `error` already share.
+fn value_and_error(value: f64, error: f64) -> (String, String) {
+    let decimals = error_decimals(error);
+    let error_str = if error > 0.0 && error < 1e-4 {
+        format!("{error:.1e}")
+    } else {
+        format!("{error:.decimals$}")
+    };
+    (format!("{value:.decimals$}"), error_str)
+}
+
 
 /// Running mean and variance of the per-iteration times, updated in O(1)
 /// per sample.
@@ -426,8 +449,14 @@ impl Running {
             return (self.mean, f64::NAN);
         }
         // Sample variance (Bessel-corrected), then the standard error of
-        // the mean.
-        let var = self.m2 / (self.count - 1) as f64;
+        // the mean. `m2` is a sum of squared deviations and so is only
+        // non-negative in exact arithmetic; on a run with almost no real
+        // spread, floating-point cancellation can push it fractionally
+        // below zero. That is the same fact a genuine `m2 == 0.0` reports -
+        // no detectable spread - so it is clamped there rather than let
+        // through to `sqrt` as a `NaN` that would misrepresent a clean
+        // measurement as a failed one.
+        let var = (self.m2 / (self.count - 1) as f64).max(0.0);
         (self.mean, (var / self.count as f64).sqrt())
     }
 }
@@ -446,6 +475,20 @@ pub(crate) mod testutil {
             x ^= x << 17;
             self.0 = x;
             x
+        }
+
+        /// Uniform on `[0, 1)`, from the top 53 bits - as many as an `f64`
+        /// mantissa holds.
+        fn uniform01(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        /// A relative jitter drawn from `[-rel, rel)`, roughly triangular
+        /// rather than flat: the sum of two independent uniforms concentrates
+        /// near zero the way real measurement noise does, instead of every
+        /// value in range being equally likely.
+        pub fn jitter(&mut self, rel: f64) -> f64 {
+            (self.uniform01() + self.uniform01() - 1.0) * rel
         }
     }
 
