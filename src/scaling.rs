@@ -142,15 +142,10 @@ impl Display for ScalingStats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let limit = if self.hit_limit { " (limit)" } else { "" };
         // Nothing identified means there is no value, no unit and no error
-        // bar to show - only how much work went into finding that out.
-        // Printing a zero here is what used to make "gave up" read exactly
-        // like "measured as free".
+        // bar to show, so the line says that and stops. A zero here would
+        // read exactly like a function measured as free.
         let Some(scaling) = self.scaling else {
-            return write!(
-                f,
-                "no scaling law identified after {} iterations{limit}",
-                self.iterations
-            );
+            return write!(f, "no scaling law identified{limit}");
         };
         // Same rules as `Stats`: value and error in one unit, the error to
         // two significant figures, and the value to exactly the precision
@@ -166,14 +161,12 @@ impl Display for ScalingStats {
         if self.std_error().is_nan() {
             // A law was found, so the only way here is a coefficient fitted
             // to exactly zero: the relative error is then infinite and the
-            // absolute one `0 * inf`. "Run it more times" would be the
-            // wrong advice, and a sweep measures every size at least twice
-            // anyway, so the count is never what is missing.
+            // absolute one `0 * inf`.
             write!(
                 f,
-                "{value:>8.2}{unit}{suffix} (± unknown, the fitted coefficient is zero \
-                 after {} iterations){limit} (R²={:.3})",
-                self.iterations, self.goodness_of_fit
+                "{value:>8.2}{unit}{suffix} (± unknown, the fitted coefficient is zero)\
+                 {limit} (R²={:.3})",
+                self.goodness_of_fit
             )
         } else {
             let (value, error) = value_and_error(value, self.std_error() / div);
@@ -2199,11 +2192,12 @@ mod tests {
             assert!(stats.std_error().is_nan());
             let shown = format!("{stats}");
             assert!(shown.contains("no scaling law identified"), "{shown}");
-            assert!(shown.contains("72 iterations"), "{shown}");
             // No fabricated value, and so no unit or error bar pretending
-            // to qualify one.
+            // to qualify one - and no count, which `Stats` leaves off its
+            // line for the same reason.
             assert!(!shown.contains('±'), "{shown}");
             assert!(!shown.contains("0.00"), "{shown}");
+            assert!(!shown.contains("72"), "{shown}");
         }
 
         #[test]
@@ -2577,5 +2571,3 @@ mod tests {
 
 
 }
-
-
