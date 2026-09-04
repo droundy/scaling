@@ -437,52 +437,36 @@ where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    // Cap how much wall-clock time a single calibration probe - setup plus
-    // timing - may cost. Ordinarily the extrapolation below is driven
-    // entirely by the timed portion approaching `SAMPLE_TIME`. But if
-    // `f`'s cost is optimised away (see the module docs' "Pure functions"
-    // caveat, e.g. `bench_env(v, |_| {})`), the timed portion never grows
-    // no matter how large `unit` gets, while untimed environment
-    // construction - which very much does cost real time and memory for a
-    // non-trivial `I` - would otherwise grow without bound before the
-    // `start.elapsed() > cfg.max_time` check below ever gets a chance to
-    // run, since that allocation itself can take unbounded time. This
-    // ceiling bounds the *total* cost of a probe, not just the part we
-    // intend to measure, so it catches that case regardless of what `I` is.
-    // Kept well under `max_time` (rather than some large fraction of it) to
-    // limit *memory*, not just time: on fast hardware a looser ceiling
-    // would let calibration allocate proportionally more before it fires.
+    // A ceiling on the *total* cost of one probe, setup as well as timing.
+    // Ordinarily the extrapolation below is driven by the timed portion
+    // approaching `SAMPLE_TIME`, but when `f`'s cost is optimised away (see
+    // the module docs' "Pure functions" caveat, e.g. `bench_env(v, |_| {})`)
+    // that portion never grows however large `unit` gets - while untimed
+    // environment construction does, unboundedly, and before the
+    // `start.elapsed() > cfg.max_time` check below can ever run, since the
+    // allocation is itself what takes the time. A hundredth of `max_time`
+    // rather than some large fraction of it, to bound memory as well: on
+    // fast hardware a looser ceiling buys proportionally more allocation
+    // before it fires.
     let probe_ceiling_ns = (cfg.max_time / 100)
         .max(Duration::from_millis(5))
         .as_secs_f64()
         * 1e9;
-    // Two independent, timing-blind ceilings on `unit` itself, combined by
-    // taking whichever is smaller. Neither is a hard memory guarantee on its
-    // own - see below - but together they cover far more real cases than
-    // either alone:
-    //
-    // `MAX_CALIBRATION_UNIT` catches the case the time-based ceiling above
-    // cannot: when *both* `f` and the environment are trivial enough (e.g.
-    // `bench(|| {})`, where `I` is `()`), the optimiser can eliminate the
-    // entire batch - construction and loop alike - up to an enormous `unit`,
-    // so `setup_ns` and `t` can both keep reading as ~0 indefinitely and no
-    // timing-based check can detect that in advance.
-    //
-    // `MAX_CALIBRATION_BYTES / size_of::<I>()` catches the complementary
-    // case: a non-trivial, non-heap-indirect `I` (an array, a plain struct)
-    // whose per-clone cost is real but small, where `probe_ceiling_ns`
-    // alone would still permit millions of copies before firing. For a
-    // heap-indirect `I` (`Vec<T>`, `Box<T>`, `String`) `size_of::<I>()` only
-    // sees the inline handle, not what it points to, so this cap cannot see
-    // that memory either - the time-based ceiling above is what bounds that
-    // case, imperfectly, by keeping the *wall-clock cost* of construction
-    // bounded even when its *size* is invisible to us. Between the three,
-    // every case has at least one real backstop, but none of them alone is
-    // a hard guarantee for every `I` - as always, keep your environment
-    // small (see the module docs).
+    // Two more ceilings on `unit`, needing no timing at all, whichever is
+    // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with
+    // `f` *and* the environment both trivial (`bench(|| {})`, `I` of `()`)
+    // the optimiser can delete the whole batch, so `setup_ns` and `t` read
+    // as ~0 however large `unit` grows. `MAX_CALIBRATION_BYTES` covers an
+    // `I` whose per-clone cost is real but too small for `probe_ceiling_ns`
+    // to catch before millions of copies - an array, a plain struct - since
+    // `size_of` sees a `Vec` or `String` as its inline handle only. That
+    // last case is left to the wall-clock ceiling above, which bounds it
+    // only indirectly: between the three every `I` has some backstop and
+    // none has a hard guarantee, so keep environments small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
-    let unit_cap = MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
+    let unit_cap =
+        MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
     let target = SAMPLE_TIME.as_secs_f64() * 1e9;
     let mut unit = 1usize;
     // Every probe really does run the benchmark, so they count towards
