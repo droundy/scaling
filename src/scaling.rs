@@ -94,17 +94,12 @@ pub struct ScalingStats {
     /// so read the two together, and treat a tight error bar next to a zero
     /// `goodness_of_fit` as "precise about a shape I could not pin down".
     ///
-    /// `NaN` before three samples, where a standard error cannot exist.
+    /// `NaN` when no scaling law was identified, there being nothing for it
+    /// to be the error of.
     pub rel_std_error: f64,
     pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
-    ///
-    /// One call per sample here, unlike [`Stats`], which counts batched
-    /// iterations separately from the samples they were batched into.
-    /// Nothing is batched in a scaling sweep - a size large enough to time
-    /// does the job a batch would have - so the two counts would be the
-    /// same number and only one is kept.
-    pub samples: usize,
+    pub iterations: u64,
     /// `true` if the benchmark ran out of time before reaching its
     /// `accuracy` target, or gave up without identifying a scaling law.
     pub hit_limit: bool,
@@ -153,8 +148,8 @@ impl Display for ScalingStats {
         let Some(scaling) = self.scaling else {
             return write!(
                 f,
-                "no scaling law identified after {} samples{limit}",
-                self.samples
+                "no scaling law identified after {} iterations{limit}",
+                self.iterations
             );
         };
         // Same rules as `Stats`: value and error in one unit, the error to
@@ -171,14 +166,14 @@ impl Display for ScalingStats {
         if self.std_error().is_nan() {
             // A law was found, so the only way here is a coefficient fitted
             // to exactly zero: the relative error is then infinite and the
-            // absolute one `0 * inf`. "Take more samples" would be the
+            // absolute one `0 * inf`. "Run it more times" would be the
             // wrong advice, and a sweep measures every size at least twice
             // anyway, so the count is never what is missing.
             write!(
                 f,
                 "{value:>8.2}{unit}{suffix} (± unknown, the fitted coefficient is zero \
-                 after {} samples){limit} (R²={:.3})",
-                self.samples, self.goodness_of_fit
+                 after {} iterations){limit} (R²={:.3})",
+                self.iterations, self.goodness_of_fit
             )
         } else {
             let (value, error) = value_and_error(value, self.std_error() / div);
@@ -286,9 +281,9 @@ fn scaling_sweep(
     nmin: usize,
     mut measure: impl FnMut(usize) -> f64,
 ) -> ScalingStats {
-    let mut samples = 0usize;
+    let mut iterations = 0u64;
     let mut counted = |n: usize| {
-        samples += 1;
+        iterations += 1;
         measure(n)
     };
 
@@ -312,7 +307,7 @@ fn scaling_sweep(
             scaling: None,
             rel_std_error: f64::NAN,
             goodness_of_fit: 0.0,
-            samples,
+            iterations,
             hit_limit: true,
         };
     };
@@ -344,7 +339,7 @@ fn scaling_sweep(
         } else {
             fit.r2.max(0.0)
         },
-        samples,
+        iterations,
         hit_limit: measured.hit_limit || rejected,
     }
 }
@@ -2198,13 +2193,13 @@ mod tests {
                 scaling: None,
                 rel_std_error: f64::NAN,
                 goodness_of_fit: 0.0,
-                samples: 72,
+                iterations: 72,
                 hit_limit: true,
             };
             assert!(stats.std_error().is_nan());
             let shown = format!("{stats}");
             assert!(shown.contains("no scaling law identified"), "{shown}");
-            assert!(shown.contains("72 samples"), "{shown}");
+            assert!(shown.contains("72 iterations"), "{shown}");
             // No fabricated value, and so no unit or error bar pretending
             // to qualify one.
             assert!(!shown.contains('±'), "{shown}");

@@ -39,12 +39,6 @@ everything is in the same unit. The time itself is printed to exactly the
 precision the error justifies — `72.17ns ± 0.46ns`, never `72.1683ns`,
 since those last digits are noise wearing the costume of signal.
 
-Iteration and sample counts are deliberately not printed. They were worth
-showing back when the only quality signal was an R², which says nothing
-about how well the answer is known; now that the `±` states the precision
-outright, they are clutter on a line meant to be scanned down a column.
-Both are still on `Stats` if you want them.
-
 ## Scaling behaviour
 
 `bench_scaling` measures how the cost grows with `N` and reports the
@@ -80,11 +74,6 @@ Measuring stops only when the shape is settled *and* the constant is precise
 enough. Both, because a wrong model does not present as an imprecise one -
 fit a constant to a cost that grows and its prefactor is essentially the
 mean of every measurement, precise straight away and quite wrong.
-
-Nothing is batched: one call per sample. A benchmark worth asking about the
-scaling of gets slow as `N` grows, so where a batch would have been needed
-to out-measure the clock, a larger `N` does the same job and tells you
-something you wanted to know anyway.
 
 The `R²` figure answers a question the `±` cannot. Two things have to be
 settled - which law, and how big its constant is - and they can fail
@@ -189,7 +178,7 @@ sudo `which quiet-bench` restore
 ```
 
 Everything here is Linux-only and entirely optional; on other platforms, and
-when no reservation is active, benchmarks simply run as before.
+when no reservation is active, benchmarks simply run normally.
 
 ## License
 
