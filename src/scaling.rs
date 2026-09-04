@@ -28,19 +28,44 @@ impl Config {
     where
         F: Fn(usize) -> O,
     {
-        bench_scaling_with(self, f, nmin)
+        quiet::pin_if_requested();
+        scaling_sweep(self, nmin, |n| {
+            // `black_box` on the size as well as the result: without it the
+            // optimiser can see a literal `n` and lift the whole call out,
+            // the job the old code did by running over a `vec![n; iters]`.
+            let n = black_box(n);
+            let start = Instant::now();
+            black_box(f(n));
+            start.elapsed().as_secs_f64() * 1e9
+        })
     }
 
     /// Benchmark the power-law scaling of a function with a generated input.
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
-    pub fn bench_scaling_gen<G, F, I, O>(&self, gen_env: G, f: F, nmin: usize) -> ScalingStats
+    pub fn bench_scaling_gen<G, F, I, O>(
+        &self,
+        mut gen_env: G,
+        f: F,
+        nmin: usize,
+    ) -> ScalingStats
     where
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
     {
-        bench_scaling_gen_with(self, gen_env, f, nmin)
+        quiet::pin_if_requested();
+        scaling_sweep(self, nmin, |n| {
+            // Build the environment before the clock starts and drop it
+            // after the clock stops, so neither generation nor drop lands
+            // in the measurement.
+            let mut x = gen_env(n);
+            let start = Instant::now();
+            black_box(f(&mut x));
+            let elapsed = start.elapsed();
+            drop(x);
+            elapsed.as_secs_f64() * 1e9
+        })
     }
 }
 
@@ -73,9 +98,12 @@ pub struct ScalingStats {
     pub rel_std_error: f64,
     pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
-    pub iterations: u64,
-    /// How many samples were taken (ie. how many times we allocated the
-    /// environment and measured the time).
+    ///
+    /// One call per sample here, unlike [`Stats`], which counts batched
+    /// iterations separately from the samples they were batched into.
+    /// Nothing is batched in a scaling sweep - a size large enough to time
+    /// does the job a batch would have - so the two counts would be the
+    /// same number and only one is kept.
     pub samples: usize,
     /// `true` if the benchmark ran out of time before reaching its
     /// `accuracy` target, or gave up without identifying a scaling law.
@@ -166,17 +194,14 @@ impl Scaling {
     /// inside the parentheses with the value it qualifies, and the unit
     /// only wants saying once.
     fn scale_suffix(&self) -> String {
+        // Only up to `MAX_DEGREE`, which is as high as a fit ever goes. A
+        // larger power can only arrive on a `Scaling` a caller built by
+        // hand, and `/N^5` reads well enough for that.
         match self.power {
             0 => "/iter".to_string(),
             1 => "/N".to_string(),
             2 => "/N²".to_string(),
             3 => "/N³".to_string(),
-            4 => "/N⁴".to_string(),
-            5 => "/N⁵".to_string(),
-            6 => "/N⁶".to_string(),
-            7 => "/N⁷".to_string(),
-            8 => "/N⁸".to_string(),
-            9 => "/N⁹".to_string(),
             p => format!("/N^{p}"),
         }
     }
@@ -247,22 +272,6 @@ where
     Config::default().bench_scaling(f, nmin)
 }
 
-fn bench_scaling_with<F, O>(cfg: &Config, f: F, nmin: usize) -> ScalingStats
-where
-    F: Fn(usize) -> O,
-{
-    quiet::pin_if_requested();
-    scaling_sweep(cfg, nmin, |n| {
-        // `black_box` on the size as well as the result: without it the
-        // optimiser can see a literal `n` and lift the whole call out, the
-        // job the old code did by running over a `vec![n; iters]`.
-        let n = black_box(n);
-        let start = Instant::now();
-        black_box(f(n));
-        start.elapsed().as_secs_f64() * 1e9
-    })
-}
-
 /// Run both stages and turn the result into a [`ScalingStats`].
 ///
 /// `measure(n)` performs one call at size `n` and returns its cost in
@@ -277,9 +286,9 @@ fn scaling_sweep(
     nmin: usize,
     mut measure: impl FnMut(usize) -> f64,
 ) -> ScalingStats {
-    let mut calls = 0u64;
+    let mut samples = 0usize;
     let mut counted = |n: usize| {
-        calls += 1;
+        samples += 1;
         measure(n)
     };
 
@@ -296,10 +305,6 @@ fn scaling_sweep(
         &mut counted,
     );
 
-    // One call per sample, so these two counts are the same number. Both
-    // are kept because they answer different questions for a caller, and
-    // because the plain-`bench` side of the crate still distinguishes them.
-    let samples = calls as usize;
     let Some(fit) = measured.fit else {
         // No degree cleared its own error bar - the cost did not measurably
         // grow, and did not measurably do anything else either.
@@ -307,7 +312,6 @@ fn scaling_sweep(
             scaling: None,
             rel_std_error: f64::NAN,
             goodness_of_fit: 0.0,
-            iterations: calls,
             samples,
             hit_limit: true,
         };
@@ -340,12 +344,10 @@ fn scaling_sweep(
         } else {
             fit.r2.max(0.0)
         },
-        iterations: calls,
         samples,
         hit_limit: measured.hit_limit || rejected,
     }
 }
-
 
 /// Benchmark the power-law scaling of the function with generated input
 ///
@@ -353,41 +355,9 @@ fn scaling_sweep(
 /// to construct the input to your benchmarked function.
 ///
 /// Reports the integer power ᴾ in 𝑶(𝑁ᴾ) and the constant in front of it,
-/// with a standard error. Sizes are chosen by a first stage that climbs
-/// until a single call is long enough to time; each is then measured
-/// repeatedly, so the fit is judged against error bars that were measured
-/// rather than assumed. A cost that is not a power law is rejected -
-/// `goodness_of_fit` zeroed and `hit_limit` set - rather than fitted anyway.
-/// Takes around 10s by default; see [`Config::max_time`].
-///
-/// # Choosing `nmin`
-///
-/// Sizes are measured in multiples of `nmin`, and nothing smaller is tried.
-/// That matters more than it looks, because many costs simply do not behave
-/// the same way at small sizes: a vector that fits in cache is a different
-/// machine from one that does not, and measuring across the boundary fits a
-/// curve to two regimes at once.
-///
-/// Summing a vector shows this plainly. Run from `nmin` of 1 it is not a
-/// power law at all - it is rejected on every run, its constant moves by
-/// tens of percent between runs, and the reported `±` understates that by a
-/// factor of fifty. Raising `nmin` until the smallest size is already out
-/// of cache fixes it:
-///
-/// ```none
-/// nmin           reported   spread over 8 runs   claimed +-
-///       1     0.303 ns/N          39.5%              0.74%
-///   1_000     0.371 ns/N           8.9%              0.60%
-/// 100_000     0.423 ns/N           2.8%              0.73%
-/// 1_000_000   0.686 ns/N           0.7%              0.58%
-/// ```
-///
-/// Note that the answer *changes*, and is not converging on a mistake being
-/// corrected: per-element cost really is higher once the vector no longer
-/// fits in cache. There is no single true number here, only one per regime,
-/// and `nmin` is how you say which regime you meant. If a scaling result
-/// comes back flagged, an `nmin` above wherever your workload changes
-/// character is the first thing to try.
+/// with a standard error, exactly as [`bench_scaling`] does - including how
+/// much the choice of `nmin` matters, which is worth reading there before
+/// trusting a result from here.
 ///
 /// # Example
 ///
@@ -419,31 +389,6 @@ where
 {
     Config::default().bench_scaling_gen(gen_env, f, nmin)
 }
-
-fn bench_scaling_gen_with<G, F, I, O>(
-    cfg: &Config,
-    mut gen_env: G,
-    f: F,
-    nmin: usize,
-) -> ScalingStats
-where
-    G: FnMut(usize) -> I,
-    F: Fn(&mut I) -> O,
-{
-    quiet::pin_if_requested();
-    scaling_sweep(cfg, nmin, |n| {
-        // Build the environment before the clock starts and drop it after
-        // the clock stops, so neither generation nor drop lands in the
-        // measurement.
-        let mut x = gen_env(n);
-        let start = Instant::now();
-        black_box(f(&mut x));
-        let elapsed = start.elapsed();
-        drop(x);
-        elapsed.as_secs_f64() * 1e9
-    })
-}
-
 
 // The polynomial fit below is validated against synthetic data in
 // `tests::fitting`, but does not yet drive `compute_scaling_gen`: wiring it
@@ -527,11 +472,13 @@ fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> O
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
+    // `max` because `floor` is the smallest *positive* error in the ladder,
+    // so it changes only the rungs that reported none at all.
     let floor = weight_floor(ses)?;
     let ws: Vec<f64> = ses
         .iter()
         .map(|&se| {
-            let se = if se > 0.0 { se } else { floor };
+            let se = se.max(floor);
             1.0 / (se * se)
         })
         .collect();
@@ -897,30 +844,29 @@ fn choose_sizes(range: SizeRange, nmin: usize) -> Vec<usize> {
     };
     let ratio = span.powf(1.0 / (NUM_SIZES - 1) as f64);
 
-    let mut sizes: Vec<usize> = Vec::with_capacity(NUM_SIZES);
-    for i in 0..NUM_SIZES {
-        let x = range.lo as f64 * ratio.powi(i as i32);
-        let n = ((x / step as f64).round().max(1.0) as usize).saturating_mul(step);
-        // Rounding onto a multiple of `nmin` can land two rungs together;
-        // keep the ladder strictly increasing rather than measuring a size
-        // twice and calling the two measurements independent.
-        if sizes.last() != Some(&n) {
-            sizes.push(n);
-        }
-    }
-
-    // Log spacing assumes there are enough distinct integers in the range
-    // to land on, and near the bottom there are not: a cubic cost wants a
-    // size span of only 1.59, which from `lo` of 1 rounds every rung onto
-    // 1 or 2. Too few sizes to fit is the one failure with no answer at
-    // all, so fall back to the densest packing there is - consecutive steps
-    // up from `lo`, every one the smallest size still available.
-    if sizes.len() < NUM_SIZES {
-        sizes = (0..NUM_SIZES)
-            .map(|i| range.lo.saturating_add(i.saturating_mul(step)))
-            .collect();
-    }
-    sizes
+    (0..NUM_SIZES)
+        .map(|i| {
+            let x = range.lo as f64 * ratio.powi(i as i32);
+            let log_spaced = ((x / step as f64).round().max(1.0) as usize).saturating_mul(step);
+            // Log spacing assumes there are enough distinct integers in the
+            // range to land on, and near the bottom there are not: a cubic
+            // cost wants a size span of only 1.59, which from `lo` of 1
+            // rounds every rung onto 1 or 2. Too few distinct sizes is the
+            // one failure with no answer at all, so every rung is also held
+            // at least one `step` above the one below it - the densest
+            // packing there is, and the smallest size still available.
+            //
+            // Taking the larger of the two makes the ladder strictly
+            // increasing by construction: the floor rises by exactly `step`
+            // each rung while log spacing never falls, so no rung can land
+            // on the one before it and there is nothing to check afterwards.
+            // Where log spacing has room it wins outright and this floor
+            // never binds; where it collapses the floor takes over rung by
+            // rung, rather than the whole ladder switching to a second
+            // scheme at a threshold.
+            log_spaced.max(range.lo.saturating_add(i.saturating_mul(step)))
+        })
+        .collect()
 }
 
 /// How many times each size is measured before the first fit is attempted.
@@ -1013,13 +959,7 @@ fn measure_scaling(
     }
 
     loop {
-        let mut means = Vec::with_capacity(acc.len());
-        let mut ses = Vec::with_capacity(acc.len());
-        for a in &acc {
-            let (m, se) = a.mean_and_stderr();
-            means.push(m);
-            ses.push(se);
-        }
+        let (means, ses): (Vec<f64>, Vec<f64>) = acc.iter().map(|a| a.mean_and_stderr()).unzip();
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
         // `map_or` rather than `is_some_and`, which needs a newer compiler
         // than the `rust-version` in `Cargo.toml` promises.
@@ -1129,18 +1069,15 @@ fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
         for v in m[col].iter_mut() {
             *v /= d;
         }
+        // Copied rather than borrowed in place: the matrix is at most four
+        // rows of eight, so one small clone per column costs nothing worth
+        // the borrow-splitting it saves.
+        let pivot_row = m[col].clone();
         for row in 0..n {
             if row != col {
                 let f = m[row][col];
                 if f != 0.0 {
-                    let (pivot_row, target) = if row < col {
-                        let (a, b) = m.split_at_mut(col);
-                        (&b[0], &mut a[row])
-                    } else {
-                        let (a, b) = m.split_at_mut(row);
-                        (&a[col], &mut b[0])
-                    };
-                    for (t, p) in target.iter_mut().zip(pivot_row.iter()) {
+                    for (t, p) in m[row].iter_mut().zip(&pivot_row) {
                         *t -= f * p;
                     }
                 }
@@ -1164,8 +1101,6 @@ fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
 struct PowerFit {
     /// The exponent `p`.
     exponent: f64,
-    /// Standard error of `exponent`.
-    exponent_se: f64,
     /// The prefactor `c`, in nanoseconds, so that `t ≈ c·Nᵖ`.
     prefactor: f64,
     /// Chi-squared per degree of freedom.
@@ -1215,7 +1150,7 @@ fn power_fit(ns: &[f64], ts: &[f64], ses: &[f64]) -> Option<PowerFit> {
         if !(n > 0.0 && t > 0.0) {
             return None;
         }
-        let se = if se > 0.0 { se } else { floor };
+        let se = se.max(floor);
         x.push(n.ln());
         y.push(t.ln());
         w.push((t / se).powi(2));
@@ -1251,10 +1186,6 @@ fn power_fit(ns: &[f64], ts: &[f64], ses: &[f64]) -> Option<PowerFit> {
         .sum();
     Some(PowerFit {
         exponent,
-        // With known variances the exponent's variance is 1/Sxx outright -
-        // no residual scale enters, because the weights are already in the
-        // right units.
-        exponent_se: (1.0 / sxx).sqrt(),
         prefactor: intercept.exp(),
         chi2_per_dof: chi2 / (ns.len() - 2) as f64,
     })
@@ -2267,7 +2198,6 @@ mod tests {
                 scaling: None,
                 rel_std_error: f64::NAN,
                 goodness_of_fit: 0.0,
-                iterations: 72,
                 samples: 72,
                 hit_limit: true,
             };
