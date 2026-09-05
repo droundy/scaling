@@ -46,40 +46,55 @@ impl Display for Comparison {
 }
 
 impl Config {
-    pub fn compare<BASE, CAND, O>(&self, mut f_base: BASE, mut f_cand: CAND) -> Comparison
+    pub fn compare<BASELINE, CANDIDATE, O>(
+        &self,
+        mut f_baseline: BASELINE,
+        mut f_candidate: CANDIDATE,
+    ) -> Comparison
     where
-        BASE: FnMut() -> O,
-        CAND: FnMut() -> O,
+        BASELINE: FnMut() -> O,
+        CANDIDATE: FnMut() -> O,
     {
-        self.compare_env((), |_| f_base(), |_| f_cand())
+        self.compare_env((), |_| f_baseline(), |_| f_candidate())
     }
 
-    pub fn compare_env<BASE, CAND, I, O>(&self, env: I, f_base: BASE, f_cand: CAND) -> Comparison
+    pub fn compare_env<BASELINE, CANDIDATE, I, O>(
+        &self,
+        env: I,
+        f_baseline: BASELINE,
+        f_candidate: CANDIDATE,
+    ) -> Comparison
     where
-        BASE: FnMut(&mut I) -> O,
-        CAND: FnMut(&mut I) -> O,
+        BASELINE: FnMut(&mut I) -> O,
+        CANDIDATE: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.compare_gen_env(move || env.clone(), f_base, f_cand)
+        self.compare_gen_env(move || env.clone(), f_baseline, f_candidate)
     }
 
-    pub fn compare_gen_env<G, BASE, CAND, I, O>(
+    pub fn compare_gen_env<G, BASELINE, CANDIDATE, I, O>(
         &self,
         mut gen_env: G,
-        mut f_base: BASE,
-        mut f_cand: CAND,
+        mut f_baseline: BASELINE,
+        mut f_candidate: CANDIDATE,
     ) -> Comparison
     where
         G: FnMut() -> I,
-        BASE: FnMut(&mut I) -> O,
-        CAND: FnMut(&mut I) -> O,
+        BASELINE: FnMut(&mut I) -> O,
+        CANDIDATE: FnMut(&mut I) -> O,
     {
         self.num_comparisons_made.fetch_add(1, Release);
         quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, base_ns, cand_ns, probed) =
-            calibrate(&mut gen_env, &mut f_base, &mut f_cand, &mut xs, self, start);
+        let (unit, base_ns, cand_ns, probed) = calibrate(
+            &mut gen_env,
+            &mut f_baseline,
+            &mut f_candidate,
+            &mut xs,
+            self,
+            start,
+        );
         if start.elapsed() > self.max_time {
             return Comparison {
                 baseline: Stats {
@@ -105,8 +120,8 @@ impl Config {
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
         loop {
-            let (_, base_t) = time_batch(&mut gen_env, &mut f_base, &mut xs, unit);
-            let (_, cand_t) = time_batch(&mut gen_env, &mut f_cand, &mut xs, unit);
+            let (_, base_t) = time_batch(&mut gen_env, &mut f_baseline, &mut xs, unit);
+            let (_, cand_t) = time_batch(&mut gen_env, &mut f_candidate, &mut xs, unit);
             base_samples.push(base_t / unit as f64);
             cand_samples.push(cand_t / unit as f64);
 
