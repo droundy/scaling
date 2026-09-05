@@ -225,15 +225,14 @@ backticks; or copy it to /usr/local/bin to type the short form.
         // partway through still leaves a state file `restore` can use.
         save_original_state(&changes)?;
 
-        let _ = Command::new("systemctl").args(["stop", "irqbalance"]).status();
+        let _ = Command::new("systemctl")
+            .args(["stop", "irqbalance"])
+            .status();
         let applied = changes
             .iter()
             .filter(|(path, value)| fs::write(path, value).is_ok())
             .count();
-        notes.push(format!(
-            "applied {applied} of {} settings",
-            changes.len()
-        ));
+        notes.push(format!("applied {applied} of {} settings", changes.len()));
 
         // Herd existing tasks (and, by inheritance, their children) onto the
         // housekeeping CPUs. Not part of `changes` because affinity is not a
@@ -470,7 +469,11 @@ backticks; or copy it to /usr/local/bin to type the short form.
                 Err(_) => continue,
             };
             for task in tasks.flatten() {
-                if let Some(tid) = task.file_name().to_str().and_then(|t| t.parse::<i32>().ok()) {
+                if let Some(tid) = task
+                    .file_name()
+                    .to_str()
+                    .and_then(|t| t.parse::<i32>().ok())
+                {
                     if pin_thread(tid, cpus).is_ok() {
                         moved += 1;
                     }

@@ -70,10 +70,7 @@ impl Row {
         Row::measure_noting(name, move || (run(), String::new()))
     }
 
-    fn measure_noting(
-        name: &'static str,
-        mut run: impl FnMut() -> (f64, String),
-    ) -> Row {
+    fn measure_noting(name: &'static str, mut run: impl FnMut() -> (f64, String)) -> Row {
         let mut values = Vec::with_capacity(REPEATS);
         let mut notes = Vec::with_capacity(REPEATS);
         let mut total = Duration::ZERO;
@@ -142,7 +139,10 @@ fn table(title: &str, unit: &str, rows: &[Row]) {
     println!("{}", "-".repeat(title.len()));
     println!(
         "  {:<26} {:>12} {:>12} {:>10}",
-        "", format!("reported{unit}"), "spread", "wall"
+        "",
+        format!("reported{unit}"),
+        "spread",
+        "wall"
     );
     for r in rows {
         // Spread as a share of the value is the comparable form, but it is
@@ -284,18 +284,20 @@ fn main() {
         }),
         Row::measure_noting("O(N log N) sort", || {
             let s = bench_scaling_gen(
-                |n| (0..n as u64).map(|i| (i * 13 + 5) % 137).collect::<Vec<_>>(),
+                |n| {
+                    (0..n as u64)
+                        .map(|i| (i * 13 + 5) % 137)
+                        .collect::<Vec<_>>()
+                },
                 |v| v.sort(),
                 1,
             );
             (reported(&s), note(&s))
         }),
         Row::measure_noting("O(N) sleep", || {
-            let s =
-                bench_scaling(|n| std::thread::sleep(Duration::from_millis(n as u64)), 1);
+            let s = bench_scaling(|n| std::thread::sleep(Duration::from_millis(n as u64)), 1);
             (reported(&s), note(&s))
         }),
     ];
     table("bench_scaling(), by benchmark", "/N^p", &scaling);
-
 }
