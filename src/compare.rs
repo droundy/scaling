@@ -20,7 +20,7 @@ impl Comparison {
         self.new.ns_per_iter - self.old.ns_per_iter
     }
     pub fn std_error(&self) -> f64 {
-        (self.new.std_error.powi(2) - self.old.std_error.powi(2)).sqrt()
+        (self.new.std_error.powi(2) + self.old.std_error.powi(2)).sqrt()
     }
     pub fn is_changed(&self) -> bool {
         crate::significant::is_significant(self.difference_ns(), self.std_error(), 0.05)
