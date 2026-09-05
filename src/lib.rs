@@ -62,7 +62,11 @@ one governs.
 
 The output includes the standard error of the measurement, printed after
 the `±` in the same unit as the measurement itself, and the measurement is
-printed to exactly the precision that error justifies.
+printed to exactly the precision that error justifies.  Quick statistics
+note:  in general you should expect a measured value to be more than *two*
+standard errors *away* from the true value about 5% of the time, and about a
+third of the time you should expect the discrepancy to be more than one
+standard error.  So do *not* take this `±` value as a bound on the error!
 
 [`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
 and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
