@@ -123,9 +123,8 @@ pub fn reserved_cpus() -> Option<String> {
 #[cfg(target_os = "linux")]
 pub fn current_affinity() -> Option<String> {
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
-    };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
     if rc != 0 {
         return None;
     }

@@ -44,12 +44,7 @@ impl Config {
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
-    pub fn bench_scaling_gen<G, F, I, O>(
-        &self,
-        mut gen_env: G,
-        f: F,
-        nmin: usize,
-    ) -> ScalingStats
+    pub fn bench_scaling_gen<G, F, I, O>(&self, mut gen_env: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
@@ -269,11 +264,7 @@ where
 /// gets [`DISCOVERY_SHARE`] to find the sizes and stage two gets what is
 /// left to measure them properly. Keeping them separate means a slow
 /// discovery cannot starve the measurement it exists to set up.
-fn scaling_sweep(
-    cfg: &Config,
-    nmin: usize,
-    mut measure: impl FnMut(usize) -> f64,
-) -> ScalingStats {
+fn scaling_sweep(cfg: &Config, nmin: usize, mut measure: impl FnMut(usize) -> f64) -> ScalingStats {
     let mut iterations = 0u64;
     let mut counted = |n: usize| {
         iterations += 1;
@@ -382,7 +373,6 @@ where
 // `tests::fitting`, but does not yet drive `compute_scaling_gen`: wiring it
 // in changes what gets reported for real workloads (notably `N log N`, which
 // is not a polynomial at all), so it lands separately from the machinery.
-
 
 /// A polynomial fit against sizes whose error bars were *measured* rather
 /// than inferred.
@@ -516,9 +506,8 @@ fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> O
         }
         se.push(var.sqrt());
     }
-    let unscale = |v: &[f64]| -> Vec<f64> {
-        (0..terms).map(|j| v[j] / scale.powi(j as i32)).collect()
-    };
+    let unscale =
+        |v: &[f64]| -> Vec<f64> { (0..terms).map(|j| v[j] / scale.powi(j as i32)).collect() };
     // Weighted R², about the weighted mean. Reported alongside chi-squared
     // rather than instead of it: R² says how much of the spread the fit
     // accounts for, which is flattering whenever the spread is large, while
@@ -1012,12 +1001,7 @@ struct ScalingFit {
 ///
 /// What chi-squared still does, and only it can do, is say whether *any*
 /// polynomial describes the data. That is reported, not acted on.
-fn scaling_fit(
-    ns: &[f64],
-    means: &[f64],
-    ses: &[f64],
-    max_degree: usize,
-) -> Option<ScalingFit> {
+fn scaling_fit(ns: &[f64], means: &[f64], ses: &[f64], max_degree: usize) -> Option<ScalingFit> {
     let slope = power_fit(ns, means, ses)?.exponent;
     if !slope.is_finite() {
         return None;
@@ -1074,8 +1058,6 @@ fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     }
     Some(m.into_iter().map(|r| r[n..].to_vec()).collect())
 }
-
-
 
 /// A power-law fit of measured times against problem size: `t ≈ c·Nᵖ`.
 ///
@@ -1295,10 +1277,6 @@ fn next_size(
     (predicted <= affordable_ns).then_some(next as usize)
 }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,7 +1370,6 @@ mod tests {
         assert_eq!(scaling.power, 1);
     }
 
-
     #[test]
     fn scales_o_n_square() {
         println!();
@@ -1412,11 +1389,6 @@ mod tests {
     /// whichever single power happens to fit best.
     mod fitting {
         use super::*;
-
-
-
-
-
 
         /// Geometrically spaced sizes spanning a wide range, as size
         /// selection is meant to produce.
@@ -1560,7 +1532,11 @@ mod tests {
         fn integer_powers_come_from_measured_error_bars() {
             let ns = wide_sizes();
             for (name, power, f) in [
-                ("N", 1, Box::new(|n: f64| 3.0 * n) as Box<dyn Fn(f64) -> f64>),
+                (
+                    "N",
+                    1,
+                    Box::new(|n: f64| 3.0 * n) as Box<dyn Fn(f64) -> f64>,
+                ),
                 ("N^2", 2, Box::new(|n: f64| 0.02 * n * n)),
                 ("N^3", 3, Box::new(|n: f64| 1e-4 * n * n * n)),
             ] {
@@ -1583,8 +1559,7 @@ mod tests {
             // dominates over most of the range, but the cost is quadratic.
             let ns = wide_sizes();
             for seed in [1u64, 3, 5, 7] {
-                let (means, ses) =
-                    replicated(|n| 5.0 * n + 0.05 * n * n, &ns, 0.02, 6, seed);
+                let (means, ses) = replicated(|n| 5.0 * n + 0.05 * n * n, &ns, 0.02, 6, seed);
                 let fit = scaling_fit(&ns, &means, &ses, 3).unwrap();
                 assert_eq!(2, fit.power, "seed {seed}");
                 assert!(
@@ -1637,6 +1612,7 @@ mod tests {
                 target_rel_error: 0.01,
                 target_abs_error: Duration::ZERO,
                 max_time: Duration::from_secs(1),
+                num_comparisons_planned: 1,
             }
         }
 
@@ -1944,7 +1920,11 @@ mod tests {
             // 1 - which `choose_sizes` would then use to budget, planning a
             // ladder whose top rung costs a hundredfold what it predicted.
             for (name, p, cost) in [
-                ("N", 1.0, Box::new(|n: f64| 1e7 * n) as Box<dyn Fn(f64) -> f64>),
+                (
+                    "N",
+                    1.0,
+                    Box::new(|n: f64| 1e7 * n) as Box<dyn Fn(f64) -> f64>,
+                ),
                 ("N^2", 2.0, Box::new(|n: f64| 1e7 * n * n)),
                 ("N^3", 3.0, Box::new(|n: f64| 1e7 * n * n * n)),
             ] {
@@ -2063,10 +2043,7 @@ mod tests {
                 exponent: Some(1.0),
             };
             let sizes = choose_sizes(range, 1);
-            let round: f64 = sizes
-                .iter()
-                .map(|&n| lo_time * n as f64 / 1000.0)
-                .sum();
+            let round: f64 = sizes.iter().map(|&n| lo_time * n as f64 / 1000.0).sum();
             let opening = round * INITIAL_REPEATS as f64;
             assert!(
                 opening < 2e6,
@@ -2116,10 +2093,16 @@ mod tests {
             // nothing about it being the scaling.
             let cubic = weighted_poly_fit(&ns, &means, &ses, 3).unwrap();
             let sigmas = cubic.coefficients[3].abs() / cubic.ses[3];
-            assert!(sigmas > 6.0, "the cubic should be far from zero, at {sigmas}");
+            assert!(
+                sigmas > 6.0,
+                "the cubic should be far from zero, at {sigmas}"
+            );
 
             let fit = scaling_fit(&ns, &means, &ses, 3).unwrap();
-            assert_eq!(1, fit.power, "a billionth of the runtime is not the scaling");
+            assert_eq!(
+                1, fit.power,
+                "a billionth of the runtime is not the scaling"
+            );
         }
 
         #[test]
@@ -2129,7 +2112,11 @@ mod tests {
             // a large lower-order term keeps its share well under half.
             let ns = wide_sizes();
             for (name, power, f) in [
-                ("N^2", 2, Box::new(|n: f64| 0.02 * n * n) as Box<dyn Fn(f64) -> f64>),
+                (
+                    "N^2",
+                    2,
+                    Box::new(|n: f64| 0.02 * n * n) as Box<dyn Fn(f64) -> f64>,
+                ),
                 ("5N + 0.05N^2", 2, Box::new(|n: f64| 5.0 * n + 0.05 * n * n)),
                 ("N^3", 3, Box::new(|n: f64| 1e-4 * n * n * n)),
             ] {
@@ -2174,7 +2161,11 @@ mod tests {
 
             let fit = scaling_fit(&ns, &means, &ses, 3).unwrap();
             assert_eq!(1, fit.power);
-            assert!((fit.ns_per_scale - 10.0).abs() < 1e-6, "{}", fit.ns_per_scale);
+            assert!(
+                (fit.ns_per_scale - 10.0).abs() < 1e-6,
+                "{}",
+                fit.ns_per_scale
+            );
         }
 
         #[test]
@@ -2210,6 +2201,7 @@ mod tests {
                 target_rel_error: 0.02,
                 target_abs_error: Duration::ZERO,
                 max_time: Duration::from_secs(60),
+                num_comparisons_planned: 1,
             };
 
             // A real power law: identified, believed, and not flagged.
@@ -2278,7 +2270,10 @@ mod tests {
                 assert_eq!(1, fit.power, "seed {seed}");
 
                 let refit = weighted_poly_fit(&ns, &means, &ses, fit.power).unwrap();
-                assert_eq!(refit.coefficients[fit.power], fit.ns_per_scale, "seed {seed}");
+                assert_eq!(
+                    refit.coefficients[fit.power], fit.ns_per_scale,
+                    "seed {seed}"
+                );
                 assert_eq!(refit.ses[fit.power], fit.std_error, "seed {seed}");
 
                 let wide = weighted_poly_fit(&ns, &means, &ses, 3).unwrap();
@@ -2312,7 +2307,11 @@ mod tests {
         fn a_power_law_gives_back_its_own_exponent() {
             let ns = wide_sizes();
             for (name, p, f) in [
-                ("N", 1.0, Box::new(|n: f64| 3.0 * n) as Box<dyn Fn(f64) -> f64>),
+                (
+                    "N",
+                    1.0,
+                    Box::new(|n: f64| 3.0 * n) as Box<dyn Fn(f64) -> f64>,
+                ),
                 ("N^2", 2.0, Box::new(|n: f64| 0.02 * n * n)),
                 ("N^3", 3.0, Box::new(|n: f64| 1e-4 * n * n * n)),
             ] {
@@ -2410,19 +2409,6 @@ mod tests {
             assert_eq!(None, two_point_exponent(10.0, 1.0, 10.0, 2.0));
             assert_eq!(None, two_point_exponent(10.0, 0.0, 20.0, 1.0));
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
 
     /// A fixed amount of arithmetic, touching no memory beyond a register.
@@ -2568,6 +2554,4 @@ mod tests {
             assert!(s.hit_limit, "and must carry the limit mark: {s}");
         }
     }
-
-
 }

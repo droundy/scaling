@@ -239,9 +239,12 @@ for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
 */
 
-pub mod quiet;
 mod bench;
+mod compare;
+pub mod quiet;
 mod scaling;
+pub(crate) use bench::time_batch;
+pub(crate) mod significant;
 
 // `self::` because the crate is called `scaling` too, and rustdoc builds
 // doctests with `--extern scaling` pointing at this very crate - which
@@ -301,6 +304,12 @@ pub struct Config {
     /// Give up after roughly this much wall-clock time even if neither goal
     /// was reached, setting [`Stats::hit_limit`].
     pub max_time: Duration,
+    /// The number of comparison benchmarks that will be taken.
+    ///
+    /// This is used to reduce the probability of false positives.  Otherwise
+    /// when you are evaluating *many* benchmarks you'd be almost certain to
+    /// see spurious "changes".
+    pub num_comparisons_planned: u64,
 }
 
 impl Default for Config {
@@ -309,6 +318,7 @@ impl Default for Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
             max_time: BENCH_TIME_MAX,
+            num_comparisons_planned: 1,
         }
     }
 }
@@ -405,7 +415,6 @@ fn value_and_error(value: f64, error: f64) -> (String, String) {
     (format!("{value:.decimals$}"), error_str)
 }
 
-
 /// Running mean and variance of the per-iteration times, updated in O(1)
 /// per sample.
 ///
@@ -460,8 +469,6 @@ impl Running {
         (self.mean, (var / self.count as f64).sqrt())
     }
 }
-
-
 
 /// Helpers shared by both modules' tests.
 #[cfg(test)]
@@ -551,11 +558,4 @@ mod tests {
             })
         );
     }
-
-
 }
-
-
-
-
-
