@@ -1,9 +1,10 @@
 /*!
 A lightweight micro-benchmarking library which:
 
-* uses linear regression to screen off constant error;
+* measures until it reaches an accuracy you ask for, and tells you the
+  accuracy it achieved;
 * handles benchmarks which mutate state;
-* can measure simple polynomial or exponential scaling behavior
+* can measure how a benchmark scales, as a power of `N`
 * is very easy to use!
 
 `scaling` is designed to work with either slow or fast functions.
@@ -32,40 +33,125 @@ println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
 Running the above yields the following results:
 
 ```none
-fib 200:        50ns (R²=0.995, 20435 iterations in 68 samples)
-fib 500:       144ns (R²=0.999, 7235 iterations in 57 samples)
-fib scaling:   0.30ns/N    (R²=0.999, 8645 iterations in 59 samples)
-reverse:        46ns (R²=0.990, 30550 iterations in 72 samples)
-sort:          137ns (R²=0.991, 187129 iterations in 91 samples)
+fib 200:    71.716ns ± 0.057ns
+fib 500:    262.75ns ± 0.14ns
+fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
+reverse:     51.80ns ± 0.62ns
+sort:        111.3ns ± 1.1ns
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
 
 # Benchmarking algorithm
 
-An *iteration* is a single execution of your code. A *sample* is a measurement,
-during which your code may be run many times. In other words: taking a sample
-means performing some number of iterations and measuring the total time.
+## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
 
-The first sample we take performs only 1 iteration, but as we continue
-taking samples we increase the number of iterations with increasing
-rapidity. We
-stop either when a global time limit is reached (currently 10 seconds),
-or when we have collected sufficient statistics (but have run for at
-least a millisecond).
+An *iteration* is a single execution of your code. A *sample* is a
+measurement, during which your code may be run many times.
 
-If a benchmark requires some state to run, `n` copies of the initial state are
-prepared before the sample is taken.
+We first calibrate a batch size: the number of iterations per sample, chosen
+so that the two clock reads bracketing a sample are a rounding error against
+it. We then take equal-sized batches, and stop once the *standard error* of
+their mean is small enough. This directly answers "how precisely do I know
+`ns_per_iter`", which is what you actually want.
 
-Once we have the data, we perform OLS linear regression to find out how
-the sample time varies with the number of iterations in the sample. The
-gradient of the regression line tells us how long it takes to perform a
-single iteration of the benchmark. The R² value is a measure of how much
-noise there is in the data.
+You may choose how accurate you want your benchmarks to be (see [`Config`])
+or you may accept a reasonable default. Both a relative and an absolute goal
+are available, and sampling stops as soon as either is met, so the coarser
+one governs.
 
-If the function is too slow (5 or 10 seconds), the linear regression is skipped,
-and a simple average of timings is used.  For slow functions, any overhead will
-be negligible.
+The output includes the standard error of the measurement, printed after
+the `±` in the same unit as the measurement itself, and the measurement is
+printed to exactly the precision that error justifies.  Quick statistics
+note:  in general you should expect a measured value to be more than *two*
+standard errors *away* from the true value about 5% of the time, and about a
+third of the time you should expect the discrepancy to be more than one
+standard error.  So do *not* take this `±` value as a bound on the error!
+
+[`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
+and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
+work it took, [`Stats::hit_limit`] tells you if the budget ran out before
+the target accuracy was met, and [`Stats::untrustworthy`] tells you if too
+few samples were collected for the error bar itself to mean anything.
+Those are marked `(limit)` and `(untrusted)` in the output.
+
+If a benchmark requires some state to run, one copy of the initial state is
+prepared per iteration.
+
+## Scaling benchmarks: `bench_scaling`, `bench_scaling_gen`
+
+These work in two stages, and the split is the point of the design.
+
+**Stage one picks the sizes.** It climbs from `nmin`, timing a single call
+at each candidate, until one call is long enough to time properly - below
+about 20 microseconds you are measuring the clock, not the function. That
+size becomes the bottom of the ladder, and the growth rate measured along
+the way says how much a larger size will cost, which is what lets stage two
+choose a top it can actually afford. These measurements steer and nothing
+else; none of them ends up in the answer.
+
+**Stage two measures.** It lays out six log-spaced sizes and times a single
+call at each, repeating - six times to begin with, more until the answer is
+precise enough. Repeating is what makes the difference: each size ends up
+with an error bar that was *measured* rather than assumed, and that changes
+what can be asked of the fit.
+
+The range is chosen in *time*, not in size: far enough up that the largest
+size takes four times as long as the smallest, which stage one's growth rate
+converts into a size range. A fixed size range would mean a different time
+range for every benchmark, since four times the size is four times the work
+for a linear cost and sixty-four times for a cubic one. No time budget is
+consulted - what makes a range good is that it separates the powers while
+costing little, and stage one already measured both of those. The opening
+rounds come to about eighty times the cheapest call, so a benchmark sitting
+on the 20-microsecond floor is measured in under two milliseconds.
+
+Nothing is batched. A benchmark worth asking about the scaling of is one
+that gets slow as `N` grows, so where a batch would have been needed to
+out-measure the clock, a larger `N` does the same job and tells you
+something you wanted to know anyway. It also keeps the model honest: timing
+a batch and dividing by its length turns the fixed per-batch overhead into a
+`c/N` term, which no polynomial in `N` can represent, so it comes out
+smeared across every coefficient. One call per sample leaves that overhead
+as a plain constant, which the fit represents exactly.
+
+Two separate things then have to be settled, and the output reports them
+separately because they fail independently:
+
+* **Which law?** With measured error bars this becomes a real
+  goodness-of-fit test rather than a heuristic: chi-squared asks whether
+  what the model failed to explain is as small as the error bars say it
+  should be. A cost that no polynomial describes is rejected outright, and
+  reported with `goodness_of_fit` zeroed and the `(limit)` mark, alongside
+  the integer power it most behaves like over the range measured.
+* **How big is its constant?** [`ScalingStats::rel_std_error`] answers this,
+  and it is what the `±` in the output shows. Measuring continues until it
+  meets the same accuracy target the flat benchmarks use, so
+  `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
+  for [`bench`].
+
+The two are deliberately not merged into one number, and measured error bars
+are what keeps them apart. Where errors are only assumed, the usual move is
+to widen them by however badly the fit turned out - which quietly converts
+"wrong shape" into "imprecise constant", and hides exactly the failure worth
+knowing about. Here the coefficient errors come from the sizes and their
+error bars alone and never see the timings, so a bad shape has nowhere to
+hide but chi-squared. Read the two together, and be suspicious of a small
+`±` sitting next to `R²=0.000`.
+
+Measuring stops once the model is accepted *and* its constant meets the
+accuracy target, or when the time budget runs out - 10 seconds by default,
+which is a backstop rather than something to be spent. Both conditions are
+needed, because a wrong model does not present as an imprecise one: fit a
+constant to a cost that grows and its prefactor is near enough the mean of
+every measurement, precise immediately and quite wrong.
+
+Only power laws are fitted. A cost that is not one - `O(N log N)`, or
+`O(2ᴺ)` - is reported as the integer power it most behaves like over the
+range measured, with `goodness_of_fit` zeroed and the `(limit)` mark to say
+that nothing described it exactly. Naming those shapes needs a different
+kind of fit and would be a different feature; measuring a power well is the
+thing this does.
 
 # Caveats
 
@@ -75,12 +161,14 @@ be negligible.
 **noise of your
 benchmark.**
 
-Any work which `scaling` does once-per-sample is ignored (this is the purpose of the linear
-regression technique described above). However, work which is done once-per-iteration *will* be
-counted in the final times.
+Work which `scaling` does once-per-sample is kept negligible: the flat
+benchmarks size each batch so that a sample takes far longer than the two
+`Instant::now()` calls bracketing it, and the scaling benchmarks choose
+sizes large enough that a single call dwarfs them. However, work which is
+done once-per-iteration *will* be counted in the final times.
 
 * In the case of [`bench()`] this amounts to incrementing the loop counter and
-  [copying the return value](#bonus-caveat-black-box).
+  passing the return value through `std::hint::black_box`.
 * In the case of [`bench_env`] and [`bench_gen_env`], we also do a lookup into a big vector in
   order to get the environment for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
@@ -112,558 +200,314 @@ let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
 The results are a little surprising:
 
 ```none
-fib_1:        110 ns   (R²=1.000, 9131585 iterations in 144 samples)
-fib_2:          0 ns   (R²=1.000, 413289203 iterations in 184 samples)
-fib_3:        109 ns   (R²=1.000, 9131585 iterations in 144 samples)
+fib_1:   262.759ns ± 0.079ns
+fib_2:   0.59300ns ± 0.00075ns
+fib_3:   262.805ns ± 0.025ns
 ```
 
 Oh, `fib_2`, why do you lie? The answer is: `fib(500)` is pure, and its
-return value is immediately thrown away, so the optimiser replaces the call
-with a no-op (which clocks in at 0 ns).
+return value is immediately thrown away, so the optimiser deletes the call
+entirely. What is left to measure is an empty loop, which clocks in at a
+fraction of a nanosecond - not the 258 ns the work would have cost.
 
 What about the other two? `fib_1` looks very similar, with one exception:
 the closure which we're benchmarking returns the result of the `fib(500)`
-call. When it runs your code, `scaling` takes the return value and tricks the
-optimiser into thinking it's going to use it for something, before throwing
-it away. This is why `fib_1` is safe from having code accidentally eliminated.
+call. When it runs your code, `scaling` passes that return value through
+[`std::hint::black_box`], which the optimiser must treat as though it were
+used, before throwing it away. This is why `fib_1` is safe from having code
+accidentally eliminated.
 
 In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
 environment. This has the desired effect, but looks a bit weird.
 
-## Bonus caveat: Black box
+## Caveat 3: A busy machine
 
-The function which `scaling` uses to trick the optimiser (`black_box`)
-is stolen from [bencher], which [states]:
+**TL;DR: on Linux, ``sudo `which quiet-bench` reserve 2`` then
+`quiet-bench run <your benchmark>`.**
 
-[bencher]: https://docs.rs/bencher/
-[states]: https://docs.rs/bencher/0.1.2/bencher/fn.black_box.html
+The accuracy `scaling` reports covers noise it can *see* while sampling. It
+cannot see the machine around it: another process on the same core, a CPU
+dropping out of turbo as it heats up, or an interrupt landing mid-sample all
+shift the answer without widening the error bar.
 
-> NOTE: We don't have a proper black box in stable Rust. This is a workaround
-> implementation, that may have a too big performance overhead, depending on
-> operation, or it may fail to properly avoid having code optimized out. It
-> is good enough that it is used by default.
+The `quiet-bench` binary shipped with this crate reserves one or more CPUs
+for benchmarking and moves everything else - processes, interrupts - off
+them, and pins the clock frequency. Benchmarks then pin themselves to the
+reserved CPUs automatically, with no code change. See the [`quiet`] module
+for the details, and [`quiet::status`] to check at runtime whether it took
+effect.
 */
 
+pub mod quiet;
+mod bench;
+mod scaling;
+
+// `self::` because the crate is called `scaling` too, and rustdoc builds
+// doctests with `--extern scaling` pointing at this very crate - which
+// leaves a bare `scaling::` ambiguous between the module below and the
+// whole crate. Rust 1.66 calls that ambiguity an error; later compilers
+// quietly pick one, so this only ever failed on the oldest supported
+// toolchain, and only when building doctests rather than the library.
+pub use self::bench::{bench, bench_env, bench_gen_env, Stats};
+pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
+
 use std::f64;
-use std::fmt::{self, Display, Formatter};
 use std::time::*;
 
-// We try to spend at very most this many seconds (roughly) in total on
-// each benchmark.
-const BENCH_TIME_MAX_DESPERATION: Duration = Duration::from_secs(120);
-// We try to spend at most this many seconds (roughly) in total on
-// each benchmark.
+/// Roughly the longest a single benchmark should take.
+///
+/// A backstop rather than a target: both kinds of benchmark stop as soon as
+/// they have the accuracy asked for, and neither sizes any of its work
+/// against the time available.
 const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
-// We try to spend at least this many seconds in total on each
-// benchmark.
-const BENCH_TIME_MIN: Duration = Duration::from_millis(1);
-
-/// Statistics for a benchmark run.
-#[derive(Debug, PartialEq, Clone)]
-pub struct Stats {
-    /// The time, in nanoseconds, per iteration. If the benchmark generated
-    /// fewer than 2 samples in the allotted time then this will be NaN.
-    pub ns_per_iter: f64,
-    /// The coefficient of determination, R².
+/// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
+/// up.
+///
+/// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
+/// call the same-named methods on a `Config` to choose your own.
+///
+/// ```
+/// use scaling::Config;
+/// use std::time::Duration;
+///
+/// # fn fib(_: usize) -> usize { 0 }
+/// // "to within a tenth of a percent"
+/// let tight = Config::relative(0.001);
+/// // "to within 50 nanoseconds, and do not spend more than a second"
+/// let quick = Config {
+///     max_time: Duration::from_secs(1),
+///     ..Config::absolute(Duration::from_nanos(50))
+/// };
+/// # let _ = (tight.target_rel_error, quick.target_abs_error);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    /// Stop once the standard error falls below this fraction of the
+    /// measurement (`0.01` = 1%).
+    pub target_rel_error: f64,
+    /// Stop once the standard error falls below this duration.
     ///
-    /// This is an indication of how noisy the benchmark was, where 1 is
-    /// good and 0 is bad. Be suspicious of values below 0.9.
-    pub goodness_of_fit: f64,
-    /// How many times the benchmarked code was actually run.
-    pub iterations: usize,
-    /// How many samples were taken (ie. how many times we allocated the
-    /// environment and measured the time).
-    pub samples: usize,
+    /// Sampling stops as soon as *either* goal is met, so whichever is
+    /// coarser for the function at hand is the one that ends up governing.
+    /// That is the point of having both: a 1% relative goal on a 1 ns
+    /// function asks for a precision finer than the clock can resolve, and
+    /// would otherwise spend the whole budget failing to reach it. An
+    /// absolute floor puts a bound on how much precision is worth chasing.
+    ///
+    /// `Duration::ZERO` disables it, leaving `target_rel_error` alone in
+    /// charge.
+    pub target_abs_error: Duration,
+    /// Give up after roughly this much wall-clock time even if neither goal
+    /// was reached, setting [`Stats::hit_limit`].
+    pub max_time: Duration,
 }
 
-impl Display for Stats {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.ns_per_iter.is_nan() {
-            write!(
-                f,
-                "Only generated {} sample(s) - we can't fit a regression line to that! \
-                 Try making your benchmark faster.",
-                self.samples
-            )
-        } else {
-            let per_iter = Duration::from_nanos(self.ns_per_iter as u64);
-            let per_iter = format!("{:?}", per_iter);
-            write!(
-                f,
-                "{:>11} (R²={:.3}, {} iterations in {} samples)",
-                per_iter, self.goodness_of_fit, self.iterations, self.samples
-            )
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            target_rel_error: 0.01,
+            target_abs_error: Duration::ZERO,
+            max_time: BENCH_TIME_MAX,
         }
     }
 }
 
-/// Run a benchmark.
-///
-/// The return value of `f` is not used, but we trick the optimiser into
-/// thinking we're going to use it. Make sure to return enough information
-/// to prevent the optimiser from eliminating code from your benchmark! (See
-/// the module docs for more.)
-pub fn bench<F, O>(mut f: F) -> Stats
-where
-    F: FnMut() -> O,
-{
-    bench_env((), |_| f())
-}
-
-/// Run a benchmark with an environment.
-///
-/// The value `env` is a clonable prototype for the "benchmark
-/// environment". Each iteration receives a freshly-cloned mutable copy of
-/// this environment. The time taken to clone the environment is not included
-/// in the results.
-///
-/// Nb: it's very possible that we will end up allocating many (>10,000)
-/// copies of `env` at the same time. Probably best to keep it small.
-///
-/// See `bench` and the module docs for more.
-///
-/// ## Overhead
-///
-/// Every iteration, `bench_env` performs a lookup into a big vector in
-/// order to get the environment for that iteration. If your benchmark
-/// is memory-intensive then this could, in the worst case, amount to a
-/// systematic cache-miss (ie. this vector would have to be fetched from
-/// DRAM at the start of every iteration). In this case the results could be
-/// affected by a hundred nanoseconds. This is a worst-case scenario however,
-/// and I haven't actually been able to trigger it in practice... but it's
-/// good to be aware of the possibility.
-pub fn bench_env<F, I, O>(env: I, f: F) -> Stats
-where
-    F: FnMut(&mut I) -> O,
-    I: Clone,
-{
-    bench_gen_env(move || env.clone(), f)
-}
-
-/// Run a benchmark with a generated environment.
-///
-/// The function `gen_env` creates the "benchmark environment" for the
-/// computation. Each iteration receives a freshly-created environment. The
-/// time taken to create the environment is not included in the results.
-///
-/// Nb: it's very possible that we will end up generating many (>10,000)
-/// copies of `env` at the same time. Probably best to keep it small.
-///
-/// See `bench` and the module docs for more.
-///
-/// ## Overhead
-///
-/// Every iteration, `bench_gen_env` performs a lookup into a big vector
-/// in order to get the environment for that iteration. If your benchmark
-/// is memory-intensive then this could, in the worst case, amount to a
-/// systematic cache-miss (ie. this vector would have to be fetched from
-/// DRAM at the start of every iteration). In this case the results could be
-/// affected by a hundred nanoseconds. This is a worst-case scenario however,
-/// and I haven't actually been able to trigger it in practice... but it's
-/// good to be aware of the possibility.
-pub fn bench_gen_env<G, F, I, O>(mut gen_env: G, mut f: F) -> Stats
-where
-    G: FnMut() -> I,
-    F: FnMut(&mut I) -> O,
-{
-    let mut data = Vec::new();
-    // The time we started the benchmark (not used in results)
-    let bench_start = Instant::now();
-
-    // Collect data until BENCH_TIME_MAX is reached.
-    for iters in slow_fib(BENCH_SCALE_TIME) {
-        // Prepare the environments - one per iteration
-        let mut xs = std::iter::repeat_with(&mut gen_env)
-            .take(iters)
-            .collect::<Vec<I>>();
-        // Start the clock
-        let iter_start = Instant::now();
-        // We iterate over `&mut xs` rather than draining it, because we
-        // don't want to drop the env values until after the clock has stopped.
-        for x in &mut xs {
-            // Run the code and pretend to use the output
-            pretend_to_use(f(x));
-        }
-        let time = iter_start.elapsed();
-        data.push((iters, time));
-
-        let elapsed = bench_start.elapsed();
-        if elapsed > BENCH_TIME_MIN && data.len() > 3 {
-            // If the first iter in a sample is consistently slow, that's fine -
-            // that's why we do the linear regression. If the first sample is slower
-            // than the rest, however, that's not fine.  Therefore, we discard the
-            // first sample as a cache-warming exercise.
-
-            // Compute some stats
-            let (grad, r2) = regression(&data[1..]);
-            let stats = Stats {
-                ns_per_iter: grad,
-                goodness_of_fit: r2,
-                iterations: data[1..].iter().map(|&(x, _)| x).sum(),
-                samples: data[1..].len(),
-            };
-            if elapsed > BENCH_TIME_MAX || r2 > 0.99 {
-                return stats;
-            }
-        } else if elapsed > BENCH_TIME_MAX {
-            let total_time: f64 = data.iter().map(|(_, t)| t.as_nanos() as f64).sum();
-            let iterations = data.iter().map(|&(x, _)| x).sum();
-            return Stats {
-                ns_per_iter: total_time / iterations as f64,
-                iterations,
-                goodness_of_fit: 0.0,
-                samples: data.len(),
-            };
-        }
-    }
-    unreachable!()
-}
-
-/// Statistics for a benchmark run determining the scaling of a function.
-#[derive(Debug, PartialEq, Clone)]
-pub struct ScalingStats {
-    pub scaling: Scaling,
-    pub goodness_of_fit: f64,
-    /// How many times the benchmarked code was actually run.
-    pub iterations: usize,
-    /// How many samples were taken (ie. how many times we allocated the
-    /// environment and measured the time).
-    pub samples: usize,
-}
-/// The timing and scaling results (without statistics) for a benchmark.
-#[derive(Debug, PartialEq, Clone)]
-pub struct Scaling {
-    /// The scaling power
-    /// If this is 2, for instance, you have an O(N²) algorithm.
-    pub power: usize,
-    /// An exponetial behavior, i.e. 2ᴺ
-    pub exponential: usize,
-    /// The time, in nanoseconds, per scaled size of the problem. If
-    /// the problem scales as O(N²) for instance, this is the number
-    /// of nanoseconds per N².
-    pub ns_per_scale: f64,
-}
-
-impl Display for ScalingStats {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{} (R²={:.3}, {} iterations in {} samples)",
-            self.scaling, self.goodness_of_fit, self.iterations, self.samples
-        )
-    }
-}
-impl Display for Scaling {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let per_iter = Duration::from_nanos(self.ns_per_scale as u64);
-        let per_iter = if self.ns_per_scale < 1.0 {
-            format!("{:.2}ns", self.ns_per_scale)
-        } else if self.ns_per_scale < 10.0 {
-            format!("{:.1}ns", self.ns_per_scale)
-        } else {
-            format!("{:?}", per_iter)
-        };
-        if self.exponential == 1 {
-            match self.power {
-                0 => write!(f, "{:>8}/iter", per_iter),
-                1 => write!(f, "{:>8}/N   ", per_iter),
-                2 => write!(f, "{:>8}/N²  ", per_iter),
-                3 => write!(f, "{:>8}/N³  ", per_iter),
-                4 => write!(f, "{:>8}/N⁴  ", per_iter),
-                5 => write!(f, "{:>8}/N⁵  ", per_iter),
-                6 => write!(f, "{:>8}/N⁶  ", per_iter),
-                7 => write!(f, "{:>8}/N⁷  ", per_iter),
-                8 => write!(f, "{:>8}/N⁸  ", per_iter),
-                9 => write!(f, "{:>8}/N⁹  ", per_iter),
-                _ => write!(f, "{:>8}/N^{}", per_iter, self.power),
-            }
-        } else {
-            match self.power {
-                0 => write!(f, "{:>8}/{}ᴺ", per_iter, self.exponential),
-                1 => write!(f, "{:>8}/(N{}ᴺ)   ", per_iter, self.exponential),
-                2 => write!(f, "{:>8}/(N²{}ᴺ)  ", per_iter, self.exponential),
-                3 => write!(f, "{:>8}/(N³{}ᴺ)  ", per_iter, self.exponential),
-                4 => write!(f, "{:>8}/(N⁴{}ᴺ)  ", per_iter, self.exponential),
-                5 => write!(f, "{:>8}/(N⁵{}ᴺ)  ", per_iter, self.exponential),
-                6 => write!(f, "{:>8}/(N⁶{}ᴺ)  ", per_iter, self.exponential),
-                7 => write!(f, "{:>8}/(N⁷{}ᴺ)  ", per_iter, self.exponential),
-                8 => write!(f, "{:>8}/(N⁸{}ᴺ)  ", per_iter, self.exponential),
-                9 => write!(f, "{:>8}/(N⁹{}ᴺ)  ", per_iter, self.exponential),
-                _ => write!(f, "{:>8}/(N^{}{}ᴺ)", per_iter, self.power, self.exponential),
-            }
-        }
-    }
-}
-
-/// Benchmark the power-law scaling of the function
-///
-/// This function assumes that the function scales as 𝑶(𝑁ᴾ𝐸ᴺ).
-/// It conisders higher powers for faster functions, and tries to
-/// keep the measuring time around 10s.  It measures the power ᴾ and exponential base 𝐸
-/// based on n R² goodness of fit parameter.
-pub fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
-where
-    F: Fn(usize) -> O,
-{
-    let mut data = Vec::new();
-    // The time we started the benchmark (not used in results)
-    let bench_start = Instant::now();
-
-    // Collect data until BENCH_TIME_MAX is reached.
-    for iters in slow_fib(BENCH_SCALE_TIME) {
-        // Prepare the environments - nmin per iteration
-        let n = if nmin > 0 { iters * nmin } else { iters };
-        // Generate a Vec holding n's to hopefully keep the optimizer
-        // from lifting the function out of the loop, as it could if
-        // we had `f(n)` in there, and `f` were inlined or `const`.
-        let xs = vec![n; iters];
-        // Start the clock
-        let iter_start = Instant::now();
-        for x in xs.into_iter() {
-            // Run the code and pretend to use the output
-            pretend_to_use(f(x));
-        }
-        let time = iter_start.elapsed();
-        data.push((n, iters, time));
-
-        let elapsed = bench_start.elapsed();
-        if elapsed > BENCH_TIME_MIN {
-            let stats = compute_scaling_gen(&data);
-            if elapsed > BENCH_TIME_MAX_DESPERATION
-                || (elapsed > BENCH_TIME_MAX && stats.goodness_of_fit > 0.0)
-                || stats.goodness_of_fit > 0.99
-            {
-                return stats;
-            }
-        }
-    }
-    unreachable!()
-}
-
-/// Benchmark the power-law scaling of the function with generated input
-///
-/// This function is like [`bench_scaling`], but uses a generating function
-/// to construct the input to your benchmarked function.
-///
-/// This function assumes that the function scales as 𝑶(𝑁ᴾ𝐸ᴺ).
-/// It conisders higher powers for faster functions, and tries to
-/// keep the measuring time around 10s.  It measures the power ᴾ and exponential base 𝐸
-/// based on n R² goodness of fit parameter.
-///
-/// # Example
-/// ```
-/// use scaling::bench_scaling_gen;
-///
-/// let summation = bench_scaling_gen(|n| vec![3.0; n], |v| v.iter().cloned().sum::<f64>(),0);
-/// println!("summation: {}", summation);
-/// assert_eq!(1, summation.scaling.power); // summation must run in linear time.
-/// ```
-/// which gives output
-/// ```none
-/// summation:     43ns/N    (R²=0.996, 445 iterations in 29 samples)
-/// ```
-pub fn bench_scaling_gen<G, F, I, O>(mut gen_env: G, f: F, nmin: usize) -> ScalingStats
-where
-    G: FnMut(usize) -> I,
-    F: Fn(&mut I) -> O,
-{
-    let mut data = Vec::new();
-    // The time we started the benchmark (not used in results)
-    let bench_start = Instant::now();
-
-    let mut am_slow = false;
-    // Collect data until BENCH_TIME_MAX is reached.
-    for iters in slow_fib(BENCH_SCALE_TIME) {
-        // Prepare the environments - nmin per iteration
-        let n = if nmin > 0 { iters * nmin } else { iters };
-        let iters = if am_slow { 1 + (iters & 1) } else { iters };
-        let mut xs = std::iter::repeat_with(|| gen_env(n))
-            .take(iters)
-            .collect::<Vec<I>>();
-        // Start the clock
-        let iter_start = Instant::now();
-        // We iterate over `&mut xs` rather than draining it, because we
-        // don't want to drop the env values until after the clock has stopped.
-        for x in &mut xs {
-            // Run the code and pretend to use the output
-            pretend_to_use(f(x));
-        }
-        let time = iter_start.elapsed();
-        if !am_slow && iters == 1 && time > Duration::from_micros(1) {
-            am_slow = true;
-        }
-        data.push((n, iters, time));
-
-        let elapsed = bench_start.elapsed();
-        if elapsed > BENCH_TIME_MIN {
-            let stats = compute_scaling_gen(&data);
-            if elapsed > BENCH_TIME_MAX_DESPERATION
-                || (elapsed > BENCH_TIME_MAX && stats.goodness_of_fit > 0.0)
-                || stats.goodness_of_fit > 0.99
-            {
-                return stats;
-            }
-        }
-    }
-    println!("how did I get here?!");
-    unreachable!()
-}
-
-/// This function assumes that the function scales as 𝑶(𝑁ᴾ𝐸ᴺ).  It measures the scaling
-/// based on n R² goodness of fit parameter, and returns the best fit.
-/// If it believes itself clueless, the goodness_of_fit is set to zero.
-fn compute_scaling_gen(data: &[(usize, usize, Duration)]) -> ScalingStats {
-    let num_n = {
-        let mut ns = data.iter().map(|(n, _, _)| *n).collect::<Vec<_>>();
-        ns.dedup();
-        ns.len()
-    };
-
-    // If the first iter in a sample is consistently slow, that's fine -
-    // that's why we do the linear regression. If the first sample is slower
-    // than the rest, however, that's not fine.  Therefore, we discard the
-    // first sample as a cache-warming exercise.
-
-    // Compute some stats for each of several different
-    // powers, to see which seems most accurate.
-    let mut stats = Vec::new();
-    let mut best = 0;
-    let mut second_best = 0;
-    for i in 1..num_n / 2 + 2 {
-        for power in 0..i {
-            let exponential = i - power;
-            let pdata: Vec<_> = data[1..]
-                .iter()
-                .map(|&(n, i, t)| {
-                    (
-                        (exponential as f64).powi(n as i32)
-                            * (n as f64).powi(power as i32)
-                            * (i as f64),
-                        t,
-                    )
-                })
-                .collect();
-            let (grad, r2) = fregression(&pdata);
-            stats.push(ScalingStats {
-                scaling: Scaling {
-                    power,
-                    exponential,
-                    ns_per_scale: grad,
-                },
-                goodness_of_fit: r2,
-                iterations: data[1..].iter().map(|&(x, _, _)| x).sum(),
-                samples: data[1..].len(),
-            });
-            if r2 > stats[best].goodness_of_fit || stats[best].goodness_of_fit.is_nan() {
-                second_best = best;
-                best = stats.len() - 1;
-            }
+impl Config {
+    /// Ask for a standard error below `fraction` of the measurement
+    /// (`0.001` = 0.1%).
+    pub fn relative(fraction: f64) -> Self {
+        Config {
+            target_rel_error: fraction,
+            ..Config::default()
         }
     }
 
-    if num_n < 10 || stats[second_best].goodness_of_fit == stats[best].goodness_of_fit {
-        stats[best].goodness_of_fit = 0.0;
+    /// Ask for a standard error below `error` in absolute terms.
+    ///
+    /// This sets only the absolute goal, leaving the relative one at its
+    /// default, so sampling stops at whichever of the two is reached first.
+    pub fn absolute(error: Duration) -> Self {
+        Config {
+            target_abs_error: error,
+            ..Config::default()
+        }
+    }
+
+    /// Is a measurement of `ns_per_iter` with standard error `std_error`
+    /// (both in nanoseconds) precise enough to stop?
+    fn accuracy_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
+        // A standard error of exactly zero means every sample agreed to the
+        // limit of the timer's resolution, and no further sampling can
+        // improve on that.
+        if std_error == 0.0 {
+            return true;
+        }
+        std_error < self.target_rel_error * ns_per_iter
+            || std_error < self.target_abs_error.as_secs_f64() * 1e9
+    }
+}
+
+/// Pick a human-readable unit from a magnitude in nanoseconds, returning
+/// the divisor and its suffix.
+///
+/// We choose units ourselves rather than deferring to `Duration`'s `Debug`,
+/// which cannot help here: `Duration` has nanosecond resolution, so the
+/// error bar on a fast benchmark - 0.12 ns on a 71 ns function is entirely
+/// typical - would round to a useless `0ns`.
+fn unit_for(ns: f64) -> (f64, &'static str) {
+    let magnitude = ns.abs();
+    if magnitude < 1e3 {
+        (1.0, "ns")
+    } else if magnitude < 1e6 {
+        (1e3, "µs")
+    } else if magnitude < 1e9 {
+        (1e6, "ms")
     } else {
-        // println!("finished...");
-        // for s in stats.iter() {
-        //     println!("  {}", s);
-        // }
-        // for d in data[data.len()-4..].iter() {
-        //     println!("    {}, {} -> {} ns", d.0, d.1, d.2.as_nanos());
-        // }
-        // println!("best is {}", stats[best]);
+        (1e9, "s")
     }
-    stats[best].clone()
 }
 
-/// Compute the OLS linear regression line for the given data set, returning
-/// the line's gradient and R². Requires at least 2 samples.
-//
-// Overflows:
-//
-// * sum(x * x): num_samples <= 0.5 * log_k (1 + 2 ^ 64 (FACTOR - 1))
-fn regression(data: &[(usize, Duration)]) -> (f64, f64) {
-    if data.len() < 2 {
-        return (f64::NAN, f64::NAN);
+/// How many decimal places `x` needs to show two significant digits, which
+/// is all the precision an error bar ever deserves.
+fn error_decimals(x: f64) -> usize {
+    // The `is_finite` test comes first so that the comparison below never
+    // has to reason about NaN.
+    if !x.is_finite() || x <= 0.0 {
+        return 4;
     }
-    // Do all the arithmetic using f64, because it can happen that the
-    // squared numbers to overflow using integer arithmetic if the
-    // tests are too fast (so we run too many iterations).
-    let data: Vec<_> = data
-        .iter()
-        .map(|&(x, y)| (x as f64, y.as_nanos() as f64))
-        .collect();
-    let n = data.len() as f64;
-    let nxbar = data.iter().map(|&(x, _)| x).sum::<f64>(); // iter_time > 5e-11 ns
-    let nybar = data.iter().map(|&(_, y)| y).sum::<f64>(); // TIME_LIMIT < 2 ^ 64 ns
-    let nxxbar = data.iter().map(|&(x, _)| x * x).sum::<f64>(); // num_iters < 13_000_000_000
-    let nyybar = data.iter().map(|&(_, y)| y * y).sum::<f64>(); // TIME_LIMIT < 4.3 e9 ns
-    let nxybar = data.iter().map(|&(x, y)| x * y).sum::<f64>();
-    let ncovar = nxybar - ((nxbar * nybar) / n);
-    let nxvar = nxxbar - ((nxbar * nxbar) / n);
-    let nyvar = nyybar - ((nybar * nybar) / n);
-    let gradient = ncovar / nxvar;
-    let r2 = (ncovar * ncovar) / (nxvar * nyvar);
-    assert!(r2.is_nan() || r2 <= 1.0);
-    (gradient, r2)
+    // The floor is zero, not one: an error of 25 in its own unit wants no
+    // decimals at all, and forcing one on it prints `25.0`, which is three
+    // significant digits claiming to be two.
+    (1 - x.log10().floor() as i64).clamp(0, 9) as usize
 }
 
-/// Compute the OLS linear regression line for the given data set, returning
-/// the line's gradient and R². Requires at least 2 samples.
-//
-// Overflows:
-//
-// * sum(x * x): num_samples <= 0.5 * log_k (1 + 2 ^ 64 (FACTOR - 1))
-fn fregression(data: &[(f64, Duration)]) -> (f64, f64) {
-    if data.len() < 2 {
-        return (f64::NAN, f64::NAN);
-    }
-    // Do all the arithmetic using f64, because it can happen that the
-    // squared numbers to overflow using integer arithmetic if the
-    // tests are too fast (so we run too many iterations).
-    let data: Vec<_> = data
-        .iter()
-        .map(|&(x, y)| (x as f64, y.as_nanos() as f64))
-        .collect();
-    let n = data.len() as f64;
-    let xbar = data.iter().map(|&(x, _)| x).sum::<f64>() / n;
-    let xvar = data.iter().map(|&(x, _)| (x - xbar).powi(2)).sum::<f64>() / n;
-    let ybar = data.iter().map(|&(_, y)| y).sum::<f64>() / n;
-    let yvar = data.iter().map(|&(_, y)| (y - ybar).powi(2)).sum::<f64>() / n;
-    let covar = data
-        .iter()
-        .map(|&(x, y)| (x - xbar) * (y - ybar))
-        .sum::<f64>()
-        / n;
-    let gradient = covar / xvar;
-    let r2 = covar.powi(2) / (xvar * yvar);
-    assert!(r2.is_nan() || r2 <= 1.0);
-    (gradient, r2)
+/// A value and its error, formatted to the precision the error justifies:
+/// digits of the value beyond where the uncertainty starts are noise
+/// dressed up as signal, so `71.9858 ± 0.17` is really only known to
+/// `71.99 ± 0.17`, and printing the extra two digits would invite a reader
+/// to believe them.
+///
+/// The error switches to scientific notation below `1e-4` rather than
+/// spelling out a run of leading zeroes - an optimised-away benchmark can
+/// reach `0.000000021` - but the value keeps plain digits at the same
+/// decimal count, which is what the scientific notation stands in for.
+///
+/// Callers own the unit: this only picks how many digits to show, in
+/// whatever unit `value` and `error` already share.
+fn value_and_error(value: f64, error: f64) -> (String, String) {
+    let decimals = error_decimals(error);
+    let error_str = if error > 0.0 && error < 1e-4 {
+        format!("{error:.1e}")
+    } else {
+        format!("{error:.decimals$}")
+    };
+    (format!("{value:.decimals$}"), error_str)
 }
 
-// Stolen from `bencher`, where it's known as `black_box`.
-//
-// NOTE: We don't have a proper black box in stable Rust. This is a workaround
-// implementation, that may have a too big performance overhead, depending
-// on operation, or it may fail to properly avoid having code optimized
-// out. It is good enough that it is used by default.
-//
-// A function that is opaque to the optimizer, to allow benchmarks to pretend
-// to use outputs to assist in avoiding dead-code elimination.
-fn pretend_to_use<T>(dummy: T) -> T {
-    unsafe {
-        let ret = ::std::ptr::read_volatile(&dummy);
-        ::std::mem::forget(dummy);
-        ret
+
+/// Running mean and variance of the per-iteration times, updated in O(1)
+/// per sample.
+///
+/// The sampling loop asks whether it can stop after *every* sample, so
+/// recomputing from a stored vector would make the loop O(k²) in the number
+/// of samples - fine at the default `sample_time`, but `sample_time` is a
+/// public knob and shrinking it puts the loop in a regime where it spends
+/// more of the budget on arithmetic than on measuring. Keeping the running
+/// figures also means the samples themselves never need storing.
+///
+/// This is Welford's algorithm rather than accumulating `sum` and
+/// `sum_of_squares`, because the variance we want is a minute difference
+/// between two large numbers in that formulation - a 260 ns benchmark
+/// measured to 0.1% - and would lose most of its significant digits to
+/// cancellation. Welford never forms that difference.
+#[derive(Default, Clone)]
+struct Running {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl Running {
+    fn push(&mut self, x: f64) {
+        self.count += 1;
+        let delta = x - self.mean;
+        self.mean += delta / self.count as f64;
+        self.m2 += delta * (x - self.mean);
+    }
+
+    /// Mean, and the standard error *of that mean*, in nanoseconds. See
+    /// [`Config::bench_gen_env`] for why batching does not bias this.
+    ///
+    /// The error is absolute rather than relative because that is the
+    /// primitive quantity: it needs nothing but the samples, whereas
+    /// dividing by the mean is undefined when the mean is zero.
+    /// [`Stats::rel_std_error`] is derived from it for reporting.
+    fn mean_and_stderr(&self) -> (f64, f64) {
+        if self.count < 2 {
+            // A standard error needs at least two points to exist at all.
+            return (self.mean, f64::NAN);
+        }
+        // Sample variance (Bessel-corrected), then the standard error of
+        // the mean. `m2` is a sum of squared deviations and so is only
+        // non-negative in exact arithmetic; on a run with almost no real
+        // spread, floating-point cancellation can push it fractionally
+        // below zero. That is the same fact a genuine `m2 == 0.0` reports -
+        // no detectable spread - so it is clamped there rather than let
+        // through to `sqrt` as a `NaN` that would misrepresent a clean
+        // measurement as a failed one.
+        let var = (self.m2 / (self.count - 1) as f64).max(0.0);
+        (self.mean, (var / self.count as f64).sqrt())
+    }
+}
+
+
+
+/// Helpers shared by both modules' tests.
+#[cfg(test)]
+pub(crate) mod testutil {
+    pub struct XorShift(pub u64);
+    impl XorShift {
+        pub fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// Uniform on `[0, 1)`, from the top 53 bits - as many as an `f64`
+        /// mantissa holds.
+        fn uniform01(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        /// A relative jitter drawn from `[-rel, rel)`, roughly triangular
+        /// rather than flat: the sum of two independent uniforms concentrates
+        /// near zero the way real measurement noise does, instead of every
+        /// value in range being equally likely.
+        pub fn jitter(&mut self, rel: f64) -> f64 {
+            (self.uniform01() + self.uniform01() - 1.0) * rel
+        }
+    }
+
+    /// Is the machine quiet enough for a timing assertion to mean anything?
+    pub fn quiesced() -> bool {
+        matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
+    }
+
+    pub fn mean_and_spread(xs: &[f64]) -> (f64, f64) {
+        let n = xs.len() as f64;
+        let mean = xs.iter().sum::<f64>() / n;
+        let sd = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+        (mean, sd / mean)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
-    use std::time::Duration;
 
     fn fib(n: usize) -> usize {
         let mut i = 0;
@@ -708,249 +552,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scales_o_one() {
-        println!();
-        let stats = bench_scaling(|_| thread::sleep(Duration::from_millis(10)), 1);
-        println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 0);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e6);
-        assert!(format!("{}", stats).contains("samples"));
-    }
 
-    #[test]
-    fn scales_o_n() {
-        println!();
-        let stats = bench_scaling(|n| thread::sleep(Duration::from_millis(10 * n as u64)), 1);
-        println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 1);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e5);
-
-        println!("Summing integers");
-        let stats = bench_scaling_gen(
-            |n| (0..n as u64).collect::<Vec<_>>(),
-            |v| v.iter().cloned().sum::<u64>(),
-            1,
-        );
-        println!("O(N): {}", stats);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert_eq!(stats.scaling.power, 1);
-    }
-
-    #[test]
-    fn scales_o_n_log_n_looks_like_n() {
-        println!("Sorting integers");
-        let stats = bench_scaling_gen(
-            |n| {
-                (0..n as u64)
-                    .map(|i| (i * 13 + 5) % 137)
-                    .collect::<Vec<_>>()
-            },
-            |v| v.sort(),
-            1,
-        );
-        println!("O(N log N): {}", stats);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert_eq!(stats.scaling.power, 1);
-    }
-
-    #[test]
-    fn scales_o_2_to_the_n() {
-        println!();
-        let stats = bench_scaling(|n| thread::sleep(Duration::from_nanos((1 << n) as u64)), 1);
-        println!("O(2ᴺ): {}", stats);
-        assert_eq!(stats.scaling.power, 0);
-        assert_eq!(stats.scaling.exponential, 2);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1.0);
-        assert!((stats.scaling.ns_per_scale - 1.0).abs() < 0.2);
-    }
-
-    #[test]
-    fn scales_o_n_square() {
-        println!();
-        let stats = bench_scaling(
-            |n| thread::sleep(Duration::from_millis(10 * (n * n) as u64)),
-            1,
-        );
-        println!("O(N): {}", stats);
-        assert_eq!(stats.scaling.power, 2);
-        println!("   error: {:e}", stats.scaling.ns_per_scale - 1e7);
-        assert!((stats.scaling.ns_per_scale - 1e7).abs() < 1e5);
-    }
-
-    #[test]
-    fn very_quick() {
-        println!();
-        println!("very quick: {}", bench(|| {}));
-    }
-
-    #[test]
-    fn very_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_millis(400)));
-        println!("very slow: {}", stats);
-        assert!(stats.ns_per_iter > 399.0e6);
-        assert_eq!(3, stats.samples);
-    }
-
-    #[test]
-    fn painfully_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_secs(11)));
-        println!("painfully slow: {}", stats);
-        println!("ns {}", stats.ns_per_iter);
-        assert!(stats.ns_per_iter > 11.0e9);
-        assert_eq!(1, stats.iterations);
-    }
-
-    #[test]
-    fn sadly_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_secs(6)));
-        println!("sadly slow: {}", stats);
-        println!("ns {}", stats.ns_per_iter);
-        assert!(stats.ns_per_iter > 6.0e9);
-        assert_eq!(2, stats.iterations);
-    }
-
-    #[test]
-    fn test_sleep() {
-        println!();
-        println!(
-            "sleep 1 ms: {}",
-            bench(|| thread::sleep(Duration::from_millis(1)))
-        );
-    }
-
-    #[test]
-    fn noop() {
-        println!();
-        println!("noop base: {}", bench(|| {}));
-        println!("noop 0:    {}", bench_env(vec![0u64; 0], |_| {}));
-        println!("noop 16:   {}", bench_env(vec![0u64; 16], |_| {}));
-        println!("noop 64:   {}", bench_env(vec![0u64; 64], |_| {}));
-        println!("noop 256:  {}", bench_env(vec![0u64; 256], |_| {}));
-        println!("noop 512:  {}", bench_env(vec![0u64; 512], |_| {}));
-    }
-
-    #[test]
-    fn ret_value() {
-        println!();
-        println!(
-            "no ret 32:    {}",
-            bench_env(vec![0u64; 32], |x| { x.clone() })
-        );
-        println!("return 32:    {}", bench_env(vec![0u64; 32], |x| x.clone()));
-        println!(
-            "no ret 256:   {}",
-            bench_env(vec![0u64; 256], |x| { x.clone() })
-        );
-        println!(
-            "return 256:   {}",
-            bench_env(vec![0u64; 256], |x| x.clone())
-        );
-        println!(
-            "no ret 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| { x.clone() })
-        );
-        println!(
-            "return 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| x.clone())
-        );
-        println!(
-            "no ret 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| { x.clone() })
-        );
-        println!(
-            "return 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| x.clone())
-        );
-        println!(
-            "no ret 50000: {}",
-            bench_env(vec![0u64; 50000], |x| { x.clone() })
-        );
-        println!(
-            "return 50000: {}",
-            bench_env(vec![0u64; 50000], |x| x.clone())
-        );
-    }
 }
 
-// Each time we take a sample we increase the number of iterations
-// using a slow version of the Fibonacci sequence, which
-// asymptotically grows exponentially, but also gives us a different
-// value each time (except for repeating 1 twice, once for warmup).
 
-// For our standard `bench_*` we use slow_fib(25), which was chosen to
-// asymptotically match the prior behavior of the library, which grew
-// by an exponential of 1.1.
-const BENCH_SCALE_TIME: usize = 25;
 
-fn slow_fib(scale_time: usize) -> impl Iterator<Item = usize> {
-    #[derive(Debug)]
-    struct SlowFib {
-        which: usize,
-        buffer: Vec<usize>,
-    }
-    impl Iterator for SlowFib {
-        type Item = usize;
-        fn next(&mut self) -> Option<usize> {
-            // println!("!!! {:?}", self);
-            let oldwhich = self.which;
-            self.which = (self.which + 1) % self.buffer.len();
-            self.buffer[self.which] = self.buffer[oldwhich] + self.buffer[self.which];
-            Some(self.buffer[self.which])
-        }
-    }
-    assert!(scale_time > 3);
-    let mut buffer = vec![1; scale_time];
-    // buffer needs just the two zeros to make it start with two 1
-    // values.  The rest should be 1s.
-    buffer[1] = 0;
-    buffer[2] = 0;
-    SlowFib { which: 0, buffer }
-}
 
-#[test]
-fn test_fib() {
-    // The following code was used to demonstrate that asymptotically
-    // the SlowFib grows as the 1.1 power, just as the old code.  It
-    // differs in that it increases linearly at the beginning, which
-    // leads to larger numbers earlier in the sequence.  It also
-    // differs in that it does not repeat any numbers in the sequence,
-    // which hopefully leads to better linear regression, particularly
-    // if we can only run a few iterations.
-    let mut prev = 1;
-    for x in slow_fib(25).take(200) {
-        let rat = x as f64 / prev as f64;
-        println!("ratio: {}/{} = {}", prev, x, rat);
-        prev = x;
-    }
-    let five: Vec<_> = slow_fib(25).take(5).collect();
-    assert_eq!(&five, &[1, 1, 2, 3, 4]);
-    let more: Vec<_> = slow_fib(25).take(32).collect();
-    assert_eq!(
-        &more,
-        &[
-            1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 28, 31, 35, 40, 46,
-        ]
-    );
-    let previous_sequence: Vec<_> = (0..32).map(|n| (1.1f64).powi(n).round() as usize).collect();
-    assert_eq!(
-        &previous_sequence,
-        &[
-            1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13,
-            14, 16, 17, 19,
-        ]
-    );
-    let previous_sequence: Vec<_> = (20..40)
-        .map(|n| (1.1f64).powi(n).round() as usize)
-        .collect();
-    assert_eq!(
-        &previous_sequence,
-        &[7, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 26, 28, 31, 34, 37, 41,]
-    );
-}
+
