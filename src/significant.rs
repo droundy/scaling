@@ -3,6 +3,9 @@
 /// * n - Total number of measurements being tested
 /// * fwer - Target Family-Wise Error Rate (e.g., 0.05 for 95% confidence)
 fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
+    if n == 0 {
+        return f64::NAN; // no way to know if this is significant.
+    }
     let alpha_adj = fwer / (n as f64);
 
     // For a two-tailed test, the upper tail probability is half the adjusted alpha
