@@ -4,7 +4,7 @@ A lightweight micro-benchmarking library which:
 * measures until it reaches an accuracy you ask for, and tells you the
   accuracy it achieved;
 * handles benchmarks which mutate state;
-* can measure how a benchmark scales, as a power of its input size
+* can measure how a benchmark scales, as a power of `N`
 * is very easy to use!
 
 `scaling` is designed to work with either slow or fast functions.
