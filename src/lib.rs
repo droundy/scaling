@@ -253,6 +253,7 @@ pub(crate) mod significant;
 // quietly pick one, so this only ever failed on the oldest supported
 // toolchain, and only when building doctests rather than the library.
 pub use self::bench::{bench, bench_env, bench_gen_env, Stats};
+pub use self::compare::Comparison;
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 
 use std::f64;

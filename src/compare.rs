@@ -29,13 +29,12 @@ impl Comparison {
 
 impl Display for Comparison {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let is_changed = self.is_changed();
-        if is_changed {
-            write!(f, "(unchanged)")
-        } else {
+        if self.is_changed() {
             let percent_change = self.difference_ns() / self.old.ns_per_iter * 100.0;
             let rel_error = self.std_error() / self.old.ns_per_iter * 100.0;
             write!(f, "{percent_change:+.1}% +/- {rel_error:.1}%")
+        } else {
+            write!(f, "(unchanged)")
         }
     }
 }
