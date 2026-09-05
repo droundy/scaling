@@ -26,16 +26,11 @@ fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
     t - (numerator / denominator)
 }
 
-pub(crate) static NUM_MEASUREMENTS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub(crate) static NUM_MEASUREMENTS_PLANNED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-pub(crate) fn is_significant(difference: f64, std_error: f64, error_rate: f64) -> bool {
-    let measurements = NUM_MEASUREMENTS_PLANNED.load(std::sync::atomic::Ordering::Relaxed);
-    let count = NUM_MEASUREMENTS.load(std::sync::atomic::Ordering::Relaxed);
-    if count > measurements {
-        println!("You should plan for at least {count} comparisons!");
-    }
-    (difference / std_error).abs() > bonferroni_z_limit(measurements, error_rate)
+pub(crate) fn is_significant(
+    difference: f64,
+    std_error: f64,
+    error_rate: f64,
+    num_comparisons: u64,
+) -> bool {
+    (difference / std_error).abs() > bonferroni_z_limit(num_comparisons, error_rate)
 }

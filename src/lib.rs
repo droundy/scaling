@@ -257,6 +257,8 @@ pub use self::compare::Comparison;
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 
 use std::f64;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::*;
 
 /// Roughly the longest a single benchmark should take.
@@ -275,17 +277,14 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 /// use scaling::Config;
 /// use std::time::Duration;
 ///
-/// # fn fib(_: usize) -> usize { 0 }
 /// // "to within a tenth of a percent"
 /// let tight = Config::relative(0.001);
 /// // "to within 50 nanoseconds, and do not spend more than a second"
-/// let quick = Config {
-///     max_time: Duration::from_secs(1),
-///     ..Config::absolute(Duration::from_nanos(50))
-/// };
+/// let quick = Config::absolute(Duration::from_nanos(50))
+///     .with_max_time(Duration::from_secs(1));
 /// # let _ = (tight.target_rel_error, quick.target_abs_error);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Stop once the standard error falls below this fraction of the
     /// measurement (`0.01` = 1%).
@@ -310,7 +309,8 @@ pub struct Config {
     /// This is used to reduce the probability of false positives.  Otherwise
     /// when you are evaluating *many* benchmarks you'd be almost certain to
     /// see spurious "changes".
-    pub num_comparisons_planned: u64,
+    num_comparisons_planned: u64,
+    num_comparisons_made: Arc<AtomicU64>,
 }
 
 impl Default for Config {
@@ -319,7 +319,8 @@ impl Default for Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
             max_time: BENCH_TIME_MAX,
-            num_comparisons_planned: 1,
+            num_comparisons_planned: 0,
+            num_comparisons_made: Default::default(),
         }
     }
 }
@@ -328,10 +329,7 @@ impl Config {
     /// Ask for a standard error below `fraction` of the measurement
     /// (`0.001` = 0.1%).
     pub fn relative(fraction: f64) -> Self {
-        Config {
-            target_rel_error: fraction,
-            ..Config::default()
-        }
+        Config::default().with_relative_error(fraction)
     }
 
     /// Ask for a standard error below `error` in absolute terms.
@@ -339,10 +337,47 @@ impl Config {
     /// This sets only the absolute goal, leaving the relative one at its
     /// default, so sampling stops at whichever of the two is reached first.
     pub fn absolute(error: Duration) -> Self {
-        Config {
-            target_abs_error: error,
-            ..Config::default()
-        }
+        Config::default().with_absolute_error(error)
+    }
+
+    /// Set [`Config::target_rel_error`], keeping every other setting.
+    ///
+    /// `0.0` disables the relative goal, leaving `target_abs_error` alone in
+    /// charge. These take `self` by value and hand it back, so they chain:
+    /// `Config::default().with_relative_error(0.0).with_absolute_error(e)`.
+    pub fn with_relative_error(mut self, fraction: f64) -> Self {
+        self.target_rel_error = fraction;
+        self
+    }
+
+    /// Set [`Config::target_abs_error`], keeping every other setting.
+    ///
+    /// `Duration::ZERO` disables the absolute goal.
+    pub fn with_absolute_error(mut self, error: Duration) -> Self {
+        self.target_abs_error = error;
+        self
+    }
+
+    /// Set [`Config::max_time`], keeping every other setting.
+    pub fn with_max_time(mut self, max_time: Duration) -> Self {
+        self.max_time = max_time;
+        self
+    }
+
+    /// Set the number of comparison benchmarks that will be taken.
+    ///
+    /// This is used to reduce the probability of false positives.  Otherwise
+    /// when you are evaluating *many* benchmarks you'd be almost certain to
+    /// see spurious "changes".
+    ///
+    /// This method can only be called once with `comparisons > 0`.
+    pub fn with_comparisons_planned(mut self, comparisons: u64) -> Self {
+        assert_eq!(
+            self.num_comparisons_planned, 0,
+            "only call with_comparisons_planned once!"
+        );
+        self.num_comparisons_planned = comparisons;
+        self
     }
 
     /// Is a measurement of `ns_per_iter` with standard error `std_error`

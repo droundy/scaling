@@ -1,6 +1,6 @@
 use super::*;
 use std::fmt::{self, Display, Formatter};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::time::{Duration, Instant};
 
 const MIN_SAMPLES: usize = 6;
@@ -9,29 +9,35 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
 const MAX_SAMPLES: usize = 1_000_000;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Comparison {
-    pub old: Stats,
-    pub new: Stats,
+    pub baseline: Stats,
+    pub candidate: Stats,
+    num_comparisons_planned: u64,
 }
 
 impl Comparison {
     pub fn difference_ns(&self) -> f64 {
-        self.new.ns_per_iter - self.old.ns_per_iter
+        self.candidate.ns_per_iter - self.baseline.ns_per_iter
     }
     pub fn std_error(&self) -> f64 {
-        (self.new.std_error.powi(2) + self.old.std_error.powi(2)).sqrt()
+        (self.candidate.std_error.powi(2) + self.baseline.std_error.powi(2)).sqrt()
     }
     pub fn is_changed(&self) -> bool {
-        crate::significant::is_significant(self.difference_ns(), self.std_error(), 0.05)
+        crate::significant::is_significant(
+            self.difference_ns(),
+            self.std_error(),
+            0.05,
+            self.num_comparisons_planned,
+        )
     }
 }
 
 impl Display for Comparison {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if self.is_changed() {
-            let percent_change = self.difference_ns() / self.old.ns_per_iter * 100.0;
-            let rel_error = self.std_error() / self.old.ns_per_iter * 100.0;
+            let percent_change = self.difference_ns() / self.baseline.ns_per_iter * 100.0;
+            let rel_error = self.std_error() / self.baseline.ns_per_iter * 100.0;
             write!(f, "{percent_change:+.1}% +/- {rel_error:.1}%")
         } else {
             write!(f, "(unchanged)")
@@ -40,114 +46,146 @@ impl Display for Comparison {
 }
 
 impl Config {
-    pub fn compare<OLD, NEW, O>(&self, mut f_old: OLD, mut f_new: NEW) -> Comparison
+    pub fn compare<BASELINE, CANDIDATE, O>(
+        &self,
+        mut f_baseline: BASELINE,
+        mut f_candidate: CANDIDATE,
+    ) -> Comparison
     where
-        OLD: FnMut() -> O,
-        NEW: FnMut() -> O,
+        BASELINE: FnMut() -> O,
+        CANDIDATE: FnMut() -> O,
     {
-        self.compare_env((), |_| f_old(), |_| f_new())
+        self.compare_env((), |_| f_baseline(), |_| f_candidate())
     }
 
-    pub fn compare_env<OLD, NEW, I, O>(&self, env: I, f_old: OLD, f_new: NEW) -> Comparison
+    pub fn compare_env<BASELINE, CANDIDATE, I, O>(
+        &self,
+        env: I,
+        f_baseline: BASELINE,
+        f_candidate: CANDIDATE,
+    ) -> Comparison
     where
-        OLD: FnMut(&mut I) -> O,
-        NEW: FnMut(&mut I) -> O,
+        BASELINE: FnMut(&mut I) -> O,
+        CANDIDATE: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.compare_gen_env(move || env.clone(), f_old, f_new)
+        self.compare_gen_env(move || env.clone(), f_baseline, f_candidate)
     }
 
-    pub fn compare_gen_env<G, OLD, NEW, I, O>(
+    pub fn compare_gen_env<G, BASELINE, CANDIDATE, I, O>(
         &self,
         mut gen_env: G,
-        mut f_old: OLD,
-        mut f_new: NEW,
+        mut f_baseline: BASELINE,
+        mut f_candidate: CANDIDATE,
     ) -> Comparison
     where
         G: FnMut() -> I,
-        OLD: FnMut(&mut I) -> O,
-        NEW: FnMut(&mut I) -> O,
+        BASELINE: FnMut(&mut I) -> O,
+        CANDIDATE: FnMut(&mut I) -> O,
     {
-        crate::significant::NUM_MEASUREMENTS_PLANNED
-            .fetch_max(self.num_comparisons_planned, Relaxed);
-        crate::significant::NUM_MEASUREMENTS.fetch_add(1, Relaxed);
+        self.num_comparisons_made.fetch_add(1, Release);
         quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, old_ns, new_ns, probed) =
-            calibrate(&mut gen_env, &mut f_old, &mut f_new, &mut xs, self, start);
+        let (unit, baseline_ns, candidate_ns, probed) = calibrate(
+            &mut gen_env,
+            &mut f_baseline,
+            &mut f_candidate,
+            &mut xs,
+            self,
+            start,
+        );
         if start.elapsed() > self.max_time {
             return Comparison {
-                old: Stats {
-                    ns_per_iter: old_ns / unit as f64,
+                baseline: Stats {
+                    ns_per_iter: baseline_ns / unit as f64,
                     std_error: f64::NAN,
                     iterations: probed,
                     samples: 1,
                     hit_limit: true,
                     untrustworthy: true,
                 },
-                new: Stats {
-                    ns_per_iter: new_ns / unit as f64,
+                candidate: Stats {
+                    ns_per_iter: candidate_ns / unit as f64,
                     std_error: f64::NAN,
                     iterations: probed,
                     samples: 1,
                     hit_limit: true,
                     untrustworthy: true,
                 },
+                num_comparisons_planned: self.num_comparisons_planned,
             };
         }
 
-        let mut old_samples = Running::default();
-        let mut new_samples = Running::default();
+        let mut baseline_samples = Running::default();
+        let mut candidate_samples = Running::default();
         loop {
-            let (_, old_t) = time_batch(&mut gen_env, &mut f_old, &mut xs, unit);
-            let (_, new_t) = time_batch(&mut gen_env, &mut f_new, &mut xs, unit);
-            old_samples.push(old_t / unit as f64);
-            new_samples.push(new_t / unit as f64);
+            let (_, baseline_t) = time_batch(&mut gen_env, &mut f_baseline, &mut xs, unit);
+            let (_, candidate_t) = time_batch(&mut gen_env, &mut f_candidate, &mut xs, unit);
+            baseline_samples.push(baseline_t / unit as f64);
+            candidate_samples.push(candidate_t / unit as f64);
 
-            let (old_mean, old_std_error) = old_samples.mean_and_stderr();
-            let (new_mean, new_std_error) = new_samples.mean_and_stderr();
+            let (baseline_mean, baseline_std_error) = baseline_samples.mean_and_stderr();
+            let (candidate_mean, candidate_std_error) = candidate_samples.mean_and_stderr();
 
-            let out_of_budget = old_samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
-            let std_error = (old_std_error.powi(2) + new_std_error.powi(2)).sqrt();
-            let precise_enough = old_samples.count >= MIN_SAMPLES
-                && self.accuracy_met(old_mean.min(new_mean), std_error);
+            let out_of_budget =
+                baseline_samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            let std_error = (baseline_std_error.powi(2) + candidate_std_error.powi(2)).sqrt();
+            let precise_enough = baseline_samples.count >= MIN_SAMPLES
+                && self.accuracy_met(baseline_mean.min(candidate_mean), std_error);
             if precise_enough || out_of_budget {
                 return Comparison {
-                    old: Stats {
-                        ns_per_iter: old_mean,
-                        std_error: old_std_error,
-                        iterations: probed + old_samples.count as u64 * unit as u64,
-                        samples: old_samples.count,
+                    baseline: Stats {
+                        ns_per_iter: baseline_mean,
+                        std_error: baseline_std_error,
+                        iterations: probed + baseline_samples.count as u64 * unit as u64,
+                        samples: baseline_samples.count,
                         hit_limit: !precise_enough,
-                        untrustworthy: old_samples.count < MIN_SAMPLES,
+                        untrustworthy: baseline_samples.count < MIN_SAMPLES,
                     },
-                    new: Stats {
-                        ns_per_iter: new_mean,
-                        std_error: new_std_error,
-                        iterations: probed + new_samples.count as u64 * unit as u64,
-                        samples: new_samples.count,
+                    candidate: Stats {
+                        ns_per_iter: candidate_mean,
+                        std_error: candidate_std_error,
+                        iterations: probed + candidate_samples.count as u64 * unit as u64,
+                        samples: candidate_samples.count,
                         hit_limit: !precise_enough,
-                        untrustworthy: new_samples.count < MIN_SAMPLES,
+                        untrustworthy: candidate_samples.count < MIN_SAMPLES,
                     },
+                    num_comparisons_planned: self.num_comparisons_planned,
                 };
             }
         }
     }
 }
 
-fn calibrate<G, OLD, NEW, I, O>(
+impl Drop for Config {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            if let Some(made) = Arc::get_mut(&mut self.num_comparisons_made) {
+                // We now know that we are the *last* user of this Config, so we can get an
+                // accurate count of how many comparisons were made.
+                let made = made.load(Acquire);
+                assert_eq!(
+                    self.num_comparisons_planned, made,
+                    "You need to set num_comparisons_planned to {made}."
+                );
+            }
+        }
+    }
+}
+
+fn calibrate<G, BASELINE, CANDIDATE, I, O>(
     gen_env: &mut G,
-    f_old: &mut OLD,
-    f_new: &mut NEW,
+    f_baseline: &mut BASELINE,
+    f_candidate: &mut CANDIDATE,
     xs: &mut Vec<I>,
     cfg: &Config,
     start: Instant,
 ) -> (usize, f64, f64, u64)
 where
     G: FnMut() -> I,
-    OLD: FnMut(&mut I) -> O,
-    NEW: FnMut(&mut I) -> O,
+    BASELINE: FnMut(&mut I) -> O,
+    CANDIDATE: FnMut(&mut I) -> O,
 {
     let probe_ceiling_ns = (cfg.max_time / 100)
         .max(Duration::from_millis(5))
@@ -161,18 +199,18 @@ where
     let mut unit = 1usize;
     let mut probed = 0u64;
     loop {
-        let (old_setup_ns, old_t) = time_batch(gen_env, f_old, xs, unit);
-        let (new_setup_ns, new_t) = time_batch(gen_env, f_new, xs, unit);
+        let (baseline_setup_ns, baseline_t) = time_batch(gen_env, f_baseline, xs, unit);
+        let (candidate_setup_ns, candidate_t) = time_batch(gen_env, f_candidate, xs, unit);
         probed += unit as u64;
-        let total_ns = old_setup_ns + new_setup_ns + old_t + new_t;
-        if old_t + new_t >= target
+        let total_ns = baseline_setup_ns + candidate_setup_ns + baseline_t + candidate_t;
+        if baseline_t + candidate_t >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
             || start.elapsed() > cfg.max_time
         {
-            return (unit, old_t, new_t, probed);
+            return (unit, baseline_t, candidate_t, probed);
         }
-        let factor_time = (target / (old_t + new_t).max(1.0)).clamp(2.0, 100.0);
+        let factor_time = (target / (baseline_t + candidate_t).max(1.0)).clamp(2.0, 100.0);
         let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
         let factor = factor_time.min(factor_safety);
         unit = ((unit as f64 * factor).ceil() as usize)

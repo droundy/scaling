@@ -1608,12 +1608,7 @@ mod tests {
         }
 
         fn precise() -> Config {
-            Config {
-                target_rel_error: 0.01,
-                target_abs_error: Duration::ZERO,
-                max_time: Duration::from_secs(1),
-                num_comparisons_planned: 1,
-            }
+            Config::default().with_max_time(Duration::from_secs(1))
         }
 
         #[test]
@@ -1765,10 +1760,7 @@ mod tests {
             // paid for exactly once.
             let sizes = [64usize, 128, 256, 512, 1024];
             let calls = std::cell::Cell::new(0);
-            let cfg = Config {
-                target_rel_error: 0.5,
-                ..precise()
-            };
+            let cfg = precise().with_relative_error(0.5);
             let m = measure_scaling(
                 &sizes,
                 &cfg,
@@ -1793,10 +1785,7 @@ mod tests {
             let mut counts = Vec::new();
             for target in [0.05, 0.005] {
                 let calls = std::cell::Cell::new(0);
-                let cfg = Config {
-                    target_rel_error: target,
-                    ..precise()
-                };
+                let cfg = precise().with_relative_error(target);
                 measure_scaling(
                     &sizes,
                     &cfg,
@@ -1820,10 +1809,7 @@ mod tests {
             // caller can tell the difference, which is the whole point of
             // returning the flag alongside the fit.
             let sizes = [64usize, 128, 256, 512, 1024];
-            let cfg = Config {
-                target_rel_error: 1e-9,
-                ..precise()
-            };
+            let cfg = precise().with_relative_error(1e-9);
             let m = measure_scaling(
                 &sizes,
                 &cfg,
@@ -1841,10 +1827,7 @@ mod tests {
             // a budget spent in units of measured cost would then never be
             // spent at all. The wall clock is what stops it.
             let sizes = [64usize, 128, 256, 512, 1024];
-            let cfg = Config {
-                target_rel_error: 1e-12,
-                ..precise()
-            };
+            let cfg = precise().with_relative_error(1e-12);
             let m = measure_scaling(&sizes, &cfg, Duration::from_millis(20), 3, |_| 0.0);
             assert!(m.hit_limit);
             assert!(m.fit.is_none(), "nothing measurable, so nothing to report");
@@ -1857,10 +1840,7 @@ mod tests {
             // measured cost does. Simulated here by a `measure` that
             // sleeps far longer than the time it reports.
             let sizes = [64usize, 128];
-            let cfg = Config {
-                target_rel_error: 1e-12,
-                ..precise()
-            };
+            let cfg = precise().with_relative_error(1e-12);
             let started = Instant::now();
             let m = measure_scaling(&sizes, &cfg, Duration::from_millis(100), 0, |_| {
                 thread::sleep(Duration::from_millis(10));
@@ -1882,10 +1862,7 @@ mod tests {
             // the budget alone would return nothing at all rather than
             // something wide, which is the worse of the two failures.
             let sizes = [64usize, 128, 256];
-            let cfg = Config {
-                target_rel_error: 1e-12,
-                ..precise()
-            };
+            let cfg = precise().with_relative_error(1e-12);
             let m = measure_scaling(
                 &sizes,
                 &cfg,
@@ -2197,12 +2174,7 @@ mod tests {
             // synthetic clock. Chi-squared no longer picks the model, so
             // reporting is the whole of its remaining job: saying whether
             // any polynomial actually described what was measured.
-            let cfg = Config {
-                target_rel_error: 0.02,
-                target_abs_error: Duration::ZERO,
-                max_time: Duration::from_secs(60),
-                num_comparisons_planned: 1,
-            };
+            let cfg = Config::relative(0.02).with_max_time(Duration::from_secs(60));
 
             // A real power law: identified, believed, and not flagged.
             let mut clock = one_call(|n| 50.0 * n * n, 0.02, 1);

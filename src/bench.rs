@@ -670,10 +670,7 @@ mod tests {
         }
         const REPEATS: usize = 15;
         for &target in &[0.05, 0.01] {
-            let cfg = Config {
-                target_rel_error: target,
-                ..Config::default()
-            };
+            let cfg = Config::relative(target);
             let estimates: Vec<f64> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))).ns_per_iter)
                 .collect();
@@ -709,13 +706,10 @@ mod tests {
             return;
         }
         // Ground truth: a long, tight-target run.
-        let truth = Config {
-            target_rel_error: 0.002,
-            max_time: Duration::from_secs(20),
-            ..Config::default()
-        }
-        .bench(variable_cost(0xabcd_ef01))
-        .ns_per_iter;
+        let truth = Config::relative(0.002)
+            .with_max_time(Duration::from_secs(20))
+            .bench(variable_cost(0xabcd_ef01))
+            .ns_per_iter;
 
         const REPEATS: usize = 15;
         let estimates: Vec<f64> = (0..REPEATS)
@@ -751,22 +745,10 @@ mod tests {
         // reached and the test can't distinguish "tighter target costs
         // more" from "both stopped at the same floor".
         let loose: Vec<Stats> = (0..REPEATS)
-            .map(|r| {
-                Config {
-                    target_rel_error: 0.05,
-                    ..Config::default()
-                }
-                .bench(variable_cost(seed_for(r)))
-            })
+            .map(|r| Config::relative(0.05).bench(variable_cost(seed_for(r))))
             .collect();
         let tight: Vec<Stats> = (0..REPEATS)
-            .map(|r| {
-                Config {
-                    target_rel_error: 0.003,
-                    ..Config::default()
-                }
-                .bench(variable_cost(seed_for(r)))
-            })
+            .map(|r| Config::relative(0.003).bench(variable_cost(seed_for(r))))
             .collect();
         let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<u64>();
         let (loose_iters, tight_iters) = (iters(&loose), iters(&tight));
@@ -799,28 +781,19 @@ mod tests {
         // A real error still has to clear the bar, either way round.
         assert!(!Config::relative(0.01).accuracy_met(100.0, 5.0));
         assert!(Config::relative(0.01).accuracy_met(100.0, 0.5));
-        assert!(!Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(1),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 5.0));
-        assert!(Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(10),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 5.0));
+        assert!(!Config::absolute(Duration::from_nanos(1))
+            .with_relative_error(0.0)
+            .accuracy_met(100.0, 5.0));
+        assert!(Config::absolute(Duration::from_nanos(10))
+            .with_relative_error(0.0)
+            .accuracy_met(100.0, 5.0));
 
         // The two goals are independent, and the coarser one wins: a 1%
         // goal on a 100ns measurement wants the error under 1ns, but a
         // 5ns absolute floor says 5ns is close enough, so it stops.
-        assert!(Config {
-            target_rel_error: 0.01,
-            target_abs_error: Duration::from_nanos(5),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 4.0));
+        assert!(Config::relative(0.01)
+            .with_absolute_error(Duration::from_nanos(5))
+            .accuracy_met(100.0, 4.0));
     }
 
     #[test]
@@ -876,11 +849,8 @@ mod tests {
         // Only the absolute goal: the relative one is disabled, since
         // sampling stops at whichever goal is coarser and the 1% default
         // would otherwise govern for a workload of this size.
-        let only_absolute = |ns| Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(ns),
-            ..Config::default()
-        };
+        let only_absolute =
+            |ns| Config::absolute(Duration::from_nanos(ns)).with_relative_error(0.0);
         // 25ns, not the 5ns this used to ask for. `variable_cost` has a
         // coefficient of variation around 50%, so the standard error falls
         // as the square root of the sample count and the last factor of two
@@ -931,10 +901,7 @@ mod tests {
         // iteration and each sample takes another, so only a handful fit -
         // fewer than MIN_SAMPLES. We should still get a real error bar out
         // of the samples we managed, rather than NaN.
-        let cfg = Config {
-            max_time: Duration::from_millis(350),
-            ..Config::default()
-        };
+        let cfg = Config::default().with_max_time(Duration::from_millis(350));
         let stats = cfg.bench(|| thread::sleep(Duration::from_millis(100)));
         println!("{stats}");
         assert!(
@@ -961,11 +928,7 @@ mod tests {
         // An accuracy no amount of sampling will reach, and a budget far too
         // short to try: the benchmark must say it fell short rather than
         // return a confident-looking number.
-        let cfg = Config {
-            target_rel_error: 1e-9,
-            max_time: Duration::from_millis(50),
-            ..Config::default()
-        };
+        let cfg = Config::relative(1e-9).with_max_time(Duration::from_millis(50));
         let stats = cfg.bench(variable_cost(1));
         println!("{stats}");
         assert!(stats.hit_limit);
@@ -986,10 +949,7 @@ mod tests {
         }
         const REPEATS: usize = 40;
         for &target in &[0.05, 0.02, 0.01] {
-            let cfg = Config {
-                target_rel_error: target,
-                ..Config::default()
-            };
+            let cfg = Config::relative(target);
             let stats: Vec<Stats> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))))
                 .collect();
