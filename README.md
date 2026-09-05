@@ -35,9 +35,7 @@ noisy ones keep working until they have earned the precision.
 Printing it absolutely rather than as a percentage is deliberate: to decide
 whether two results really differ you compare the gap between them against
 the `±`, and that is a direct digit-for-digit comparison only when
-everything is in the same unit. The time itself is printed to exactly the
-precision the error justifies — `72.17ns ± 0.46ns`, never `72.1683ns`,
-since those last digits are noise wearing the costume of signal.
+everything is in the same unit.
 
 ## Scaling behaviour
 
@@ -48,20 +46,11 @@ constant in front of the law it found, with the same kind of error bar:
 fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
-It works in two stages. The first climbs from small sizes, timing one call
+It works in two stages. The first climbs from small values of `N`, timing one call
 at each, until a call is long enough to time properly, and notes how fast
 cost is growing; those measurements steer and are not part of the answer.
-The second lays out six log-spaced sizes and times a single call at each,
-repeatedly - six rounds to start with, more until the answer is precise
-enough.
-
-The range is picked in *time* rather than in size: far enough up that the
-largest size takes four times as long as the smallest, which the measured
-growth rate turns into a size range. A fixed size range would mean a
-different time range for every benchmark, since four times the size is four
-times the work for a linear cost and sixty-four times for a cubic one. It
-consults no time budget, and a benchmark at the bottom of the measurable
-range is done in under two milliseconds.
+The second lays out six log-spaced values of `N` and times a single call at each,
+repeatedly, until the answer is precise enough.
 
 Repeating each size is what makes the rest work: every size ends up with an
 error bar that was *measured* rather than assumed. That turns "is this the
@@ -88,55 +77,6 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 `O(2ᴺ)` - is reported as the integer power it most behaves like over the
 range measured, with `R²=0.000` and `(limit)` to say that nothing described
 it exactly.
-
-### `nmin`, and workloads that change character
-
-Sizes are measured in multiples of `nmin`, and nothing smaller is tried.
-That matters more than it looks: many costs do not behave the same way at
-small sizes, and a vector that fits in cache is a different machine from one
-that does not.
-
-Summing a vector is the clearest case. From `nmin` of 1 it is not a power
-law at all — rejected on every run, with a constant that moves by tens of
-percent between runs while the reported `±` claims well under one:
-
-```none
-nmin           reported   spread over 8 runs   claimed ±
-      1     0.303 ns/N          39.5%            0.74%
-  1_000     0.371 ns/N           8.9%            0.60%
-100_000     0.423 ns/N           2.8%            0.73%
-1_000_000   0.686 ns/N           0.7%            0.58%
-```
-
-The answer *changes* as `nmin` rises, and that is not a mistake being
-corrected — per-element cost really is higher once the vector no longer fits
-in cache. There is no single true number, only one per regime, and `nmin` is
-how you say which you meant. If a result comes back flagged, an `nmin` above
-wherever your workload changes character is the first thing to try.
-
-To ask for a different accuracy, use a `Config` — either as a fraction of
-the measurement, or as a flat `Duration`:
-
-```rust
-use scaling::Config;
-use std::time::Duration;
-
-println!("fib 500: {}", Config::relative(0.001).bench(|| fib(500)));
-println!("fib 500: {}", Config::absolute(Duration::from_nanos(1)).bench(|| fib(500)));
-```
-
-```none
-fib 500:     262.61ns ± 0.24ns
-fib 500:      253.6ns ± 2.3ns
-```
-
-An absolute target is often the more natural request: if you are trying to
-tell apart two implementations you believe differ by about 5 ns, ask for an
-error well under that and stop paying for precision you will not use.
-
-If the target cannot be reached within the time budget, the benchmark says
-so rather than quietly returning an over-confident number: `Stats::hit_limit`
-is set and the output is marked `(limit)`.
 
 ## Quiescing the machine (Linux)
 

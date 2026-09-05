@@ -44,10 +44,6 @@ Easy! However, please read the [caveats](#caveats) below before using.
 
 # Benchmarking algorithm
 
-An *iteration* is a single execution of your code. A *sample* is a measurement,
-during which your code may be run many times. In other words: taking a sample
-means performing some number of iterations and measuring the total time.
-
 ## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
 
 An *iteration* is a single execution of your code. A *sample* is a
