@@ -40,7 +40,7 @@
 //! library has. Two ways of measuring one quantity that agree are evidence;
 //! the interesting day is the one where they stop agreeing.
 
-use scaling::{bench, bench_env, bench_gen_env, bench_scaling, bench_scaling_gen};
+use scaling::{bench, bench_gen_input, bench_input, bench_scaling, bench_scaling_gen};
 use std::time::{Duration, Instant};
 
 /// How many independent runs each row is built from.
@@ -200,17 +200,17 @@ fn main() {
     // What the harness adds to each iteration.
     //
     // An empty closure costs nothing, so whatever `bench` reports for one
-    // is the harness: the loop counter, the `black_box`, and for the `env`
-    // forms the lookup into the environment vector. The crate documents
+    // is the harness: the loop counter, the `black_box`, and for the `input`
+    // forms the lookup into the input vector. The crate documents
     // this as negligible; this is the measurement behind that claim.
     // ----------------------------------------------------------------
     let overhead = [
         Row::measure("bench", || bench(|| {}).ns_per_iter),
-        Row::measure("bench_env", || {
-            bench_env(vec![0u8; 16], |v| v.len()).ns_per_iter
+        Row::measure("bench_input", || {
+            bench_input(vec![0u8; 16], |v| v.len()).ns_per_iter
         }),
-        Row::measure("bench_gen_env", || {
-            bench_gen_env(|| vec![0u8; 16], |v| v.len()).ns_per_iter
+        Row::measure("bench_gen_input", || {
+            bench_gen_input(|| vec![0u8; 16], |v| v.len()).ns_per_iter
         }),
     ];
     table("Per-iteration harness overhead", "/iter", &overhead);

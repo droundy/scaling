@@ -55,9 +55,9 @@ const MIN_SAMPLES: usize = 6;
 /// ```
 ///
 /// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is [`bench_env`] and [`bench_gen_env`],
+/// the cost moves. The exception is [`bench_input`] and [`bench_gen_input`],
 /// which report about 20% lower, because a smaller batch means a smaller
-/// environment vector to index into - that lookup is harness overhead
+/// input vector to index into - that lookup is harness overhead
 /// rather than the benchmark, so measuring less of it is a gain, but it is
 /// a visible change in what those two report.
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
@@ -99,7 +99,7 @@ pub struct Stats {
     /// 32-bit `usize` could not hold.
     pub iterations: u64,
     /// How many samples were taken (ie. how many times we allocated the
-    /// environment and measured the time).
+    /// input and measured the time).
     pub samples: usize,
     /// `true` if the benchmark ran out of time before reaching its accuracy
     /// target: the answer is real, just less precise than you asked for.
@@ -194,88 +194,86 @@ where
     Config::default().bench(f)
 }
 
-/// Run a benchmark with an environment, with default accuracy (see
+/// Run a benchmark with an input, with default accuracy (see
 /// [`Config`]).
 ///
-/// See [`Config::bench_env`] for the full documentation.
-pub fn bench_env<F, I, O>(env: I, f: F) -> Stats
+/// See [`Config::bench_input`] for the full documentation.
+pub fn bench_input<F, I, O>(input: I, f: F) -> Stats
 where
     F: FnMut(&mut I) -> O,
     I: Clone,
 {
-    Config::default().bench_env(env, f)
+    Config::default().bench_input(input, f)
 }
 
-/// Run a benchmark with a generated environment, with default
+/// Run a benchmark with a generated input, with default
 /// accuracy (see [`Config`]).
 ///
-/// See [`Config::bench_gen_env`] for the full documentation.
-pub fn bench_gen_env<G, F, I, O>(gen_env: G, f: F) -> Stats
+/// See [`Config::bench_gen_input`] for the full documentation.
+pub fn bench_gen_input<G, F, I, O>(gen_input: G, f: F) -> Stats
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    Config::default().bench_gen_env(gen_env, f)
+    Config::default().bench_gen_input(gen_input, f)
 }
 
 impl Config {
     /// Run a benchmark.
     ///
     /// See [`bench`] for the default-accuracy version, and
-    /// [`Config::bench_gen_env`] for the algorithm.
+    /// [`Config::bench_gen_input`] for the algorithm.
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where
         F: FnMut() -> O,
     {
-        self.bench_env((), |_| f())
+        self.bench_input((), |_| f())
     }
 
-    /// Run a benchmark with an environment.
+    /// Run a benchmark with an input.
     ///
-    /// The value `env` is a clonable prototype for the "benchmark
-    /// environment". Each iteration receives a freshly-cloned mutable copy
-    /// of this environment. The time taken to clone the environment is not
+    /// The value `input` is a clonable prototype. Each iteration receives a
+    /// freshly-cloned mutable copy of it. The time taken to clone is not
     /// included in the results.
     ///
     /// Nb: it's very possible that we will end up allocating many (>10,000)
-    /// copies of `env` at the same time. Probably best to keep it small.
+    /// copies of `input` at the same time. Probably best to keep it small.
     ///
-    /// See [`Config::bench_gen_env`] and the module docs for more.
+    /// See [`Config::bench_gen_input`] and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_env` performs a lookup into a big vector in
-    /// order to get the environment for that iteration. If your benchmark
+    /// Every iteration, `bench_input` performs a lookup into a big vector in
+    /// order to get the input for that iteration. If your benchmark
     /// is memory-intensive then this could, in the worst case, amount to a
     /// systematic cache-miss (ie. this vector would have to be fetched from
     /// DRAM at the start of every iteration). In this case the results could
     /// be affected by a hundred nanoseconds. This is a worst-case scenario
     /// however, and I haven't actually been able to trigger it in
     /// practice... but it's good to be aware of the possibility.
-    pub fn bench_env<F, I, O>(&self, env: I, f: F) -> Stats
+    pub fn bench_input<F, I, O>(&self, input: I, f: F) -> Stats
     where
         F: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.bench_gen_env(move || env.clone(), f)
+        self.bench_gen_input(move || input.clone(), f)
     }
 
-    /// Run a benchmark with a generated environment.
+    /// Run a benchmark with a generated input.
     ///
-    /// The function `gen_env` creates the "benchmark environment" for the
-    /// computation. Each iteration receives a freshly-created environment.
-    /// The time taken to create the environment is not included in the
-    /// results.
+    /// The function `gen_input` creates the input for the computation. Each
+    /// iteration receives a freshly-created one. The time taken to create
+    /// them is not included in the results.
     ///
     /// Nb: it's very possible that we will end up generating many (>10,000)
-    /// copies of `env` at the same time. Probably best to keep it small.
+    /// copies of `input` at the same time. Probably best to keep it small.
     ///
     /// See `bench` and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_gen_env` performs a lookup into a big vector
-    /// in order to get the environment for that iteration. If your
+    /// Every iteration, `bench_gen_input` performs a lookup into a big vector
+    /// in order to get the input for that iteration. If your
     /// benchmark is memory-intensive then this could, in the worst case,
     /// amount to a systematic cache-miss (ie. this vector would have to be
     /// fetched from DRAM at the start of every iteration). In this case the
@@ -312,7 +310,7 @@ impl Config {
     /// benchmark has `var(batch) ∝ unit` while a deterministic one has
     /// roughly constant per-sample jitter, and this estimator is right for
     /// both.
-    pub fn bench_gen_env<G, F, I, O>(&self, mut gen_env: G, mut f: F) -> Stats
+    pub fn bench_gen_input<G, F, I, O>(&self, mut gen_input: G, mut f: F) -> Stats
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
@@ -320,7 +318,7 @@ impl Config {
         quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, first_ns, probed) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
+        let (unit, first_ns, probed) = calibrate(&mut gen_input, &mut f, &mut xs, self, start);
         if start.elapsed() > self.max_time {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
@@ -339,7 +337,7 @@ impl Config {
 
         let mut samples = Running::default();
         loop {
-            let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
+            let (_, t) = time_batch(&mut gen_input, &mut f, &mut xs, unit);
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
 
@@ -377,11 +375,11 @@ impl Config {
 }
 
 /// Time `iters` back-to-back calls of `f`, each on its own freshly
-/// generated environment. Returns `(setup_ns, timed_ns)`: the time spent
-/// generating and collecting the `iters` environments (untimed, but still
+/// generated input. Returns `(setup_ns, timed_ns)`: the time spent
+/// generating and collecting the `iters` inputs (untimed, but still
 /// real wall-clock cost that [`calibrate`] must account for so it cannot be
 /// tricked by a benchmark whose timed cost is optimised away), and the time
-/// spent actually running `f` over them. Environments are all created
+/// spent actually running `f` over them. Inputs are all created
 /// before the clock for `timed_ns` starts and all dropped after it stops,
 /// so neither generation nor drop pollutes `timed_ns` itself.
 ///
@@ -397,7 +395,7 @@ impl Config {
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
 pub(crate) fn time_batch<G, F, I, O>(
-    gen_env: &mut G,
+    gen_input: &mut G,
     f: &mut F,
     xs: &mut Vec<I>,
     iters: usize,
@@ -408,11 +406,11 @@ where
 {
     let setup_start = Instant::now();
     xs.clear();
-    xs.extend(std::iter::repeat_with(&mut *gen_env).take(iters));
+    xs.extend(std::iter::repeat_with(&mut *gen_input).take(iters));
     let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
     let start = Instant::now();
     // We iterate over `&mut *xs` rather than draining it, because we don't
-    // want to drop the env values until after the clock has stopped.
+    // want to drop the input values until after the clock has stopped.
     for x in &mut *xs {
         black_box(f(x));
     }
@@ -426,7 +424,7 @@ where
 /// instead of being measured a second time. `xs` is the same reusable
 /// scratch buffer described on [`time_batch`].
 fn calibrate<G, F, I, O>(
-    gen_env: &mut G,
+    gen_input: &mut G,
     f: &mut F,
     xs: &mut Vec<I>,
     cfg: &Config,
@@ -439,9 +437,9 @@ where
     // A ceiling on the *total* cost of one probe, setup as well as timing.
     // Ordinarily the extrapolation below is driven by the timed portion
     // approaching `SAMPLE_TIME`, but when `f`'s cost is optimised away (see
-    // the module docs' "Pure functions" caveat, e.g. `bench_env(v, |_| {})`)
+    // the module docs' "Pure functions" caveat, e.g. `bench_input(v, |_| {})`)
     // that portion never grows however large `unit` gets - while untimed
-    // environment construction does, unboundedly, and before the
+    // input construction does, unboundedly, and before the
     // `start.elapsed() > cfg.max_time` check below can ever run, since the
     // allocation is itself what takes the time. A hundredth of `max_time`
     // rather than some large fraction of it, to bound memory as well: on
@@ -453,7 +451,7 @@ where
         * 1e9;
     // Two more ceilings on `unit`, needing no timing at all, whichever is
     // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with
-    // `f` *and* the environment both trivial (`bench(|| {})`, `I` of `()`)
+    // `f` *and* the input both trivial (`bench(|| {})`, `I` of `()`)
     // the optimiser can delete the whole batch, so `setup_ns` and `t` read
     // as ~0 however large `unit` grows. `MAX_CALIBRATION_BYTES` covers an
     // `I` whose per-clone cost is real but too small for `probe_ceiling_ns`
@@ -461,7 +459,7 @@ where
     // `size_of` sees a `Vec` or `String` as its inline handle only. That
     // last case is left to the wall-clock ceiling above, which bounds it
     // only indirectly: between the three every `I` has some backstop and
-    // none has a hard guarantee, so keep environments small.
+    // none has a hard guarantee, so keep inputs small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -472,7 +470,7 @@ where
     // `Stats::iterations` even though their timings are discarded.
     let mut probed = 0u64;
     loop {
-        let (setup_ns, t) = time_batch(gen_env, f, xs, unit);
+        let (setup_ns, t) = time_batch(gen_input, f, xs, unit);
         probed += unit as u64;
         let total_ns = setup_ns + t;
         // Accept immediately, without ever retrying at this size, as soon
@@ -573,11 +571,11 @@ mod tests {
     fn noop() {
         println!();
         println!("noop base: {}", bench(|| {}));
-        println!("noop 0:    {}", bench_env(vec![0u64; 0], |_| {}));
-        println!("noop 16:   {}", bench_env(vec![0u64; 16], |_| {}));
-        println!("noop 64:   {}", bench_env(vec![0u64; 64], |_| {}));
-        println!("noop 256:  {}", bench_env(vec![0u64; 256], |_| {}));
-        println!("noop 512:  {}", bench_env(vec![0u64; 512], |_| {}));
+        println!("noop 0:    {}", bench_input(vec![0u64; 0], |_| {}));
+        println!("noop 16:   {}", bench_input(vec![0u64; 16], |_| {}));
+        println!("noop 64:   {}", bench_input(vec![0u64; 64], |_| {}));
+        println!("noop 256:  {}", bench_input(vec![0u64; 256], |_| {}));
+        println!("noop 512:  {}", bench_input(vec![0u64; 512], |_| {}));
     }
 
     #[test]
@@ -585,40 +583,43 @@ mod tests {
         println!();
         println!(
             "no ret 32:    {}",
-            bench_env(vec![0u64; 32], |x| { x.clone() })
+            bench_input(vec![0u64; 32], |x| { x.clone() })
         );
-        println!("return 32:    {}", bench_env(vec![0u64; 32], |x| x.clone()));
+        println!(
+            "return 32:    {}",
+            bench_input(vec![0u64; 32], |x| x.clone())
+        );
         println!(
             "no ret 256:   {}",
-            bench_env(vec![0u64; 256], |x| { x.clone() })
+            bench_input(vec![0u64; 256], |x| { x.clone() })
         );
         println!(
             "return 256:   {}",
-            bench_env(vec![0u64; 256], |x| x.clone())
+            bench_input(vec![0u64; 256], |x| x.clone())
         );
         println!(
             "no ret 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| { x.clone() })
+            bench_input(vec![0u64; 1024], |x| { x.clone() })
         );
         println!(
             "return 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| x.clone())
+            bench_input(vec![0u64; 1024], |x| x.clone())
         );
         println!(
             "no ret 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| { x.clone() })
+            bench_input(vec![0u64; 4096], |x| { x.clone() })
         );
         println!(
             "return 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| x.clone())
+            bench_input(vec![0u64; 4096], |x| x.clone())
         );
         println!(
             "no ret 50000: {}",
-            bench_env(vec![0u64; 50000], |x| { x.clone() })
+            bench_input(vec![0u64; 50000], |x| { x.clone() })
         );
         println!(
             "return 50000: {}",
-            bench_env(vec![0u64; 50000], |x| x.clone())
+            bench_input(vec![0u64; 50000], |x| x.clone())
         );
     }
 

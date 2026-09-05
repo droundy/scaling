@@ -44,17 +44,17 @@ impl Config {
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
-    pub fn bench_scaling_gen<G, F, I, O>(&self, mut gen_env: G, f: F, nmin: usize) -> ScalingStats
+    pub fn bench_scaling_gen<G, F, I, O>(&self, mut gen_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
     {
         quiet::pin_if_requested();
         scaling_sweep(self, nmin, |n| {
-            // Build the environment before the clock starts and drop it
+            // Build the input before the clock starts and drop it
             // after the clock stops, so neither generation nor drop lands
             // in the measurement.
-            let mut x = gen_env(n);
+            let mut x = gen_input(n);
             let start = Instant::now();
             black_box(f(&mut x));
             let elapsed = start.elapsed();
@@ -361,12 +361,12 @@ fn scaling_sweep(cfg: &Config, nmin: usize, mut measure: impl FnMut(usize) -> f6
 /// ```
 ///
 /// See [`Config::bench_scaling_gen`] to choose your own accuracy.
-pub fn bench_scaling_gen<G, F, I, O>(gen_env: G, f: F, nmin: usize) -> ScalingStats
+pub fn bench_scaling_gen<G, F, I, O>(gen_input: G, f: F, nmin: usize) -> ScalingStats
 where
     G: FnMut(usize) -> I,
     F: Fn(&mut I) -> O,
 {
-    Config::default().bench_scaling_gen(gen_env, f, nmin)
+    Config::default().bench_scaling_gen(gen_input, f, nmin)
 }
 
 // The polynomial fit below is validated against synthetic data in
@@ -719,14 +719,14 @@ fn discover_sizes(
             // not have, and it reaches any size worth reaching in a
             // logarithmic number of steps, which `MAX_CLIMB_STEPS` bounds -
             // *for the cost this function can see*. `bench_scaling_gen`
-            // times only `f`, not `gen_env` (see `bench_scaling_gen_with`),
-            // so a `gen_env` that grows with `n` while `f` stays too fast to
+            // times only `f`, not `gen_input` (see `bench_scaling_gen_with`),
+            // so a `gen_input` that grows with `n` while `f` stays too fast to
             // time is invisible here: doubling will keep asking for larger
-            // `n` on `gen_env`'s behalf with nothing to weigh that cost
+            // `n` on `gen_input`'s behalf with nothing to weigh that cost
             // against, up to `nmin · 2^MAX_CLIMB_STEPS`. Budgeting that
-            // properly needs `gen_env` in the clock, which is deliberately
+            // properly needs `gen_input` in the clock, which is deliberately
             // excluded elsewhere for good reason (measurement purity), so
-            // this is a known gap rather than an oversight: keep `gen_env`
+            // this is a known gap rather than an oversight: keep `gen_input`
             // cheap relative to `f`, the same assumption the crate already
             // asks of it for the timed region to mean anything.
             None if last_t <= 0.0 => last_n.saturating_mul(2),
@@ -908,7 +908,7 @@ fn measure_scaling(
     // the binding one. `spent` adds up what the calls themselves cost,
     // which is what the accuracy is bought with; `started` is real time,
     // which also covers what `measure` does around the call - building and
-    // dropping an environment, most of all, which for something like a
+    // dropping an input, most of all, which for something like a
     // sort costs as much again as the sort does. Budgeting on `spent`
     // alone would overrun by whatever that setup costs, and would never
     // terminate at all for a benchmark whose calls measure as zero.
@@ -1835,7 +1835,7 @@ mod tests {
 
         #[test]
         fn setup_around_the_call_counts_against_the_budget() {
-            // `bench_scaling_gen` builds and drops an environment outside
+            // `bench_scaling_gen` builds and drops an input outside
             // the timed region, so real time can run out long before the
             // measured cost does. Simulated here by a `measure` that
             // sleeps far longer than the time it reports.

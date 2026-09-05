@@ -16,7 +16,7 @@ analysis (no outlier detection, no HTML output).
 [criterion]: https://crates.io/crates/criterion
 
 ```
-use scaling::{bench,bench_env,bench_scaling};
+use scaling::{bench,bench_input,bench_scaling};
 
 # fn fib(_: usize) -> usize { 0 }
 #
@@ -25,9 +25,9 @@ println!("fib 200: {}", bench(|| fib(200) ));
 println!("fib 500: {}", bench(|| fib(500) ));
 println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
 
-// If a function needs to mutate some state, use `bench_env`.
-println!("reverse: {}", bench_env(vec![0;100], |xs| xs.reverse() ));
-println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
+// If a function needs to mutate some state, use `bench_input`.
+println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse() ));
+println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()    ));
 ```
 
 Running the above yields the following results:
@@ -44,7 +44,7 @@ Easy! However, please read the [caveats](#caveats) below before using.
 
 # Benchmarking algorithm
 
-## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
+## Flat benchmarks: `bench`, `bench_input`, `bench_gen_input`
 
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
@@ -169,13 +169,13 @@ done once-per-iteration *will* be counted in the final times.
 
 * In the case of [`bench()`] this amounts to incrementing the loop counter and
   passing the return value through `std::hint::black_box`.
-* In the case of [`bench_env`] and [`bench_gen_env`], we also do a lookup into a big vector in
-  order to get the environment for that iteration.
+* In the case of [`bench_input`] and [`bench_gen_input`], we also do a lookup into a big vector in
+  order to get the input for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
 
 The cost of the above operations depend on the details of your benchmark;
 namely: (1) how large is the return value? and (2) does the benchmark evict
-the environment vector from the CPU cache? In practice, these criteria are only
+the input vector from the CPU cache? In practice, these criteria are only
 satisfied by longer-running benchmarks, making these effects hard to measure.
 
 ## Caveat 2: Pure functions
@@ -187,13 +187,13 @@ Benchmarking pure functions involves a nasty gotcha which users should be
 aware of. Consider the following benchmarks:
 
 ```
-# use scaling::{bench,bench_env};
+# use scaling::{bench,bench_input};
 #
 # fn fib(_: usize) -> usize { 0 }
 #
 let fib_1 = bench(|| fib(500) );                     // fine
 let fib_2 = bench(|| { fib(500); } );                // spoiler: NOT fine
-let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
+let fib_3 = bench_input(0, |x| { *x = fib(500); } );   // also fine, but ugly
 # let _ = (fib_1, fib_2, fib_3);
 ```
 
@@ -219,7 +219,7 @@ accidentally eliminated.
 
 In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
-environment. This has the desired effect, but looks a bit weird.
+own input. This has the desired effect, but looks a bit weird.
 
 ## Caveat 3: A busy machine
 
@@ -252,7 +252,7 @@ pub(crate) mod significant;
 // whole crate. Rust 1.66 calls that ambiguity an error; later compilers
 // quietly pick one, so this only ever failed on the oldest supported
 // toolchain, and only when building doctests rather than the library.
-pub use self::bench::{bench, bench_env, bench_gen_env, Stats};
+pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 
@@ -270,7 +270,7 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
+/// [`bench`], [`bench_input`] and [`bench_gen_input`] use [`Config::default`];
 /// call the same-named methods on a `Config` to choose your own.
 ///
 /// ```
@@ -482,7 +482,7 @@ impl Running {
     }
 
     /// Mean, and the standard error *of that mean*, in nanoseconds. See
-    /// [`Config::bench_gen_env`] for why batching does not bias this.
+    /// [`Config::bench_gen_input`] for why batching does not bias this.
     ///
     /// The error is absolute rather than relative because that is the
     /// primitive quantity: it needs nothing but the samples, whereas
@@ -574,8 +574,8 @@ mod tests {
         println!("fib 200: {}", bench(|| fib(200)));
         println!("fib 500: {}", bench(|| fib(500)));
         println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
-        println!("reverse: {}", bench_env(vec![0; 100], |xs| xs.reverse()));
-        println!("sort:    {}", bench_env(vec![0; 100], |xs| xs.sort()));
+        println!("reverse: {}", bench_input(vec![0; 100], |xs| xs.reverse()));
+        println!("sort:    {}", bench_input(vec![0; 100], |xs| xs.sort()));
 
         // This is fine:
         println!("fib 1:   {}", bench(|| fib(500)));
@@ -589,7 +589,7 @@ mod tests {
         // This is also fine, but a bit weird:
         println!(
             "fib 3:   {}",
-            bench_env(0, |x| {
+            bench_input(0, |x| {
                 *x = fib(500);
             })
         );

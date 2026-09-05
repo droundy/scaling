@@ -46,26 +46,89 @@ impl Display for Comparison {
 }
 
 impl Config {
+    /// Compare two functions `f_baseline` and `f_candidate` to see if performance has changed.
+    ///
+    /// Note that when using the `compare_*` family of functions, you *must* use
+    /// `Config::with_comparisons_planned` to specify the number of comparisons that will be
+    /// made.
+    ///
+    /// See [`Config::compare_gen_input`] for algorithm details.
     pub fn compare<B, C, O>(&self, mut f_baseline: B, mut f_candidate: C) -> Comparison
     where
         B: FnMut() -> O,
         C: FnMut() -> O,
     {
-        self.compare_env((), |_| f_baseline(), |_| f_candidate())
+        self.compare_input((), |_| f_baseline(), |_| f_candidate())
     }
 
-    pub fn compare_env<B, C, I, O>(&self, env: I, f_baseline: B, f_candidate: C) -> Comparison
+    /// Compare two functions `f_baseline` and `f_candidate` that need mutable state to run.
+    ///
+    /// Every iteration of both functions gets its own freshly-cloned copy of `input`, so neither
+    /// function ever sees state the other left behind, and neither sees its own from a previous
+    /// iteration. The cloning happens outside the timed region and is not measured.
+    ///
+    /// Note that a whole batch of copies exists at once - possibly many thousands - so `input` is
+    /// best kept small. [`Config::compare_gen_input`] takes a closure instead, for state that is
+    /// too expensive to clone or is not [`Clone`] at all.
+    ///
+    /// As with every `compare_*` function, you *must* use
+    /// [`Config::with_comparisons_planned`] to specify the number of comparisons that will be
+    /// made. See [`Config::compare_gen_input`] for algorithm details.
+    pub fn compare_input<B, C, I, O>(&self, input: I, f_baseline: B, f_candidate: C) -> Comparison
     where
         B: FnMut(&mut I) -> O,
         C: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.compare_gen_env(move || env.clone(), f_baseline, f_candidate)
+        self.compare_gen_input(move || input.clone(), f_baseline, f_candidate)
     }
 
-    pub fn compare_gen_env<G, B, C, I, O>(
+    /// Compare two functions whose mutable state is built fresh rather than cloned.
+    ///
+    /// `gen_input` is called once per iteration of each function, so `f_baseline` and
+    /// `f_candidate` always get their own inputs and neither can leave anything behind for the
+    /// other. Building them is not timed. Use this in preference to [`Config::compare_input`]
+    /// when the state is expensive to clone, or is not [`Clone`] at all.
+    ///
+    /// As with every `compare_*` function, you *must* use
+    /// [`Config::with_comparisons_planned`] to specify the number of comparisons that will be
+    /// made.
+    ///
+    /// ## Overhead
+    ///
+    /// Every iteration performs a lookup into a big vector to reach its input, exactly as
+    /// [`Config::bench_gen_input`] does, and the same worst-case cache-miss caveat applies.
+    /// Here both functions pay it alike, so most of it cancels out of the difference.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Calibrate.** Find the smallest batch size `unit` for which one batch of each
+    ///    function *together* reach `SAMPLE_TIME`, extrapolating multiplicatively from the last
+    ///    probe as [`Config::bench_gen_input`] does. Both functions are measured at the same
+    ///    `unit`, so it is the pair of batches, not either one alone, that costs a sample time.
+    /// 2. **Sample.** Each round times a batch of `unit` iterations of `f_baseline` and then a
+    ///    batch of `unit` iterations of `f_candidate`, recording the per-iteration time of
+    ///    each. Timing them back to back means slow drift - a core changing frequency, a
+    ///    neighbour waking up - lands on both nearly equally, so it largely cancels out of the
+    ///    difference between them. It still widens both error bars, but that only makes
+    ///    [`Comparison::is_changed`] harder to satisfy; drift that fell on one function alone
+    ///    would instead look exactly like a real change.
+    /// 3. **Stop** once there are at least `MIN_SAMPLES` rounds *and* the accuracy target is
+    ///    met. What is tested against the target is the standard error of the *difference*,
+    ///    `sqrt(se_baseline² + se_candidate²)`, measured relative to whichever of the two is
+    ///    faster. If `max_time` runs out first, stop anyway and set `hit_limit` on both halves.
+    ///
+    /// Note what step 3 does *not* promise. The target is relative to a runtime, not to the
+    /// difference between the two, so meeting it does not mean a change is resolvable: a 1%
+    /// target on two functions that differ by 0.5% will stop long before it can tell them
+    /// apart. Whether the difference is real is [`Comparison::is_changed`]'s question, and it
+    /// is the one that accounts for how many comparisons were planned.
+    ///
+    /// See [`Config::bench_gen_input`] for why batching does not bias the per-iteration figures
+    /// that come out of step 2.
+    pub fn compare_gen_input<G, B, C, I, O>(
         &self,
-        mut gen_env: G,
+        mut gen_input: G,
         mut f_baseline: B,
         mut f_candidate: C,
     ) -> Comparison
@@ -79,7 +142,7 @@ impl Config {
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
         let (unit, base_ns, cand_ns, probed) = calibrate(
-            &mut gen_env,
+            &mut gen_input,
             &mut f_baseline,
             &mut f_candidate,
             &mut xs,
@@ -111,8 +174,8 @@ impl Config {
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
         loop {
-            let (_, base_t) = time_batch(&mut gen_env, &mut f_baseline, &mut xs, unit);
-            let (_, cand_t) = time_batch(&mut gen_env, &mut f_candidate, &mut xs, unit);
+            let (_, base_t) = time_batch(&mut gen_input, &mut f_baseline, &mut xs, unit);
+            let (_, cand_t) = time_batch(&mut gen_input, &mut f_candidate, &mut xs, unit);
             base_samples.push(base_t / unit as f64);
             cand_samples.push(cand_t / unit as f64);
 
@@ -166,7 +229,7 @@ impl Drop for Config {
 }
 
 fn calibrate<G, B, C, I, O>(
-    gen_env: &mut G,
+    gen_input: &mut G,
     f_base: &mut B,
     f_cand: &mut C,
     xs: &mut Vec<I>,
@@ -190,8 +253,8 @@ where
     let mut unit = 1usize;
     let mut probed = 0u64;
     loop {
-        let (base_setup_ns, base_t) = time_batch(gen_env, f_base, xs, unit);
-        let (cand_setup_ns, cand_t) = time_batch(gen_env, f_cand, xs, unit);
+        let (base_setup_ns, base_t) = time_batch(gen_input, f_base, xs, unit);
+        let (cand_setup_ns, cand_t) = time_batch(gen_input, f_cand, xs, unit);
         probed += unit as u64;
         let total_ns = base_setup_ns + cand_setup_ns + base_t + cand_t;
         if base_t + cand_t >= target

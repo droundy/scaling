@@ -7,15 +7,15 @@ A lightweight benchmarking library which:
 * has a very simple API!
 
 ```rust
-use scaling::{bench, bench_env};
+use scaling::{bench, bench_input};
 
 // Simple benchmarks are performed with `bench`.
 println!("fib 200: {}", bench(|| fib(200) ));
 println!("fib 500: {}", bench(|| fib(500) ));
 
-// If a function needs to mutate some state, use `bench_env`.
-println!("reverse: {}", bench_env(vec![0;100], |xs| xs.reverse()));
-println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
+// If a function needs to mutate some state, use `bench_input`.
+println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse()));
+println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()));
 ```
 
 Running the above yields the following:
