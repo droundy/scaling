@@ -1,9 +1,9 @@
-//! Timing a benchmark that does not take a size: [`bench`] and its
-//! variants, and the sampling loop behind them.
+//! Comparing two benchmarks that do not take a size: [`Config::compare`] and
+//! its variants, and the sampling loop behind them.
 //!
-//! The loop keeps taking samples until the standard error of the mean is
+//! The loop keeps taking samples until the standard error of each mean is
 //! small enough to meet the caller's accuracy target, or until the time
-//! budget runs out; see [`Config`] for the target and [`Stats`] for what
+//! budget runs out; see [`Config`] for the target and [`Comparison`] for what
 //! comes back.
 
 use super::*;
@@ -40,26 +40,12 @@ const MIN_SAMPLES: usize = 6;
 /// on the order of 100 ns together - stay a rounding error against it, at
 /// about 0.1%, which is far below any accuracy worth asking for.
 ///
-/// It was 1ms, and shortening it is nearly free. A benchmark stops when the
-/// standard error of the mean is small enough, and that error is set by the
-/// spread *between* samples, which for the benchmarks measured here is
-/// dominated by drift the batch size does not affect - so the same number
-/// of samples is needed either way, and each one costs a tenth as much:
-///
-/// ```none
-///                    reported at 1ms / at 100us      wall at 1ms / at 100us
-///   empty closure         0.5921 / 0.5933 ns             8.9 / 1.5 ms
-///   ~3ns of arithmetic    2.6236 / 2.6594 ns            13.2 / 1.4 ms
-///   ~2.9us of arithmetic  2880.7 / 2883.6 ns            10.7 / 1.4 ms
-///   noisy 1.7us workload  1753.2 / 1766.1 ns            10.3 / 5.9 ms
-/// ```
-///
-/// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is [`bench_env`] and [`bench_gen_env`],
-/// which report about 20% lower, because a smaller batch means a smaller
-/// environment vector to index into - that lookup is harness overhead
-/// rather than the benchmark, so measuring less of it is a gain, but it is
-/// a visible change in what those two report.
+/// Shortening this is nearly free: a comparison stops when the standard
+/// error of each mean is small enough, and that error is set by the spread
+/// *between* samples, which is typically dominated by drift the batch size
+/// does not affect - so the same number of samples is needed regardless of
+/// how long each one takes, and each one costs less. See [`bench`]'s module
+/// for the measurements behind this constant.
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
 /// A backstop on the number of samples, so the vector of them cannot grow
@@ -70,7 +56,7 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 /// below this.
 const MAX_SAMPLES: usize = 1_000_000;
 
-/// Statistics for a benchmark run.
+/// The result of comparing two benchmarks.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Comparison {
     /// The [`Stats`] for the old version.
@@ -100,18 +86,17 @@ impl Display for Comparison {
         if is_changed {
             write!(f, "(unchanged)")
         } else {
-            let percent_change = self.difference_ns()/self.old.ns_per_iter*100.0;
-            let rel_error = self.std_error()/self.old.ns_per_iter*100.0;
+            let percent_change = self.difference_ns() / self.old.ns_per_iter * 100.0;
+            let rel_error = self.std_error() / self.old.ns_per_iter * 100.0;
             write!(f, "{percent_change:+.1}% +/- {rel_error:.1}%")
         }
     }
 }
 
 impl Config {
-    /// Run a benchmark.
+    /// Compare two benchmarks.
     ///
-    /// See [`bench`] for the default-accuracy version, and
-    /// [`Config::bench_gen_env`] for the algorithm.
+    /// See [`Config::compare_gen_env`] for the algorithm.
     pub fn compare<OLD, NEW, O>(&self, mut f_old: OLD, mut f_new: NEW) -> Comparison
     where
         OLD: FnMut() -> O,
@@ -120,7 +105,7 @@ impl Config {
         self.compare_env((), |_| f_old(), |_| f_new())
     }
 
-    /// Run a benchmark with an environment.
+    /// Compare two benchmarks with an environment.
     ///
     /// The value `env` is a clonable prototype for the "benchmark
     /// environment". Each iteration receives a freshly-cloned mutable copy
@@ -130,11 +115,11 @@ impl Config {
     /// Nb: it's very possible that we will end up allocating many (>10,000)
     /// copies of `env` at the same time. Probably best to keep it small.
     ///
-    /// See [`Config::bench_gen_env`] and the module docs for more.
+    /// See [`Config::compare_gen_env`] and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_env` performs a lookup into a big vector in
+    /// Every iteration, `compare_env` performs a lookup into a big vector in
     /// order to get the environment for that iteration. If your benchmark
     /// is memory-intensive then this could, in the worst case, amount to a
     /// systematic cache-miss (ie. this vector would have to be fetched from
@@ -151,7 +136,7 @@ impl Config {
         self.compare_gen_env(move || env.clone(), f_old, f_new)
     }
 
-    /// Run a benchmark with a generated environment.
+    /// Compare two benchmarks with a generated environment.
     ///
     /// The function `gen_env` creates the "benchmark environment" for the
     /// computation. Each iteration receives a freshly-created environment.
@@ -161,12 +146,12 @@ impl Config {
     /// Nb: it's very possible that we will end up generating many (>10,000)
     /// copies of `env` at the same time. Probably best to keep it small.
     ///
-    /// See `bench` and the module docs for more.
+    /// See [`Config::compare`] and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_gen_env` performs a lookup into a big vector
-    /// in order to get the environment for that iteration. If your
+    /// Every iteration, `compare_gen_env` performs a lookup into a big
+    /// vector in order to get the environment for that iteration. If your
     /// benchmark is memory-intensive then this could, in the worst case,
     /// amount to a systematic cache-miss (ie. this vector would have to be
     /// fetched from DRAM at the start of every iteration). In this case the
@@ -177,19 +162,20 @@ impl Config {
     ///
     /// # Algorithm
     ///
-    /// 1. **Calibrate.** Find the smallest batch size `unit` whose measured
-    ///    duration reaches `sample_time`, extrapolating multiplicatively
-    ///    from the last probe (clamped to [2x, 100x] per step) so a
-    ///    nanosecond-scale function reaches its batch size in a handful of
-    ///    probes.
-    /// 2. **Sample.** Repeatedly time a batch of exactly `unit` iterations,
-    ///    recording the per-iteration time `x_j = t_j / unit`. The batch
-    ///    from step 1 that first reached `sample_time` is reused as the
-    ///    warmup sample and discarded, rather than measured again.
-    /// 3. **Stop** once there are at least `MIN_SAMPLES` samples *and*
-    ///    the `accuracy` target is met, where
-    ///    `stderr(x) = sd(x) / sqrt(k)` with a Bessel-corrected `sd`. If
-    ///    `max_time` runs out first, stop anyway, set `hit_limit`, and
+    /// 1. **Calibrate.** Find the smallest batch size `unit` whose combined
+    ///    measured duration for `f_old` and `f_new` reaches `sample_time`,
+    ///    extrapolating multiplicatively from the last probe (clamped to
+    ///    [2x, 100x] per step) so a nanosecond-scale function reaches its
+    ///    batch size in a handful of probes.
+    /// 2. **Sample.** Repeatedly time a batch of exactly `unit` iterations
+    ///    of each of `f_old` and `f_new`, recording their per-iteration
+    ///    times `x_j = t_j / unit`. The batch from step 1 that first reached
+    ///    `sample_time` is reused as the warmup sample and discarded, rather
+    ///    than measured again.
+    /// 3. **Stop** once there are at least `MIN_SAMPLES` samples of each
+    ///    *and* the accuracy target is met by the combined standard error,
+    ///    where `stderr(x) = sd(x) / sqrt(k)` with a Bessel-corrected `sd`.
+    ///    If `max_time` runs out first, stop anyway, set `hit_limit`, and
     ///    report the standard error from however many samples were
     ///    collected - two is enough for one to exist, and a wide honest
     ///    error bar beats none.
@@ -317,7 +303,7 @@ where
     // A ceiling on the *total* cost of one probe, setup as well as timing.
     // Ordinarily the extrapolation below is driven by the timed portion
     // approaching `SAMPLE_TIME`, but when `f`'s cost is optimised away (see
-    // the module docs' "Pure functions" caveat, e.g. `bench_env(v, |_| {})`)
+    // the crate docs' "Pure functions" caveat, e.g. `compare_env(v, |_| {}, |_| {})`)
     // that portion never grows however large `unit` gets - while untimed
     // environment construction does, unboundedly, and before the
     // `start.elapsed() > cfg.max_time` check below can ever run, since the
@@ -331,9 +317,10 @@ where
         * 1e9;
     // Two more ceilings on `unit`, needing no timing at all, whichever is
     // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with
-    // `f` *and* the environment both trivial (`bench(|| {})`, `I` of `()`)
-    // the optimiser can delete the whole batch, so `setup_ns` and `t` read
-    // as ~0 however large `unit` grows. `MAX_CALIBRATION_BYTES` covers an
+    // `f_old`/`f_new` *and* the environment both trivial
+    // (`compare(|| {}, || {})`, `I` of `()`) the optimiser can delete the
+    // whole batch, so `setup_ns` and `t` read as ~0 however large `unit`
+    // grows. `MAX_CALIBRATION_BYTES` covers an
     // `I` whose per-clone cost is real but too small for `probe_ceiling_ns`
     // to catch before millions of copies - an array, a plain struct - since
     // `size_of` sees a `Vec` or `String` as its inline handle only. That
