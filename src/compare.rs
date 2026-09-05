@@ -46,42 +46,33 @@ impl Display for Comparison {
 }
 
 impl Config {
-    pub fn compare<BASELINE, CANDIDATE, O>(
-        &self,
-        mut f_baseline: BASELINE,
-        mut f_candidate: CANDIDATE,
-    ) -> Comparison
+    pub fn compare<B, C, O>(&self, mut f_baseline: B, mut f_candidate: C) -> Comparison
     where
-        BASELINE: FnMut() -> O,
-        CANDIDATE: FnMut() -> O,
+        B: FnMut() -> O,
+        C: FnMut() -> O,
     {
         self.compare_env((), |_| f_baseline(), |_| f_candidate())
     }
 
-    pub fn compare_env<BASELINE, CANDIDATE, I, O>(
-        &self,
-        env: I,
-        f_baseline: BASELINE,
-        f_candidate: CANDIDATE,
-    ) -> Comparison
+    pub fn compare_env<B, C, I, O>(&self, env: I, f_baseline: B, f_candidate: C) -> Comparison
     where
-        BASELINE: FnMut(&mut I) -> O,
-        CANDIDATE: FnMut(&mut I) -> O,
+        B: FnMut(&mut I) -> O,
+        C: FnMut(&mut I) -> O,
         I: Clone,
     {
         self.compare_gen_env(move || env.clone(), f_baseline, f_candidate)
     }
 
-    pub fn compare_gen_env<G, BASELINE, CANDIDATE, I, O>(
+    pub fn compare_gen_env<G, B, C, I, O>(
         &self,
         mut gen_env: G,
-        mut f_baseline: BASELINE,
-        mut f_candidate: CANDIDATE,
+        mut f_baseline: B,
+        mut f_candidate: C,
     ) -> Comparison
     where
         G: FnMut() -> I,
-        BASELINE: FnMut(&mut I) -> O,
-        CANDIDATE: FnMut(&mut I) -> O,
+        B: FnMut(&mut I) -> O,
+        C: FnMut(&mut I) -> O,
     {
         self.num_comparisons_made.fetch_add(1, Release);
         quiet::pin_if_requested();
@@ -174,18 +165,18 @@ impl Drop for Config {
     }
 }
 
-fn calibrate<G, BASE, CAND, I, O>(
+fn calibrate<G, B, C, I, O>(
     gen_env: &mut G,
-    f_base: &mut BASE,
-    f_cand: &mut CAND,
+    f_base: &mut B,
+    f_cand: &mut C,
     xs: &mut Vec<I>,
     cfg: &Config,
     start: Instant,
 ) -> (usize, f64, f64, u64)
 where
     G: FnMut() -> I,
-    BASE: FnMut(&mut I) -> O,
-    CAND: FnMut(&mut I) -> O,
+    B: FnMut(&mut I) -> O,
+    C: FnMut(&mut I) -> O,
 {
     let probe_ceiling_ns = (cfg.max_time / 100)
         .max(Duration::from_millis(5))
