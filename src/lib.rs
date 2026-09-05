@@ -128,7 +128,7 @@ separately because they fail independently:
   and it is what the `±` in the output shows. Measuring continues until it
   meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
-  for [`bench`].
+  for [`bench()`].
 
 The two are deliberately not merged into one number, and measured error bars
 are what keeps them apart. Where errors are only assumed, the usual move is
@@ -264,7 +264,7 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
+/// [`bench()`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
 /// call the same-named methods on a `Config` to choose your own.
 ///
 /// ```
