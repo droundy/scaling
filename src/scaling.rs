@@ -29,6 +29,9 @@ impl Config {
         F: Fn(usize) -> O,
     {
         quiet::pin_if_requested();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
         scaling_sweep(self, nmin, |n| {
             // `black_box` on the size as well as the result: without it the
             // optimiser can see a literal `n` and lift the whole call out,
@@ -50,6 +53,9 @@ impl Config {
         F: Fn(&mut I) -> O,
     {
         quiet::pin_if_requested();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
         scaling_sweep(self, nmin, |n| {
             // Build the input before the clock starts and drop it
             // after the clock stops, so neither generation nor drop lands

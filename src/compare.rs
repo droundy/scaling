@@ -203,6 +203,9 @@ impl Config {
     {
         self.num_comparisons_made.fetch_add(1, Release);
         quiet::pin_if_requested();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
         let (unit, base_ns, cand_ns, probed) = calibrate(

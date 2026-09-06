@@ -308,9 +308,140 @@ pub(crate) fn pin_if_requested() {
     });
 }
 
+/// Exclusive use of the reserved CPUs, for as long as this is held.
+///
+/// Benchmarks contend at two scopes, so this closes both. A process-wide
+/// mutex makes parallel test threads take turns - pinned to one core they
+/// cannot run faster in parallel anyway, they only interleave and spoil each
+/// other's timings. An `flock` on [`CPUS_PATH`] then does the same between
+/// separate benchmark processes. The kernel drops a file lock when the
+/// process holding it dies, so a benchmark killed with `SIGKILL` or
+/// interrupted at the terminal cannot strand the CPU the way a PID file
+/// would.
+///
+/// Blocks until both are free. Benchmarks take this for themselves whenever
+/// they are [`Status::Pinned`]; take it by hand around a group of
+/// measurements that must not be interleaved with anything else:
+///
+/// ```
+/// let _held = scaling::quiet::exclusive();
+/// // ... measurements that belong together ...
+/// ```
+///
+/// Re-entrant within a thread: taking it again while it is already held
+/// hands back a claim that does nothing, so a benchmark nested inside
+/// another one's closure cannot deadlock against itself.
+pub struct Exclusive {
+    /// `None` for a re-entrant claim, where an outer [`Exclusive`] on this
+    /// thread holds the real locks - releasing here would hand the CPU away
+    /// while that outer measurement was still running.
+    held: Option<Held>,
+}
+
+/// The locks themselves. Fields drop in declaration order, so the file lock
+/// is released before the mutex - the reverse of the order they are taken.
+struct Held {
+    _machine: Option<std::fs::File>,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+static IN_PROCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static ALREADY_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Take exclusive use of the reserved CPUs, waiting if another thread or
+/// process has it. See [`Exclusive`].
+pub fn exclusive() -> Exclusive {
+    if ALREADY_HELD.with(|h| h.get()) {
+        return Exclusive { held: None };
+    }
+    // A poisoned mutex means an earlier benchmark panicked while holding it.
+    // That says nothing about whether the CPU is free now, so carry on
+    // rather than letting one failure break every later measurement.
+    let _process = IN_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+    let _machine = lock_reservation();
+    ALREADY_HELD.with(|h| h.set(true));
+    Exclusive {
+        held: Some(Held { _machine, _process }),
+    }
+}
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        if self.held.is_some() {
+            ALREADY_HELD.with(|h| h.set(false));
+        }
+    }
+}
+
+/// Take it only when pinned, which is where sharing a core would actually
+/// corrupt a measurement. Unpinned, benchmarks are spread over the machine
+/// and serialising them would cost a test suite dearly for little gain.
+pub(crate) fn exclusive_if_pinned() -> Option<Exclusive> {
+    matches!(status(), Status::Pinned { .. }).then(exclusive)
+}
+
+/// `flock` the reservation record, or `None` if there is no reservation to
+/// coordinate over.
+fn lock_reservation() -> Option<std::fs::File> {
+    // Read-only is enough - `flock` ignores the access mode - and it has to
+    // be, since `/run` is root-owned and an ordinary user could neither
+    // create a lock file there nor open this one for writing.
+    let _file = std::fs::File::open(CPUS_PATH).ok()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Blocking: waiting our turn is the entire point.
+        if unsafe { libc::flock(_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            // A measurement that could not take the lock is still valid,
+            // just possibly sharing the CPU - the same bargain
+            // `pin_if_requested` makes when pinning fails.
+            return None;
+        }
+        Some(_file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A benchmark nested inside another one's closure must not deadlock
+    /// against itself, which a plain mutex would do.
+    #[test]
+    fn exclusive_is_reentrant_within_a_thread() {
+        let outer = exclusive();
+        let inner = exclusive();
+        drop(inner);
+        drop(outer);
+    }
+
+    /// ...but it must still make other threads wait, which is the whole
+    /// point: pinned to one core they cannot run at once anyway, they only
+    /// interleave and measure each other.
+    #[test]
+    fn exclusive_makes_other_threads_wait() {
+        use std::time::{Duration, Instant};
+        let held = exclusive();
+        let waiter = std::thread::spawn(|| {
+            let start = Instant::now();
+            let _held = exclusive();
+            start.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        drop(held);
+        let waited = waiter.join().expect("waiter panicked");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "second thread should have waited its turn, got {waited:?}"
+        );
+    }
 
     #[test]
     fn cpu_lists_round_trip() {

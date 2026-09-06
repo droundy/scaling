@@ -593,7 +593,13 @@ pub(crate) mod testutil {
     }
 
     /// Is the machine quiet enough for a timing assertion to mean anything?
+    ///
+    /// Pins first. Every benchmark pins its own thread, but this gate is
+    /// consulted *before* the first benchmark runs, so without pinning here
+    /// the answer would be "not pinned" every time and these tests would
+    /// skip themselves even under `quiet-bench run`.
     pub fn quiesced() -> bool {
+        crate::quiet::pin_if_requested();
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 

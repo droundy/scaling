@@ -316,6 +316,9 @@ impl Config {
         F: FnMut(&mut I) -> O,
     {
         quiet::pin_if_requested();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
         let (unit, first_ns, probed) = calibrate(&mut gen_input, &mut f, &mut xs, self, start);
