@@ -100,14 +100,32 @@ input type and duration - more machinery than (3).
 
 ## Also open
 
-### [ ] 5. Paired estimator in `Comparison::std_error`
+### [x] 5. Paired estimator in `Comparison::std_error`
 
-`std_error()` combines the two halves as independent
-(`sqrt(se_b^2 + se_c^2)`), but they are timed back to back under nearly
-identical conditions. Taking the variance of the *per-round differences*
-would cancel common-mode drift and tighten the bars. Never tested, and
-plausibly the largest single win still available given how much of the
-noise is drift.
+*Done.* The standard error of the difference now comes from the per-round
+differences rather than from combining the two halves as though they were
+independent. They are timed back to back under nearly identical conditions,
+so slow movement of the machine lands on both and cancels out of each
+round's difference; adding their variances counted that movement twice.
+
+Measured by comparing a function against itself, where the true difference
+is zero and so the spread of the reported difference is exactly what the
+`±` should describe:
+
+| workload | combined | paired |
+| --- | --- | --- |
+| deterministic, 28ns | 0.96, 1.10, 1.02 | 1.03, 1.00, 1.01 |
+| deterministic, 512ns | 1.08, 1.07, 1.10 | 1.06, 1.01, 0.95 |
+| **randomised cost** | **0.75, 0.79, 0.74** | **1.01, 0.94, 1.01** |
+
+(ratio of observed spread to claimed `±`; 1.0 is honest). On the workload
+with real spread the combined form claimed 0.165ns where the answer moved
+by 0.123ns - cautious rather than wrong, but a third wider than it needed
+to be, which is a third of a regression it could not see.
+
+The stopping rule drives down the paired estimate too, so it and the
+verdict stay the same question. Stopping on the combined form was measured
+as well and came out indistinguishable, so the tie went to coherence.
 
 ### [ ] 6. Batch-size jitter, revisited
 

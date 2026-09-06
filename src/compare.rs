@@ -16,14 +16,45 @@ pub struct Comparison {
     /// The Bonferroni limit this comparison was judged against, carried from
     /// the [`Config`] that made it.
     z_alpha: f64,
+    /// Standard error of the difference, taken from the per-round
+    /// differences rather than by combining the two halves. `NaN` when
+    /// fewer than two rounds were run.
+    paired_std_error: f64,
 }
 
 impl Comparison {
     pub fn difference_ns(&self) -> f64 {
         self.candidate.ns_per_iter - self.baseline.ns_per_iter
     }
+    /// Standard error of [`Comparison::difference_ns`].
+    ///
+    /// Taken from the per-round differences rather than by combining the two
+    /// halves. The halves are timed back to back under nearly identical
+    /// conditions, so whatever the machine does slowly - a drifting clock, a
+    /// warming package - moves both together and cancels out of each round's
+    /// difference. Adding their variances as though they were independent
+    /// counts that common movement twice.
+    ///
+    /// It shows on a workload with real spread. Comparing such a function
+    /// against itself, where the true difference is zero so the spread of
+    /// the reported difference is exactly what the `±` should describe:
+    ///
+    /// ```none
+    ///                observed spread   claimed
+    ///   combined         0.123ns       0.165ns
+    ///   paired           0.123ns       0.126ns
+    /// ```
+    ///
+    /// A third narrower, and honest rather than merely cautious.
+    ///
+    /// Falls back to the combined form when there were fewer than two rounds
+    /// to difference - the budget-blown path, where no paired estimate
+    /// exists.
     pub fn std_error(&self) -> f64 {
-        (self.candidate.std_error.powi(2) + self.baseline.std_error.powi(2)).sqrt()
+        if self.paired_std_error.is_nan() {
+            return (self.candidate.std_error.powi(2) + self.baseline.std_error.powi(2)).sqrt();
+        }
+        self.paired_std_error
     }
     pub fn is_changed(&self) -> bool {
         crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
@@ -239,6 +270,7 @@ impl Config {
                     untrustworthy: true,
                 },
                 z_alpha: self.z_alpha,
+                paired_std_error: f64::NAN,
             };
         }
 
@@ -248,6 +280,7 @@ impl Config {
         let mut measured_ns = 0.0;
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
+        let mut diff_samples = Running::default();
 
         // One batch of one function, with everything shared passed in rather
         // than captured, so the two closures borrow disjointly.
@@ -292,12 +325,23 @@ impl Config {
             measured_ns += base_t + cand_t;
             base_samples.push(base_t / unit as f64);
             cand_samples.push(cand_t / unit as f64);
+            diff_samples.push((cand_t - base_t) / unit as f64);
 
             let (base_mean, base_std_error) = base_samples.mean_and_stderr();
             let (cand_mean, cand_std_error) = cand_samples.mean_and_stderr();
+            let (_, paired_std_error) = diff_samples.mean_and_stderr();
 
             let out_of_budget = base_samples.count >= MAX_SAMPLES || start.elapsed() > budget;
-            let std_error = (base_std_error.powi(2) + cand_std_error.powi(2)).sqrt();
+            // The same estimate `Comparison::std_error` reports, so what
+            // sampling drives down is exactly what the verdict is made on.
+            // Stopping on the combined form instead measured no better -
+            // both hold the error bar to the observed spread - but it would
+            // leave the rule and the verdict asking different questions.
+            let std_error = if paired_std_error.is_nan() {
+                (base_std_error.powi(2) + cand_std_error.powi(2)).sqrt()
+            } else {
+                paired_std_error
+            };
             // Twice [`MIN_SAMPLE_TIME`], because a round here buys evidence
             // about *two* functions: at the single floor each side would get
             // half of what a lone `bench` call gets, and a comparison is only
@@ -324,6 +368,7 @@ impl Config {
                         untrustworthy: cand_samples.count < MIN_SAMPLES,
                     },
                     z_alpha: self.z_alpha,
+                    paired_std_error,
                 };
             }
         }
@@ -409,6 +454,9 @@ mod tests {
             baseline: stats(baseline, se_each),
             candidate: stats(candidate, se_each),
             z_alpha: crate::significant::bonferroni_z_limit(planned, crate::significant::FWER),
+            // These are hand-built, so there are no per-round differences to
+            // take: the tests using them ask about the combined form.
+            paired_std_error: f64::NAN,
         }
     }
 
