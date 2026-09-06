@@ -238,6 +238,7 @@ impl Config {
             };
         }
 
+        let sampling_started = Instant::now();
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
         loop {
@@ -252,7 +253,12 @@ impl Config {
             let out_of_budget =
                 base_samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
             let std_error = (base_std_error.powi(2) + cand_std_error.powi(2)).sqrt();
+            // Twice [`MIN_SAMPLE_TIME`], because a round here buys evidence
+            // about *two* functions: at the single floor each side would get
+            // half of what a lone `bench` call gets, and a comparison is only
+            // as good as the weaker of its two halves.
             let precise_enough = base_samples.count >= MIN_SAMPLES
+                && sampling_started.elapsed() >= 2 * MIN_SAMPLE_TIME
                 && self.comparison_accuracy_met(base_mean, std_error);
             if precise_enough || out_of_budget {
                 return Comparison {

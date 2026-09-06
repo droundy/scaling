@@ -946,9 +946,19 @@ fn measure_scaling(
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
         // `map_or` rather than `is_some_and`, which needs a newer compiler
         // than the `rust-version` in `Cargo.toml` promises.
-        let precise = fit.as_ref().map_or(false, |f| {
-            f.std_error < cfg.target_rel_error * f.ns_per_scale.abs()
-        });
+        // The same floor `bench` uses, and for the same reason: six rounds
+        // of a benchmark at its measurable floor is under two milliseconds
+        // of evidence, and a fit that agrees over six rounds by luck is
+        // exactly the one that stops early and reports a narrow error bar.
+        //
+        // Measured against `spent` rather than the wall clock, because what
+        // the floor is asking for is evidence, and the time `measure` spends
+        // building and dropping an input is not evidence. `over_budget`
+        // still watches both clocks, so this cannot fail to terminate.
+        let precise = spent >= MIN_SAMPLE_TIME.as_secs_f64() * 1e9
+            && fit.as_ref().map_or(false, |f| {
+                f.std_error < cfg.target_rel_error * f.ns_per_scale.abs()
+            });
         // Check the budget only after a fit that was not good enough, so a
         // benchmark that is already precise enough never reports having hit
         // a limit it did not need.
@@ -1744,6 +1754,11 @@ mod tests {
             // The loop buys precision it has found it lacks, and not
             // otherwise: a model that fits and a target already met must be
             // paid for exactly once.
+            //
+            // The synthetic cost is scaled so the opening rounds clear
+            // `MIN_SAMPLE_TIME` by themselves. Below that floor it is the
+            // floor and not the target that decides how many rounds are
+            // bought, and this test would be measuring the floor.
             let sizes = [64usize, 128, 256, 512, 1024];
             let calls = std::cell::Cell::new(0);
             let cfg = precise().with_relative_error(0.5);
@@ -1752,7 +1767,7 @@ mod tests {
                 &cfg,
                 Duration::from_secs(3600),
                 3,
-                counted(&calls, balanced(|n| 0.02 * n * n, 0.02)),
+                counted(&calls, balanced(|n| 0.4 * n * n, 0.02)),
             );
             let fit = m.fit.expect("exact quadratic data must fit");
             assert!(!m.hit_limit);
@@ -1777,7 +1792,7 @@ mod tests {
                     &cfg,
                     Duration::from_secs(3600),
                     3,
-                    counted(&calls, one_call(|n| 0.02 * n * n, 0.10, 1)),
+                    counted(&calls, one_call(|n| 0.4 * n * n, 0.10, 1)),
                 );
                 counts.push(calls.get());
             }

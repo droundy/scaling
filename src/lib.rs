@@ -261,6 +261,45 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::*;
 
+/// Sample for at least this long before believing any accuracy target.
+///
+/// Both sampling loops used to stop on a count - six samples in [`bench`],
+/// six rounds in [`bench_scaling`] - and a count is the wrong unit. Six
+/// samples of a nanosecond-scale function is barely a millisecond of
+/// evidence, and the accuracy target is then met by whichever six happened
+/// to agree. Measured across seven workloads, 95% of `bench` runs stopped
+/// there; the scaling sweep's opening rounds come to under two milliseconds
+/// on a benchmark sitting at its measurable floor, which is the same
+/// regime.
+///
+/// A floor in *time* is scale-free where a count floor is not: it costs a
+/// slow function nothing, since one sample already exceeds it, while making
+/// a fast one watch the machine for a while rather than for an instant.
+/// Raising the counts instead would make a benchmark that sleeps 400ms per
+/// iteration take ten seconds.
+///
+/// Three milliseconds is where it stops paying. Sweeping both floors
+/// together over seven workloads - integer, transcendental, division and
+/// branchy, from 20ns to 2.8us - round-robin so every cell met the same
+/// drift:
+///
+/// ```none
+///   time floor   spread   worst error bar   cost
+///   none         0.316%        1.01x        1.3ms
+///   1ms          0.244%        0.93x        1.4ms
+///   3ms          0.143%        1.45x        3.4ms
+///   10ms         0.144%        3.10x       10.4ms
+/// ```
+///
+/// "worst error bar" is how far the reported `±` understates the spread
+/// actually seen, for whichever workload it understated most. Ten
+/// milliseconds buys no further reproducibility and costs a great deal of
+/// honesty: past a few milliseconds the `±` shrinks faster than the answer
+/// settles, so sampling harder yields a tighter number that is less true.
+/// Reproducibility beyond this is the caller's to ask for, with
+/// [`Config::target_rel_error`].
+const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
+
 /// Roughly the longest a single benchmark should take.
 ///
 /// A backstop rather than a target: both kinds of benchmark stop as soon as
