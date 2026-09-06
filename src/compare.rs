@@ -201,7 +201,7 @@ impl Config {
         B: FnMut(&mut I) -> O,
         C: FnMut(&mut I) -> O,
     {
-        self.num_comparisons_made.fetch_add(1, Release);
+        let made = self.num_comparisons_made.fetch_add(1, Release);
         // Twice the budget, because a comparison produces two `Stats`: at the
         // single budget each side would get half the wall clock a lone
         // `bench` call is allowed, for the same target.
@@ -248,9 +248,47 @@ impl Config {
         let mut measured_ns = 0.0;
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
+
+        // One batch of one function, with everything shared passed in rather
+        // than captured, so the two closures borrow disjointly.
+        let mut run_baseline =
+            |gen: &mut G, xs: &mut Vec<I>, unit: usize| time_batch(gen, &mut f_baseline, xs, unit);
+        let mut run_candidate =
+            |gen: &mut G, xs: &mut Vec<I>, unit: usize| time_batch(gen, &mut f_candidate, xs, unit);
+
+        // Which function is timed first is chosen per round, so neither
+        // occupies a fixed position. Timing them in a fixed order leaves the
+        // two sampling fixed and *different* phases of anything periodic in
+        // the machine, and there is something periodic in it: the scheduler
+        // tick, a 1000Hz line in the spectrum of a fixed-cadence sample.
+        //
+        // The choice is made behind a `&mut dyn` over the whole batch, not
+        // over the function inside it. Writing it as an `if`/`else` around
+        // two `time_batch` calls duplicates the timing loop, and the copies
+        // are not equally fast, so each function ends up measured by a
+        // *mixture* of two of them - which showed up as a 3-5% difference
+        // between a function and itself. Erasing the batch instead leaves
+        // each function one consistently-compiled loop, and costs one
+        // indirect call per batch rather than per iteration.
+        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ made.wrapping_mul(0x2545_F491_4F6C_DD1D);
         loop {
-            let (_, base_t) = time_batch(&mut gen_input, &mut f_baseline, &mut xs, unit);
-            let (_, cand_t) = time_batch(&mut gen_input, &mut f_candidate, &mut xs, unit);
+            flip ^= flip << 13;
+            flip ^= flip >> 7;
+            flip ^= flip << 17;
+            let candidate_first = flip & 1 == 1;
+            type Batch<'a, G, I> = &'a mut dyn FnMut(&mut G, &mut Vec<I>, usize) -> (f64, f64);
+            let (first, second): (Batch<G, I>, Batch<G, I>) = if candidate_first {
+                (&mut run_candidate, &mut run_baseline)
+            } else {
+                (&mut run_baseline, &mut run_candidate)
+            };
+            let (_, t_first) = first(&mut gen_input, &mut xs, unit);
+            let (_, t_second) = second(&mut gen_input, &mut xs, unit);
+            let (base_t, cand_t) = if candidate_first {
+                (t_second, t_first)
+            } else {
+                (t_first, t_second)
+            };
             measured_ns += base_t + cand_t;
             base_samples.push(base_t / unit as f64);
             cand_samples.push(cand_t / unit as f64);

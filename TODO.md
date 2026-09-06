@@ -46,36 +46,34 @@ Also updated `an_absolute_accuracy_target_is_honoured`, which compared a
 numbers the floor had made equal. It now compares 25ns against 5ns, where
 the expensive side genuinely wants more than the floor supplies.
 
-### [ ] 2. Randomise comparison order
+### [x] 2. Randomise comparison order
 
-*Tried, reverted, and should be folded into (3).* The cure costs more than
-the disease when written on its own.
+*Done.* Which function is timed first is chosen per round, so neither
+occupies a fixed position and neither samples a fixed phase of anything
+periodic in the machine.
 
-Measured on a function compared against itself, where every difference
-reported is false by construction:
+Getting there took two wrong turns, both measured on a function compared
+against itself, where every difference reported is false by construction:
 
 | approach | bias | absolute-time cost |
 | --- | --- | --- |
 | fixed order, baseline first | +0.10% | none |
 | fixed order, candidate first | -0.12% | none |
 | swap via `if`/`else` | **-3% to -5%** | none |
-| swap via `&mut dyn`, one call site | +/-0.03% | +2% at 28ns, +14% at 9ns |
+| `&mut dyn` over the *function* | +/-0.03% | +2% at 28ns, **+14% at 9ns** |
+| `&mut dyn` over the *batch* | **+/-0.02%** | **none** |
 
-So the positional bias the item set out to remove is only about 0.22% -
-smaller than the ~0.25% layout floor, and far below the 1% default target.
+An `if`/`else` around two `time_batch` calls is far worse than doing
+nothing: it duplicates the timing loop, and the copies are not equally
+fast, so each function is measured by a *mixture* of two of them. That is
+the layout lottery, reaching 5% here - twenty times the 0.22% positional
+bias the change set out to remove.
 
-Writing the swap as an `if`/`else` over two call sites is *much* worse than
-doing nothing: it duplicates the timing loop, and the duplicates are not
-equally fast, so each function ends up measured by a mixture of two
-compiled copies. That is the layout lottery again, and here it reached 5%.
-
-Routing both functions through one `&mut dyn FnMut` call site fixes it
-completely - +/-0.03%, better than either fixed order - which is direct
-evidence for (3)'s prediction that type erasure removes the lottery. But
-the indirect call inflates the absolute times `Comparison` reports, by 14%
-on a 9ns function. It cancels out of the difference, and would be a fair
-price inside a k-way API that needs the erasure anyway; it is not a fair
-price for removing 0.22%.
+Erasing the innermost function fixes the mixing but puts an indirect call
+on every iteration. Erasing the *whole batch* fixes it and costs one
+indirect call per batch, amortised over `unit` iterations: each function
+keeps one consistently-compiled loop, and the order becomes a choice of
+data. Bias and overhead both fall to noise.
 
 ### [ ] 3. K-way compare
 
@@ -86,12 +84,11 @@ in every slot. The multiple-comparison machinery
 
 Holding k alternatives needs `Box<dyn FnMut()>`, and that erasure is a
 *benefit* here: all alternatives go through one shared call path instead of
-k separate monomorphisations at k different addresses. **Measured while
-attempting (2): it works** - one `&mut dyn` call site took a function
-compared against itself from -5% to +/-0.03%. The cost is an indirect call,
-which inflates the absolute times reported (+2% at 28ns, +14% at 9ns) while
-cancelling out of the difference. Order randomisation comes free once this
-is in place, so do the two together.
+k separate monomorphisations at k different addresses. **Measured while doing (2): it
+works** - one `&mut dyn` call site took a function compared against itself
+from -5% to +/-0.02%. Erase at the batch level rather than the function
+level, as (2) does, and the indirect call is amortised over the batch and
+costs nothing measurable.
 
 ### [ ] 4. Interleave dissimilar benchmarks across a suite
 
