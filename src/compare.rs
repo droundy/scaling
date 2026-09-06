@@ -13,7 +13,9 @@ const MAX_SAMPLES: usize = 1_000_000;
 pub struct Comparison {
     pub baseline: Stats,
     pub candidate: Stats,
-    num_comparisons_planned: u64,
+    /// The Bonferroni limit this comparison was judged against, carried from
+    /// the [`Config`] that made it.
+    z_alpha: f64,
 }
 
 impl Comparison {
@@ -24,23 +26,73 @@ impl Comparison {
         (self.candidate.std_error.powi(2) + self.baseline.std_error.powi(2)).sqrt()
     }
     pub fn is_changed(&self) -> bool {
-        crate::significant::is_significant(
-            self.difference_ns(),
-            self.std_error(),
-            0.05,
-            self.num_comparisons_planned,
-        )
+        crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
+    }
+
+    /// The smallest difference this comparison could have called a change,
+    /// in nanoseconds.
+    ///
+    /// Sampling aims to bring this down to
+    /// [`Config::target_rel_error`] of the baseline, but a comparison that
+    /// ran out of [`Config::max_time`] stops wherever it got to - so on a
+    /// result that is not changed, this is what "not changed" is worth.
+    ///
+    /// `NaN` when there is no threshold to compare against, which is both of
+    /// the cases where there is no verdict either: no plan was set (see
+    /// [`Config::with_comparisons_planned`]), or fewer than two samples were
+    /// collected, leaving [`Stats::std_error`] itself `NaN`. Both print as
+    /// something other than a plain result, so check this before formatting
+    /// it yourself.
+    pub fn min_detectable_difference(&self) -> f64 {
+        self.z_alpha * self.std_error()
+    }
+
+    /// [`Comparison::min_detectable_difference`] as a fraction of the
+    /// baseline (`0.01` = 1%).
+    ///
+    /// `NaN` wherever [`Comparison::min_detectable_difference`] is, and
+    /// infinite when the baseline measured as zero, where a relative figure
+    /// is undefined.
+    pub fn min_detectable_rel(&self) -> f64 {
+        self.min_detectable_difference() / self.baseline.ns_per_iter
     }
 }
 
 impl Display for Comparison {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        // Without a plan there is no threshold, so there is no verdict to
+        // report. Saying "(unchanged)" here would read exactly like a
+        // measured no-change result, and the `Drop` check that would
+        // otherwise catch the mistake does not run if the process exits, or
+        // if the `Config` is leaked or outlived by a clone.
+        if self.z_alpha.is_nan() {
+            return write!(f, "(no verdict: num_comparisons_planned is unset)");
+        }
+        // Both halves are filled in together, so either would answer for the
+        // pair - but combine them rather than depending on that. Reaching the
+        // sensitivity goal costs several times what a plain accuracy target
+        // does, so a comparison running out of budget is ordinary rather than
+        // exotic, and a truncated answer has to say so.
+        let limit = match (
+            self.baseline.hit_limit || self.candidate.hit_limit,
+            self.baseline.untrustworthy || self.candidate.untrustworthy,
+        ) {
+            (true, true) => " (limit, untrusted)",
+            (true, false) => " (limit)",
+            (false, true) => " (untrusted)",
+            (false, false) => "",
+        };
         if self.is_changed() {
             let percent_change = self.difference_ns() / self.baseline.ns_per_iter * 100.0;
             let rel_error = self.std_error() / self.baseline.ns_per_iter * 100.0;
-            write!(f, "{percent_change:+.1}% +/- {rel_error:.1}%")
+            write!(f, "{percent_change:+.1}% ± {rel_error:.1}%{limit}")
         } else {
-            write!(f, "(unchanged)")
+            let detectable = self.min_detectable_rel() * 100.0;
+            if detectable.is_finite() {
+                write!(f, "(unchanged, would detect {detectable:.1}%){limit}")
+            } else {
+                write!(f, "(unchanged){limit}")
+            }
         }
     }
 }
@@ -113,16 +165,28 @@ impl Config {
     ///    difference between them. It still widens both error bars, but that only makes
     ///    [`Comparison::is_changed`] harder to satisfy; drift that fell on one function alone
     ///    would instead look exactly like a real change.
-    /// 3. **Stop** once there are at least `MIN_SAMPLES` rounds *and* the accuracy target is
-    ///    met. What is tested against the target is the standard error of the *difference*,
-    ///    `sqrt(se_baseline² + se_candidate²)`, measured relative to whichever of the two is
-    ///    faster. If `max_time` runs out first, stop anyway and set `hit_limit` on both halves.
+    /// 3. **Stop** once there are at least `MIN_SAMPLES` rounds *and* a difference the size of
+    ///    the goal would be detected - that is, once [`Comparison::is_changed`] would fire if
+    ///    the difference were exactly `target_rel_error` of the baseline (or
+    ///    `target_abs_error`, whichever is coarser). The standard error being driven down is
+    ///    that of the *difference*, `sqrt(se_baseline² + se_candidate²)`. If `max_time` runs
+    ///    out first, stop anyway and set `hit_limit` on both halves.
     ///
-    /// Note what step 3 does *not* promise. The target is relative to a runtime, not to the
-    /// difference between the two, so meeting it does not mean a change is resolvable: a 1%
-    /// target on two functions that differ by 0.5% will stop long before it can tell them
-    /// apart. Whether the difference is real is [`Comparison::is_changed`]'s question, and it
-    /// is the one that accounts for how many comparisons were planned.
+    /// Step 3 asks the very question the result will later be judged by, so what the goal buys
+    /// you is a floor on sensitivity rather than on precision. It is a 50% floor, deliberately: a
+    /// difference exactly the size of your goal is caught about half the time, and one twice
+    /// that size essentially always - 97.5% at a single comparison, higher as more are planned.
+    /// Ask for 1% and you should expect 1% regressions to slip through regularly and 2% ones
+    /// not to. [`Comparison::min_detectable_difference`] reports where a given run actually
+    /// landed, which matters most when the budget ran out before the goal was reached.
+    ///
+    /// Reaching that floor costs `z²` times the sampling the plain accuracy target would need -
+    /// roughly 4x at one planned comparison, 8x at ten, 12x at a hundred - so comparison suites
+    /// usually want an explicit [`Config::with_max_time`].
+    ///
+    /// One caveat on reading the output: a difference detected right at the threshold is
+    /// overstated by around 40% on average, because it only clears the bar on the runs where
+    /// noise pushed it up. That is true of any significance threshold, not special to this one.
     ///
     /// See [`Config::bench_gen_input`] for why batching does not bias the per-iteration figures
     /// that come out of step 2.
@@ -167,7 +231,7 @@ impl Config {
                     hit_limit: true,
                     untrustworthy: true,
                 },
-                num_comparisons_planned: self.num_comparisons_planned,
+                z_alpha: self.z_alpha,
             };
         }
 
@@ -186,7 +250,7 @@ impl Config {
                 base_samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
             let std_error = (base_std_error.powi(2) + cand_std_error.powi(2)).sqrt();
             let precise_enough = base_samples.count >= MIN_SAMPLES
-                && self.accuracy_met(base_mean.min(cand_mean), std_error);
+                && self.comparison_accuracy_met(base_mean, std_error);
             if precise_enough || out_of_budget {
                 return Comparison {
                     baseline: Stats {
@@ -205,7 +269,7 @@ impl Config {
                         hit_limit: !precise_enough,
                         untrustworthy: cand_samples.count < MIN_SAMPLES,
                     },
-                    num_comparisons_planned: self.num_comparisons_planned,
+                    z_alpha: self.z_alpha,
                 };
             }
         }
@@ -270,5 +334,194 @@ where
         unit = ((unit as f64 * factor).ceil() as usize)
             .max(unit + 1)
             .min(unit_cap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::*;
+
+    fn stats(ns: f64, std_error: f64) -> Stats {
+        Stats {
+            ns_per_iter: ns,
+            std_error,
+            iterations: 1000,
+            samples: 100,
+            hit_limit: false,
+            untrustworthy: false,
+        }
+    }
+
+    fn comparison(baseline: f64, candidate: f64, se_each: f64, planned: u64) -> Comparison {
+        Comparison {
+            baseline: stats(baseline, se_each),
+            candidate: stats(candidate, se_each),
+            z_alpha: crate::significant::bonferroni_z_limit(planned, crate::significant::FWER),
+        }
+    }
+
+    /// The stopping rule and the verdict must be the same question asked of
+    /// two different differences. If they ever drift apart, a comparison
+    /// could stop at a precision that cannot decide the thing it stopped for.
+    #[test]
+    fn stopping_asks_exactly_what_is_changed_asks() {
+        for planned in [1u64, 3, 10, 100] {
+            let cfg = Config::default().with_comparisons_planned(planned);
+            for baseline in [1.0, 71.0, 2.5e6] {
+                let goal = cfg.comparison_goal_ns(baseline);
+                for scale in [0.5, 0.9, 0.99, 1.01, 1.1, 2.0] {
+                    // Pick a standard error, then ask both questions of it.
+                    let se = goal / cfg.z_alpha * scale;
+                    let stopped = cfg.comparison_accuracy_met(baseline, se);
+                    // A comparison whose difference is exactly the goal.
+                    let c = comparison(baseline, baseline + goal, se / 2.0f64.sqrt(), planned);
+                    assert_eq!(
+                        stopped,
+                        c.is_changed(),
+                        "planned {planned}, baseline {baseline}, scale {scale}"
+                    );
+                }
+            }
+            // This test never runs a comparison - it only asks the two
+            // predicates about hand-built numbers - so there is no count for
+            // `Drop` to check against the plan.
+            std::mem::forget(cfg);
+        }
+    }
+
+    /// A difference the size of the goal sits exactly on the threshold, so
+    /// `min_detectable_difference` should come back as the goal itself.
+    #[test]
+    fn min_detectable_difference_is_the_goal_once_sampling_stops() {
+        let cfg = Config::default().with_comparisons_planned(4);
+        let baseline = 500.0;
+        let goal = cfg.comparison_goal_ns(baseline);
+        // The standard error the stopping rule is aiming for.
+        let se = goal / cfg.z_alpha;
+        let c = comparison(baseline, baseline, se / 2.0f64.sqrt(), 4);
+        assert!(
+            (c.min_detectable_difference() - goal).abs() < 1e-9,
+            "expected {goal}, got {}",
+            c.min_detectable_difference()
+        );
+        assert!((c.min_detectable_rel() - cfg.target_rel_error).abs() < 1e-12);
+        std::mem::forget(cfg); // no comparisons run; nothing for `Drop` to check
+    }
+
+    /// Two things a reader must never mistake for a clean "no change": a run
+    /// that was cut off by the budget, and one that had no threshold at all.
+    #[test]
+    fn display_marks_a_truncated_run_and_an_unplanned_one() {
+        // Planned and precise: the sensitivity is the whole story.
+        let clean = format!("{}", comparison(100.0, 100.0, 0.1, 4));
+        assert!(clean.starts_with("(unchanged, would detect"), "{clean}");
+        assert!(!clean.contains("limit"), "{clean}");
+
+        // The budget ran out before the goal was reached.
+        let mut truncated = comparison(100.0, 100.0, 0.1, 4);
+        truncated.baseline.hit_limit = true;
+        truncated.candidate.hit_limit = true;
+        let truncated = format!("{truncated}");
+        assert!(truncated.ends_with(" (limit)"), "{truncated}");
+
+        // Too few samples for the error bar itself to be worth reading.
+        let mut untrusted = comparison(100.0, 100.0, 0.1, 4);
+        untrusted.baseline.untrustworthy = true;
+        untrusted.candidate.untrustworthy = true;
+        let untrusted = format!("{untrusted}");
+        assert!(untrusted.ends_with(" (untrusted)"), "{untrusted}");
+
+        // A change that is real, but measured on a truncated run.
+        let mut changed = comparison(100.0, 130.0, 0.1, 4);
+        changed.baseline.hit_limit = true;
+        changed.candidate.hit_limit = true;
+        // Pinned whole, so the `\u{b1}` cannot quietly become an ASCII `+/-` and
+        // drift from what `Stats` prints.
+        assert_eq!("+30.0% \u{b1} 0.1% (limit)", format!("{changed}"));
+
+        // No plan: not a verdict, and it must not read like one.
+        let unplanned = format!("{}", comparison(100.0, 100.0, 0.1, 0));
+        assert!(unplanned.contains("no verdict"), "{unplanned}");
+        assert!(!unplanned.contains("unchanged"), "{unplanned}");
+    }
+
+    /// With no plan set there is no threshold, so nothing is ever a change -
+    /// but the loop must still terminate promptly rather than spending the
+    /// whole budget discovering that.
+    #[test]
+    fn an_unplanned_comparison_terminates_and_reports_nothing() {
+        let cfg = Config::default().with_max_time(Duration::from_secs(5));
+        let started = Instant::now();
+        let c = cfg.compare(|| 1u64, || 1u64);
+        let elapsed = started.elapsed();
+        println!("unplanned: {c} in {elapsed:?}");
+        assert!(!c.is_changed(), "no plan means no verdict");
+        let shown = format!("{c}");
+        assert!(shown.contains("no verdict"), "{shown}");
+        assert!(
+            !shown.contains("unchanged"),
+            "must not read as a measured result: {shown}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "should not burn the budget: took {elapsed:?}"
+        );
+        std::mem::forget(cfg); // Drop would rightly assert; not what this tests.
+    }
+
+    /// A workload whose cost is drawn at random, so the spread is real
+    /// rather than machine noise.
+    fn variable_cost(seed: u64, iterations: usize) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            let n = 1 + (rng.next() as usize % iterations);
+            let mut acc = 0u64;
+            for i in 0..n {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
+    /// The headline promise: a difference twice the goal is caught nearly
+    /// always, while one exactly at the goal is a coin flip.
+    #[test]
+    fn twice_the_goal_is_caught_and_the_goal_itself_is_a_coin_flip() {
+        println!();
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
+        const REPEATS: u64 = 20;
+        for (name, multiple, low, high) in
+            [("1x goal", 1.0, 0.15, 0.85), ("2x goal", 2.0, 0.70, 1.0)]
+        {
+            let cfg = Config::relative(0.05)
+                .with_max_time(Duration::from_secs(4))
+                .with_comparisons_planned(REPEATS);
+            let mut changed = 0u64;
+            for r in 0..REPEATS {
+                // `candidate` does `multiple * 5%` more work than `baseline`.
+                let base_iters = 2000;
+                let cand_iters = (base_iters as f64 * (1.0 + 0.05 * multiple)) as usize;
+                let c = cfg.compare(
+                    variable_cost(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1), base_iters),
+                    variable_cost(0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1), cand_iters),
+                );
+                if c.is_changed() {
+                    changed += 1;
+                }
+            }
+            let rate = changed as f64 / REPEATS as f64;
+            println!(
+                "{name}: detected {changed}/{REPEATS} = {:.0}%",
+                rate * 100.0
+            );
+            assert!(
+                rate >= low && rate <= high,
+                "{name}: detection rate {rate:.2} outside [{low}, {high}]"
+            );
+        }
     }
 }

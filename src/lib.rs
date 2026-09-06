@@ -288,6 +288,11 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 pub struct Config {
     /// Stop once the standard error falls below this fraction of the
     /// measurement (`0.01` = 1%).
+    ///
+    /// The `compare_*` functions read this as a *sensitivity* rather than a
+    /// precision: the smallest difference worth detecting, as a fraction of
+    /// the baseline. See [`Config::compare_gen_input`], which spells out what
+    /// that floor is and is not worth.
     pub target_rel_error: f64,
     /// Stop once the standard error falls below this duration.
     ///
@@ -300,6 +305,10 @@ pub struct Config {
     ///
     /// `Duration::ZERO` disables it, leaving `target_rel_error` alone in
     /// charge.
+    ///
+    /// As with [`Config::target_rel_error`], the `compare_*` functions read
+    /// this as the smallest difference worth detecting rather than as a
+    /// precision.
     pub target_abs_error: Duration,
     /// Give up after roughly this much wall-clock time even if neither goal
     /// was reached, setting [`Stats::hit_limit`].
@@ -310,6 +319,11 @@ pub struct Config {
     /// when you are evaluating *many* benchmarks you'd be almost certain to
     /// see spurious "changes".
     num_comparisons_planned: u64,
+    /// The Bonferroni limit `num_comparisons_planned` implies, cached
+    /// because the sampling loop consults it after every round.
+    ///
+    /// `NaN` until a plan is set, which makes every significance test false.
+    z_alpha: f64,
     num_comparisons_made: Arc<AtomicU64>,
 }
 
@@ -320,6 +334,7 @@ impl Default for Config {
             target_abs_error: Duration::ZERO,
             max_time: BENCH_TIME_MAX,
             num_comparisons_planned: 0,
+            z_alpha: significant::bonferroni_z_limit(0, significant::FWER),
             num_comparisons_made: Default::default(),
         }
     }
@@ -377,7 +392,49 @@ impl Config {
             "only call with_comparisons_planned once!"
         );
         self.num_comparisons_planned = comparisons;
+        self.z_alpha = significant::bonferroni_z_limit(comparisons, significant::FWER);
         self
+    }
+
+    /// The smallest difference worth detecting, in nanoseconds, for a
+    /// baseline of `baseline_ns`.
+    ///
+    /// The coarser of the two goals wins, matching how [`Config::accuracy_met`]
+    /// stops at whichever is reached first.
+    fn comparison_goal_ns(&self, baseline_ns: f64) -> f64 {
+        (self.target_rel_error * baseline_ns).max(self.target_abs_error.as_secs_f64() * 1e9)
+    }
+
+    /// Is `std_error` small enough that a difference the size of the goal
+    /// would be *detected*?
+    ///
+    /// This is the same predicate [`Comparison::is_changed`] applies, asked
+    /// of a hypothetical difference rather than the observed one, so a
+    /// comparison stops exactly when the test it is about to run would fire
+    /// at the goal. Deliberately independent of the difference actually
+    /// measured: stopping as soon as a result *became* significant would be
+    /// optional stopping, and would put back the false positives the
+    /// Bonferroni correction exists to remove.
+    fn comparison_accuracy_met(&self, baseline_ns: f64, std_error: f64) -> bool {
+        // Every sample agreed to the limit of the timer's resolution; no
+        // further sampling can improve on that. Also keeps the zero-mean
+        // case out of the `0 / 0` that would follow.
+        if std_error == 0.0 {
+            return true;
+        }
+        if self.num_comparisons_planned == 0 {
+            // `z_alpha` is `NaN`, so the real rule would never be satisfied
+            // and every comparison would spend the whole budget. The results
+            // are unusable regardless and `Drop` is about to name the number
+            // that should have been planned - just don't take ten seconds
+            // per comparison to get there.
+            return self.accuracy_met(baseline_ns, std_error);
+        }
+        significant::is_significant(
+            self.comparison_goal_ns(baseline_ns),
+            std_error,
+            self.z_alpha,
+        )
     }
 
     /// Is a measurement of `ns_per_iter` with standard error `std_error`

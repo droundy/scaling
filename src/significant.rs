@@ -2,7 +2,7 @@
 ///
 /// * n - Total number of measurements being tested
 /// * fwer - Target Family-Wise Error Rate (e.g., 0.05 for 95% confidence)
-fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
+pub(super) fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
     if n == 0 {
         return f64::NAN; // no way to know if this is significant.
     }
@@ -29,11 +29,20 @@ fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
     t - (numerator / denominator)
 }
 
-pub(crate) fn is_significant(
-    difference: f64,
-    std_error: f64,
-    error_rate: f64,
-    num_comparisons: u64,
-) -> bool {
-    (difference / std_error).abs() > bonferroni_z_limit(num_comparisons, error_rate)
+/// The family-wise error rate every comparison is judged against: a 5%
+/// chance of *any* false positive across the whole planned suite.
+pub(super) const FWER: f64 = 0.05;
+
+/// Is `difference` big enough, against `std_error`, to call a change?
+///
+/// Takes the limit rather than computing it, so that the sampling loop and
+/// [`crate::Comparison::is_changed`] are guaranteed to be asking the same
+/// question: one is this predicate applied to the observed difference, the
+/// other is it applied to the smallest difference worth detecting.
+///
+/// `z_alpha` is `NaN` when no comparisons were planned, and every
+/// comparison against `NaN` is false - so nothing is ever reported as
+/// changed until a plan is set.
+pub(super) fn is_significant(difference: f64, std_error: f64, z_alpha: f64) -> bool {
+    (difference / std_error).abs() > z_alpha
 }
