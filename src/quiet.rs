@@ -385,27 +385,29 @@ pub(crate) fn exclusive_if_pinned() -> Option<Exclusive> {
 
 /// `flock` the reservation record, or `None` if there is no reservation to
 /// coordinate over.
+///
+/// Read-only is enough - `flock` ignores the access mode - and it has to be,
+/// since `/run` is root-owned and an ordinary user could neither create a
+/// lock file there nor open this one for writing.
+#[cfg(target_os = "linux")]
 fn lock_reservation() -> Option<std::fs::File> {
-    // Read-only is enough - `flock` ignores the access mode - and it has to
-    // be, since `/run` is root-owned and an ordinary user could neither
-    // create a lock file there nor open this one for writing.
-    let _file = std::fs::File::open(CPUS_PATH).ok()?;
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        // Blocking: waiting our turn is the entire point.
-        if unsafe { libc::flock(_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            // A measurement that could not take the lock is still valid,
-            // just possibly sharing the CPU - the same bargain
-            // `pin_if_requested` makes when pinning fails.
-            return None;
-        }
-        Some(_file)
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(CPUS_PATH).ok()?;
+    // Blocking: waiting our turn is the entire point.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        // A measurement that could not take the lock is still valid, just
+        // possibly sharing the CPU - the same bargain `pin_if_requested`
+        // makes when pinning fails.
+        return None;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    Some(file)
+}
+
+/// Always `None` on non-Linux platforms, which have no reservation to lock
+/// and no pinning for it to protect.
+#[cfg(not(target_os = "linux"))]
+fn lock_reservation() -> Option<std::fs::File> {
+    None
 }
 
 #[cfg(test)]
