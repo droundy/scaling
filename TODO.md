@@ -142,23 +142,23 @@ debug and release - but see (9), which is still open.
 
 ### [ ] 9. Fix the flaky scaling tests
 
-Two of them, not one: `scaling_error_bar_is_honest` and `scales_o_one`,
-the latter seen failing twice and passing on the immediate rerun both
-times.
+*Measured, not fixed.* Thirty full release runs, `--test-threads=1`, machine
+otherwise idle: **25 clean, 5 with a failure (17%)**, across three tests -
+not the one it started as.
 
-Rate uncertain and probably conditions-dependent. `scaling_error_bar_is_honest`
-failed 4 times in ~19
-pinned runs one evening, then went 9 for 9 the next morning after (8)
-landed - though the earlier measurements were taken while other analysis
-was running on the machine, which by itself argues the test is reading the
-neighbours.
+| test | failures in 30 |
+| --- | --- |
+| `scaling_error_bar_is_honest` | 3 |
+| `scales_o_n_log_n_looks_like_n` | 2 |
+| `scales_o_one` | seen separately, twice |
 
-The design flaw stands regardless: it compares a *between-run* spread
-against a *within-run* claimed error, which `Stats::std_error` documents
-that it does not bound. Isolated it passes comfortably (ratio 0.7-1.8
-against a bound of 4.0); with 40s of suite load ahead of it, 5.0. It is
-measuring the machine rather than the library, so it wants (7) - a measured
-fitness gate - rather than a looser bound.
+`scaling_error_bar_is_honest` compares a *between-run* spread against a
+*within-run* claimed error, which `Stats::std_error` documents that it does
+not bound. Isolated it passes comfortably (ratio 0.7-1.8 against a bound of
+4.0); with 40s of suite load ahead of it, 5.0. It is measuring the machine
+rather than the library, so it wants (7) - a measured fitness gate - rather
+than a looser bound. The other two are single-shot assertions on a fitted
+power and will flake for the same reason: one draw, no replication.
 
 ### [-] 10. Document the layout floor
 
@@ -168,12 +168,31 @@ fitness gate - rather than a looser bound.
 
 *Skipped.* Student-t rather than z: mooted by (1), which makes the sample counts large enough that t and z agree.
 
-### [ ] 12. `flock` gap when the reservation comes from the environment
+### [x] 12. `flock` gap when the reservation comes from the environment
 
-`reserved_cpus()` prefers `SCALING_BENCH_CPUS` and falls back to
-`CPUS_PATH`, but `lock_reservation()` only ever opens the file. Setting the
-variable by hand without a `quiet-bench reserve` therefore gets pinning and
-the in-process mutex but *no* cross-process lock, silently.
+*Done.* `reserved_cpus()` prefers `SCALING_BENCH_CPUS` and falls back to the
+reservation file, but `lock_reservation()` only ever opened the file - so
+setting the variable by hand pinned to the reserved CPUs with no
+cross-process lock at all, silently.
+
+Rather than patch the lock path, the invariant is now enforced from both
+ends:
+
+* `quiet-bench run` takes the machine lock itself before it pins, so it can
+  never put a command on the reserved CPUs without having claimed them. Two
+  concurrent runs queue - measured, the second waited 2.59s for a
+  three-second first.
+* `pin_if_reserved` refuses to pin at all unless a lock is available, so an
+  ad-hoc `SCALING_BENCH_CPUS` with nothing behind it leaves the benchmark
+  unpinned rather than on an unclaimable core.
+* `quiet-bench run` sets `SCALING_BENCH_LOCKED`, and a benchmark seeing that
+  takes the in-process mutex only. Without it the child would wait on the
+  `flock` its own parent holds, which never comes free.
+
+`an_inherited_lock_is_not_waited_on` covers that last one. It tests
+`machine_lock` rather than `exclusive`, because `exclusive` also takes the
+in-process mutex and the test would then be timing whatever other test
+happened to be benchmarking - which is exactly how it failed first time.
 
 ## Tried without success so far
 

@@ -103,14 +103,26 @@ backticks; or copy it to /usr/local/bin to type the short form.
         // and everything it spawns start out on the reserved CPUs. The
         // environment variable additionally lets `scaling` confirm - and
         // re-apply - the pinning from inside the benchmark process.
+        // Take the machine-wide lock for the whole command, so we never pin
+        // to the reserved CPUs without having claimed them. A second
+        // `quiet-bench run` waits here rather than sharing the core: that is
+        // the point of a reservation, and waiting is the honest outcome.
+        let held = scaling::quiet::hold_reserved_cpus()
+            .map_err(|e| format!("could not claim the reserved CPU(s) {cpus_str}: {e}"))?;
+
         scaling::quiet::pin_current_thread(&cpus)
             .map_err(|e| format!("could not pin to CPU(s) {cpus_str}: {e}"))?;
 
+        // The child inherits the affinity, and is told the lock is already
+        // held - so its benchmarks take the in-process mutex to keep their
+        // own threads apart, and do not wait on a lock we are holding.
         let status = Command::new(&argv[0])
             .args(&argv[1..])
             .env(CPUS_VAR, &cpus_str)
+            .env(scaling::quiet::LOCK_HELD_VAR, "1")
             .status()
             .map_err(|e| format!("could not run {:?}: {e}", argv[0]))?;
+        drop(held);
         // Propagate the child's exit status, including death by signal, so
         // this is transparent to whatever is driving it (a test runner, CI).
         Ok(exit_code_of(status))
