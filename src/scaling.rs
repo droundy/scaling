@@ -2487,9 +2487,18 @@ mod tests {
         const REPEATS: usize = 8;
         let runs: Vec<ScalingStats> = (0..REPEATS)
             .map(|_| {
+                // Sorting, because `O(N log N)` is not a polynomial and so
+                // is exactly the shape no power law describes. This used to
+                // sum a `Vec`, which is honestly linear - on a quiesced
+                // machine the fit was *accepted*, so the case this test
+                // exists to cover never arose and its own premise failed.
                 bench_scaling_gen(
-                    |n| (0..n as u64).collect::<Vec<_>>(),
-                    |v| v.iter().cloned().sum::<u64>(),
+                    |n| {
+                        (0..n as u64)
+                            .map(|i| (i * 2_654_435_761) % 1_000_003)
+                            .collect::<Vec<_>>()
+                    },
+                    |v| v.sort(),
                     1,
                 )
             })

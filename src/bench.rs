@@ -697,42 +697,67 @@ mod tests {
         }
     }
 
+    /// Nine calls in ten cost about a thousandth of the mean, so the
+    /// minimum and the median are both ~1 while the mean is ~1001.
+    fn bimodal_cost(seed: u64) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            let n = if rng.next() % 10 == 0 { 10_000 } else { 1 };
+            let mut acc = 0u64;
+            for i in 0..n {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
+    /// The same mean cost with no spread at all, so minimum, median and mean
+    /// coincide. Draws from the rng and throws it away, so both workloads
+    /// pay for the draw and the comparison is of the work alone.
+    fn fixed_cost(seed: u64) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            black_box(rng.next());
+            let mut acc = 0u64;
+            for i in 0..1001 {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();
-        // Comparing a long run against short ones only isolates the
-        // estimator when the machine holds still. Contention does not
-        // affect the two equally - the long run averages over more of it -
-        // so on a busy machine this measures the neighbours rather than
-        // the estimator, which is the same reason its siblings above skip.
-        if !quiesced() {
-            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
-            return;
+        // This used to compare one long tight-target run against many short
+        // ones, and measured the machine rather than the estimator: twenty
+        // seconds flat out on a core is a different frequency and thermal
+        // regime than a run lasting milliseconds. The bias it reported
+        // swung between -14% and +17% on a *quiesced* machine, against a
+        // 10% bound - and its sign flipped run to run, which is the tell.
+        //
+        // Two workloads of the same mean and very different shape settle it
+        // without a reference run at all. Both are measured back to back in
+        // the same regime, so drift lands on both and divides out, and the
+        // ratio holds to about 1% whether or not the machine is quiesced -
+        // which is why this one no longer skips itself.
+        const REPEATS: usize = 4;
+        for r in 0..REPEATS {
+            let seed = seed_for(r);
+            let bimodal = bench(bimodal_cost(seed)).ns_per_iter;
+            let fixed = bench(fixed_cost(seed)).ns_per_iter;
+            let ratio = bimodal / fixed;
+            println!("bimodal {bimodal:.1} / fixed {fixed:.1} = {ratio:.4}");
+            // An estimator reporting the minimum - or the median, which the
+            // old shape could not have caught - would see nine cheap calls
+            // in ten and land near 0.001. The band is wide because what is
+            // being separated differs by three orders of magnitude, not by
+            // a few percent.
+            assert!(
+                (0.5..1.5).contains(&ratio),
+                "reported cost ratio {ratio:.4} says this is not the mean"
+            );
         }
-        // Ground truth: a long, tight-target run.
-        let truth = Config::relative(0.002)
-            .with_max_time(Duration::from_secs(20))
-            .bench(variable_cost(0xabcd_ef01))
-            .ns_per_iter;
-
-        const REPEATS: usize = 15;
-        let estimates: Vec<f64> = (0..REPEATS)
-            .map(|r| {
-                Config::default()
-                    .bench(variable_cost(seed_for(r)))
-                    .ns_per_iter
-            })
-            .collect();
-        let (mean, _) = mean_and_spread(&estimates);
-        let bias = (mean - truth) / truth;
-        println!(
-            "truth {truth:.1} ns/iter, estimated {mean:.1} ns/iter, bias {:+.2}%",
-            100.0 * bias
-        );
-        // An estimator that reported (say) the minimum of each batch rather
-        // than the mean would be biased sharply negative on a workload with
-        // this much variance - well outside this bound.
-        assert!(bias.abs() < 0.1, "bias {:+.2}%", 100.0 * bias);
     }
 
     #[test]

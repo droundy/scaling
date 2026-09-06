@@ -455,6 +455,10 @@ mod tests {
     #[test]
     fn an_unplanned_comparison_terminates_and_reports_nothing() {
         let cfg = Config::default().with_max_time(Duration::from_secs(5));
+        // Claim the CPU before starting the clock, so what is timed is the
+        // comparison and not our wait for other tests to finish with it. The
+        // claim is re-entrant, so the comparison's own costs nothing.
+        let _held = crate::quiet::exclusive();
         let started = Instant::now();
         let c = cfg.compare(|| 1u64, || 1u64);
         let elapsed = started.elapsed();
