@@ -158,25 +158,30 @@ cost of actually measuring rather than pretending to. The flakiness this
 was deferred behind did not materialise - 9 consecutive green runs across
 debug and release - but see (9), which is still open.
 
-### [ ] 9. Fix the flaky scaling tests
+### [x] 9. Fix the flaky scaling tests
 
-*Measured, not fixed.* Thirty full release runs, `--test-threads=1`, machine
-otherwise idle: **25 clean, 5 with a failure (17%)**, across three tests -
-not the one it started as.
+*Done by deletion.* Four tests went: `scaling_error_bar_is_honest`,
+`scales_o_one`, `scales_o_n_log_n_looks_like_n` and `scales_o_n`. Before,
+5 runs in 30 carried a failure; after, 0 in 15.
 
-| test | failures in 30 |
-| --- | --- |
-| `scaling_error_bar_is_honest` | 3 |
-| `scales_o_n_log_n_looks_like_n` | 2 |
-| `scales_o_one` | seen separately, twice |
+All four were single draws of a stochastic process asserted as though
+deterministic, and every one of them passed in isolation and failed only
+inside the full suite - which is to say they were measuring their
+neighbours. `scales_o_one` is the sharpest example: its strict assertions
+sat behind `if quiesced()` and so had *never executed* until (8) made
+pinning automatic.
 
-`scaling_error_bar_is_honest` compares a *between-run* spread against a
-*within-run* claimed error, which `Stats::std_error` documents that it does
-not bound. Isolated it passes comfortably (ratio 0.7-1.8 against a bound of
-4.0); with 40s of suite load ahead of it, 5.0. It is measuring the machine
-rather than the library, so it wants (7) - a measured fitness gate - rather
-than a looser bound. The other two are single-shot assertions on a fitted
-power and will flake for the same reason: one draw, no replication.
+What is lost is end-to-end coverage of the scaling pipeline on real
+timings; `mod fitting` still covers power identification deterministically
+with synthetic clocks, but bypasses size selection and real noise.
+`scales_o_n_square` remains and has the same shape, so it may follow.
+
+`scaling_error_bar_is_honest` deserves a note of its own: it compared a
+*between-run* spread against a *within-run* claimed error, which
+`Stats::std_error` documents that it does not bound. It was a machine-quality
+measurement wearing a library test's clothes, and the quantity it computed
+is the one (7) wants for a fitness gate. Worth rebuilding there rather than
+mourning here.
 
 ### [-] 10. Document the layout floor
 

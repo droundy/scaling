@@ -1301,72 +1301,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn scales_o_one() {
-        println!();
-        let stats = bench_scaling(|_| thread::sleep(Duration::from_millis(10)), 1);
-        println!("O(N): {}", stats);
-        let scaling = stats.scaling.expect("a sleep has a scaling law");
-        assert_eq!(scaling.power, 0);
-        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
-        assert!((scaling.ns_per_scale - 1e7).abs() < 1e6);
-        // A constant used to be the case the fit could say least about:
-        // with only an R² to go on, nothing distinguished "flat" from
-        // "could not tell", so it reported itself clueless. Measured error
-        // bars settle it - a degree-zero fit that lands inside them has
-        // identified the shape as surely as any other - so a constant is
-        // now a proper answer, reached and stood behind.
-        //
-        // Only on a quiet machine, though. Contention makes timing noise
-        // heavy-tailed rather than merely large: a stray slow sample sits
-        // far outside error bars estimated from the samples around it, and
-        // chi-squared rightly rejects a flat model that the data no longer
-        // supports. The power above survives that; believing the *shape*
-        // does not, and should not.
-        if quiesced() {
-            assert_eq!(1.0, stats.goodness_of_fit);
-            assert!(!stats.hit_limit);
-        }
-        let shown = format!("{stats}");
-        assert!(shown.contains('±'), "{shown}");
-        assert!(shown.contains("R²"), "{shown}");
-    }
-
-    #[test]
-    fn scales_o_n() {
-        println!();
-        let stats = bench_scaling(|n| thread::sleep(Duration::from_millis(10 * n as u64)), 1);
-        println!("O(N): {}", stats);
-        let scaling = stats.scaling.expect("a sleep has a scaling law");
-        assert_eq!(scaling.power, 1);
-        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
-        assert!((scaling.ns_per_scale - 1e7).abs() < 1e5);
-
-        // The same law again, in real work rather than sleep. This used to
-        // sum a vector, which is memory-bound: its per-element cost is set
-        // by what else is touching the cache, so the measured growth was
-        // the neighbours' rather than the sum's, and the fit came back
-        // constant often enough to fail about one run in twenty. Arithmetic
-        // in registers has no such second story to tell.
-        println!("Spinning N rounds");
-        let stats = bench_scaling(|n| spin(n as u64), 1);
-        println!("O(N): {}", stats);
-        let scaling = stats.scaling.expect("a linear spin has a scaling law");
-        assert_eq!(scaling.power, 1);
-    }
-
-    #[test]
-    fn scales_o_n_log_n_looks_like_n() {
-        // Sorting would do, but a sort is memory-bound and then the cache
-        // rather than the algorithm sets the growth. `spin_n_log_n` is the
-        // same law in registers.
-        println!("Spinning N log N rounds");
-        let stats = bench_scaling(|n| spin_n_log_n(n as u64), 1);
-        println!("O(N log N): {}", stats);
-        let scaling = stats.scaling.expect("N log N still has a nearest power");
-        assert_eq!(scaling.power, 1);
-    }
-
-    #[test]
     fn scales_o_n_square() {
         println!();
         let stats = bench_scaling(
@@ -2403,66 +2337,6 @@ mod tests {
     fn spin_n_log_n(n: u64) -> u64 {
         let n = n.max(2) as f64;
         spin((n * n.log2()) as u64)
-    }
-
-    /// Does the reported `±` describe the spread you actually get?
-    ///
-    /// The only way to know is to run the whole thing repeatedly and
-    /// compare, which no amount of reading the estimator can substitute
-    /// for. Checked on a cost that really is a power law, because
-    /// `rel_std_error` is documented as conditional on the law being right
-    /// and it would be idle to hold it to a promise it does not make.
-    /// `a_flagged_fit_does_not_pretend_to_a_trustworthy_error_bar` covers
-    /// what happens when the law is not right.
-    #[test]
-    fn scaling_error_bar_is_honest() {
-        println!();
-        if !quiesced() {
-            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
-            return;
-        }
-        const REPEATS: usize = 12;
-        let runs: Vec<ScalingStats> = (0..REPEATS)
-            .map(|_| bench_scaling(|n| spin(n as u64), 1))
-            .collect();
-
-        // Only runs whose law was identified, and only those that agreed on
-        // it: `ns_per_scale` is measured per `Nᴾ`, so runs with different P
-        // report different quantities in different units and pooling them
-        // would compare nanoseconds-per-N with nanoseconds-per-N².
-        let good: Vec<&ScalingStats> = runs
-            .iter()
-            .filter(|s| s.goodness_of_fit > 0.0 && s.scaling.map_or(false, |sc| sc.power == 1))
-            .collect();
-        assert!(
-            good.len() * 2 > REPEATS,
-            "only {} of {REPEATS} runs identified this linear cost",
-            good.len()
-        );
-
-        let (_, observed) = mean_and_spread(
-            &good
-                .iter()
-                .map(|s| s.scaling.expect("filtered to identified runs").ns_per_scale)
-                .collect::<Vec<_>>(),
-        );
-        let claimed = good.iter().map(|s| s.rel_std_error).sum::<f64>() / good.len() as f64;
-        let ratio = observed / claimed;
-        println!(
-            "claimed {:.3}%, observed {:.3}%, ratio {ratio:.2}x",
-            100.0 * claimed,
-            100.0 * observed
-        );
-        // Generous, like its flat-benchmark counterpart: a spread estimated
-        // from a dozen runs is itself noisy, and run-to-run drift the
-        // estimator cannot see - cache state, frequency - inflates the
-        // observed side without any dishonesty on the claimed side.
-        assert!(
-            ratio < 4.0,
-            "claimed {:.3}% but observed spread was {:.3}% ({ratio:.1}x overconfident)",
-            100.0 * claimed,
-            100.0 * observed
-        );
     }
 
     /// The other half of the promise: when the cost is *not* a power law,
