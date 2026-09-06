@@ -33,6 +33,41 @@ use std::time::{Duration, Instant};
 /// different answer here.
 const MIN_SAMPLES: usize = 6;
 
+/// Sample for at least this long before believing any accuracy target.
+///
+/// [`MIN_SAMPLES`] counts samples, which is the wrong unit: six samples of a
+/// nanosecond-scale function is barely a millisecond of evidence, and the
+/// accuracy target is then met by whichever six happened to agree. Measured
+/// across seven workloads, 95% of runs stopped there.
+///
+/// A floor in *time* is scale-free where a count floor is not: it costs a
+/// slow function nothing, since one sample already exceeds it, while making
+/// a fast one watch the machine for a while rather than for an instant.
+/// Raising [`MIN_SAMPLES`] instead would make a benchmark that sleeps 400ms
+/// per iteration take ten seconds.
+///
+/// Three milliseconds is where it stops paying. Sweeping both floors
+/// together over seven workloads - integer, transcendental, division and
+/// branchy, from 20ns to 2.8us - round-robin so every cell met the same
+/// drift:
+///
+/// ```none
+///   time floor   spread   worst error bar   cost
+///   none         0.316%        1.01x        1.3ms
+///   1ms          0.244%        0.93x        1.4ms
+///   3ms          0.143%        1.45x        3.4ms
+///   10ms         0.144%        3.10x       10.4ms
+/// ```
+///
+/// "worst error bar" is how far the reported `±` understates the spread
+/// actually seen, for whichever workload it understated most. Ten
+/// milliseconds buys no further reproducibility and costs a great deal of
+/// honesty: past a few milliseconds the `±` shrinks faster than the answer
+/// settles, so sampling harder yields a tighter number that is less true.
+/// Reproducibility beyond this is the caller's to ask for, with
+/// [`Config::target_rel_error`].
+const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
+
 /// How long one sample should take: calibration picks a batch size aiming
 /// for this.
 ///
@@ -338,6 +373,7 @@ impl Config {
         // Otherwise the probe that finished calibration serves as the
         // warmup sample and is discarded.
 
+        let sampling_started = Instant::now();
         let mut samples = Running::default();
         loop {
             let (_, t) = time_batch(&mut gen_input, &mut f, &mut xs, unit);
@@ -354,7 +390,9 @@ impl Config {
             // rather than discarding it. A slow function with a short
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
-            let precise_enough = samples.count >= MIN_SAMPLES && self.accuracy_met(mean, std_error);
+            let precise_enough = samples.count >= MIN_SAMPLES
+                && sampling_started.elapsed() >= MIN_SAMPLE_TIME
+                && self.accuracy_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
@@ -909,16 +947,25 @@ mod tests {
             stats.std_error
         );
 
-        // A looser absolute ask must be cheaper - the target is doing the
-        // work, not some fixed amount of sampling. 500ns is met by the
-        // minimum sampling every run takes, so this comparison cannot come
-        // down to noise either.
-        let cheap = only_absolute(500).bench(variable_cost(7));
-        println!("absolute 500ns: {cheap}");
+        // A tighter absolute ask must cost more - the target is doing the
+        // work, not some fixed amount of sampling.
+        //
+        // The comparison is 25ns against 5ns rather than 500ns against 25ns,
+        // because `MIN_SAMPLE_TIME` now sets a floor that 25ns already meets:
+        // asking for 500ns instead buys nothing, both runs stop at the floor
+        // having taken the same iterations, and the old form of this test
+        // compared two numbers that the floor had made equal. To show the
+        // target governing, the expensive side has to want more than the
+        // floor supplies. 5ns is not reachable on every machine - it may set
+        // `hit_limit` - which is fine here: a run that spends its whole
+        // budget chasing 5ns has still spent more than one that stopped at
+        // the floor.
+        let dear = only_absolute(5).bench(variable_cost(7));
+        println!("absolute 5ns: {dear}");
         assert!(
-            cheap.iterations < stats.iterations,
-            "loose target used {} iterations, tight used {}",
-            cheap.iterations,
+            dear.iterations > stats.iterations,
+            "tight target used {} iterations, looser used {}",
+            dear.iterations,
             stats.iterations
         );
     }

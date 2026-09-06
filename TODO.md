@@ -10,26 +10,40 @@ said outright, because several did not.
 
 ## Planned
 
-### [ ] 1. Spend more time benchmarking by default
+### [x] 1. Spend more time benchmarking by default
 
-The single best-supported change. Reproducibility improves with sampling
-time, and *the returns get better the longer you go*:
+*Done, but not as predicted.* A `MIN_SAMPLE_TIME` of 3ms now floors the
+sampling duration; `MIN_SAMPLES` stays at 6 and `max_time` stays at 10s.
 
-| sampling time | run-to-run spread | slope over that decade |
-| --- | --- | --- |
-| 1ms | 1.14% | |
-| 10ms | 0.77% | -0.17 |
-| 100ms | 0.39% | -0.29 |
-| 1s | 0.14% | -0.45 |
-| 10s | 0.044% | **-0.51** (ideal) |
+The premise was that reproducibility keeps improving with time, which is
+true of *pure averaging* (1ms 1.14% -> 10s 0.044%, slope reaching -0.51)
+but not of the benchmark as a whole. Sweeping both floors together over
+seven workloads - integer, transcendental, division and branchy, 20ns to
+2.8us, round-robin so every cell met the same drift:
 
-Below ~100ms the correlated noise does not average out; past ~1s it behaves
-like independent noise and you get the full `1/sqrt(t)`. Today's floor is
-`MIN_SAMPLES * SAMPLE_TIME` = 6 x 100us = **600us**, which sits in the worst
-part of that curve. Raising the floor towards 100ms would buy ~3x, and
-towards 1s ~8x, with `max_time` (10s) leaving room for it.
+| time floor | spread | worst error bar | cost |
+| --- | --- | --- | --- |
+| none | 0.316% | 1.01x | 1.3ms |
+| 1ms | 0.244% | 0.93x | 1.4ms |
+| **3ms** | **0.143%** | 1.45x | 3.4ms |
+| 10ms | 0.144% | 3.10x | 10.4ms |
 
-Replicated on split halves of a 300s series. This one I believe.
+Ten milliseconds buys no further reproducibility and costs a great deal of
+honesty. Past a few milliseconds the reported `±` shrinks faster than the
+answer settles, so sampling harder yields a tighter number that is *less*
+true - which is the opposite of the point. The `branchy` workload drives
+that alone: its spread will not come down (0.62-0.79% at every floor) while
+its `±` keeps falling, so its error bar reaches 3.1x too small at 10ms.
+
+Raising `MIN_SAMPLES` instead was measured and rejected: it buys no more
+than the time floor does at COUNT=24 (0.157% against 0.143%), and it is not
+scale-free - 24 samples of the crate's own 400ms-sleep test would take ten
+seconds. A floor in time costs a slow benchmark nothing.
+
+Also updated `an_absolute_accuracy_target_is_honoured`, which compared a
+25ns and a 500ns target. The floor satisfies both, so it was comparing two
+numbers the floor had made equal. It now compares 25ns against 5ns, where
+the expensive side genuinely wants more than the floor supplies.
 
 ### [ ] 2. Randomise comparison order
 
