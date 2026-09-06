@@ -1331,48 +1331,28 @@ mod tests {
         println!("   error: {:e}", scaling.ns_per_scale - 1e7);
         assert!((scaling.ns_per_scale - 1e7).abs() < 1e5);
 
-        // The sleep above is immune to a busy machine; this is not.
-        // Summing a vector is memory-bound, so its per-element cost is set
-        // by what else is touching the cache, and on a contended machine
-        // the measured growth is that neighbour's rather than the sum's.
-        // The reservation exists for exactly this - see `quiet-bench`.
-        if !quiesced() {
-            println!("SKIPPED (not quiesced): cannot measure a memory-bound cost here");
-            return;
-        }
-        println!("Summing integers");
-        let stats = bench_scaling_gen(
-            |n| (0..n as u64).collect::<Vec<_>>(),
-            |v| v.iter().cloned().sum::<u64>(),
-            1,
-        );
+        // The same law again, in real work rather than sleep. This used to
+        // sum a vector, which is memory-bound: its per-element cost is set
+        // by what else is touching the cache, so the measured growth was
+        // the neighbours' rather than the sum's, and the fit came back
+        // constant often enough to fail about one run in twenty. Arithmetic
+        // in registers has no such second story to tell.
+        println!("Spinning N rounds");
+        let stats = bench_scaling(|n| spin(n as u64), 1);
         println!("O(N): {}", stats);
-        let scaling = stats.scaling.expect("a sum has a scaling law");
-        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        let scaling = stats.scaling.expect("a linear spin has a scaling law");
         assert_eq!(scaling.power, 1);
     }
 
     #[test]
     fn scales_o_n_log_n_looks_like_n() {
-        // Memory-bound, like the sum above: on a contended machine this
-        // measures the neighbours rather than the sort.
-        if !quiesced() {
-            println!("SKIPPED (not quiesced): cannot measure a memory-bound cost here");
-            return;
-        }
-        println!("Sorting integers");
-        let stats = bench_scaling_gen(
-            |n| {
-                (0..n as u64)
-                    .map(|i| (i * 13 + 5) % 137)
-                    .collect::<Vec<_>>()
-            },
-            |v| v.sort(),
-            1,
-        );
+        // Sorting would do, but a sort is memory-bound and then the cache
+        // rather than the algorithm sets the growth. `spin_n_log_n` is the
+        // same law in registers.
+        println!("Spinning N log N rounds");
+        let stats = bench_scaling(|n| spin_n_log_n(n as u64), 1);
         println!("O(N log N): {}", stats);
-        let scaling = stats.scaling.expect("a sort has a scaling law");
-        println!("   error: {:e}", scaling.ns_per_scale - 1e7);
+        let scaling = stats.scaling.expect("N log N still has a nearest power");
         assert_eq!(scaling.power, 1);
     }
 
@@ -2402,6 +2382,14 @@ mod tests {
         x
     }
 
+    /// `O(N log N)` in registers: the shape no polynomial describes, with
+    /// no vector anywhere near it. `max(2.0)` keeps `log2` positive at the
+    /// bottom of the ladder, where the sweep starts.
+    fn spin_n_log_n(n: u64) -> u64 {
+        let n = n.max(2) as f64;
+        spin((n * n.log2()) as u64)
+    }
+
     /// Does the reported `±` describe the spread you actually get?
     ///
     /// The only way to know is to run the whole thing repeatedly and
@@ -2487,20 +2475,13 @@ mod tests {
         const REPEATS: usize = 8;
         let runs: Vec<ScalingStats> = (0..REPEATS)
             .map(|_| {
-                // Sorting, because `O(N log N)` is not a polynomial and so
-                // is exactly the shape no power law describes. This used to
-                // sum a `Vec`, which is honestly linear - on a quiesced
+                // `O(N log N)`, which is not a polynomial and so is exactly
+                // the shape no power law describes - in arithmetic rather
+                // than a sort, so the cache has no say in it. This used to
+                // sum a `Vec`, which is honestly linear: on a quiesced
                 // machine the fit was *accepted*, so the case this test
                 // exists to cover never arose and its own premise failed.
-                bench_scaling_gen(
-                    |n| {
-                        (0..n as u64)
-                            .map(|i| (i * 2_654_435_761) % 1_000_003)
-                            .collect::<Vec<_>>()
-                    },
-                    |v| v.sort(),
-                    1,
-                )
+                bench_scaling(|n| spin_n_log_n(n as u64), 1)
             })
             .collect();
 
