@@ -48,11 +48,34 @@ the expensive side genuinely wants more than the floor supplies.
 
 ### [ ] 2. Randomise comparison order
 
-Time the candidate first on half the rounds. `compare` currently always
-times baseline then candidate, so the two sample fixed and *different*
-phases of any periodic disturbance - and there is a real one at exactly
-1000Hz (see Findings). Cheap, and the right defence even though the
-positional bias measured small (mean +0.04%, spread +/-0.8%).
+*Tried, reverted, and should be folded into (3).* The cure costs more than
+the disease when written on its own.
+
+Measured on a function compared against itself, where every difference
+reported is false by construction:
+
+| approach | bias | absolute-time cost |
+| --- | --- | --- |
+| fixed order, baseline first | +0.10% | none |
+| fixed order, candidate first | -0.12% | none |
+| swap via `if`/`else` | **-3% to -5%** | none |
+| swap via `&mut dyn`, one call site | +/-0.03% | +2% at 28ns, +14% at 9ns |
+
+So the positional bias the item set out to remove is only about 0.22% -
+smaller than the ~0.25% layout floor, and far below the 1% default target.
+
+Writing the swap as an `if`/`else` over two call sites is *much* worse than
+doing nothing: it duplicates the timing loop, and the duplicates are not
+equally fast, so each function ends up measured by a mixture of two
+compiled copies. That is the layout lottery again, and here it reached 5%.
+
+Routing both functions through one `&mut dyn FnMut` call site fixes it
+completely - +/-0.03%, better than either fixed order - which is direct
+evidence for (3)'s prediction that type erasure removes the lottery. But
+the indirect call inflates the absolute times `Comparison` reports, by 14%
+on a 9ns function. It cancels out of the difference, and would be a fair
+price inside a k-way API that needs the erasure anyway; it is not a fair
+price for removing 0.22%.
 
 ### [ ] 3. K-way compare
 
@@ -63,8 +86,12 @@ in every slot. The multiple-comparison machinery
 
 Holding k alternatives needs `Box<dyn FnMut()>`, and that erasure is a
 *benefit* here: all alternatives go through one shared call path instead of
-k separate monomorphisations at k different addresses, which should remove
-the layout lottery below. Falsifiable prediction - worth measuring.
+k separate monomorphisations at k different addresses. **Measured while
+attempting (2): it works** - one `&mut dyn` call site took a function
+compared against itself from -5% to +/-0.03%. The cost is an indirect call,
+which inflates the absolute times reported (+2% at 28ns, +14% at 9ns) while
+cancelling out of the difference. Order randomisation comes free once this
+is in place, so do the two together.
 
 ### [ ] 4. Interleave dissimilar benchmarks across a suite
 
@@ -116,9 +143,14 @@ cost of actually measuring rather than pretending to. The flakiness this
 was deferred behind did not materialise - 9 consecutive green runs across
 debug and release - but see (9), which is still open.
 
-### [ ] 9. Fix `scaling_error_bar_is_honest`
+### [ ] 9. Fix the flaky scaling tests
 
-Rate uncertain and probably conditions-dependent. It failed 4 times in ~19
+Two of them, not one: `scaling_error_bar_is_honest` and `scales_o_one`,
+the latter seen failing twice and passing on the immediate rerun both
+times.
+
+Rate uncertain and probably conditions-dependent. `scaling_error_bar_is_honest`
+failed 4 times in ~19
 pinned runs one evening, then went 9 for 9 the next morning after (8)
 landed - though the earlier measurements were taken while other analysis
 was running on the machine, which by itself argues the test is reading the
