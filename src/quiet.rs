@@ -539,23 +539,39 @@ mod tests {
     fn an_inherited_lock_is_not_waited_on() {
         use std::sync::mpsc;
         use std::time::Duration;
-        // Stand in for `quiet-bench run`: hold the machine lock, then say so
-        // the way it does.
-        let held = match hold_reserved_cpus() {
-            Ok(h) => h,
-            Err(_) => {
-                println!("SKIPPED: no reservation to lock on this machine");
-                return;
+        // Under a real `quiet-bench run` the situation being tested already
+        // obtains: an ancestor holds the lock and has said so. Standing in
+        // for it a second time would mean waiting on the very lock that
+        // ancestor holds - which is the hang this test exists to catch,
+        // arrived at from the wrong side.
+        let inherited = std::env::var_os(LOCK_HELD_VAR).is_some();
+        let held = if inherited {
+            None
+        } else {
+            // Stand in for `quiet-bench run`: hold the machine lock, then
+            // say so the way it does.
+            match hold_reserved_cpus() {
+                Ok(h) => {
+                    std::env::set_var(LOCK_HELD_VAR, "1");
+                    Some(h)
+                }
+                Err(_) => {
+                    println!("SKIPPED: no reservation to lock on this machine");
+                    return;
+                }
             }
         };
-        std::env::set_var(LOCK_HELD_VAR, "1");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let taken = machine_lock();
             let _ = tx.send(taken.is_some());
         });
         let answered = rx.recv_timeout(Duration::from_secs(5));
-        std::env::remove_var(LOCK_HELD_VAR);
+        // Only unset what this test set: under `quiet-bench run` the variable
+        // belongs to the process and the rest of the suite depends on it.
+        if !inherited {
+            std::env::remove_var(LOCK_HELD_VAR);
+        }
         drop(held);
         match answered {
             Err(_) => panic!("waited on the lock its own parent was holding"),

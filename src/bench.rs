@@ -419,14 +419,27 @@ where
     xs.clear();
     xs.extend(std::iter::repeat_with(&mut *gen_input).take(iters));
     let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
+    (setup_ns, time_loop(f, xs))
+}
+
+/// Run `f` once over every input in `xs`, and say how long that took in
+/// nanoseconds.
+///
+/// The timed part of [`time_batch`], split out because
+/// [`crate::ComparisonSet`] prepares one batch of inputs and then hands the
+/// same batch - cloned - to each alternative in turn, so its generating and
+/// its timing happen in different places.
+pub(crate) fn time_loop<F, I, O>(f: &mut F, xs: &mut [I]) -> f64
+where
+    F: FnMut(&mut I) -> O,
+{
     let start = Instant::now();
     // We iterate over `&mut *xs` rather than draining it, because we don't
     // want to drop the input values until after the clock has stopped.
     for x in &mut *xs {
         black_box(f(x));
     }
-    let timed_ns = start.elapsed().as_secs_f64() * 1e9;
-    (setup_ns, timed_ns)
+    start.elapsed().as_secs_f64() * 1e9
 }
 
 /// Find a batch size whose measured duration reaches `cfg.sample_time`.

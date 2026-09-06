@@ -60,6 +60,26 @@ impl Comparison {
         crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
     }
 
+    /// Assemble one from parts measured elsewhere.
+    ///
+    /// For [`crate::ComparisonSet`], which times more than two alternatives
+    /// against each other and then reports each against the baseline. The
+    /// verdict, the sensitivity and the formatting are the same questions
+    /// there as here, so they are asked of the same type.
+    pub(crate) fn from_parts(
+        baseline: Stats,
+        candidate: Stats,
+        z_alpha: f64,
+        paired_std_error: f64,
+    ) -> Self {
+        Comparison {
+            baseline,
+            candidate,
+            z_alpha,
+            paired_std_error,
+        }
+    }
+
     /// The smallest difference this comparison could have called a change,
     /// in nanoseconds.
     ///

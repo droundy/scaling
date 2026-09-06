@@ -241,9 +241,10 @@ effect.
 
 mod bench;
 mod compare;
+mod kway;
 pub mod quiet;
 mod scaling;
-pub(crate) use bench::time_batch;
+pub(crate) use bench::{time_batch, time_loop};
 pub(crate) mod significant;
 
 // `self::` because the crate is called `scaling` too, and rustdoc builds
@@ -254,6 +255,7 @@ pub(crate) mod significant;
 // toolchain, and only when building doctests rather than the library.
 pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
+pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 
 use std::f64;

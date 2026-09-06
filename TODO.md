@@ -75,7 +75,7 @@ indirect call per batch, amortised over `unit` iterations: each function
 keeps one consistently-compiled loop, and the order becomes a choice of
 data. Bias and overhead both fall to noise.
 
-### [ ] 3. K-way compare
+### [x] 3. K-way compare
 
 Generalise `compare` to k alternatives, round-robin by batch with the
 starting position rotated each round so every alternative spends equal time
@@ -89,6 +89,31 @@ works** - one `&mut dyn` call site took a function compared against itself
 from -5% to +/-0.02%. Erase at the batch level rather than the function
 level, as (2) does, and the indirect call is amortised over the batch and
 costs nothing measurable.
+
+*Done*, in `src/kway.rs`, as a builder: `cfg.comparison().add("old",
+old).add("new", new).run()`. The erasure is at the batch level, so each
+alternative keeps its own monomorphised timing loop and pays no
+per-iteration indirect call - which does leave the layout lottery between
+alternatives, but that is 0.1-1% and an order of magnitude below any
+accuracy goal worth asking for. Each alternative beyond the baseline counts
+as one comparison against the plan, and the budget is `k * max_time`.
+Measured on the reserved CPU: three identical alternatives at a 5% goal came
+back changed 0/20 times over six runs, and +/-10% differences were caught
+20/20.
+
+**One batch of inputs per round, cloned for each alternative.** Not one draw
+per alternative: if the cost depends on the input, then each alternative
+drawing its own means every difference carries the difference between two
+draws, which is not a difference between the alternatives at all. This is
+why `comparison_gen_input` needs `I: Clone` where `compare_gen_input` does
+not. Measured: on inputs whose length spans 4000x, the paired standard error
+comes to 0.48 of the combined one, averaged over 16 comparisons and steady
+to +/-0.02 across runs. It only shows up when the batch is small enough that
+which inputs it drew still matters - at a 200x span the batch ran to ~1600
+draws, the input had already averaged itself away, and the ratio sat at 1.07.
+
+This does not yet replace `compare`, which stays as the two-alternative
+form that needs no names and no plan arithmetic.
 
 ### [ ] 4. Interleave dissimilar benchmarks across a suite
 
