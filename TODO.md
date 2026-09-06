@@ -1,6 +1,7 @@
 # TODO
 
 Tick an item when it lands, and say underneath what was actually done.
+`[-]` means deliberately skipped, with the reason.
 
 Working notes on measurement quality. Numbers below were measured on one
 laptop (i5-1240P, `CONFIG_HZ=1000`, CPU 2 reserved with its SMT sibling
@@ -130,20 +131,13 @@ against a bound of 4.0); with 40s of suite load ahead of it, 5.0. It is
 measuring the machine rather than the library, so it wants (7) - a measured
 fitness gate - rather than a looser bound.
 
-### [ ] 10. Document the layout floor
+### [-] 10. Document the layout floor
 
-Identical-cost functions compiled separately differ by a median of 0.24%
-and up to ~1%. `compare` therefore cannot honestly resolve differences
-below about 1% when the two sides are separately compiled, whatever the
-sampling effort. Belongs in `compare_gen_input`'s docs beside the drift
-caveat - it is a separate, additive floor.
+*Skipped.* Documenting the layout floor: judged not worth the words.
 
-### [ ] 11. Student-t rather than z in `is_significant`
+### [-] 11. Student-t rather than z in `is_significant`
 
-At six samples the normal quantile makes the test anti-conservative: ~7.8%
-actual against 5% nominal at df≈10, ~19% at df≈2. Largely evaporates if (1)
-lands, since hundreds of samples make df large - so this is a note, not a
-task, unless the floor stays low.
+*Skipped.* Student-t rather than z: mooted by (1), which makes the sample counts large enough that t and z agree.
 
 ### [ ] 12. `flock` gap when the reservation comes from the environment
 

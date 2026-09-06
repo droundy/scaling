@@ -338,10 +338,15 @@ impl Config {
         // Otherwise the probe that finished calibration serves as the
         // warmup sample and is discarded.
 
-        let sampling_started = Instant::now();
+        // What the floor counts: time spent *running* `f`, not wall-clock
+        // time. A benchmark whose input is expensive to build would
+        // otherwise satisfy the floor by building inputs, which is not
+        // evidence about anything.
+        let mut measured_ns = 0.0;
         let mut samples = Running::default();
         loop {
             let (_, t) = time_batch(&mut gen_input, &mut f, &mut xs, unit);
+            measured_ns += t;
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
 
@@ -356,7 +361,7 @@ impl Config {
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
             let precise_enough = samples.count >= MIN_SAMPLES
-                && sampling_started.elapsed() >= MIN_SAMPLE_TIME
+                && measured_ns >= MIN_SAMPLE_TIME.as_secs_f64() * 1e9
                 && self.accuracy_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {

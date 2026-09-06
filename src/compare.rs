@@ -202,6 +202,10 @@ impl Config {
         C: FnMut(&mut I) -> O,
     {
         self.num_comparisons_made.fetch_add(1, Release);
+        // Twice the budget, because a comparison produces two `Stats`: at the
+        // single budget each side would get half the wall clock a lone
+        // `bench` call is allowed, for the same target.
+        let budget = self.max_time * 2;
         quiet::pin_if_reserved();
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
@@ -213,10 +217,10 @@ impl Config {
             &mut f_baseline,
             &mut f_candidate,
             &mut xs,
-            self,
+            budget,
             start,
         );
-        if start.elapsed() > self.max_time {
+        if start.elapsed() > budget {
             return Comparison {
                 baseline: Stats {
                     ns_per_iter: base_ns / unit as f64,
@@ -238,27 +242,30 @@ impl Config {
             };
         }
 
-        let sampling_started = Instant::now();
+        // Time spent *running* the two functions, not wall-clock time: an
+        // input that is slow to build would otherwise satisfy the floor by
+        // being built, which is not evidence about either function.
+        let mut measured_ns = 0.0;
         let mut base_samples = Running::default();
         let mut cand_samples = Running::default();
         loop {
             let (_, base_t) = time_batch(&mut gen_input, &mut f_baseline, &mut xs, unit);
             let (_, cand_t) = time_batch(&mut gen_input, &mut f_candidate, &mut xs, unit);
+            measured_ns += base_t + cand_t;
             base_samples.push(base_t / unit as f64);
             cand_samples.push(cand_t / unit as f64);
 
             let (base_mean, base_std_error) = base_samples.mean_and_stderr();
             let (cand_mean, cand_std_error) = cand_samples.mean_and_stderr();
 
-            let out_of_budget =
-                base_samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            let out_of_budget = base_samples.count >= MAX_SAMPLES || start.elapsed() > budget;
             let std_error = (base_std_error.powi(2) + cand_std_error.powi(2)).sqrt();
             // Twice [`MIN_SAMPLE_TIME`], because a round here buys evidence
             // about *two* functions: at the single floor each side would get
             // half of what a lone `bench` call gets, and a comparison is only
             // as good as the weaker of its two halves.
             let precise_enough = base_samples.count >= MIN_SAMPLES
-                && sampling_started.elapsed() >= 2 * MIN_SAMPLE_TIME
+                && measured_ns >= 2.0 * MIN_SAMPLE_TIME.as_secs_f64() * 1e9
                 && self.comparison_accuracy_met(base_mean, std_error);
             if precise_enough || out_of_budget {
                 return Comparison {
@@ -306,7 +313,7 @@ fn calibrate<G, B, C, I, O>(
     f_base: &mut B,
     f_cand: &mut C,
     xs: &mut Vec<I>,
-    cfg: &Config,
+    budget: Duration,
     start: Instant,
 ) -> (usize, f64, f64, u64)
 where
@@ -314,10 +321,7 @@ where
     B: FnMut(&mut I) -> O,
     C: FnMut(&mut I) -> O,
 {
-    let probe_ceiling_ns = (cfg.max_time / 100)
-        .max(Duration::from_millis(5))
-        .as_secs_f64()
-        * 1e9;
+    let probe_ceiling_ns = (budget / 100).max(Duration::from_millis(5)).as_secs_f64() * 1e9;
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -333,7 +337,7 @@ where
         if base_t + cand_t >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
-            || start.elapsed() > cfg.max_time
+            || start.elapsed() > budget
         {
             return (unit, base_t, cand_t, probed);
         }

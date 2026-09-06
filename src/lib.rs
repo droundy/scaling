@@ -261,9 +261,19 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::*;
 
-/// Sample for at least this long before believing any accuracy target.
+/// Spend at least this long *running the benchmark* before believing any
+/// accuracy target.
 ///
-/// Both sampling loops used to stop on a count - six samples in [`bench`],
+/// Measured time, not wall-clock time: an input that is slow to build would
+/// otherwise satisfy the floor by being built, and construction is not
+/// evidence about the function. [`Config::max_time`] is the opposite - a
+/// wall-clock cap, because that is a promise about how long the caller
+/// waits - so the two clocks are deliberately different.
+///
+/// A comparison gets twice this, since a round there buys evidence about
+/// two functions and is only as good as its weaker half.
+///
+/// All three sampling loops used to stop on a count - six samples in [`bench`],
 /// six rounds in [`bench_scaling`] - and a count is the wrong unit. Six
 /// samples of a nanosecond-scale function is barely a millisecond of
 /// evidence, and the accuracy target is then met by whichever six happened
@@ -272,7 +282,7 @@ use std::time::*;
 /// on a benchmark sitting at its measurable floor, which is the same
 /// regime.
 ///
-/// A floor in *time* is scale-free where a count floor is not: it costs a
+/// A floor in time is scale-free where a count floor is not: it costs a
 /// slow function nothing, since one sample already exceeds it, while making
 /// a fast one watch the machine for a while rather than for an instant.
 /// Raising the counts instead would make a benchmark that sleeps 400ms per
@@ -351,6 +361,12 @@ pub struct Config {
     pub target_abs_error: Duration,
     /// Give up after roughly this much wall-clock time even if neither goal
     /// was reached, setting [`Stats::hit_limit`].
+    ///
+    /// Wall clock rather than measured time, because this is a promise about
+    /// how long the caller waits - a benchmark whose input is slow to build
+    /// has still taken that long. The `compare_*` functions allow twice
+    /// this, since they produce two [`Stats`] and would otherwise give each
+    /// side half the budget a lone [`bench`] gets for the same target.
     pub max_time: Duration,
     /// The number of comparison benchmarks that will be taken.
     ///
