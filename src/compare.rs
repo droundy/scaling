@@ -202,7 +202,7 @@ impl Config {
         C: FnMut(&mut I) -> O,
     {
         self.num_comparisons_made.fetch_add(1, Release);
-        quiet::pin_if_requested();
+        quiet::pin_if_reserved();
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();

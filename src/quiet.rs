@@ -13,16 +13,17 @@ quiet-bench run cargo test --release
 sudo `which quiet-bench` restore     # put everything back
 ```
 
-`quiet-bench run` sets [`CPUS_VAR`] for the command it launches. Every
-benchmark in this crate checks that variable and, if it is set, **pins
-itself to those CPUs automatically** - so a program built against `scaling`
-lands on the reserved CPU without needing a `taskset` wrapper, and without
-any code change. Set [`NO_PIN_VAR`] to `1` to suppress that.
+Once a reservation exists, every benchmark in this crate **pins itself to
+those CPUs automatically** - so a program built against `scaling` lands on
+the reserved CPU without a `taskset` wrapper, without `quiet-bench run`, and
+without any code change. The reservation is taken as permission to use it:
+that is what it is for, and [`exclusive`] makes concurrent benchmarks take
+turns rather than collide. Set [`NO_PIN_VAR`] to `1` to opt out.
 
 Pinning affects only the thread running the benchmark, and happens at most
 once per thread. Nothing here does anything at all on non-Linux platforms,
-or when [`CPUS_VAR`] is unset - which is the normal case for an ordinary
-`cargo bench` on a developer machine.
+or when no reservation exists - the normal case for an ordinary `cargo
+bench` on a developer machine.
 
 Use [`status`] to find out what happened:
 
@@ -43,8 +44,8 @@ use std::fmt::{self, Display, Formatter};
 /// crate.
 pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
 
-/// Set this to `1` to stop `scaling` pinning itself even when [`CPUS_VAR`]
-/// is set.
+/// Set this to `1` to stop `scaling` pinning itself even when CPUs have
+/// been reserved.
 pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
 
 /// Where `quiet-bench` records the reserved CPUs. On `/run`, which is a
@@ -269,13 +270,25 @@ pub fn status() -> Status {
     }
 }
 
-/// Pin this thread to the reserved CPUs, if a reservation is advertised and
-/// pinning has not been suppressed.
+/// Pin this thread to the reserved CPUs, if there are any and pinning has
+/// not been suppressed.
 ///
 /// Called automatically by every benchmark in this crate, at most once per
 /// thread. Doing it more than once is harmless but pointless, so the result
 /// is remembered.
-pub(crate) fn pin_if_requested() {
+///
+/// A reservation is taken as permission to use it. That is a deliberate
+/// change: pinning used to require [`CPUS_VAR`] to be set explicitly,
+/// because a reservation said CPUs had been set aside but not that *this*
+/// program was meant to have them, and two benchmarks seizing the same core
+/// would each have measured the other. [`exclusive`] answers that now - they
+/// take turns instead of colliding - and the old caution cost more than it
+/// saved: every benchmark launched any way other than `quiet-bench run`
+/// silently went unpinned, including this crate's own accuracy tests, which
+/// therefore skipped themselves on every machine they had ever run on.
+///
+/// Set [`NO_PIN_VAR`] to `1` to opt out.
+pub(crate) fn pin_if_reserved() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -290,14 +303,12 @@ pub(crate) fn pin_if_requested() {
         if std::env::var(NO_PIN_VAR).map(|v| v == "1").unwrap_or(false) {
             return;
         }
-        // Only an explicit request in the environment triggers pinning. The
-        // file at CPUS_PATH says a reservation exists, but not that *this*
-        // program was meant to have it; silently seizing a reserved CPU
-        // because one happens to be set aside would be an unpleasant
-        // surprise for an unrelated process.
-        let cpus = match std::env::var(CPUS_VAR) {
-            Ok(c) => c,
-            Err(_) => return,
+        // `reserved_cpus` prefers CPUS_VAR, which `quiet-bench run` sets,
+        // and falls back to the reservation file - so a benchmark started
+        // any other way notices the reservation too.
+        let cpus = match reserved_cpus() {
+            Some(c) => c,
+            None => return,
         };
         if let Ok(cpus) = parse_cpu_list(&cpus) {
             // A failure here is not worth aborting a benchmark over: the
@@ -396,7 +407,7 @@ fn lock_reservation() -> Option<std::fs::File> {
     // Blocking: waiting our turn is the entire point.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         // A measurement that could not take the lock is still valid, just
-        // possibly sharing the CPU - the same bargain `pin_if_requested`
+        // possibly sharing the CPU - the same bargain `pin_if_reserved`
         // makes when pinning fails.
         return None;
     }

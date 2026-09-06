@@ -599,7 +599,7 @@ pub(crate) mod testutil {
     /// the answer would be "not pinned" every time and these tests would
     /// skip themselves even under `quiet-bench run`.
     pub fn quiesced() -> bool {
-        crate::quiet::pin_if_requested();
+        crate::quiet::pin_if_reserved();
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 

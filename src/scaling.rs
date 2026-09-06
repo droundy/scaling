@@ -28,7 +28,7 @@ impl Config {
     where
         F: Fn(usize) -> O,
     {
-        quiet::pin_if_requested();
+        quiet::pin_if_reserved();
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();
@@ -52,7 +52,7 @@ impl Config {
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
     {
-        quiet::pin_if_requested();
+        quiet::pin_if_reserved();
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();

@@ -1,5 +1,7 @@
 # TODO
 
+Tick an item when it lands, and say underneath what was actually done.
+
 Working notes on measurement quality. Numbers below were measured on one
 laptop (i5-1240P, `CONFIG_HZ=1000`, CPU 2 reserved with its SMT sibling
 offline and P-cores capped at 1.7GHz), so treat them as indicative of shape
@@ -8,7 +10,7 @@ said outright, because several did not.
 
 ## Planned
 
-### 1. Spend more time benchmarking by default
+### [ ] 1. Spend more time benchmarking by default
 
 The single best-supported change. Reproducibility improves with sampling
 time, and *the returns get better the longer you go*:
@@ -29,7 +31,7 @@ towards 1s ~8x, with `max_time` (10s) leaving room for it.
 
 Replicated on split halves of a 300s series. This one I believe.
 
-### 2. Randomise comparison order
+### [ ] 2. Randomise comparison order
 
 Time the candidate first on half the rounds. `compare` currently always
 times baseline then candidate, so the two sample fixed and *different*
@@ -37,7 +39,7 @@ phases of any periodic disturbance - and there is a real one at exactly
 1000Hz (see Findings). Cheap, and the right defence even though the
 positional bias measured small (mean +0.04%, spread +/-0.8%).
 
-### 3. K-way compare
+### [ ] 3. K-way compare
 
 Generalise `compare` to k alternatives, round-robin by batch with the
 starting position rotated each round so every alternative spends equal time
@@ -49,7 +51,7 @@ Holding k alternatives needs `Box<dyn FnMut()>`, and that erasure is a
 k separate monomorphisations at k different addresses, which should remove
 the layout lottery below. Falsifiable prediction - worth measuring.
 
-### 4. Interleave dissimilar benchmarks across a suite
+### [ ] 4. Interleave dissimilar benchmarks across a suite
 
 Today benchmark #1 runs at t=0 and #50 at t=500s, sampling different thermal
 states. Interleaved, every benchmark's samples spread over the whole
@@ -59,7 +61,7 @@ input type and duration - more machinery than (3).
 
 ## Also open
 
-### 5. Paired estimator in `Comparison::std_error`
+### [ ] 5. Paired estimator in `Comparison::std_error`
 
 `std_error()` combines the two halves as independent
 (`sqrt(se_b^2 + se_c^2)`), but they are timed back to back under nearly
@@ -68,7 +70,7 @@ would cancel common-mode drift and tighten the bars. Never tested, and
 plausibly the largest single win still available given how much of the
 noise is drift.
 
-### 6. Batch-size jitter, revisited
+### [ ] 6. Batch-size jitter, revisited
 
 Compensated jitter cuts the 1000Hz peak from 4.18% of spectral power to
 0.38% and lag-10 autocorrelation from +0.88 to +0.49. No end-to-end gain
@@ -77,7 +79,7 @@ which is exactly where correlated noise fails to average. Worth retrying
 once (1) lands, because the tick *is* the correlated noise that dominates
 there.
 
-### 7. Machine-fitness check instead of `quiesced()`
+### [ ] 7. Machine-fitness check instead of `quiesced()`
 
 `quiesced()` gates on configuration (are we pinned?) rather than on
 evidence (is this machine holding still?). A cheap probe - measure a fixed
@@ -85,24 +87,36 @@ workload N times, report the between-run spread - would gate the honesty
 tests on a measured number, and would give `quiet-bench status` something
 better to say than "CPU 2 is reserved".
 
-### 8. Pin automatically when a reservation exists
+### [x] 8. Pin automatically when a reservation exists
 
-Drop the requirement that `SCALING_BENCH_CPUS` be set: pin whenever
-`reserved_cpus()` finds a reservation. The original objection - that the
-CPUs might have been set aside for something else - is answered by the
-`flock` in `quiet::exclusive()`. `SCALING_NO_PIN=1` stays as the escape
-hatch. Deferred only until the flaky test below is fixed, since this makes
-the quiesced-only tests run for everyone.
+*Done.* `pin_if_requested` became `pin_if_reserved` and now pins whenever
+`reserved_cpus()` finds a reservation, rather than requiring
+`SCALING_BENCH_CPUS`. The original objection - that the CPUs might have
+been set aside for something else - is answered by the `flock` in
+`quiet::exclusive()`. `SCALING_NO_PIN=1` remains the escape hatch.
 
-### 9. Fix `scaling_error_bar_is_honest`
+Consequence to watch: on a machine with a reservation, a plain `cargo test`
+now pins and serialises, so the suite went from 12s to ~50s. That is the
+cost of actually measuring rather than pretending to. The flakiness this
+was deferred behind did not materialise - 9 consecutive green runs across
+debug and release - but see (9), which is still open.
 
-Still fails roughly 1-2 runs in 3 when pinned. It compares a *between-run*
-spread against a *within-run* claimed error, which `Stats::std_error` docs
-explicitly decline to bound. Isolated it passes (ratio 0.7-1.8 against a
-bound of 4.0); after 40s of suite load ahead of it, 5.0. It is measuring
-the machine, so it wants (7) rather than a tighter bound.
+### [ ] 9. Fix `scaling_error_bar_is_honest`
 
-### 10. Document the layout floor
+Rate uncertain and probably conditions-dependent. It failed 4 times in ~19
+pinned runs one evening, then went 9 for 9 the next morning after (8)
+landed - though the earlier measurements were taken while other analysis
+was running on the machine, which by itself argues the test is reading the
+neighbours.
+
+The design flaw stands regardless: it compares a *between-run* spread
+against a *within-run* claimed error, which `Stats::std_error` documents
+that it does not bound. Isolated it passes comfortably (ratio 0.7-1.8
+against a bound of 4.0); with 40s of suite load ahead of it, 5.0. It is
+measuring the machine rather than the library, so it wants (7) - a measured
+fitness gate - rather than a looser bound.
+
+### [ ] 10. Document the layout floor
 
 Identical-cost functions compiled separately differ by a median of 0.24%
 and up to ~1%. `compare` therefore cannot honestly resolve differences
@@ -110,14 +124,14 @@ below about 1% when the two sides are separately compiled, whatever the
 sampling effort. Belongs in `compare_gen_input`'s docs beside the drift
 caveat - it is a separate, additive floor.
 
-### 11. Student-t rather than z in `is_significant`
+### [ ] 11. Student-t rather than z in `is_significant`
 
 At six samples the normal quantile makes the test anti-conservative: ~7.8%
 actual against 5% nominal at df≈10, ~19% at df≈2. Largely evaporates if (1)
 lands, since hundreds of samples make df large - so this is a note, not a
 task, unless the floor stays low.
 
-### 12. `flock` gap when the reservation comes from the environment
+### [ ] 12. `flock` gap when the reservation comes from the environment
 
 `reserved_cpus()` prefers `SCALING_BENCH_CPUS` and falls back to
 `CPUS_PATH`, but `lock_reservation()` only ever opens the file. Setting the
