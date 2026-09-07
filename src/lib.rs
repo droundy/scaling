@@ -75,6 +75,13 @@ the target accuracy was met, and [`Stats::untrustworthy`] tells you if too
 few samples were collected for the error bar itself to mean anything.
 Those are marked `(limit)` and `(untrusted)` in the output.
 
+[`Stats::clock_moved`] is a different kind of thing, and the only one here
+not computed from the timings: on Linux it says the core changed frequency
+during the run, or the benchmark ran on more than one core. It is marked
+`(clock moved)`, and it exists because a run that was *uniformly* slow has
+a small `±` on a wrong answer, which no amount of arithmetic over the
+samples can reveal. See the next section, and `Caveat 3` below.
+
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
 
@@ -231,6 +238,14 @@ cannot see the machine around it: another process on the same core, a CPU
 dropping out of turbo as it heats up, or an interrupt landing mid-sample all
 shift the answer without widening the error bar.
 
+Some of that it can at least *ask* about, rather than infer. On Linux every
+sample is bracketed by a read of the core's current clock frequency and of
+which core it is, and a run where either moved is marked `(clock moved)` -
+see [`Stats::clock_moved`]. Nothing is discarded or corrected on account of
+it; it is there to tell you that a tight `±` was measured on a machine that
+was not holding still. On a machine quiesced by `quiet-bench` it should
+never appear, which makes it a check that the quiescing worked.
+
 The `quiet-bench` binary shipped with this crate reserves one or more CPUs
 for benchmarking and moves everything else - processes, interrupts - off
 them, and pins the clock frequency. Benchmarks then pin themselves to the
@@ -241,6 +256,7 @@ effect.
 
 pub mod quiet;
 mod bench;
+mod machine;
 mod scaling;
 
 // `self::` because the crate is called `scaling` too, and rustdoc builds

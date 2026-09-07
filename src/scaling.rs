@@ -34,9 +34,9 @@ impl Config {
             // optimiser can see a literal `n` and lift the whole call out,
             // the job the old code did by running over a `vec![n; iters]`.
             let n = black_box(n);
-            let start = Instant::now();
+            let start = machine::Timer::start();
             black_box(f(n));
-            start.elapsed().as_secs_f64() * 1e9
+            start.elapsed_ns()
         })
     }
 
@@ -60,11 +60,11 @@ impl Config {
             // after the clock stops, so neither generation nor drop lands
             // in the measurement.
             let mut x = gen_env(n);
-            let start = Instant::now();
+            let start = machine::Timer::start();
             black_box(f(&mut x));
-            let elapsed = start.elapsed();
+            let elapsed_ns = start.elapsed_ns();
             drop(x);
-            elapsed.as_secs_f64() * 1e9
+            elapsed_ns
         })
     }
 }
