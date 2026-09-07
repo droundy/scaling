@@ -286,6 +286,10 @@ for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
 */
 
+/// Assembling registered benchmarks into a suite. See `REGISTRATION.md`.
+#[cfg(feature = "registry")]
+#[doc(hidden)]
+pub mod assemble;
 mod bench;
 mod compare;
 mod kway;

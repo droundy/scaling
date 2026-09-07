@@ -25,6 +25,7 @@ use std::any::{Any, TypeId};
 /// units arrive in an order the linker chose, so anything that depends on
 /// order - which alternative is a comparison's baseline, what order a report
 /// prints in - has to be decided from the fields rather than from position.
+#[derive(Debug)]
 pub struct Registered {
     /// What the report calls this, conventionally module-qualified so that
     /// two benchmarks of the same name in different modules do not collide.
@@ -87,6 +88,7 @@ pub struct Registered {
 /// [`ScalingStats`]: crate::ScalingStats
 /// [`Comparisons`]: crate::Comparisons
 /// [`Config::bench`]: crate::Config::bench
+#[derive(Debug)]
 pub enum Kind {
     /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
     /// [`Suite::add_gen_input`] - which of the three, and any input
@@ -97,13 +99,40 @@ pub enum Kind {
     /// signature has nowhere to pass it.
     Scaling(fn(&mut Suite<'_>, &Config, &str)),
     /// Adds itself to a comparison group's [`ComparisonSet`].
-    ///
-    /// Takes the set and gives it back because `ComparisonSet` is a
-    /// consuming builder. The `for<'a>` is what lets one registration serve
-    /// whatever `Config` borrow assembly ends up with, rather than being
-    /// tied to a lifetime chosen at registration time - which, being a
-    /// `static`, would have to be `'static`.
-    Alt(for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>),
+    Alt {
+        /// Takes the set and gives it back because `ComparisonSet` is a
+        /// consuming builder. The `for<'a>` is what lets one registration
+        /// serve whatever `Config` borrow assembly ends up with, rather than
+        /// being tied to a lifetime chosen at registration time - which,
+        /// being a `static`, would have to be `'static`.
+        add: for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>,
+        /// The input type this alternative expects, before erasure.
+        ///
+        /// Carried so that assembly can check every member of a group agrees
+        /// with the group's generator *before* anything runs. Without it the
+        /// first mismatched downcast would panic from inside the scheduler,
+        /// naming nothing useful.
+        input_type: TypeId,
+        /// The same type, spelled the way the source spells it, because a
+        /// `TypeId` says nothing to a reader and a diagnostic has to.
+        ///
+        /// Written by the registering macro with `stringify!`, which is a
+        /// literal and so usable in the `static` a registration becomes.
+        input_type_name: &'static str,
+    },
+}
+
+impl Kind {
+    /// How this spells its input type, for a diagnostic to quote. `"()"` for
+    /// the kinds that take no input.
+    pub fn input_type_name(&self) -> &'static str {
+        match self {
+            Kind::Alt {
+                input_type_name, ..
+            } => input_type_name,
+            _ => "()",
+        }
+    }
 }
 
 #[cfg(feature = "registry")]
@@ -201,12 +230,16 @@ impl Clone for ErasedInput {
 /// Registered separately from the group's alternatives, and exactly once per
 /// group, because there is exactly one generator per group - see
 /// [`ErasedInput`] for why the alternatives cannot each bring their own.
+#[derive(Debug)]
 pub struct GenInputRegistration {
     /// The group this generates input for.
     pub group: &'static str,
     /// `TypeId::of::<I>()`, so assembly can check the group's alternatives
     /// agree with it.
     pub type_id: TypeId,
+    /// The same type as the source spells it, for diagnostics. See
+    /// [`Kind::Alt::input_type_name`](Kind#variant.Alt.field.input_type_name).
+    pub type_name: &'static str,
     /// Called once per round.
     pub make: fn() -> ErasedInput,
 }
