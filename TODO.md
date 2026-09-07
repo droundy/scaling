@@ -232,10 +232,32 @@ is the machine. Sixteen runs per arm, medians over four invocations:
 
 Nothing. Medians equal, spreads equal, and the sample counts show no sign of
 the mechanism - for it to work, interleaved samples would have to see a
-larger standard error and therefore stop *later*, and they do not. Note too
-that the claimed `±` is two to eight times *larger* than the robust spread,
-so on this machine the error bars are conservative rather than understating,
-and there is no dishonesty for interleaving to fix.
+larger standard error and therefore stop *later*, and they do not.
+
+**Neither column above settles whether the `±` is honest, and an earlier
+version of this entry claimed it did.** It said the claimed `±` ran two to
+eight times larger than the robust spread and concluded the error bars were
+conservative. That comparison is not valid: `std_error` is computed from
+every sample in the run and so counts the tails, while a half-interquartile
+range discards them by construction. Even on clean normal data the ratio
+would read 1.48x "conservative" for free, since a half-IQR is 0.675 sigma;
+and with one run in sixteen at twice the cost, that run contributes about a
+quarter to sigma and nothing at all to the IQR. So the two statistics here
+are wrong in opposite directions from one cause - the sd-based one called
+the error bars 38-73x too narrow, the IQR-based one called them 2-8x too
+wide - and the honest position is that this experiment did not measure it.
+
+Measuring it wants like compared with like: sigma against `std_error`, or a
+trimmed spread against a trimmed `std_error`. Better still, measure lag-1
+autocorrelation of the per-sample times directly, which tests the mechanism
+instead of inferring it. The sign matters and can go either way:
+`Var(mean) = (sigma^2/k)(1 + 2*sum_j (1 - j/k) rho_j)`, and `Running`
+assumes that bracket is 1. Positive `rho` - drift, samples agreeing because
+they share a trend - makes the reported `±` too narrow, which is what (5)
+fixed for comparisons. Negative `rho` makes it too wide, and negative `rho`
+is measured here: "Findings worth keeping" records lag-1 of -0.58 and -0.24
+at batch sizes of half and a quarter of a scheduler tick, the alternating
+signature of aliasing. A benchmark can have both at once.
 
 **The first version of that table said 38-73x dishonest against 2-10x, and
 was wrong the same way the position table was.** The statistic was a
@@ -418,6 +440,68 @@ ends:
 `machine_lock` rather than `exclusive`, because `exclusive` also takes the
 in-process mutex and the test would then be timing whatever other test
 happened to be benchmarking - which is exactly how it failed first time.
+
+### [ ] 13. Discard preempted samples, on evidence rather than on size
+
+Ask the kernel whether a sample was interfered with, and drop the ones that
+were:
+
+```rust
+// around the batch, outside the timed region
+libc::getrusage(libc::RUSAGE_THREAD, &mut usage);
+// usage.ru_nivcsw - involuntary context switches
+```
+
+A batch during which `ru_nivcsw` rose was *preempted*, and what it timed is
+partly some other process. That is not the function's cost and the mean
+should not carry it.
+
+**The point is that it discards on cause and not on magnitude.** Every
+size-based rule - a median, a trimmed mean, dropping the slowest decile -
+founders on the same case, and it is a case this crate already tests for.
+`bimodal_cost` spends 10,000 rounds one call in ten and 1 round otherwise:
+mean about 1001, median 1. Any estimator that throws away large values
+reports a thousandth of the true cost, and
+`estimates_the_mean_not_the_minimum` exists to catch precisely that. The
+mean is also the quantity wanted - what N calls cost is N times the mean,
+not N times the median.
+
+Sample-level trimming is *safer than it looks*, because each sample already
+averages `unit` iterations and so has the function's own tail reduced by
+`1/sqrt(unit)` - at `unit` around 500, `bimodal_cost`'s per-sample values
+vary by only about 14%, so a sample at twice the rest is far likelier to be
+the machine. What kills it anyway is rarity: a tail event with `p = 1e-4`
+costing `1e6` times the baseline puts *zero* events in most batches and one
+in a few, so the samples read "mostly baseline, occasionally enormous" and
+trimming deletes the entire signal. No timing-based rule can tell that
+workload from an interrupted one. The kernel can.
+
+What to watch for:
+
+* **Cost.** Two syscalls per batch, outside the timed region, so nothing
+  lands in the measurement - but it is perhaps 0.1-0.5% of wall time at the
+  default 100us batch, which `benches/harness-cost.rs` should be asked
+  about.
+* **Selection.** Dropping samples selects on something correlated with the
+  machine being busy, and (1) records how badly adaptive stopping can be
+  fooled by selection. Discarded samples should probably still count against
+  `MIN_SAMPLE_TIME`, and the number discarded is worth reporting: a run that
+  threw away half its samples measured a busy machine, whatever the `±`
+  says.
+* **Portability.** `RUSAGE_THREAD` is Linux-only. Elsewhere this compiles
+  away to today's behaviour, as the affinity code already does.
+
+Independent of everything else here: it touches `time_batch` and `Running`
+and nothing in the scheduling.
+
+**It does not address the outliers that prompted it.** Measuring (4)
+unquiesced turned up whole *runs* at twice the cost, and if a run is
+uniformly slow - the frequency dropped for its whole duration - then every
+sample is slow together, the within-run spread looks tight, and `std_error`
+reports a confident `±` on a number that is wrong by a factor of two. That
+is invisible at the sample level by construction and belongs to (7). Worth
+measuring first which of the two shapes those runs actually have, since it
+decides whether this item would have helped at all.
 
 ## Tried without success so far
 
