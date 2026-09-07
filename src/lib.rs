@@ -290,6 +290,12 @@ mod bench;
 mod compare;
 mod kway;
 pub mod quiet;
+/// Benchmarks registered from anywhere in a crate. See `REGISTRATION.md`.
+///
+/// Public but hidden: the types here are named by generated registration
+/// code rather than written by hand, and their shapes are not yet stable.
+#[doc(hidden)]
+pub mod registry;
 mod scaling;
 mod suite;
 pub(crate) use bench::{time_batch, time_loop};
@@ -307,6 +313,12 @@ pub use self::compare::Comparison;
 pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 pub use self::suite::{Report, Suite, Token};
+
+/// Re-exported so that registration code written by a macro has a single
+/// path to name, and callers need not depend on `inventory` themselves.
+#[cfg(feature = "registry")]
+#[doc(hidden)]
+pub use inventory;
 
 use std::f64;
 use std::sync::atomic::Ordering::{Acquire, Release};
