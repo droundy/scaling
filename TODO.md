@@ -211,6 +211,56 @@ prints rather than asserts. It is one draw from a stochastic process, and
 they were not. Run it several times, in different sessions, before believing
 any of it - which is advice this entry had to learn twice.
 
+**Early-stop bias: measured on an unquiesced machine, and not found.** The
+better hypothesis was that interleaving should attack the selection effect
+recorded under "Findings worth keeping". Sampling stops when the standard
+error of the mean is small enough, but that standard error assumes
+independent samples, and samples taken back to back on a drifting machine
+are not: they share a drift state, agree with each other for that reason,
+and stop the run on a `±` no repeat of it will honour. Spread across a
+session, the spread seen while sampling should be the spread really there.
+
+Measured with the reservation off and the machine on battery - the condition
+where it could show - on a deterministic workload so everything that varies
+is the machine. Sixteen runs per arm, medians over four invocations:
+
+| | median | robust spread | claimed +/- | samples |
+| --- | --- | --- | --- | --- |
+| sequential | 220.0-220.9ns | 0.03-0.28% | 0.24-0.46% | 19-75 |
+| suite of one | 220.3-221.1ns | 0.05-0.14% | 0.18-0.49% | 20-29 |
+| interleaved | 220.5-220.9ns | 0.06-0.21% | 0.22-0.45% | 19-63 |
+
+Nothing. Medians equal, spreads equal, and the sample counts show no sign of
+the mechanism - for it to work, interleaved samples would have to see a
+larger standard error and therefore stop *later*, and they do not. Note too
+that the claimed `±` is two to eight times *larger* than the robust spread,
+so on this machine the error bars are conservative rather than understating,
+and there is no dishonesty for interleaving to fix.
+
+**The first version of that table said 38-73x dishonest against 2-10x, and
+was wrong the same way the position table was.** The statistic was a
+population standard deviation, and this machine produces roughly one run in
+sixteen at *twice* the cost - one such run moves an sd by twenty percentage
+points. Sequential's worst arm read min 220.4, median 220.8, max 439.1. The
+`suite of one` control is what exposed it: a control that lands with
+sequential in one invocation, with interleaved in the next, and between them
+in a third is measuring noise. **On a machine like this, report medians and
+inter-quartile ranges and never an sd.**
+
+A 5% gap between `bench` and the suite path turned up while chasing this,
+and was chased down: there is none. `suite_path_costs_nothing` alternates
+the two on equal-length runs and reports -0.03%, -0.19%, -0.21%. The gap was
+an artifact of the experiment - a three-arm rotation in which one arm ran
+31x longer put `bench` after the long run two thirds of the time and the
+suite before it two thirds of the time, and a run following 250ms of load
+measures 1.4% faster than one following 250ms of idle. Which is a small
+independent datum for the warm-up item under "Not demonstrated", measured
+this time somewhere the frequency was free to move.
+
+The machine's absolute level moved from ~220ns to ~268ns for the same
+workload over the course of these measurements. Nothing measured in one
+sitting here can be compared with anything measured in another.
+
 Two things fell out along the way:
 
 * **`Config`'s plan is now shared between clones.** `num_comparisons_planned`

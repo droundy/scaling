@@ -845,6 +845,38 @@ pub(crate) mod testutil {
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 
+    /// A cost with a heavy right tail: nine calls in ten are trivial and the
+    /// tenth is ten thousand times longer.
+    ///
+    /// This is the shape the selection effect feeds on. A handful of samples
+    /// that happen to miss the tail have both a low mean and a small standard
+    /// deviation - so the run stops, and stops low.
+    pub fn bimodal_cost(seed: u64) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            let n = if rng.next() % 10 == 0 { 10_000 } else { 1 };
+            let mut acc = 0u64;
+            for i in 0..n {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
+    /// Near enough the same mean as [`bimodal_cost`], with no spread of its
+    /// own at all - so whatever varies when this is measured is the machine.
+    pub fn fixed_cost(seed: u64) -> impl FnMut() -> u64 {
+        let mut rng = XorShift(seed | 1);
+        move || {
+            std::hint::black_box(rng.next());
+            let mut acc = 0u64;
+            for i in 0..1001 {
+                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            }
+            acc
+        }
+    }
+
     pub fn mean_and_spread(xs: &[f64]) -> (f64, f64) {
         let n = xs.len() as f64;
         let mean = xs.iter().sum::<f64>() / n;

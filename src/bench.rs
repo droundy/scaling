@@ -760,35 +760,6 @@ mod tests {
         }
     }
 
-    /// Nine calls in ten cost about a thousandth of the mean, so the
-    /// minimum and the median are both ~1 while the mean is ~1001.
-    fn bimodal_cost(seed: u64) -> impl FnMut() -> u64 {
-        let mut rng = XorShift(seed | 1);
-        move || {
-            let n = if rng.next() % 10 == 0 { 10_000 } else { 1 };
-            let mut acc = 0u64;
-            for i in 0..n {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
-            }
-            acc
-        }
-    }
-
-    /// The same mean cost with no spread at all, so minimum, median and mean
-    /// coincide. Draws from the rng and throws it away, so both workloads
-    /// pay for the draw and the comparison is of the work alone.
-    fn fixed_cost(seed: u64) -> impl FnMut() -> u64 {
-        let mut rng = XorShift(seed | 1);
-        move || {
-            black_box(rng.next());
-            let mut acc = 0u64;
-            for i in 0..1001 {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
-            }
-            acc
-        }
-    }
-
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();

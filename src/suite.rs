@@ -676,6 +676,7 @@ impl Display for Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{fixed_cost, mean_and_spread};
 
     /// A future that yields `n` times and then reports how many rounds it
     /// took, appending its identity to a shared log every time it is polled.
@@ -1077,10 +1078,11 @@ mod tests {
         const N: usize = 8;
         const ROUNDS: u64 = 2_000;
         println!();
-        if !crate::testutil::quiesced() {
-            println!("SKIPPED: machine is not quiesced");
-            return;
-        }
+        // Deliberately *not* gated on `quiesced()`. What interleaving
+        // defends against is the machine moving underneath a benchmark, and
+        // quiescing is the other way of stopping that - so a quiesced
+        // machine is the one place this can least be seen. Run it both ways.
+        println!("quiesced: {}", crate::testutil::quiesced());
         let cfg = Config::default().with_max_time(Duration::from_millis(100));
 
         // Sequential, as a caller writes it today: one `bench` per line.
@@ -1150,6 +1152,181 @@ mod tests {
                 report("sequential", &sf, &sr);
             }
         }
+        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
+    }
+
+    /// Does reaching a benchmark through a [`Suite`] change what it reads?
+    ///
+    /// It must not. A suite of one goes through the scheduler, the boxed
+    /// future and the async sampling loop, but has nothing to interleave
+    /// with, so it should measure exactly what [`bench`] measures. Anything
+    /// else is overhead the suite is adding, and would mean a suite's numbers
+    /// cannot be compared with a lone `bench` call even in principle.
+    ///
+    /// This exists because a 5% gap turned up between the two while measuring
+    /// something else, in a session with long runs in it and not in a session
+    /// without - which is either a real cost that only shows under some
+    /// conditions, or the machine wandering. The two arms here are the same
+    /// length as each other and alternate, so a gap that survives is the code
+    /// path.
+    ///
+    /// Medians, not means: this machine produces occasional runs at twice the
+    /// cost, and one of those moves a mean several percent.
+    ///
+    /// ```none
+    /// cargo test --release -- --ignored --nocapture suite_path_costs
+    /// ```
+    #[test]
+    #[ignore]
+    fn suite_path_costs_nothing() {
+        const REPEATS: usize = 24;
+        println!();
+        println!("quiesced: {}", crate::testutil::quiesced());
+        let cfg = Config::default().with_max_time(Duration::from_millis(100));
+
+        let mut direct: Vec<f64> = Vec::new();
+        let mut viasuite: Vec<f64> = Vec::new();
+        for r in 0..REPEATS {
+            let seed = 0x243f_6a88_85a3_08d3u64.wrapping_mul(r as u64 + 1);
+            let mut run_direct = || direct.push(cfg.bench(fixed_cost(seed)).ns_per_iter);
+            let mut run_suite = || {
+                let mut suite = cfg.suite();
+                let subject = suite.add("subject", fixed_cost(seed));
+                suite.run();
+                viasuite.push(subject.get().unwrap().ns_per_iter);
+            };
+            // Alternate, so neither is always the one that runs cold.
+            if r % 2 == 0 {
+                run_direct();
+                run_suite();
+            } else {
+                run_suite();
+                run_direct();
+            }
+        }
+
+        let median = |xs: &[f64]| {
+            let mut v = xs.to_vec();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let (d, s) = (median(&direct), median(&viasuite));
+        println!("  bench()      median {d:7.2}ns");
+        println!("  suite of 1   median {s:7.2}ns");
+        println!("  difference          {:+7.2}%", 100.0 * (s - d) / d);
+        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
+    }
+
+    /// Does interleaving stop a benchmark believing an error bar it has not
+    /// earned?
+    ///
+    /// This is the question item 4 should have asked first. Sampling stops
+    /// when the standard error of the mean gets small enough - but that
+    /// standard error is computed as though the samples were independent, and
+    /// on a drifting machine samples taken back to back are not: they share a
+    /// drift state, agree with each other for that reason, and make the run
+    /// stop early on a `±` that no repeat of it will honour. Interleaved, a
+    /// benchmark's samples are spread across the whole session, so the spread
+    /// it sees while sampling is the spread that is really there.
+    ///
+    /// The metric is the one item 1 used: **the ratio of the spread actually
+    /// observed between runs to the `±` those runs claimed.** One is honest.
+    /// Above one is an error bar that understates, which is the failure worth
+    /// catching - a tighter number that is less true.
+    ///
+    /// The workload is deterministic, so everything that varies is the
+    /// machine rather than the workload. And there is no long reference run:
+    /// `estimates_the_mean_not_the_minimum` records what that costs, its bias
+    /// swinging between -14% and +17% because twenty seconds flat out on a
+    /// core is a different thermal regime than a millisecond. Both arms here
+    /// are short, adaptive, and measured back to back.
+    ///
+    /// Ignored, and prints rather than asserts, for the reason given on
+    /// [`position_bias_interleaved_versus_sequential`]:
+    ///
+    /// ```none
+    /// cargo test --release -- --ignored --nocapture early_stop
+    /// ```
+    #[test]
+    #[ignore]
+    fn early_stop_bias_interleaved_versus_sequential() {
+        const REPEATS: usize = 16;
+        const FILLERS: usize = 5;
+        println!();
+        println!("quiesced: {}", crate::testutil::quiesced());
+        let cfg = Config::default().with_max_time(Duration::from_millis(100));
+
+        let mut seq: Vec<Stats> = Vec::new();
+        let mut alone: Vec<Stats> = Vec::new();
+        let mut inter: Vec<Stats> = Vec::new();
+        // A suite of one is the control. It goes through every line of the
+        // scheduler, the async loop and the boxed future that the real arm
+        // does, but has nothing to be interleaved *with* - so its samples are
+        // back to back, exactly as `bench`'s are. If the effect is
+        // interleaving it should look like `bench`; if it is anything else
+        // about the suite machinery, it should look like the interleaved arm.
+        let run_suite = |subject_only: bool, out: &mut Vec<Stats>, seed: u64| {
+            let mut suite = cfg.suite();
+            let subject = suite.add("subject", fixed_cost(seed));
+            if !subject_only {
+                for i in 0..FILLERS {
+                    let _ = suite.add(
+                        &format!("filler{i}"),
+                        fixed_cost(seed.wrapping_add(i as u64 + 1)),
+                    );
+                }
+            }
+            suite.run();
+            out.push(subject.get().unwrap());
+        };
+        for r in 0..REPEATS {
+            let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r as u64 + 1);
+            // Rotate which arm goes first, so none of them always meets the
+            // same phase of whatever the machine is doing.
+            for arm in 0..3 {
+                match (arm + r) % 3 {
+                    0 => seq.push(cfg.bench(fixed_cost(seed))),
+                    1 => run_suite(true, &mut alone, seed),
+                    _ => run_suite(false, &mut inter, seed),
+                }
+            }
+        }
+
+        let report = |label: &str, runs: &[Stats]| {
+            let mut means: Vec<f64> = runs.iter().map(|s| s.ns_per_iter).collect();
+            let (_, rel_spread) = mean_and_spread(&means);
+            means.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median = means[means.len() / 2];
+            // A *robust* spread beside the standard-deviation one, because
+            // one run at twice the others moves an sd a long way and this
+            // machine produces such runs. Half-interquartile against the
+            // median: if the two disagree, the sd is describing outliers
+            // rather than the distribution, and the sd is the one to
+            // distrust.
+            let q = |f: f64| means[((means.len() - 1) as f64 * f).round() as usize];
+            let robust = (q(0.75) - q(0.25)) / 2.0 / median;
+            let claimed = runs.iter().map(|s| s.rel_std_error()).sum::<f64>() / runs.len() as f64;
+            let samples = runs.iter().map(|s| s.samples).sum::<usize>() as f64 / runs.len() as f64;
+            println!(
+                "  {label:<12} median {median:7.1}ns  min {:6.1} max {:7.1}  \
+                 sd {:6.2}%  robust {:5.2}%  claimed {:.3}%  robust-honesty {:6.2}x  \
+                 samples {samples:5.1}",
+                means[0],
+                means[means.len() - 1],
+                100.0 * rel_spread,
+                100.0 * robust,
+                100.0 * claimed,
+                robust / claimed,
+            );
+        };
+        println!(
+            "Error-bar honesty over {REPEATS} runs: observed between-run spread \
+             against the claimed +/-."
+        );
+        println!("1.00x is honest; above 1 is an error bar that understates.");
+        report("sequential", &seq);
+        report("suite of 1", &alone);
+        report("interleaved", &inter);
         std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
     }
 
