@@ -499,9 +499,77 @@ unquiesced turned up whole *runs* at twice the cost, and if a run is
 uniformly slow - the frequency dropped for its whole duration - then every
 sample is slow together, the within-run spread looks tight, and `std_error`
 reports a confident `±` on a number that is wrong by a factor of two. That
-is invisible at the sample level by construction and belongs to (7). Worth
-measuring first which of the two shapes those runs actually have, since it
-decides whether this item would have helped at all.
+is invisible to any statistic computed from the timings, and is what (14)
+exists for - and (7) above it, for whatever moves that is not the clock.
+Worth measuring first which of the two shapes those runs actually have,
+since it decides whether this item would have helped at all.
+
+### [ ] 14. Read the clock frequency around each sample
+
+Sibling to (13), and the more important of the two, because it catches the
+failure (13) cannot see.
+
+Read `/sys/devices/system/cpu/cpu<N>/cpufreq/scaling_cur_freq` before and
+after a sample, along with `sched_getcpu()`, and record whether either
+moved. A sample measured at a different clock speed than its neighbours is
+not comparable with them, and one measured on a different core may not be
+either.
+
+**Why this one matters most.** Measuring (4) with the reservation off turned
+up whole *runs* at twice the cost, and (13) is blind to them by
+construction: if the frequency dropped for a run's entire duration then every
+sample is slow together, the within-run spread looks tight, and `std_error`
+reports a confident `±` on a number that is wrong by a factor of two.
+Nothing computed from the timings can see that, because from the inside
+there is nothing to see. Asking what the clock was doing is the only way.
+
+**Cost, measured on this laptop:**
+
+```none
+  open + read + close        7.7us     7.7% of a default 100us batch
+  held-open fd + pread       0.5us     0.5%
+```
+
+So hold the descriptor open for the run rather than opening per sample; that
+is the difference between unaffordable and affordable. `sched_getcpu()` is a
+vDSO call and near enough free. Both go outside the timed region, so nothing
+lands in the measurement itself - but `benches/harness-cost.rs` should still
+be asked about the wall-clock cost.
+
+**What to do with it.** Flag before filtering. A third flag on [`Stats`]
+beside `hit_limit` and `untrustworthy` - the clock moved under this
+measurement - needs no statistical decision and no selection, and matches
+how the crate already reports a result it does not trust. Only once that is
+in place is it worth asking whether to bin samples by frequency, or discard
+the minority ones: both select on something correlated with the machine
+being busy, and (1) records how badly adaptive stopping can be fooled by
+selection. Binning is the more interesting of the two - "43.1ns/iter at
+1.7GHz" is a *better* contract than an unqualified number - but it is a much
+larger change, and needs enough samples in a bin to say anything.
+
+**Caveats.**
+
+* On `intel_pstate`, which is what this machine runs, `scaling_cur_freq` is
+  an APERF/MPERF average over the driver's own sampling interval rather than
+  an instantaneous reading. Its timescale may be coarser than a 100us batch,
+  so a brief dip can be invisible. Worth checking what it actually resolves
+  before trusting it at the sample level; at the level of a whole run it is
+  certainly good enough.
+* Frequency is not the only thing that moves - uncore and memory clocks do
+  too, and are not exposed this cheaply.
+* Linux only, like the affinity code, and compiles away elsewhere.
+
+**It should be silent on a quiesced machine**, since `quiet-bench reserve`
+pins the governor and disables turbo. That makes it a check that quiescing
+actually worked, which is half of what (7) wants and a good deal cheaper
+than (7)'s reference workload: this measures the mechanism directly where
+(7) measures the symptom. The two belong together, and `quiet-bench status`
+could report both.
+
+Independent of the scheduling work, and shares its shape with (13): ask the
+system whether a sample is trustworthy, rather than inferring it from the
+sample's own size. They likely want one shared place to record what was true
+around a batch.
 
 ## Tried without success so far
 
