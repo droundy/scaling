@@ -164,28 +164,52 @@ does, against `harness-cost`:
 
 Every delta is inside its own spread.
 
-**Position bias, which is what the item is for.** Eight identical workloads
-(one closure type, so one compiled loop - no layout lottery to mistake for a
-positional effect), measured forward and then in reverse declaration order.
-How far each moved between the two orders, alternating which method went
-first so neither always met the colder machine:
+**Position bias, which is what the item is for. It bounds it rather than
+lowering it, and the first answer here was wrong.** Eight identical
+workloads (one closure type, so one compiled loop - no layout lottery to
+mistake for a positional effect), measured forward and then in reverse
+declaration order, alternating which method goes first. How far each moved
+between the two orders, over 21 passes across several sessions:
 
-| pass | sequential | interleaved |
-| --- | --- | --- |
-| 0 | 0.773% (worst 1.53%) | **0.390% (0.835%)** |
-| 1 | 0.729% (1.28%) | **0.301% (0.618%)** |
-| 2 | 1.194% (2.42%) | **0.232% (0.621%)** |
+| | median | range | spread |
+| --- | --- | --- | --- |
+| sequential | 0.256% | 0.097 - 1.194% | 12x |
+| interleaved | 0.280% | 0.146 - 0.453% | **3.1x** |
 
-About three times less movement, consistently. The trend within the table
-says the same thing twice: across the three passes sequential got *worse*
-(0.77 -> 1.19%) while interleaved got *better* (0.39 -> 0.23%), which is
-what a machine warming under the experiment does to a method that samples
-each benchmark once at a fixed time and not to one that spreads it.
+The medians are the same to within nothing. What interleaving changes is the
+*range*: it never did better than 0.15% and never worse than 0.45%, while
+the sequential arm ranged over a factor of twelve depending on nothing but
+which session it ran in. On a session where the machine is drifting,
+sequential reads 1.19% and interleaved reads 0.23%; on a quiet one,
+sequential reads 0.10% and interleaved reads 0.30%.
+
+That is exactly what the mechanism says it should be. Interleaving pays a
+floor it can never get back - every sample starts on a cache the rest of the
+suite has been using - in exchange for a ceiling on drift. Where there is no
+drift there is nothing to buy, and the floor is all that shows.
+
+**This entry first claimed "about three times less movement, consistently",
+from three passes.** All three came from one session, and that session's
+*sequential* arm read 0.77-1.19% where every later session read 0.10-0.32%
+from byte-identical code. What was being measured was that session's drift,
+not the technique. It is the same mistake as the -0.13 slope recorded at the
+top of "Tried without success", made again, in a file that opens by warning
+about it: three passes inside one session are one draw, not three.
+
+Two things this does *not* say. It is not evidence that interleaving fails -
+bounding the worst case is most of what was wanted, and the suite's other
+purpose, making numbers comparable *within* one run, is not what this
+experiment measures at all. And it is not evidence that the ordering within
+a round does not matter: the round order was changed from a rotation to a
+full shuffle while this was being measured, and the interleaved arm did not
+move (0.309% -> 0.305%), so that change stands on its mechanism and not on a
+measurement.
 
 That is `position_bias_interleaved_versus_sequential`, `#[ignore]`d, and it
 prints rather than asserts. It is one draw from a stochastic process, and
 (9) deleted four tests of exactly this shape for being asserted as though
-they were not.
+they were not. Run it several times, in different sessions, before believing
+any of it - which is advice this entry had to learn twice.
 
 Two things fell out along the way:
 

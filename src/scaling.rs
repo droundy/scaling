@@ -28,10 +28,7 @@ impl Config {
     where
         F: Fn(usize) -> O,
     {
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
+        let _machine = Machine::claim();
         let clock = Clock::new(self.max_time);
         block_on(&clock, self.bench_scaling_async(&clock, f, nmin))
     }
@@ -69,10 +66,7 @@ impl Config {
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
     {
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
+        let _machine = Machine::claim();
         let clock = Clock::new(self.max_time);
         block_on(
             &clock,

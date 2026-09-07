@@ -183,10 +183,17 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// If fewer than two alternatives were added: there is nothing to
     /// compare a lone alternative against.
     pub fn run(self) -> Comparisons {
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
+        // Before pinning and before the machine lock, both of which have
+        // effects that outlive a panic and the second of which blocks: a
+        // caller who added one alternative has made a mistake that wants
+        // reporting now, not after waiting for another process to give the
+        // reserved CPUs back. `run_async` re-checks for the suite path.
+        assert!(
+            self.entries.len() >= 2,
+            "a comparison needs at least two alternatives, got {}",
+            self.entries.len()
+        );
+        let _machine = Machine::claim();
         // `k` times the budget, because `k` `Stats` come out of this: at the
         // single budget each alternative would get a `k`th of the wall clock
         // a lone `bench` call is allowed, for the same target.

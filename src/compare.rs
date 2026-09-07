@@ -251,10 +251,7 @@ impl Config {
         B: FnMut(&mut I) -> O,
         C: FnMut(&mut I) -> O,
     {
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
+        let _machine = Machine::claim();
         // Twice the budget, because a comparison produces two `Stats`: at the
         // single budget each side would get half the wall clock a lone
         // `bench` call is allowed, for the same target.
@@ -629,6 +626,52 @@ mod tests {
         // Two comparisons against a plan of two, claimed through one clone
         // and dropped through the other. Neither drop may assert.
         cfg.claim_comparisons(2);
+        drop(clone);
+        drop(cfg);
+    }
+
+    /// A `Config` kept as a template can be cloned and planned several
+    /// different ways.
+    ///
+    /// Sharing the plan between clones broke this: the second clone's call
+    /// saw the first clone's number through the `Arc` and asserted, on a
+    /// caller who had done nothing wrong. Planning now detaches.
+    #[test]
+    fn a_template_config_can_be_cloned_and_planned_separately() {
+        let base = Config::relative(0.02);
+        let two = base.clone().with_comparisons_planned(2);
+        let three = base.clone().with_comparisons_planned(3);
+        assert_eq!(two.num_comparisons_planned(), 2);
+        assert_eq!(three.num_comparisons_planned(), 3);
+        // The template itself is untouched, and each plan is its own.
+        assert_eq!(base.num_comparisons_planned(), 0);
+        two.claim_comparisons(2);
+        three.claim_comparisons(3);
+        drop(two);
+        drop(three);
+        drop(base);
+    }
+
+    /// Detaching must not cost the check it replaced: planning one `Config`
+    /// twice is still a mistake and still says so.
+    #[test]
+    #[should_panic(expected = "only call with_comparisons_planned once")]
+    fn planning_twice_still_panics() {
+        let cfg = Config::default()
+            .with_comparisons_planned(2)
+            .with_comparisons_planned(3);
+        std::mem::forget(cfg);
+    }
+
+    /// Clones taken *after* planning still share it, so the count they must
+    /// reach between them is the one that was promised once.
+    #[test]
+    fn clones_taken_after_planning_share_it() {
+        let cfg = Config::default().with_comparisons_planned(2);
+        let clone = cfg.clone();
+        assert_eq!(clone.num_comparisons_planned(), 2);
+        cfg.claim_comparisons(1);
+        clone.claim_comparisons(1);
         drop(clone);
         drop(cfg);
     }

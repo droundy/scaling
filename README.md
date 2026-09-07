@@ -103,16 +103,25 @@ let growth: scaling::ScalingStats = growth.get().unwrap();
 ```
 
 One suite can hold flat benchmarks, scaling benchmarks and whole
-comparisons, and they need not share an input type. Reversing the
-declaration order of eight identical workloads moves a sequentially-measured
-one about three times as far as an interleaved one.
+comparisons, and they need not share an input type.
 
-Two things this does not do. It will not make any single benchmark more
-reproducible — it averages drift in rather than out — and a suite's numbers
-are not comparable with a lone `bench` call, because interleaving leaves
-every sample starting on a cache the rest of the suite has been using. What
-it buys is that the numbers within one suite, and across runs of it, are
-measured in the same machine.
+What this buys is a **bound**, not an improvement. Reversing the declaration
+order of eight identical workloads moves an interleaved benchmark by
+0.15–0.45%, whatever the session; measured one after another instead, the
+same workloads move by anywhere from 0.10% to 1.19% depending on nothing but
+how much the machine happened to be drifting at the time. The typical case is
+a wash — the medians are 0.28% and 0.26%. The worst case is four times
+better.
+
+That is the trade the mechanism predicts: interleaving pays a floor it never
+gets back, because every sample starts on a cache the rest of the suite has
+been using, in exchange for a ceiling on drift. Where there is no drift, only
+the floor shows.
+
+So it will not make any single benchmark more reproducible — it averages
+drift in rather than out — and a suite's numbers are not comparable with a
+lone `bench` call. What it gives you is that the numbers within one suite,
+and across runs of it, were measured in the same machine.
 
 Each benchmark still gets the full time budget of its own, so a suite of `n`
 may take `n` times as long as one benchmark.

@@ -182,13 +182,19 @@ its round must stay whole for the paired error bar to mean anything - which
 is also fair, since one of its turns runs `k` batches and produces `k`
 [`Stats`].
 
-Measured on eight identical workloads, reversing the declaration order moves
-a sequentially-measured benchmark about three times as far as an interleaved
-one. Two things this does *not* do: it does not make any single benchmark
-more precise - it averages drift in rather than out - and it does not make a
-suite's numbers comparable with a lone [`bench`] call, since interleaving
-leaves every sample starting on a cache the rest of the suite has been
-using.
+What this buys is a *bound*, not an improvement. Reversing the declaration
+order of eight identical workloads moves an interleaved benchmark by
+0.15-0.45%, whatever the session; measured one after another the same
+workloads move by anywhere from 0.10% to 1.19%, depending on nothing but how
+much the machine happened to be drifting. The medians are near enough equal
+(0.28% against 0.26%); the worst case is four times better. Interleaving
+pays a floor it never gets back - every sample starts on a cache the rest of
+the suite has been using - in exchange for a ceiling on drift.
+
+So it does *not* make any single benchmark more precise - it averages drift
+in rather than out - and it does not make a suite's numbers comparable with
+a lone [`bench`] call. What it gives you is that the numbers within one
+suite, and across runs of it, were measured in the same machine.
 
 Each benchmark still gets [`Config::max_time`] of its own running time, so a
 suite of `n` may take `n` times as long as one - the same arithmetic
@@ -287,7 +293,7 @@ pub mod quiet;
 mod scaling;
 mod suite;
 pub(crate) use bench::{time_batch, time_loop};
-pub(crate) use suite::{block_on, Clock};
+pub(crate) use suite::{block_on, Clock, Machine};
 pub(crate) mod significant;
 
 // `self::` because the crate is called `scaling` too, and rustdoc builds
@@ -303,8 +309,8 @@ pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats}
 pub use self::suite::{Report, Suite, Token};
 
 use std::f64;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::*;
 
@@ -415,7 +421,8 @@ pub struct Config {
     /// this, since they produce two [`Stats`] and would otherwise give each
     /// side half the budget a lone [`bench`] gets for the same target.
     pub max_time: Duration,
-    /// The multiple-comparison plan, shared by every clone of this `Config`.
+    /// The multiple-comparison plan, shared by every clone of this `Config`
+    /// *until* one of them plans, which detaches it.
     ///
     /// See [`Config::with_comparisons_planned`] for what it is for.
     plan: Arc<Plan>,
@@ -424,20 +431,25 @@ pub struct Config {
 /// How many comparisons were promised, how many have happened, and the
 /// significance threshold the promise implies.
 ///
-/// All three live behind one `Arc` because [`Config`] is `Clone` and they
-/// are one fact. The count of comparisons *made* always had to be shared -
-/// `Drop` can only check it when it is the last holder - and holding
-/// `planned` per-clone alongside it let two clones disagree about the plan,
-/// with whichever dropped last deciding whether the assertion fired.
+/// These live behind one `Arc` because they are one fact and because
+/// [`Config::suite`] hands out only a `&Config` - a [`Suite`] must be able to
+/// record a plan through a shared reference, since it knows how many
+/// comparisons it holds only once the last one is added.
 ///
-/// Sharing also lets a [`Suite`] fill the plan in on the caller's behalf: it
-/// knows how many comparisons it holds only once the last one is added,
-/// which is after every `Config` clone already exists.
+/// Holding them separately was wrong: `planned` used to be a plain field
+/// while `made` was already shared, so two clones could disagree about the
+/// plan and whichever dropped last decided whether the assertion in `Drop`
+/// fired. Sharing both makes them agree - and
+/// [`Config::with_comparisons_planned`] detaches, so a `Config` kept as a
+/// template can still be cloned and planned several different ways.
 #[derive(Debug)]
 struct Plan {
     /// Claimed by each comparison as it starts.
     made: AtomicU64,
     /// What was promised.
+    ///
+    /// Read first and written last, which is what makes `z_alpha` safe to
+    /// read without a lock: see [`Config::set_comparisons_planned`].
     planned: AtomicU64,
     /// The Bonferroni limit `planned` implies, as `f64::to_bits`. Cached
     /// because the sampling loop consults it after every round; an atomic
@@ -446,6 +458,13 @@ struct Plan {
     ///
     /// `NaN` until a plan is set, which makes every significance test false.
     z_alpha: AtomicU64,
+    /// Whether the *caller* set this plan, as opposed to a [`Suite`]
+    /// counting its own comparisons.
+    ///
+    /// A caller who says how many comparisons they will make may be planning
+    /// some outside any suite, so their number is taken as final; suites
+    /// otherwise add their own comparisons to it as they run.
+    by_caller: AtomicBool,
 }
 
 impl Default for Plan {
@@ -459,6 +478,7 @@ impl Default for Plan {
             z_alpha: AtomicU64::new(
                 significant::bonferroni_z_limit(0, significant::FWER).to_bits(),
             ),
+            by_caller: AtomicBool::new(false),
         }
     }
 }
@@ -519,13 +539,31 @@ impl Config {
     /// when you are evaluating *many* benchmarks you'd be almost certain to
     /// see spurious "changes".
     ///
-    /// This method can only be called once with `comparisons > 0`.
-    pub fn with_comparisons_planned(self, comparisons: u64) -> Self {
-        assert_eq!(
-            self.num_comparisons_planned(),
-            0,
+    /// This method can only be called once on any one `Config`.
+    ///
+    /// Planning *detaches* this `Config` from any clones it was sharing a
+    /// plan with, so a `Config` kept as a template can be cloned and planned
+    /// several different ways:
+    ///
+    /// ```
+    /// let base = scaling::Config::relative(0.02);
+    /// let two = base.clone().with_comparisons_planned(2);
+    /// let three = base.clone().with_comparisons_planned(3);
+    /// # std::mem::forget(base); std::mem::forget(two); std::mem::forget(three);
+    /// ```
+    ///
+    /// Clones made *after* planning do share it, and between them must make
+    /// exactly the number promised.
+    pub fn with_comparisons_planned(mut self, comparisons: u64) -> Self {
+        assert!(
+            !self.plan.by_caller.load(Acquire),
             "only call with_comparisons_planned once!"
         );
+        // Detach before recording. Without this, planning one clone of a
+        // template would be visible to the next, and the assertion above
+        // would fire on a caller who had done nothing wrong.
+        self.plan = Default::default();
+        self.plan.by_caller.store(true, Release);
         self.set_comparisons_planned(comparisons);
         self
     }
@@ -540,17 +578,55 @@ impl Config {
         f64::from_bits(self.plan.z_alpha.load(Acquire))
     }
 
-    /// Record the plan, on a shared cell every clone can see.
+    /// Record the plan through a shared reference.
     ///
     /// Separate from [`Config::with_comparisons_planned`] because a
-    /// [`Suite`] sets it *after* the caller's `Config` exists, and so cannot
-    /// go through a builder that consumes `self`.
+    /// [`Suite`] records its plan *after* the caller's `Config` exists, and
+    /// so cannot go through a builder that consumes `self`.
+    ///
+    /// `z_alpha` is stored **before** `planned`, and that order is what makes
+    /// the pair safe to read without a lock. Every reader tests `planned`
+    /// first and only consults `z_alpha` when it is non-zero
+    /// ([`Config::comparison_accuracy_met`]), so an acquire-load that sees
+    /// the new `planned` is guaranteed by the release-store to see the
+    /// matching `z_alpha`. Written the other way round, a reader could see a
+    /// plan with the `NaN` threshold that means "no plan", and would then
+    /// find nothing significant however long it sampled.
     pub(crate) fn set_comparisons_planned(&self, comparisons: u64) {
-        self.plan.planned.store(comparisons, Release);
         self.plan.z_alpha.store(
             significant::bonferroni_z_limit(comparisons, significant::FWER).to_bits(),
             Release,
         );
+        self.plan.planned.store(comparisons, Release);
+    }
+
+    /// Add `comparisons` to the plan, and say what the total became.
+    ///
+    /// For [`Suite`], which counts its own comparisons rather than making
+    /// the caller do it. Adding rather than setting is what lets a second
+    /// suite built from the same `Config` account for itself: setting would
+    /// leave the first suite's number in place and `Drop` would then
+    /// complain about a count the caller never chose.
+    ///
+    /// The read-modify-write is a single `fetch_add`, so two suites run
+    /// concurrently from one `Config` both count rather than one overwriting
+    /// the other.
+    pub(crate) fn add_comparisons_planned(&self, comparisons: u64) -> u64 {
+        let total = self.plan.planned.fetch_add(comparisons, Release) + comparisons;
+        // Same publish order as above, except that `planned` is already
+        // visible - so a reader racing this sees either threshold, both of
+        // which are real Bonferroni limits, rather than the `NaN` that means
+        // "unplanned".
+        self.plan.z_alpha.store(
+            significant::bonferroni_z_limit(total, significant::FWER).to_bits(),
+            Release,
+        );
+        total
+    }
+
+    /// Did the caller set this plan themselves, rather than a [`Suite`]?
+    pub(crate) fn plan_set_by_caller(&self) -> bool {
+        self.plan.by_caller.load(Acquire)
     }
 
     /// Claim `n` comparisons against the plan, and say how many had been

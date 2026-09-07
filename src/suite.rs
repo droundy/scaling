@@ -187,6 +187,29 @@ impl Clock {
     }
 }
 
+/// The machine, claimed for measuring, for as long as this value lives.
+///
+/// Every blocking entry point begins by pinning to the reserved CPUs and
+/// then serialising against every other benchmark on the machine, and the
+/// two belong together: pinning without the lock puts a benchmark on cores
+/// it has not claimed, and claiming without pinning serialises for nothing.
+/// Bundling them means a new entry point cannot copy half of it - dropping
+/// the guard would mean two benchmarks sharing one core, each measuring the
+/// other rather than itself, and nothing about the resulting numbers would
+/// look wrong.
+///
+/// A [`Suite`] takes one of these for the whole session rather than one per
+/// benchmark. The guard is re-entrant within a thread, so the benchmarks it
+/// interleaves cost nothing extra when they are also run individually.
+pub(crate) struct Machine(#[allow(dead_code)] Option<quiet::Exclusive>);
+
+impl Machine {
+    pub(crate) fn claim() -> Self {
+        quiet::pin_if_reserved();
+        Machine(quiet::exclusive_if_pinned())
+    }
+}
+
 /// Drive one future to completion, polling it in a tight loop.
 ///
 /// Spinning is right rather than lazy: a `Pending` from [`Clock::yield_now`]
@@ -245,32 +268,55 @@ impl<'a> Scheduler<'a> {
         });
     }
 
-    fn next_offset(&mut self, len: usize) -> usize {
+    fn next_rand(&mut self) -> u64 {
         self.seed ^= self.seed << 13;
         self.seed ^= self.seed >> 7;
         self.seed ^= self.seed << 17;
-        (self.seed % len as u64) as usize
+        self.seed
+    }
+
+    /// Put `live` into a fresh uniformly random order, Fisher-Yates.
+    ///
+    /// A *shuffle*, not a rotation. Rotating gives every benchmark a
+    /// different position each round but leaves the order they sit in
+    /// unchanged, so each one is always polled immediately after the same
+    /// neighbour: with A, B and C the only orders a rotation ever produces
+    /// are ABC, BCA and CAB, never ACB.
+    ///
+    /// That matters here in a way it does not inside a comparison, where
+    /// every alternative is the same size and shape. A suite's benchmarks are
+    /// not: if A has a large working set, then under a rotation B pays for
+    /// evicting it in every single sample and C never does, which is a
+    /// systematic difference between B and C that no amount of averaging
+    /// removes. It is the same kind of fixed-position artifact this scheduler
+    /// exists to destroy, one level down - so destroy it properly.
+    fn shuffle(&mut self, live: &mut [usize]) {
+        for i in (1..live.len()).rev() {
+            let j = (self.next_rand() % (i as u64 + 1)) as usize;
+            live.swap(i, j);
+        }
     }
 
     /// Poll every benchmark once per round until all of them finish.
     ///
-    /// The starting position is redrawn each round, so no benchmark sits at a
-    /// fixed place in the rotation. That matters for the same reason it
-    /// mattered within a comparison: a fixed position samples a fixed phase of
-    /// whatever the machine does periodically, and this machine has a
-    /// measured moire at the scheduler tick.
+    /// The order is redrawn every round, so no benchmark keeps a fixed
+    /// position *or* a fixed neighbour. Position matters for the reason it
+    /// mattered within a comparison - a fixed position samples a fixed phase
+    /// of whatever the machine does periodically, and this machine has a
+    /// measured moire at the scheduler tick - and the neighbour matters
+    /// because of what it leaves in the caches; see [`Scheduler::shuffle`].
     ///
     /// Finished benchmarks are retired *between* rounds rather than as they
-    /// finish, so that removing one cannot shift the rest of the round's
+    /// finish, so that removing one cannot disturb the rest of the round's
     /// order and skip somebody.
     fn run(&mut self) {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut live: Vec<usize> = (0..self.tasks.len()).collect();
         while !live.is_empty() {
-            let offset = self.next_offset(live.len());
-            for step in 0..live.len() {
-                let task = &mut self.tasks[live[(offset + step) % live.len()]];
+            self.shuffle(&mut live);
+            for &i in &live {
+                let task = &mut self.tasks[i];
                 task.clock.begin_poll();
                 let polled = task.future.as_mut().poll(&mut cx);
                 task.clock.end_poll();
@@ -563,24 +609,28 @@ impl<'a> Suite<'a> {
 
     /// Measure every benchmark, interleaved, and report them together.
     ///
-    /// If the suite holds comparisons and no plan was set by hand, the plan
-    /// is set here from the number of comparisons the suite is about to make.
-    /// It can only be done at this point - the count is not known until the
-    /// last one is added - and it is only possible at all because a suite
-    /// collects everything before running anything, which is exactly what a
-    /// caller invoking [`Config::compare`] in a loop cannot do.
+    /// If the suite holds comparisons and the caller set no plan of their
+    /// own, the suite *adds* its own comparisons to the plan here. It can
+    /// only be done at this point - the count is not known until the last one
+    /// is added - and it is only possible at all because a suite collects
+    /// everything before running anything, which is exactly what a caller
+    /// invoking [`Config::compare`] in a loop cannot do.
     ///
-    /// A plan set by hand wins, since the caller may be planning comparisons
-    /// outside this suite as well.
+    /// Adding rather than setting is what lets a second suite built from the
+    /// same [`Config`] account for itself. Setting would leave the first
+    /// suite's number in place, and dropping the `Config` would then complain
+    /// about a count the caller never chose.
+    ///
+    /// A plan the caller set by hand wins outright and is never added to,
+    /// since they may be planning comparisons outside this suite as well.
     pub fn run(mut self) -> Report {
-        if self.comparisons > 0 && self.cfg.num_comparisons_planned() == 0 {
-            self.cfg.set_comparisons_planned(self.comparisons);
+        if self.comparisons > 0 && !self.cfg.plan_set_by_caller() {
+            self.cfg.add_comparisons_planned(self.comparisons);
         }
-        quiet::pin_if_reserved();
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
-        let _exclusive = quiet::exclusive_if_pinned();
+        let _machine = Machine::claim();
         self.scheduler.run();
         Report {
             entries: self.entries,
@@ -606,7 +656,11 @@ impl Display for Report {
                 writeln!(f)?;
             }
             let shown = cell.render();
-            let shown = shown.as_deref().unwrap_or("(not measured)");
+            // Trimmed because a multi-line result brings its own trailing
+            // newline - `Comparisons` writes every line with `writeln!` - and
+            // this loop supplies the separators itself. Leaving it produced a
+            // blank line after any comparison that was not the last entry.
+            let shown = shown.as_deref().unwrap_or("(not measured)").trim_end();
             // A comparison prints several lines, so it is given its own
             // block rather than being crammed onto the name's line.
             if shown.contains('\n') {
@@ -668,7 +722,7 @@ mod tests {
         }
     }
 
-    /// The starting position must actually move, or "rotated order" is a
+    /// The starting position must actually move, or "shuffled order" is a
     /// comment rather than a behaviour.
     #[test]
     fn the_starting_position_moves_between_rounds() {
@@ -685,6 +739,38 @@ mod tests {
         assert!(
             distinct > 1,
             "every round started with the same benchmark: {firsts:?}"
+        );
+    }
+
+    /// Who a benchmark is polled *after* must vary too, not just where it
+    /// sits. A rotation moves every position while leaving the order intact,
+    /// so each benchmark keeps one fixed predecessor and therefore always
+    /// inherits the same neighbour's cache state - a systematic difference
+    /// between benchmarks that averaging cannot touch.
+    ///
+    /// With three benchmarks a rotation can only ever produce ABC, BCA and
+    /// CAB, in all of which A precedes B; this asserts that A is sometimes
+    /// preceded by each of the others, which no rotation can satisfy.
+    #[test]
+    fn the_neighbour_order_varies_too() {
+        const N: usize = 3;
+        let (mut s, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
+        s.run();
+        let log = log.borrow();
+        // Read adjacency straight off the flat log rather than within
+        // rounds, so the pairing across a round boundary counts too - the
+        // machine does not know where a round ended.
+        let mut predecessors: Vec<usize> =
+            log.windows(2).filter(|w| w[1] == 0).map(|w| w[0]).collect();
+        predecessors.sort_unstable();
+        predecessors.dedup();
+        // Both of the others must appear; a rotation would give exactly one,
+        // always the same one. Benchmark 0 may also follow *itself*, when it
+        // ends one round and begins the next - independent shuffles allow
+        // that, and it costs nothing: each round still polls everyone once.
+        assert!(
+            predecessors.contains(&1) && predecessors.contains(&2),
+            "benchmark 0 did not follow every other: {predecessors:?}"
         );
     }
 
@@ -857,6 +943,53 @@ mod tests {
         drop(cfg);
     }
 
+    /// Two suites off one `Config` must each account for themselves.
+    ///
+    /// The suite used to *set* the plan only when it was still zero, so a
+    /// second suite silently skipped its own comparisons while still
+    /// claiming them - and dropping the `Config` then complained about a
+    /// count the caller never chose. Reaching the end of this test without a
+    /// panic from `Drop` is the assertion.
+    #[test]
+    fn a_second_suite_adds_its_own_comparisons() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        for _ in 0..2 {
+            let mut suite = cfg.suite();
+            let _ = suite.add_comparison(
+                "pair",
+                cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+            );
+            suite.run();
+        }
+        assert_eq!(cfg.num_comparisons_planned(), 2);
+        drop(cfg);
+    }
+
+    /// A comparison that is not the last entry must not leave a blank line
+    /// behind it: `Comparisons` ends its own output with a newline, and this
+    /// loop supplies the separators.
+    ///
+    /// A blank line is not merely untidy - anything parsing the table a line
+    /// at a time meets an empty one, as this module's own declaration-order
+    /// test would.
+    #[test]
+    fn a_comparison_before_another_entry_leaves_no_blank_line() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let mut suite = cfg.suite();
+        let _ = suite.add_comparison(
+            "pair",
+            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+        );
+        let _ = suite.add("flat", || (0..20u64).sum::<u64>());
+        let shown = format!("{}", suite.run());
+        assert!(
+            !shown.lines().any(|l| l.trim().is_empty()),
+            "blank line in report:\n{shown}"
+        );
+        assert!(shown.lines().last().unwrap().starts_with("flat"), "{shown}");
+        drop(cfg);
+    }
+
     /// A plan set by hand must win, because the caller may be planning
     /// comparisons outside the suite too.
     #[test]
@@ -920,16 +1053,24 @@ mod tests {
     /// declaration order, and reports how far each one moved between the two.
     /// A benchmark measured in sequence at t=0 and again at t=N sees a
     /// different machine; interleaved, both runs spread it over the whole
-    /// session, so it should move less.
+    /// session.
     ///
-    /// Ignored, and it prints rather than asserts. It is a *measurement* -
-    /// one draw from a stochastic process - and four tests of exactly this
-    /// shape were deleted from this crate for being asserted as though they
-    /// were deterministic. Run it with:
+    /// **The passes below are not independent replicates.** They share one
+    /// session and therefore one drift state, and the sequential arm is
+    /// enormously sensitive to it: byte-identical code has read 0.10% in one
+    /// session and 1.19% in another. Three passes that agree tell you about
+    /// that session, not about the technique - which this entry got wrong
+    /// once already, and TODO item 4 records. Run it several times, at
+    /// different times, and compare the *ranges*:
     ///
     /// ```none
     /// cargo test --release -- --ignored --nocapture position_bias
     /// ```
+    ///
+    /// Ignored, and it prints rather than asserts, because it is a
+    /// measurement and not a test - four tests of exactly this shape were
+    /// deleted from this crate for being asserted as though they were
+    /// deterministic.
     #[test]
     #[ignore]
     fn position_bias_interleaved_versus_sequential() {

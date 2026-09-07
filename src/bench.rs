@@ -315,10 +315,7 @@ impl Config {
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
     {
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
+        let _machine = Machine::claim();
         let clock = Clock::new(self.max_time);
         block_on(&clock, self.bench_gen_input_async(&clock, gen_input, f))
     }
