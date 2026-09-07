@@ -444,17 +444,24 @@ happened to be benchmarking - which is exactly how it failed first time.
 ### [ ] 13. Discard preempted samples, on evidence rather than on size
 
 Ask the kernel whether a sample was interfered with, and drop the ones that
-were:
+were. Read a second clock alongside the wall clock:
 
 ```rust
 // around the batch, outside the timed region
-libc::getrusage(libc::RUSAGE_THREAD, &mut usage);
-// usage.ru_nivcsw - involuntary context switches
+libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
 ```
 
-A batch during which `ru_nivcsw` rose was *preempted*, and what it timed is
-partly some other process. That is not the function's cost and the mean
-should not carry it.
+`CLOCK_THREAD_CPUTIME_ID` advances only while this thread is on a CPU, so
+`wall - cpu` over the batch is the time it spent descheduled. A batch that
+lost time that way partly timed some other process, and the mean should not
+carry it.
+
+**Prefer this to `getrusage(RUSAGE_THREAD)` and `ru_nivcsw`**, which was
+the first idea here. Measured, they cost the same - 382.9ns against 382.4ns
+per call on this laptop - and the clock says strictly more: not merely
+*whether* the thread was preempted but *how long for*, which is a threshold
+you can set rather than a binary you cannot. A 3us gap in a 100us batch and
+a 3ms one are both one context switch.
 
 **The point is that it discards on cause and not on magnitude.** Every
 size-based rule - a median, a trimmed mean, dropping the slowest decile -
@@ -478,18 +485,27 @@ workload from an interrupted one. The kernel can.
 
 What to watch for:
 
-* **Cost.** Two syscalls per batch, outside the timed region, so nothing
-  lands in the measurement - but it is perhaps 0.1-0.5% of wall time at the
-  default 100us batch, which `benches/harness-cost.rs` should be asked
-  about.
+* **Cost.** 382.9ns a call, measured, and two calls a batch - so about 0.8%
+  of the default 100us batch, and some 4% against `bench_scaling`'s 20us
+  measurable floor. It sits outside the timed region so none of it lands in
+  the answer, but `benches/harness-cost.rs` should be asked about the wall
+  cost, and the scaling case may want its own decision. For contrast the
+  ordinary clock is 26.8ns, which is why timing itself is free and this is
+  not.
 * **Selection.** Dropping samples selects on something correlated with the
   machine being busy, and (1) records how badly adaptive stopping can be
   fooled by selection. Discarded samples should probably still count against
   `MIN_SAMPLE_TIME`, and the number discarded is worth reporting: a run that
   threw away half its samples measured a busy machine, whatever the `±`
   says.
-* **Portability.** `RUSAGE_THREAD` is Linux-only. Elsewhere this compiles
-  away to today's behaviour, as the affinity code already does.
+* **Syscalls in the benchmark.** Thread CPU time counts user *and* system
+  time on this thread's own behalf, so a function that makes syscalls is
+  measured fairly - unlike the cycle counter in (15), which
+  `perf_event_paranoid` forces to exclude the kernel. Worth confirming
+  rather than assuming, since it is the difference between the two
+  approaches on syscall-heavy code.
+* **Portability.** Linux only. Elsewhere this compiles away to today's
+  behaviour, as the affinity code already does.
 
 Independent of everything else here: it touches `time_batch` and `Running`
 and nothing in the scheduling.
@@ -566,10 +582,97 @@ than (7)'s reference workload: this measures the mechanism directly where
 (7) measures the symptom. The two belong together, and `quiet-bench status`
 could report both.
 
+**While here: `CLOCK_MONOTONIC_RAW` is free.** `Instant::now()` is
+`CLOCK_MONOTONIC`, which NTP steers by up to 500ppm - 0.05%, right at the
+edge of what a 0.1% target can afford, and a systematic rather than noise.
+`CLOCK_MONOTONIC_RAW` is not steered and costs the same: 26.48ns against
+25.81ns, both in the vDSO on this kernel, where `Instant::now()` itself
+measures 26.80ns. It cancels out of a comparison and only shows in an
+absolute `ns_per_iter`, so this is small - but it is free, and (15) makes it
+matter more, since an unsteered clock is the one to divide cycles by.
+`Instant` cannot be told which clock to use, so this means calling
+`clock_gettime` directly on Linux and keeping `Instant` elsewhere.
+
 Independent of the scheduling work, and shares its shape with (13): ask the
 system whether a sample is trustworthy, rather than inferring it from the
 sample's own size. They likely want one shared place to record what was true
 around a batch.
+
+### [ ] 15. Count cycles as well as nanoseconds
+
+Open a `perf_event_open` counter for `PERF_COUNT_HW_CPU_CYCLES` and read it
+around each sample, alongside the wall clock. Supersedes (14) where it
+works, and answers a question neither (13) nor (14) can.
+
+**The cross-check is the point:**
+
+```none
+  ns/iter    cycles/iter    reading
+  moved      moved          the code changed
+  moved      steady         the clock changed - not a regression
+  steady     moved          frequency compensated; suspicious
+```
+
+That is the separation (7), (13) and (14) are all circling: *did the machine
+move, or did the code?* Nothing computed from timings alone can answer it.
+
+It also gives (14)'s number for free and better. **cycles / nanoseconds is
+the effective frequency over exactly the interval measured**, where
+`scaling_cur_freq` on `intel_pstate` is an APERF/MPERF average over the
+driver's own sampling window and may be coarser than a 100us batch.
+
+**Do (14) first anyway.** The cheap path is 0.5ns for the frequency read and
+2.3ns for `sched_getcpu`; this is 412ns a read and 824ns a batch, which is
+0.8% of a default batch and some 4% of `bench_scaling`'s 20us floor. Most of
+the diagnostic for a three-hundredth of the cost. `rdpmc` off the mmap'd
+page would bring a read to ~10ns and remove that objection, but it is a good
+deal more machinery, and `/sys/devices/cpu_core/rdpmc` is not even readable
+as an ordinary user here, so whether it is permitted needs testing.
+
+**Where it gets hard:**
+
+* **Hybrid CPUs.** This laptop is an i5-1240P: eight P-cores at 4.4GHz on
+  the `cpu_core` PMU and eight E-cores at 3.3GHz on `cpu_atom`. A single
+  generic `PERF_TYPE_HARDWARE` event silently counts nothing - measured, all
+  three encodings returned zero - because the thread ran on the PMU the
+  event was not opened against. `perf stat` shows it plainly: unpinned it
+  counted `cpu_atom/cycles` and reported `<not counted>` for `cpu_core`;
+  under `taskset -c 0` it did the reverse. So both PMUs must be opened, and
+  summing them is *wrong* if the thread migrated, because a P-core cycle and
+  an E-core cycle are neither the same wall time nor the same work. Pinned -
+  the mode this crate already recommends - it is clean, and that is probably
+  the condition to require.
+* **`exclude_kernel` is forced** at `perf_event_paranoid = 2`, which is what
+  this machine runs. Cycles then exclude syscall time while the wall clock
+  includes it, so a syscall-heavy benchmark shows a cycles-per-ns ratio that
+  looks like a frequency drop and is not. (13)'s thread CPU time does not
+  have this problem and could disentangle it.
+* **Multiplexing.** More events than the PMU has counters and the kernel
+  time-slices them and *scales* the result. `time_enabled` and
+  `time_running` from the read must be compared, or an extrapolation gets
+  reported as a measurement.
+* **Availability.** Containers and hardened kernels often set
+  `perf_event_paranoid = 3`. This has to degrade silently to no cycle data,
+  never to a wrong number.
+* **`libc` does not expose `perf_event_attr`**, so the struct has to be
+  declared here. A zeroed 128-byte buffer with `type`, `size` and `config`
+  poked at their offsets is accepted by `perf_copy_attr`, which is
+  forward-compatible by design.
+
+**Cycles are not a universal invariant, and I claimed they were.** For
+memory-bound code they are not even frequency-invariant: DRAM latency is
+fixed in nanoseconds, so the same stall costs *fewer* cycles at a lower core
+clock. Cycles/iter holds still under frequency change only for core-bound
+work. It answers "how much work was done", which is a genuinely different
+and useful question from "how long did it take", but it is not a better
+clock and it would not reliably have caught the 2x runs in (4).
+
+**Related and not the same: `rdtsc` is not a cycle counter.** On modern x86
+the TSC is invariant - a fixed rate regardless of P-state - so it measures
+wall time, which is why it is 8.34ns (13.00ns behind an `lfence`) against
+`clock_gettime`'s 26.8ns and why it says nothing about frequency. It is a
+cheaper clock, not a counter. Worth remembering if (6) ever wants batches
+small enough for 26.8ns to matter.
 
 ## Tried without success so far
 
@@ -625,6 +728,29 @@ the answer. None of these is closed.
 
 ## Findings worth keeping
 
+- **What it costs to ask the machine something.** Measured with `bench`
+  itself, i5-1240P, unquiesced. Items (13), (14) and (15) all turn on these
+  numbers, so they live here rather than in any one of them:
+
+  ```none
+    sched_getcpu()                2.30ns
+    CLOCK_MONOTONIC_COARSE        7.54ns   (1ms resolution - unusable here)
+    _rdtsc()                      8.34ns
+    lfence + _rdtsc()            13.00ns
+    CLOCK_MONOTONIC              25.81ns
+    CLOCK_MONOTONIC_RAW          26.48ns   (not NTP-steered)
+    Instant::now()               26.80ns   (what the crate uses)
+    CLOCK_THREAD_CPUTIME_ID     382.90ns
+    getrusage(RUSAGE_THREAD)    382.44ns
+    read(perf_event fd)         412.00ns
+    open+read+close a sysfs file  7.7us    (0.5us with the fd held open)
+  ```
+
+  The gap that matters is the two orders of magnitude between the vDSO
+  clocks and anything that enters the kernel. Timing is free - two reads
+  bracket a whole batch, so 53ns against 100us is 0.05% - while asking who
+  preempted you, or how many cycles you burned, is 0.8% a batch and some 4%
+  of `bench_scaling`'s 20us floor.
 - **There is a moiré at exactly the scheduler tick.** Dominant spectral peak
   at 1000.1Hz = `CONFIG_HZ`, harmonic at 1998.8Hz. With 100us samples
   against a 1ms tick, every tenth sample lands on the same phase:
