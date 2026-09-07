@@ -78,6 +78,45 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 range measured, with `R²=0.000` and `(limit)` to say that nothing described
 it exactly.
 
+## Measuring many benchmarks together
+
+Benchmarks run one after another are measured in different machines: the
+first on a cold package, the fiftieth on a warm one. Their numbers are not
+comparable with each other, nor with the same suite run tomorrow.
+
+A suite measures them interleaved instead — one sample each, in rotation —
+so every benchmark's samples spread across the whole session and all of them
+average the same drift. Each `add` hands back a token holding that
+benchmark's answer once the suite has run.
+
+```rust
+let cfg = scaling::Config::default();
+let mut suite = cfg.suite();
+let sort  = suite.add_input("sort", vec![0; 100], |xs: &mut Vec<i32>| xs.sort());
+let fib   = suite.add("fib 500", || fib(500));
+let growth = suite.add_scaling("fib scaling", |n| fib(n), 0);
+println!("{}", suite.run());
+
+// Each token keeps its own type.
+let sort: scaling::Stats = sort.get().unwrap();
+let growth: scaling::ScalingStats = growth.get().unwrap();
+```
+
+One suite can hold flat benchmarks, scaling benchmarks and whole
+comparisons, and they need not share an input type. Reversing the
+declaration order of eight identical workloads moves a sequentially-measured
+one about three times as far as an interleaved one.
+
+Two things this does not do. It will not make any single benchmark more
+reproducible — it averages drift in rather than out — and a suite's numbers
+are not comparable with a lone `bench` call, because interleaving leaves
+every sample starting on a cache the rest of the suite has been using. What
+it buys is that the numbers within one suite, and across runs of it, are
+measured in the same machine.
+
+Each benchmark still gets the full time budget of its own, so a suite of `n`
+may take `n` times as long as one benchmark.
+
 ## Quiescing the machine (Linux)
 
 The `±` figure covers noise `scaling` can see while sampling. It cannot see

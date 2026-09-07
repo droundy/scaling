@@ -1,7 +1,6 @@
 use super::*;
 use std::fmt::{self, Display, Formatter};
-use std::sync::atomic::Ordering::{Acquire, Release};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MIN_SAMPLES: usize = 6;
 
@@ -243,6 +242,47 @@ impl Config {
     /// that come out of step 2.
     pub fn compare_gen_input<G, B, C, I, O>(
         &self,
+        gen_input: G,
+        f_baseline: B,
+        f_candidate: C,
+    ) -> Comparison
+    where
+        G: FnMut() -> I,
+        B: FnMut(&mut I) -> O,
+        C: FnMut(&mut I) -> O,
+    {
+        quiet::pin_if_reserved();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
+        // Twice the budget, because a comparison produces two `Stats`: at the
+        // single budget each side would get half the wall clock a lone
+        // `bench` call is allowed, for the same target.
+        let clock = Clock::new(self.max_time * 2);
+        block_on(
+            &clock,
+            self.compare_gen_input_async(&clock, gen_input, f_baseline, f_candidate),
+        )
+    }
+
+    /// The comparison's sampling loop, which yields to the scheduler between
+    /// rounds.
+    ///
+    /// A *round* - baseline and candidate, back to back - is the unit, and it
+    /// is deliberately atomic. The paired error bar this reports comes from
+    /// the per-round differences, and that only cancels the machine's slow
+    /// movement because the two halves are timed under near-identical
+    /// conditions. Yielding between them would let a whole suite run in the
+    /// gap and put the drift back into every difference.
+    ///
+    /// `clock` must be built with twice [`Config::max_time`], for the reason
+    /// given at the call site above.
+    ///
+    /// Neither pinning nor the exclusive guard is taken here; the caller owns
+    /// them, so a suite claims the machine once for the whole session.
+    pub(crate) async fn compare_gen_input_async<G, B, C, I, O>(
+        &self,
+        clock: &Clock,
         mut gen_input: G,
         mut f_baseline: B,
         mut f_candidate: C,
@@ -252,26 +292,17 @@ impl Config {
         B: FnMut(&mut I) -> O,
         C: FnMut(&mut I) -> O,
     {
-        let made = self.num_comparisons_made.fetch_add(1, Release);
-        // Twice the budget, because a comparison produces two `Stats`: at the
-        // single budget each side would get half the wall clock a lone
-        // `bench` call is allowed, for the same target.
-        let budget = self.max_time * 2;
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
-        let start = Instant::now();
+        let made = self.claim_comparisons(1);
         let mut xs: Vec<I> = Vec::new();
         let (unit, base_ns, cand_ns, probed) = calibrate(
             &mut gen_input,
             &mut f_baseline,
             &mut f_candidate,
             &mut xs,
-            budget,
-            start,
-        );
-        if start.elapsed() > budget {
+            clock,
+        )
+        .await;
+        if clock.exhausted() {
             return Comparison {
                 baseline: Stats {
                     ns_per_iter: base_ns / unit as f64,
@@ -289,7 +320,7 @@ impl Config {
                     hit_limit: true,
                     untrustworthy: true,
                 },
-                z_alpha: self.z_alpha,
+                z_alpha: self.z_alpha(),
                 paired_std_error: f64::NAN,
             };
         }
@@ -351,7 +382,7 @@ impl Config {
             let (cand_mean, cand_std_error) = cand_samples.mean_and_stderr();
             let (_, paired_std_error) = diff_samples.mean_and_stderr();
 
-            let out_of_budget = base_samples.count >= MAX_SAMPLES || start.elapsed() > budget;
+            let out_of_budget = base_samples.count >= MAX_SAMPLES || clock.exhausted();
             // The same estimate `Comparison::std_error` reports, so what
             // sampling drives down is exactly what the verdict is made on.
             // Stopping on the combined form instead measured no better -
@@ -387,10 +418,13 @@ impl Config {
                         hit_limit: !precise_enough,
                         untrustworthy: cand_samples.count < MIN_SAMPLES,
                     },
-                    z_alpha: self.z_alpha,
+                    z_alpha: self.z_alpha(),
                     paired_std_error,
                 };
             }
+            // One *round* per poll, never half of one. See the note on this
+            // function about why the pair may not be split.
+            clock.yield_now().await;
         }
     }
 }
@@ -398,12 +432,15 @@ impl Config {
 impl Drop for Config {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            if let Some(made) = Arc::get_mut(&mut self.num_comparisons_made) {
+            if let Some(plan) = Arc::get_mut(&mut self.plan) {
                 // We now know that we are the *last* user of this Config, so we can get an
-                // accurate count of how many comparisons were made.
-                let made = made.load(Acquire);
+                // accurate count of how many comparisons were made. Being the
+                // last holder also means `get_mut` gives us the plan itself,
+                // so neither figure needs an atomic load.
+                let made = *plan.made.get_mut();
+                let planned = *plan.planned.get_mut();
                 assert_eq!(
-                    self.num_comparisons_planned, made,
+                    planned, made,
                     "You need to set num_comparisons_planned to {made}."
                 );
             }
@@ -411,20 +448,22 @@ impl Drop for Config {
     }
 }
 
-fn calibrate<G, B, C, I, O>(
+async fn calibrate<G, B, C, I, O>(
     gen_input: &mut G,
     f_base: &mut B,
     f_cand: &mut C,
     xs: &mut Vec<I>,
-    budget: Duration,
-    start: Instant,
+    clock: &Clock,
 ) -> (usize, f64, f64, u64)
 where
     G: FnMut() -> I,
     B: FnMut(&mut I) -> O,
     C: FnMut(&mut I) -> O,
 {
-    let probe_ceiling_ns = (budget / 100).max(Duration::from_millis(5)).as_secs_f64() * 1e9;
+    let probe_ceiling_ns = (clock.budget() / 100)
+        .max(Duration::from_millis(5))
+        .as_secs_f64()
+        * 1e9;
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -440,8 +479,13 @@ where
         if base_t + cand_t >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
-            || start.elapsed() > budget
+            || clock.exhausted()
         {
+            return (unit, base_t, cand_t, probed);
+        }
+        // Before the extrapolation, so every return reports a `unit` and the
+        // times measured at it.
+        if !clock.yield_now().await {
             return (unit, base_t, cand_t, probed);
         }
         let factor_time = (target / (base_t + cand_t).max(1.0)).clamp(2.0, 100.0);
@@ -491,7 +535,7 @@ mod tests {
                 let goal = cfg.comparison_goal_ns(baseline);
                 for scale in [0.5, 0.9, 0.99, 1.01, 1.1, 2.0] {
                     // Pick a standard error, then ask both questions of it.
-                    let se = goal / cfg.z_alpha * scale;
+                    let se = goal / cfg.z_alpha() * scale;
                     let stopped = cfg.comparison_accuracy_met(baseline, se);
                     // A comparison whose difference is exactly the goal.
                     let c = comparison(baseline, baseline + goal, se / 2.0f64.sqrt(), planned);
@@ -517,7 +561,7 @@ mod tests {
         let baseline = 500.0;
         let goal = cfg.comparison_goal_ns(baseline);
         // The standard error the stopping rule is aiming for.
-        let se = goal / cfg.z_alpha;
+        let se = goal / cfg.z_alpha();
         let c = comparison(baseline, baseline, se / 2.0f64.sqrt(), 4);
         assert!(
             (c.min_detectable_difference() - goal).abs() < 1e-9,
@@ -563,6 +607,40 @@ mod tests {
         let unplanned = format!("{}", comparison(100.0, 100.0, 0.1, 0));
         assert!(unplanned.contains("no verdict"), "{unplanned}");
         assert!(!unplanned.contains("unchanged"), "{unplanned}");
+    }
+
+    /// Every clone of a `Config` shares one plan, so the order they happen to
+    /// drop in cannot change whether `Drop` complains.
+    ///
+    /// Before the plan moved into the shared cell, `planned` was per-clone
+    /// while `made` was shared: setting the plan on one clone left the other
+    /// reading zero, and whichever dropped last decided. A `Suite` sets the
+    /// plan on the caller's behalf and so hits exactly that case.
+    #[test]
+    fn the_plan_is_shared_by_every_clone() {
+        let cfg = Config::default();
+        let clone = cfg.clone();
+        // Set through one clone; the other must see it.
+        clone.set_comparisons_planned(2);
+        assert_eq!(cfg.num_comparisons_planned(), 2);
+        assert_eq!(clone.z_alpha(), cfg.z_alpha());
+        assert!(cfg.z_alpha().is_finite(), "a plan implies a threshold");
+
+        // Two comparisons against a plan of two, claimed through one clone
+        // and dropped through the other. Neither drop may assert.
+        cfg.claim_comparisons(2);
+        drop(clone);
+        drop(cfg);
+    }
+
+    /// The assertion still fires when the count is genuinely wrong - sharing
+    /// the plan must not have quietly disabled the check.
+    #[test]
+    #[should_panic(expected = "set num_comparisons_planned to 1")]
+    fn a_miscounted_plan_still_asserts() {
+        let cfg = Config::default().with_comparisons_planned(3);
+        cfg.claim_comparisons(1);
+        drop(cfg);
     }
 
     /// With no plan set there is no threshold, so nothing is ever a change -

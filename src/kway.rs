@@ -10,7 +10,6 @@
 
 use super::*;
 use std::fmt::{self, Display, Formatter};
-use std::sync::atomic::Ordering::Release;
 use std::time::{Duration, Instant};
 
 /// Never stop *voluntarily* on fewer rounds than this. See
@@ -184,6 +183,31 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// If fewer than two alternatives were added: there is nothing to
     /// compare a lone alternative against.
     pub fn run(self) -> Comparisons {
+        quiet::pin_if_reserved();
+        // Serialise while pinned: two benchmarks sharing one core measure
+        // each other rather than themselves.
+        let _exclusive = quiet::exclusive_if_pinned();
+        // `k` times the budget, because `k` `Stats` come out of this: at the
+        // single budget each alternative would get a `k`th of the wall clock
+        // a lone `bench` call is allowed, for the same target.
+        let clock = Clock::new(self.cfg.max_time * self.entries.len().max(1) as u32);
+        block_on(&clock, self.run_async(&clock))
+    }
+
+    /// The k-way sampling loop, which yields to the scheduler between rounds.
+    ///
+    /// A round - every alternative once, from a rotated starting position -
+    /// is atomic for the same reason a two-way comparison's is: the
+    /// differences this reports cancel the machine's slow movement only
+    /// because every alternative met that movement within the same round.
+    ///
+    /// `clock` must be built with `k` times [`Config::max_time`], as the
+    /// caller above does.
+    ///
+    /// # Panics
+    ///
+    /// If fewer than two alternatives were added.
+    pub(crate) async fn run_async(self, clock: &Clock) -> Comparisons {
         assert!(
             self.entries.len() >= 2,
             "a comparison needs at least two alternatives, got {}",
@@ -198,29 +222,13 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         // One comparison is reported per alternative beyond the baseline,
         // and each of those is a chance at a false positive, so each is
         // counted against the plan.
-        let made = cfg.num_comparisons_made.fetch_add(k as u64 - 1, Release);
-        quiet::pin_if_reserved();
-        // Serialise while pinned: two benchmarks sharing one core measure
-        // each other rather than themselves.
-        let _exclusive = quiet::exclusive_if_pinned();
-
-        // `k` times the budget, because `k` `Stats` come out of this: at the
-        // single budget each alternative would get a `k`th of the wall clock
-        // a lone `bench` call is allowed, for the same target.
-        let budget = cfg.max_time * k as u32;
-        let start = Instant::now();
+        let made = cfg.claim_comparisons(k as u64 - 1);
         // `master` holds the round's inputs; `xs` is the copy an alternative
         // is actually handed, and may be left in any state.
         let mut master: Vec<I> = Vec::new();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, probed) = calibrate(
-            &mut gen_input,
-            &mut entries,
-            &mut master,
-            &mut xs,
-            budget,
-            start,
-        );
+        let (unit, probed) =
+            calibrate(&mut gen_input, &mut entries, &mut master, &mut xs, clock).await;
 
         let mut per = vec![Running::default(); k];
         let mut diffs = vec![Running::default(); k];
@@ -253,7 +261,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             }
             rounds += 1;
 
-            let out_of_budget = rounds >= MAX_SAMPLES || start.elapsed() > budget;
+            let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
             let (base_mean, _) = per[0].mean_and_stderr();
             // Good enough only when every difference is, since the report
             // stands behind all of them at once.
@@ -265,6 +273,8 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             if precise_enough || out_of_budget {
                 break precise_enough;
             }
+            // One whole round per poll, never part of one.
+            clock.yield_now().await;
         };
 
         let iterations = probed + rounds as u64 * unit as u64;
@@ -296,7 +306,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             names: entries.into_iter().map(|e| e.name).collect(),
             stats,
             paired,
-            z_alpha: cfg.z_alpha,
+            z_alpha: cfg.z_alpha(),
         }
     }
 }
@@ -323,15 +333,17 @@ fn clone_into<I: Clone>(master: &[I], xs: &mut Vec<I>) {
 /// Find a batch size whose measured duration, summed over every alternative,
 /// reaches [`SAMPLE_TIME`]: the same extrapolation
 /// [`Config::bench_gen_input`] does, over a whole round.
-fn calibrate<'a, I: Clone>(
+async fn calibrate<'a, I: Clone>(
     gen_input: &mut GenInput<'a, I>,
     entries: &mut [Entry<'a, I>],
     master: &mut Vec<I>,
     xs: &mut Vec<I>,
-    budget: Duration,
-    start: Instant,
+    clock: &Clock,
 ) -> (usize, u64) {
-    let probe_ceiling_ns = (budget / 100).max(Duration::from_millis(5)).as_secs_f64() * 1e9;
+    let probe_ceiling_ns = (clock.budget() / 100)
+        .max(Duration::from_millis(5))
+        .as_secs_f64()
+        * 1e9;
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -355,8 +367,12 @@ fn calibrate<'a, I: Clone>(
         if timed_ns >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
-            || start.elapsed() > budget
+            || clock.exhausted()
         {
+            return (unit, probed);
+        }
+        // Before the extrapolation, so `unit` and the probe agree.
+        if !clock.yield_now().await {
             return (unit, probed);
         }
         let factor_time = (target / timed_ns.max(1.0)).clamp(2.0, 100.0);

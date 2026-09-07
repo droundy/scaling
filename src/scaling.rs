@@ -32,7 +32,23 @@ impl Config {
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();
-        scaling_sweep(self, nmin, |n| {
+        let clock = Clock::new(self.max_time);
+        block_on(&clock, self.bench_scaling_async(&clock, f, nmin))
+    }
+
+    /// The scaling sweep, which yields to the scheduler between rounds. See
+    /// [`Config::bench_scaling`], and [`Config::bench_gen_input_async`] for
+    /// why the asynchronous form is the only one.
+    pub(crate) async fn bench_scaling_async<F, O>(
+        &self,
+        clock: &Clock,
+        f: F,
+        nmin: usize,
+    ) -> ScalingStats
+    where
+        F: Fn(usize) -> O,
+    {
+        scaling_sweep(self, nmin, clock, |n| {
             // `black_box` on the size as well as the result: without it the
             // optimiser can see a literal `n` and lift the whole call out,
             // the job the old code did by running over a `vec![n; iters]`.
@@ -41,13 +57,14 @@ impl Config {
             black_box(f(n));
             start.elapsed().as_secs_f64() * 1e9
         })
+        .await
     }
 
     /// Benchmark the power-law scaling of a function with a generated input.
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
-    pub fn bench_scaling_gen<G, F, I, O>(&self, mut gen_input: G, f: F, nmin: usize) -> ScalingStats
+    pub fn bench_scaling_gen<G, F, I, O>(&self, gen_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
@@ -56,7 +73,27 @@ impl Config {
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();
-        scaling_sweep(self, nmin, |n| {
+        let clock = Clock::new(self.max_time);
+        block_on(
+            &clock,
+            self.bench_scaling_gen_async(&clock, gen_input, f, nmin),
+        )
+    }
+
+    /// The generated-input scaling sweep, which yields between rounds. See
+    /// [`Config::bench_scaling_gen`].
+    pub(crate) async fn bench_scaling_gen_async<G, F, I, O>(
+        &self,
+        clock: &Clock,
+        mut gen_input: G,
+        f: F,
+        nmin: usize,
+    ) -> ScalingStats
+    where
+        G: FnMut(usize) -> I,
+        F: Fn(&mut I) -> O,
+    {
+        scaling_sweep(self, nmin, clock, |n| {
             // Build the input before the clock starts and drop it
             // after the clock stops, so neither generation nor drop lands
             // in the measurement.
@@ -67,6 +104,7 @@ impl Config {
             drop(x);
             elapsed.as_secs_f64() * 1e9
         })
+        .await
     }
 }
 
@@ -270,14 +308,25 @@ where
 /// gets [`DISCOVERY_SHARE`] to find the sizes and stage two gets what is
 /// left to measure them properly. Keeping them separate means a slow
 /// discovery cannot starve the measurement it exists to set up.
-fn scaling_sweep(cfg: &Config, nmin: usize, mut measure: impl FnMut(usize) -> f64) -> ScalingStats {
+async fn scaling_sweep(
+    cfg: &Config,
+    nmin: usize,
+    clock: &Clock,
+    mut measure: impl FnMut(usize) -> f64,
+) -> ScalingStats {
     let mut iterations = 0u64;
     let mut counted = |n: usize| {
         iterations += 1;
         measure(n)
     };
 
-    let range = discover_sizes(nmin, cfg.max_time.mul_f64(DISCOVERY_SHARE), &mut counted);
+    let range = discover_sizes(
+        nmin,
+        cfg.max_time.mul_f64(DISCOVERY_SHARE),
+        clock,
+        &mut counted,
+    )
+    .await;
     let sizes = choose_sizes(range, nmin);
 
     // Each degree costs a size, and a fit needs more sizes than terms.
@@ -287,8 +336,10 @@ fn scaling_sweep(cfg: &Config, nmin: usize, mut measure: impl FnMut(usize) -> f6
         cfg,
         cfg.max_time.mul_f64(1.0 - DISCOVERY_SHARE),
         max_degree,
+        clock,
         &mut counted,
-    );
+    )
+    .await;
 
     let Some(fit) = measured.fit else {
         // No degree cleared its own error bar - the cost did not measurably
@@ -658,11 +709,17 @@ struct SizeRange {
 /// `budget` is a backstop against a pathological climb, not a target: the
 /// climb stops at the floor, and what it costs is whatever getting there
 /// cost. Nothing here is sized against the time available.
-fn discover_sizes(
+async fn discover_sizes(
     nmin: usize,
     budget: Duration,
+    clock: &Clock,
     mut measure: impl FnMut(usize) -> f64,
 ) -> SizeRange {
+    // A deadline in this benchmark's *own* time rather than an `Instant`,
+    // because under interleaving its wall-clock span is the whole session.
+    // Taken relative to what it has spent already, so the share this stage
+    // gets is the same one it got before.
+    let deadline = clock.spent() + budget;
     let step = nmin.max(1);
     let budget_ns = budget.as_secs_f64() * 1e9;
     let floor_ns = MIN_MEASURABLE.as_secs_f64() * 1e9;
@@ -680,12 +737,18 @@ fn discover_sizes(
     // gives no rate either - so this tracks whether a rate was measured,
     // not merely whether the loop has been round twice.
     let mut exponent: Option<f64> = None;
-    // See `measure_scaling`: the calls are not the only thing that costs
-    // time here either.
-    let started = Instant::now();
 
-    for _ in 0..MAX_CLIMB_STEPS {
-        if started.elapsed().as_secs_f64() * 1e9 >= budget_ns {
+    // `climb`, not `step`, which is the size unit above.
+    for climb in 0..MAX_CLIMB_STEPS {
+        // See `measure_scaling`: the calls are not the only thing that costs
+        // time here either, so this watches own-time and not just `spent`.
+        if clock.spent() >= deadline {
+            break;
+        }
+        // Yield between climb steps, so that in a suite the size discovery of
+        // every scaling benchmark is interleaved too. Not before the first
+        // one, which has nothing to report yet.
+        if climb > 0 && !clock.yield_now().await {
             break;
         }
         if let Some((pn, pt)) = prev {
@@ -899,11 +962,12 @@ struct Measured {
     hit_limit: bool,
 }
 
-fn measure_scaling(
+async fn measure_scaling(
     sizes: &[usize],
     cfg: &Config,
     budget: Duration,
     max_degree: usize,
+    clock: &Clock,
     mut measure: impl FnMut(usize) -> f64,
 ) -> Measured {
     let ns: Vec<f64> = sizes.iter().map(|&n| n as f64).collect();
@@ -912,15 +976,18 @@ fn measure_scaling(
     let mut spent = 0.0;
     // Two clocks, because they measure different things and either can be
     // the binding one. `spent` adds up what the calls themselves cost,
-    // which is what the accuracy is bought with; `started` is real time,
-    // which also covers what `measure` does around the call - building and
-    // dropping an input, most of all, which for something like a
-    // sort costs as much again as the sort does. Budgeting on `spent`
-    // alone would overrun by whatever that setup costs, and would never
-    // terminate at all for a benchmark whose calls measure as zero.
-    let started = Instant::now();
-    let over_budget =
-        |spent: f64| spent >= budget_ns || started.elapsed().as_secs_f64() * 1e9 >= budget_ns;
+    // which is what the accuracy is bought with; the other is this
+    // benchmark's own running time, which also covers what `measure` does
+    // around the call - building and dropping an input, most of all, which
+    // for something like a sort costs as much again as the sort does.
+    // Budgeting on `spent` alone would overrun by whatever that setup costs,
+    // and would never terminate at all for a benchmark whose calls measure
+    // as zero.
+    //
+    // Own-time rather than an `Instant`, because under interleaving the wall
+    // clock covers every other benchmark's turns as well.
+    let deadline = clock.spent() + budget;
+    let over_budget = |spent: f64| spent >= budget_ns || clock.spent() >= deadline;
 
     let mut round = |acc: &mut Vec<Running>, spent: &mut f64| {
         for (i, &n) in sizes.iter().enumerate() {
@@ -939,6 +1006,13 @@ fn measure_scaling(
             break;
         }
         round(&mut acc, &mut spent);
+        // One whole round per poll, never part of one. A round contributes a
+        // sample at *every* size, and the fit compares those sizes against
+        // each other - so splitting a round across a suite's other benchmarks
+        // would let the machine drift between the small sizes and the large
+        // ones, and land that drift in the fitted power itself. The same
+        // argument that makes a comparison's round atomic, one level up.
+        clock.yield_now().await;
     }
 
     loop {
@@ -969,6 +1043,7 @@ fn measure_scaling(
             };
         }
         round(&mut acc, &mut spent);
+        clock.yield_now().await;
     }
 }
 
@@ -1320,6 +1395,42 @@ mod tests {
     mod fitting {
         use super::*;
 
+        /// The three sweep stages are `async` so that a suite can interleave
+        /// them; these drive one to completion the way the blocking entry
+        /// points do, so the tests below can go on asking their questions
+        /// synchronously.
+        ///
+        /// The clock is given an hour, leaving whatever budget the test
+        /// passed in as the only thing that binds - which is what these
+        /// tests were written against.
+        fn run_measure_scaling(
+            sizes: &[usize],
+            cfg: &Config,
+            budget: Duration,
+            max_degree: usize,
+            measure: impl FnMut(usize) -> f64,
+        ) -> Measured {
+            let clock = Clock::new(Duration::from_secs(3600));
+            block_on(
+                &clock,
+                measure_scaling(sizes, cfg, budget, max_degree, &clock, measure),
+            )
+        }
+
+        fn discovered(
+            nmin: usize,
+            budget: Duration,
+            measure: impl FnMut(usize) -> f64,
+        ) -> SizeRange {
+            let clock = Clock::new(Duration::from_secs(3600));
+            block_on(&clock, discover_sizes(nmin, budget, &clock, measure))
+        }
+
+        fn swept(cfg: &Config, nmin: usize, measure: impl FnMut(usize) -> f64) -> ScalingStats {
+            let clock = Clock::new(cfg.max_time);
+            block_on(&clock, scaling_sweep(cfg, nmin, &clock, measure))
+        }
+
         /// Geometrically spaced sizes spanning a wide range, as size
         /// selection is meant to produce.
         fn wide_sizes() -> Vec<f64> {
@@ -1640,7 +1751,7 @@ mod tests {
             let sizes = [64usize, 128, 256, 512, 1024];
             for seed in [1u64, 3, 5, 7] {
                 let cfg = precise();
-                let m = measure_scaling(
+                let m = run_measure_scaling(
                     &sizes,
                     &cfg,
                     Duration::from_secs(3600),
@@ -1696,7 +1807,7 @@ mod tests {
             let sizes = [64usize, 128, 256, 512, 1024];
             let calls = std::cell::Cell::new(0);
             let cfg = precise().with_relative_error(0.5);
-            let m = measure_scaling(
+            let m = run_measure_scaling(
                 &sizes,
                 &cfg,
                 Duration::from_secs(3600),
@@ -1721,7 +1832,7 @@ mod tests {
             for target in [0.05, 0.005] {
                 let calls = std::cell::Cell::new(0);
                 let cfg = precise().with_relative_error(target);
-                measure_scaling(
+                run_measure_scaling(
                     &sizes,
                     &cfg,
                     Duration::from_secs(3600),
@@ -1745,7 +1856,7 @@ mod tests {
             // returning the flag alongside the fit.
             let sizes = [64usize, 128, 256, 512, 1024];
             let cfg = precise().with_relative_error(1e-9);
-            let m = measure_scaling(
+            let m = run_measure_scaling(
                 &sizes,
                 &cfg,
                 Duration::from_millis(50),
@@ -1763,7 +1874,7 @@ mod tests {
             // spent at all. The wall clock is what stops it.
             let sizes = [64usize, 128, 256, 512, 1024];
             let cfg = precise().with_relative_error(1e-12);
-            let m = measure_scaling(&sizes, &cfg, Duration::from_millis(20), 3, |_| 0.0);
+            let m = run_measure_scaling(&sizes, &cfg, Duration::from_millis(20), 3, |_| 0.0);
             assert!(m.hit_limit);
             assert!(m.fit.is_none(), "nothing measurable, so nothing to report");
         }
@@ -1777,7 +1888,7 @@ mod tests {
             let sizes = [64usize, 128];
             let cfg = precise().with_relative_error(1e-12);
             let started = Instant::now();
-            let m = measure_scaling(&sizes, &cfg, Duration::from_millis(100), 0, |_| {
+            let m = run_measure_scaling(&sizes, &cfg, Duration::from_millis(100), 0, |_| {
                 thread::sleep(Duration::from_millis(10));
                 1.0
             });
@@ -1798,7 +1909,7 @@ mod tests {
             // something wide, which is the worse of the two failures.
             let sizes = [64usize, 128, 256];
             let cfg = precise().with_relative_error(1e-12);
-            let m = measure_scaling(
+            let m = run_measure_scaling(
                 &sizes,
                 &cfg,
                 Duration::from_micros(1),
@@ -1817,7 +1928,7 @@ mod tests {
             budget: Duration,
         ) -> (SizeRange, Vec<usize>) {
             let tried = std::cell::RefCell::new(Vec::new());
-            let range = discover_sizes(nmin, budget, |n| {
+            let range = discovered(nmin, budget, |n| {
                 tried.borrow_mut().push(n);
                 cost(n as f64)
             });
@@ -2113,7 +2224,7 @@ mod tests {
 
             // A real power law: identified, believed, and not flagged.
             let mut clock = one_call(|n| 50.0 * n * n, 0.02, 1);
-            let stats = scaling_sweep(&cfg, 1, |n| clock(n));
+            let stats = swept(&cfg, 1, |n| clock(n));
             let scaling = stats.scaling.expect("a real power law is identified");
             assert_eq!(2, scaling.power);
             assert!(stats.goodness_of_fit > 0.9, "{}", stats.goodness_of_fit);
@@ -2128,7 +2239,7 @@ mod tests {
             // behaves like - the slope does not need a polynomial to exist
             // - but says it could not vouch for the shape.
             let mut clock = one_call(|n| 40.0 * n * (n + 1.0).ln(), 0.0005, 1);
-            let stats = scaling_sweep(&cfg, 1, |n| clock(n));
+            let stats = swept(&cfg, 1, |n| clock(n));
             assert_eq!(
                 0.0, stats.goodness_of_fit,
                 "an N log N cost is not a polynomial and should say so"

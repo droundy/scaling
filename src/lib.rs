@@ -153,6 +153,47 @@ that nothing described it exactly. Naming those shapes needs a different
 kind of fit and would be a different feature; measuring a power well is the
 thing this does.
 
+# Suites: measuring many benchmarks together
+
+Benchmarks run one after another are measured in different machines. The
+first runs on a cold package and the fiftieth on a warm one, so their
+numbers are not comparable with each other, and neither is either of them
+with the same suite run tomorrow.
+
+[`Config::suite`] measures them interleaved instead, one sample each in
+rotation, so every benchmark's samples spread across the whole session and
+all of them average the same drift. Each `add` returns a token to read that
+benchmark's answer from once [`Suite::run`] has finished:
+
+```
+let cfg = scaling::Config::default();
+let mut suite = cfg.suite();
+let sort = suite.add_input("sort", vec![5, 3, 1, 4, 2], |v: &mut Vec<i32>| v.sort());
+let sum = suite.add("sum", || (0..100u64).sum::<u64>());
+println!("{}", suite.run());
+# let _ = (sort.get().unwrap(), sum.get().unwrap());
+```
+
+A suite is not restricted to one kind or one input type: [`Suite::add_scaling`]
+takes a scaling benchmark and [`Suite::add_comparison`] takes a whole
+[`ComparisonSet`], and the token remembers which, so each answer keeps its
+own type. A comparison counts as *one* participant in the rotation, because
+its round must stay whole for the paired error bar to mean anything - which
+is also fair, since one of its turns runs `k` batches and produces `k`
+[`Stats`].
+
+Measured on eight identical workloads, reversing the declaration order moves
+a sequentially-measured benchmark about three times as far as an interleaved
+one. Two things this does *not* do: it does not make any single benchmark
+more precise - it averages drift in rather than out - and it does not make a
+suite's numbers comparable with a lone [`bench`] call, since interleaving
+leaves every sample starting on a cache the rest of the suite has been
+using.
+
+Each benchmark still gets [`Config::max_time`] of its own running time, so a
+suite of `n` may take `n` times as long as one - the same arithmetic
+[`Config::compare`] uses for two.
+
 # Caveats
 
 ## Caveat 1: Harness overhead
@@ -244,7 +285,9 @@ mod compare;
 mod kway;
 pub mod quiet;
 mod scaling;
+mod suite;
 pub(crate) use bench::{time_batch, time_loop};
+pub(crate) use suite::{block_on, Clock};
 pub(crate) mod significant;
 
 // `self::` because the crate is called `scaling` too, and rustdoc builds
@@ -257,9 +300,11 @@ pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
 pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
+pub use self::suite::{Report, Suite, Token};
 
 use std::f64;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::Arc;
 use std::time::*;
 
@@ -370,18 +415,52 @@ pub struct Config {
     /// this, since they produce two [`Stats`] and would otherwise give each
     /// side half the budget a lone [`bench`] gets for the same target.
     pub max_time: Duration,
-    /// The number of comparison benchmarks that will be taken.
+    /// The multiple-comparison plan, shared by every clone of this `Config`.
     ///
-    /// This is used to reduce the probability of false positives.  Otherwise
-    /// when you are evaluating *many* benchmarks you'd be almost certain to
-    /// see spurious "changes".
-    num_comparisons_planned: u64,
-    /// The Bonferroni limit `num_comparisons_planned` implies, cached
-    /// because the sampling loop consults it after every round.
+    /// See [`Config::with_comparisons_planned`] for what it is for.
+    plan: Arc<Plan>,
+}
+
+/// How many comparisons were promised, how many have happened, and the
+/// significance threshold the promise implies.
+///
+/// All three live behind one `Arc` because [`Config`] is `Clone` and they
+/// are one fact. The count of comparisons *made* always had to be shared -
+/// `Drop` can only check it when it is the last holder - and holding
+/// `planned` per-clone alongside it let two clones disagree about the plan,
+/// with whichever dropped last deciding whether the assertion fired.
+///
+/// Sharing also lets a [`Suite`] fill the plan in on the caller's behalf: it
+/// knows how many comparisons it holds only once the last one is added,
+/// which is after every `Config` clone already exists.
+#[derive(Debug)]
+struct Plan {
+    /// Claimed by each comparison as it starts.
+    made: AtomicU64,
+    /// What was promised.
+    planned: AtomicU64,
+    /// The Bonferroni limit `planned` implies, as `f64::to_bits`. Cached
+    /// because the sampling loop consults it after every round; an atomic
+    /// load is nothing against a batch, where recomputing the inverse normal
+    /// would not be.
     ///
     /// `NaN` until a plan is set, which makes every significance test false.
-    z_alpha: f64,
-    num_comparisons_made: Arc<AtomicU64>,
+    z_alpha: AtomicU64,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Plan {
+            made: AtomicU64::new(0),
+            planned: AtomicU64::new(0),
+            // Not `AtomicU64::new(0)`: an unset plan must read as `NaN`, and
+            // zero bits are the float `0.0`, which would call everything
+            // significant rather than nothing.
+            z_alpha: AtomicU64::new(
+                significant::bonferroni_z_limit(0, significant::FWER).to_bits(),
+            ),
+        }
+    }
 }
 
 impl Default for Config {
@@ -390,9 +469,7 @@ impl Default for Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
             max_time: BENCH_TIME_MAX,
-            num_comparisons_planned: 0,
-            z_alpha: significant::bonferroni_z_limit(0, significant::FWER),
-            num_comparisons_made: Default::default(),
+            plan: Default::default(),
         }
     }
 }
@@ -443,14 +520,46 @@ impl Config {
     /// see spurious "changes".
     ///
     /// This method can only be called once with `comparisons > 0`.
-    pub fn with_comparisons_planned(mut self, comparisons: u64) -> Self {
+    pub fn with_comparisons_planned(self, comparisons: u64) -> Self {
         assert_eq!(
-            self.num_comparisons_planned, 0,
+            self.num_comparisons_planned(),
+            0,
             "only call with_comparisons_planned once!"
         );
-        self.num_comparisons_planned = comparisons;
-        self.z_alpha = significant::bonferroni_z_limit(comparisons, significant::FWER);
+        self.set_comparisons_planned(comparisons);
         self
+    }
+
+    /// What was promised via [`Config::with_comparisons_planned`].
+    pub(crate) fn num_comparisons_planned(&self) -> u64 {
+        self.plan.planned.load(Acquire)
+    }
+
+    /// The Bonferroni limit the plan implies; `NaN` when no plan is set.
+    pub(crate) fn z_alpha(&self) -> f64 {
+        f64::from_bits(self.plan.z_alpha.load(Acquire))
+    }
+
+    /// Record the plan, on a shared cell every clone can see.
+    ///
+    /// Separate from [`Config::with_comparisons_planned`] because a
+    /// [`Suite`] sets it *after* the caller's `Config` exists, and so cannot
+    /// go through a builder that consumes `self`.
+    pub(crate) fn set_comparisons_planned(&self, comparisons: u64) {
+        self.plan.planned.store(comparisons, Release);
+        self.plan.z_alpha.store(
+            significant::bonferroni_z_limit(comparisons, significant::FWER).to_bits(),
+            Release,
+        );
+    }
+
+    /// Claim `n` comparisons against the plan, and say how many had been
+    /// claimed already.
+    ///
+    /// The prior count seeds each comparison's random stream, so consecutive
+    /// comparisons do not choose the same order.
+    pub(crate) fn claim_comparisons(&self, n: u64) -> u64 {
+        self.plan.made.fetch_add(n, Release)
     }
 
     /// The smallest difference worth detecting, in nanoseconds, for a
@@ -479,7 +588,7 @@ impl Config {
         if std_error == 0.0 {
             return true;
         }
-        if self.num_comparisons_planned == 0 {
+        if self.num_comparisons_planned() == 0 {
             // `z_alpha` is `NaN`, so the real rule would never be satisfied
             // and every comparison would spend the whole budget. The results
             // are unusable regardless and `Drop` is about to name the number
@@ -490,7 +599,7 @@ impl Config {
         significant::is_significant(
             self.comparison_goal_ns(baseline_ns),
             std_error,
-            self.z_alpha,
+            self.z_alpha(),
         )
     }
 

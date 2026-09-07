@@ -115,13 +115,116 @@ draws, the input had already averaged itself away, and the ratio sat at 1.07.
 This does not yet replace `compare`, which stays as the two-alternative
 form that needs no names and no plan arithmetic.
 
-### [ ] 4. Interleave dissimilar benchmarks across a suite
+### [x] 4. Interleave dissimilar benchmarks across a suite
 
 Today benchmark #1 runs at t=0 and #50 at t=500s, sampling different thermal
 states. Interleaved, every benchmark's samples spread over the whole
 session, so all of them average the same drift. Needs time-sliced
 scheduling rather than fixed batch counts, since the benchmarks differ in
 input type and duration - more machinery than (3).
+
+*Done*, in `src/suite.rs`: `cfg.suite()`, `add`/`add_input`/`add_gen_input`/
+`add_scaling`/`add_comparison`, then `run()`. Each `add` hands back a token
+to read that benchmark's answer from afterwards, so one suite holds flat
+benchmarks, scaling benchmarks and whole `ComparisonSet`s with their result
+types intact - no enum of kinds, no downcasting.
+
+**Each benchmark is an `async fn` and the scheduler is forty lines.** The
+hard part was never the round robin, it was that "stop in the middle and be
+picked up later" means lifting `unit`, `probed`, the `Running` accumulator,
+the measured-time total and the scratch `Vec<I>` out of a stack frame into a
+struct with a `step` method - four times, once per kind. An `async fn`
+leaves each loop looking like the loop it replaced and has the compiler
+generate that struct, and boxing the future erases `I` and `O` in the same
+move, which is the other thing a heterogeneous suite needed.
+
+No runtime was added, and that is not dependency-aversion:
+
+* The scheduling policy is the feature. `FuturesUnordered` polls in wake
+  order and `async-executor` has its own ready queue; both would be fought.
+* Runtimes park. A general `block_on` sleeps when everything returns
+  `Pending`, waiting for an outside wake that here never comes. `Pending`
+  always means "I have had my turn", so parking would be a deadlock - which
+  is also why a no-op waker is sound and the waker protocol disappears.
+* `async-executor` 1.14 pulls six direct dependencies into a crate that has
+  none off Linux, and a benchmarking crate is a dev-dependency of
+  everything downstream.
+
+**The overhead is nothing measurable**, which was the bet. One poll per
+sample amortises over `unit` iterations exactly as (2)'s batch-level erasure
+does, against `harness-cost`:
+
+| | before | after |
+| --- | --- | --- |
+| `bench` overhead/iter | 0.5927ns | 0.5919ns |
+| `bench_input` | 1.489ns | 1.490ns |
+| `bench_gen_input` | 1.521ns | 1.536ns |
+| 1 round of spin | 3.260ns | 3.261ns |
+| 10k rounds | 2.886us | 2.883us |
+
+Every delta is inside its own spread.
+
+**Position bias, which is what the item is for.** Eight identical workloads
+(one closure type, so one compiled loop - no layout lottery to mistake for a
+positional effect), measured forward and then in reverse declaration order.
+How far each moved between the two orders, alternating which method went
+first so neither always met the colder machine:
+
+| pass | sequential | interleaved |
+| --- | --- | --- |
+| 0 | 0.773% (worst 1.53%) | **0.390% (0.835%)** |
+| 1 | 0.729% (1.28%) | **0.301% (0.618%)** |
+| 2 | 1.194% (2.42%) | **0.232% (0.621%)** |
+
+About three times less movement, consistently. The trend within the table
+says the same thing twice: across the three passes sequential got *worse*
+(0.77 -> 1.19%) while interleaved got *better* (0.39 -> 0.23%), which is
+what a machine warming under the experiment does to a method that samples
+each benchmark once at a fixed time and not to one that spreads it.
+
+That is `position_bias_interleaved_versus_sequential`, `#[ignore]`d, and it
+prints rather than asserts. It is one draw from a stochastic process, and
+(9) deleted four tests of exactly this shape for being asserted as though
+they were not.
+
+Two things fell out along the way:
+
+* **`Config`'s plan is now shared between clones.** `num_comparisons_planned`
+  was a per-clone field while `num_comparisons_made` was behind the `Arc`, so
+  two clones could disagree and whichever dropped last decided whether `Drop`
+  complained. Fixing that was a prerequisite - and it lets `Suite::run` set
+  the plan itself, from the comparisons it is about to make. A caller with
+  five comparison sets no longer counts candidates by hand.
+* **A scaling round is atomic, and for a reason worth writing down.** The
+  plan had scaling yielding part-way through a round on a time slice. It
+  must not: a round contributes one sample at *every* size and the fit
+  compares the sizes against each other, so splitting one across the suite
+  would let the machine drift between the small sizes and the large ones and
+  land that drift in the fitted power. The same argument that makes a
+  comparison's round atomic, one level up.
+
+Still open, and deliberately not attempted here:
+
+* **Cold starts.** Interleaved, every sample begins with the working set
+  evicted by the rest of the suite, where before samples 2..k started warm.
+  That argues for a larger `unit` to dilute it. The null recorded below
+  under "Larger batches" does *not* cover this regime - it interleaved batch
+  *sizes* within one warm benchmark - so the question is open rather than
+  answered.
+* **A round is a new period.** Fifty benchmarks at 100us is a 5ms round, and
+  5ms is five scheduler ticks. The moire at `CONFIG_HZ` is the sharpest
+  finding in this file, and a fixed round period could put every benchmark
+  on the same tick phase every round, in lockstep - worse than what it
+  replaced. The random starting offset per round breaks the lock partially;
+  (6) attacks the period itself, and this may be the regime that makes it
+  pay.
+* **Retirement.** A benchmark that meets its target returns `Ready` and
+  leaves, so the stragglers finish sequentially at the tail - and the
+  stragglers are, by construction, the ones that never converge. `branchy`
+  from (1) would be last man standing every time.
+* **Suite numbers are not standalone numbers.** Everything is slower and
+  noisier under interleaving, uniformly. Comparable within a suite and
+  across runs of it; no longer comparable against a lone `bench()`.
 
 ## Also open
 

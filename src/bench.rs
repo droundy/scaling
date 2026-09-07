@@ -310,7 +310,7 @@ impl Config {
     /// benchmark has `var(batch) ∝ unit` while a deterministic one has
     /// roughly constant per-sample jitter, and this estimator is right for
     /// both.
-    pub fn bench_gen_input<G, F, I, O>(&self, mut gen_input: G, mut f: F) -> Stats
+    pub fn bench_gen_input<G, F, I, O>(&self, gen_input: G, f: F) -> Stats
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
@@ -319,10 +319,36 @@ impl Config {
         // Serialise while pinned: two benchmarks sharing one core measure
         // each other rather than themselves.
         let _exclusive = quiet::exclusive_if_pinned();
-        let start = Instant::now();
+        let clock = Clock::new(self.max_time);
+        block_on(&clock, self.bench_gen_input_async(&clock, gen_input, f))
+    }
+
+    /// The sampling loop itself, which yields to the scheduler between
+    /// samples.
+    ///
+    /// [`Config::bench_gen_input`] is this driven to completion by
+    /// [`block_on`], and a [`Suite`] instead interleaves it with every other
+    /// benchmark's. There is deliberately only the one loop: a synchronous
+    /// copy alongside an asynchronous one is how a stopping rule and the
+    /// verdict it exists to serve drift apart.
+    ///
+    /// Neither pinning nor the exclusive guard is taken here. The caller owns
+    /// them, so that a suite claims the machine once for the whole session
+    /// rather than once per benchmark.
+    pub(crate) async fn bench_gen_input_async<G, F, I, O>(
+        &self,
+        clock: &Clock,
+        mut gen_input: G,
+        mut f: F,
+    ) -> Stats
+    where
+        G: FnMut() -> I,
+        F: FnMut(&mut I) -> O,
+    {
         let mut xs: Vec<I> = Vec::new();
-        let (unit, first_ns, probed) = calibrate(&mut gen_input, &mut f, &mut xs, self, start);
-        if start.elapsed() > self.max_time {
+        let (unit, first_ns, probed) =
+            calibrate(&mut gen_input, &mut f, &mut xs, self, clock).await;
+        if clock.exhausted() {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
             // than paying for a second full-length call just to "warm up".
@@ -350,7 +376,7 @@ impl Config {
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
 
-            let out_of_budget = samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            let out_of_budget = samples.count >= MAX_SAMPLES || clock.exhausted();
             // `MIN_SAMPLES` gates only the *voluntary* stop. Its job is to
             // stop us concluding from a standard error so noisy it might
             // have dipped below the target by luck - a hazard that exists
@@ -381,6 +407,17 @@ impl Config {
                     untrustworthy: samples.count < MIN_SAMPLES,
                 };
             }
+            // One sample per poll. In a suite this is where every other
+            // benchmark takes its turn, so this benchmark's samples end up
+            // spread across the whole session rather than bunched into one
+            // stretch of it.
+            //
+            // The verdict is ignored because `out_of_budget` above asks the
+            // same question one batch later, which keeps the overrun exactly
+            // what it was before interleaving: at most one batch past the
+            // budget, because the clock is read after a sample rather than
+            // before one.
+            clock.yield_now().await;
         }
     }
 }
@@ -447,12 +484,17 @@ where
 /// that reached it, so that probe can be reused as the warmup sample
 /// instead of being measured a second time. `xs` is the same reusable
 /// scratch buffer described on [`time_batch`].
-fn calibrate<G, F, I, O>(
+///
+/// Calibration yields between probes, so that in a suite it is interleaved
+/// like everything else. Doing it eagerly instead would put every
+/// benchmark's choice of batch size at the very start of the session, in the
+/// one thermal state interleaving exists to stop trusting.
+async fn calibrate<G, F, I, O>(
     gen_input: &mut G,
     f: &mut F,
     xs: &mut Vec<I>,
     cfg: &Config,
-    start: Instant,
+    clock: &Clock,
 ) -> (usize, f64, u64)
 where
     G: FnMut() -> I,
@@ -503,11 +545,14 @@ where
         // dominates, and `unit >= unit_cap` is the timing-blind backstop
         // above. Retrying here (rather than accepting) would just re-pay
         // the same large cost for no benefit.
-        if t >= target
-            || total_ns >= probe_ceiling_ns
-            || unit >= unit_cap
-            || start.elapsed() > cfg.max_time
-        {
+        if t >= target || total_ns >= probe_ceiling_ns || unit >= unit_cap || clock.exhausted() {
+            return (unit, t, probed);
+        }
+        // Give the scheduler a turn between probes. This sits *before* the
+        // extrapolation below rather than after it, so that every return from
+        // this function reports a `unit` and a `t` that were measured
+        // together - the caller divides one by the other.
+        if !clock.yield_now().await {
             return (unit, t, probed);
         }
         // Extrapolate from whichever cost is closer to its own ceiling: the
