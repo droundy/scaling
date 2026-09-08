@@ -3,30 +3,10 @@ on: [push, pull_request]
 name: Continuous integration
 
 jobs:
-  # The library on its own, at the version it claims to support. Scoped to
-  # `-p scaling` with default features on purpose: `--all` would pull in
-  # `scaling-macros`, whose proc-macro dependencies want 1.71, so it would
-  # test the workspace's floor rather than the library's and there would be
-  # no way left to notice the library itself drifting off 1.66.
+  # One floor for the whole workspace, tested with the feature on, since
+  # that is what sets it.
   msrv:
-    name: Library on its MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.66.0
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: -p scaling
-
-  # Everything, including the registry feature and the macros crate, on the
-  # version *those* need.
-  registry-msrv:
-    name: Registry on its MSRV
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -73,9 +53,10 @@ jobs:
           profile: minimal
           toolchain: ${{ matrix.rust }}
           override: true
-      # Both ways round: with the feature off the crate must still build
+      # Both ways round. With the feature off the crate must still build
       # with no dependencies at all, which is the thing easiest to break by
-      # accident and hardest to notice.
+      # accident and hardest to notice - nothing fails, the dependency tree
+      # just quietly grows.
       - uses: actions-rs/cargo@v1
         with:
           command: test

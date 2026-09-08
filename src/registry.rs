@@ -161,11 +161,15 @@ pub enum Kind {
 }
 
 impl fmt::Debug for Kind {
-    /// Written out rather than derived, for two reasons that happen to
-    /// agree. A derived one would print the shims as bare addresses, which
-    /// tell a reader nothing; and deriving `Debug` over the higher-ranked
-    /// `AddAlt` needs a compiler newer than this crate supports, so the
-    /// derive quietly raised the floor for everyone, feature or no feature.
+    /// Written out rather than derived, because a derived one prints the
+    /// shims as bare addresses and an address tells a reader nothing; what
+    /// is worth seeing about an alternative is the input type it wants.
+    ///
+    /// It was once necessary as well as nicer - deriving over the
+    /// higher-ranked `AddAlt` does not compile before 1.71, so while this
+    /// crate supported 1.66 the derive silently raised the floor for
+    /// everyone, feature or no feature. That is no longer the reason, but it
+    /// is worth knowing that this derive is not free on older compilers.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Kind::Flat(_) => f.write_str("Flat"),
@@ -360,9 +364,9 @@ pub struct MatrixCandidate {
 }
 
 impl fmt::Debug for MatrixCandidate {
-    /// Hand-written for the same reasons as [`Kind`]'s: the shims are noise
-    /// as addresses, and deriving over `AddAlt` demands a newer compiler
-    /// than this crate claims to need.
+    /// Hand-written for the same reason as [`Kind`]'s: the shims are noise
+    /// as addresses, and what is worth seeing is what this candidate is and
+    /// where it came from.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MatrixCandidate")
             .field("matrix", &self.matrix)
