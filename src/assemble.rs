@@ -258,13 +258,13 @@ pub fn plan(
         // with no generator takes `()`, and its members must expect `()`.
         let gen_input = gens_by_group.get(name).and_then(|gs| gs.first()).copied();
         let (gen_type, gen_name) = match gen_input {
-            Some(g) => (g.type_id, g.type_name),
+            Some(g) => ((g.type_id)(), g.type_name),
             None => (std::any::TypeId::of::<()>(), "()"),
         };
         let mut mismatched = false;
         for m in &members {
             if let Kind::Alt { input_type, .. } = &m.kind {
-                if *input_type != gen_type {
+                if input_type() != gen_type {
                     problems.push(Diagnostic::InputTypeMismatch {
                         group: name.to_string(),
                         member: m.name.to_string(),
@@ -301,13 +301,15 @@ pub fn plan(
 mod tests {
     use super::*;
     use crate::registry::ErasedInput;
-    use crate::{ComparisonSet, Config, Suite};
+    use crate::{ComparisonSet, Config, Stats, Suite, Token};
     use std::any::TypeId;
 
     // Shims that do nothing. Assembly never calls them - it decides what
     // *would* be run - so a plan can be checked without a machine claim, a
     // benchmark, or a linker.
-    fn noop_flat(_: &mut Suite<'_>, _: &Config, _: &str) {}
+    fn noop_flat(suite: &mut Suite<'_>, _: &Config, name: &str) -> Token<Stats> {
+        suite.add(name, || ())
+    }
     fn noop_alt<'a>(
         set: ComparisonSet<'a, ErasedInput>,
         _: &str,
@@ -342,7 +344,7 @@ mod tests {
             is_baseline,
             kind: Kind::Alt {
                 add: noop_alt,
-                input_type: TypeId::of::<I>(),
+                input_type: TypeId::of::<I>,
                 input_type_name: type_name,
             },
         }
@@ -351,7 +353,7 @@ mod tests {
     fn generator<I: 'static>(group: &'static str, type_name: &'static str) -> GenInputRegistration {
         GenInputRegistration {
             group,
-            type_id: TypeId::of::<I>(),
+            type_id: TypeId::of::<I>,
             type_name,
             make: || ErasedInput::new(()),
         }

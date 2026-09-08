@@ -53,7 +53,11 @@
 //!   nothing at all.
 
 use super::*;
+#[cfg(feature = "registry")]
+use crate::registry::{GenInputRegistration, Kind, Registered};
 use std::cell::Cell;
+#[cfg(feature = "registry")]
+use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -365,6 +369,17 @@ impl<T: Clone> Token<T> {
     }
 }
 
+impl<T> fmt::Debug for Token<T> {
+    /// Deliberately not `where T: Debug`. A token is a handle, and what a
+    /// reader wants of one is whether its answer has arrived yet; the answer
+    /// itself is what [`Token::get`] and [`Report`] are for.
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("Token")
+            .field("measured", &self.cell().is_some())
+            .finish()
+    }
+}
+
 /// A result that can be shown in the suite's table, whatever its type.
 ///
 /// `Arc<Mutex<Option<T>>>` coerces straight to `Arc<dyn Reportable>`, so the
@@ -635,6 +650,119 @@ impl<'a> Suite<'a> {
         Report {
             entries: self.entries,
         }
+    }
+}
+
+/// Where the answers of registered benchmarks appear once the suite has run.
+///
+/// A [`Report`] shows everything, but only as text. This is how a caller
+/// reaches one particular answer afterwards - to assert on it in a test, or
+/// to feed it somewhere - without parsing the report back.
+///
+/// Keyed by the name the benchmark registered under. Split by kind rather
+/// than mixed, because the three answers are different types and a token
+/// remembers which: that is exactly what stops a caller having to downcast.
+#[cfg(feature = "registry")]
+#[derive(Debug, Default)]
+pub struct RegisteredTokens {
+    /// Flat benchmarks, by name.
+    pub flat: BTreeMap<String, Token<Stats>>,
+    /// Scaling benchmarks, by name.
+    pub scaling: BTreeMap<String, Token<ScalingStats>>,
+    /// Comparison groups, by group name.
+    pub comparisons: BTreeMap<String, Token<Comparisons>>,
+}
+
+#[cfg(feature = "registry")]
+impl<'a> Suite<'a> {
+    /// Add every benchmark registered anywhere in this binary.
+    ///
+    /// Discovery only; the suite is otherwise unchanged, and benchmarks added
+    /// by hand before or after this call sit alongside the discovered ones
+    /// and are measured the same way. Calling it twice would add everything
+    /// twice, so do not.
+    ///
+    /// Registered comparisons go through [`Suite::add_comparison`] like any
+    /// other, so they are counted towards the suite's multiple-comparison
+    /// plan by the machinery that was already there.
+    ///
+    /// # Panics
+    ///
+    /// If the registrations do not make sense together - a duplicate name, a
+    /// comparison group with no baseline or two, an alternative whose input
+    /// type is not the one its group generates. The panic lists *every*
+    /// problem rather than the first, since they are found before anything
+    /// runs and fixing them one rebuild at a time would be tedious.
+    ///
+    /// Use [`Suite::try_add_registered`] to handle them instead, which is
+    /// what a runner printing diagnostics of its own should do.
+    pub fn add_registered(&mut self) -> RegisteredTokens {
+        match self.try_add_registered() {
+            Ok(tokens) => tokens,
+            Err(problems) => {
+                let mut msg = String::from("registered benchmarks do not make sense together:");
+                for p in &problems {
+                    msg.push_str("\n  - ");
+                    msg.push_str(&p.to_string());
+                }
+                panic!("{msg}");
+            }
+        }
+    }
+
+    /// [`Suite::add_registered`], handing back what is wrong rather than
+    /// panicking.
+    ///
+    /// Nothing is added when this returns `Err`: the registrations are
+    /// checked in full before the first one is added, so a suite is never
+    /// left holding half of a set that did not check out.
+    pub fn try_add_registered(
+        &mut self,
+    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
+        let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
+        let gens: Vec<&'static GenInputRegistration> =
+            inventory::iter::<GenInputRegistration>().collect();
+        let plan = crate::assemble::plan(&regs, &gens)?;
+
+        let cfg = self.cfg;
+        let mut tokens = RegisteredTokens::default();
+
+        for r in plan.flat {
+            match r.kind {
+                Kind::Flat(add) => {
+                    tokens
+                        .flat
+                        .insert(r.name.to_string(), add(self, cfg, r.name));
+                }
+                Kind::Scaling(add) => {
+                    tokens
+                        .scaling
+                        .insert(r.name.to_string(), add(self, cfg, r.name));
+                }
+                // `plan` puts anything with a group in `groups`, so a bare
+                // alternative cannot reach here.
+                Kind::Alt { .. } => unreachable!("an alternative without a group"),
+            }
+        }
+
+        for group in plan.groups {
+            // One generator for the whole group, cloned per alternative, which
+            // is what makes the differences paired - see `ErasedInput`.
+            let make = group.make_input();
+            let mut set = cfg.comparison_gen_input(make);
+            for m in group.members {
+                match m.kind {
+                    Kind::Alt { add, .. } => set = add(set, m.name),
+                    // `plan` only puts alternatives in a group.
+                    _ => unreachable!("a group member that is not an alternative"),
+                }
+            }
+            tokens
+                .comparisons
+                .insert(group.name.to_string(), self.add_comparison(group.name, set));
+        }
+
+        Ok(tokens)
     }
 }
 

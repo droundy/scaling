@@ -14,7 +14,7 @@
 //! See `REGISTRATION.md` for the design this implements and the stages still
 //! to come.
 
-use crate::{ComparisonSet, Config, Suite};
+use crate::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
 
 /// One registered benchmark.
@@ -93,11 +93,15 @@ pub enum Kind {
     /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
     /// [`Suite::add_gen_input`] - which of the three, and any input
     /// generator, is baked into the shim.
-    Flat(fn(&mut Suite<'_>, &Config, &str)),
+    ///
+    /// Hands back the token that `add` returned, so that a caller can still
+    /// look this benchmark's answer up by name after the suite has run
+    /// rather than only reading it out of the printed report.
+    Flat(fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>),
     /// Adds itself with [`Suite::add_scaling`] or
     /// [`Suite::add_scaling_gen`]. `nmin` is baked in too, since this
     /// signature has nowhere to pass it.
-    Scaling(fn(&mut Suite<'_>, &Config, &str)),
+    Scaling(fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>),
     /// Adds itself to a comparison group's [`ComparisonSet`].
     Alt {
         /// Takes the set and gives it back because `ComparisonSet` is a
@@ -112,7 +116,13 @@ pub enum Kind {
         /// with the group's generator *before* anything runs. Without it the
         /// first mismatched downcast would panic from inside the scheduler,
         /// naming nothing useful.
-        input_type: TypeId,
+        ///
+        /// A function returning the id rather than the id itself, because a
+        /// registration is a `static` and so must be built in a `const`
+        /// context - where `TypeId::of` only became usable in Rust 1.91. A
+        /// `fn` pointer is const-constructible on every version, and calling
+        /// it during assembly costs nothing worth counting.
+        input_type: fn() -> TypeId,
         /// The same type, spelled the way the source spells it, because a
         /// `TypeId` says nothing to a reader and a diagnostic has to.
         ///
@@ -234,9 +244,10 @@ impl Clone for ErasedInput {
 pub struct GenInputRegistration {
     /// The group this generates input for.
     pub group: &'static str,
-    /// `TypeId::of::<I>()`, so assembly can check the group's alternatives
-    /// agree with it.
-    pub type_id: TypeId,
+    /// The generated input's type, so assembly can check the group's
+    /// alternatives agree with it. A function for the same reason
+    /// [`Kind::Alt`]'s is: a registration is built in a `const` context.
+    pub type_id: fn() -> TypeId,
     /// The same type as the source spells it, for diagnostics. See
     /// [`Kind::Alt::input_type_name`](Kind#variant.Alt.field.input_type_name).
     pub type_name: &'static str,
@@ -332,7 +343,7 @@ mod tests {
             }
             match r.kind {
                 Kind::Flat(add) => {
-                    add(&mut suite, &cfg, r.name);
+                    let _token = add(&mut suite, &cfg, r.name);
                     added += 1;
                 }
                 _ => panic!("the self-test registrations are all flat"),
@@ -353,13 +364,13 @@ mod tests {
     // Deliberately at item position in a test module: that is where
     // `submit!` has to work, and it is the arrangement a macro produces.
     #[cfg(feature = "registry")]
-    fn add_alpha(suite: &mut Suite<'_>, _cfg: &Config, name: &str) {
-        suite.add(name, || (0..32u64).sum::<u64>());
+    fn add_alpha(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
+        suite.add(name, || (0..32u64).sum::<u64>())
     }
 
     #[cfg(feature = "registry")]
-    fn add_beta(suite: &mut Suite<'_>, _cfg: &Config, name: &str) {
-        suite.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort());
+    fn add_beta(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
+        suite.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort())
     }
 
     #[cfg(feature = "registry")]

@@ -99,10 +99,11 @@ pub struct Registered {
 }
 
 pub enum Kind {
-    /// Calls suite.add / add_input / add_gen_input with the real closure.
-    Flat(fn(&mut Suite<'_>, &Config, &str)),
+    /// Calls suite.add / add_input / add_gen_input with the real closure,
+    /// handing back the token so results stay reachable by name.
+    Flat(fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>),
     /// Calls suite.add_scaling / add_scaling_gen; nmin baked into the fn.
-    Scaling(fn(&mut Suite<'_>, &Config, &str)),
+    Scaling(fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>),
     /// One alternative in a comparison group. `ComparisonSet` is a consuming
     /// builder, so this takes and returns it.
     Alt(for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>),
@@ -183,14 +184,19 @@ a backstop, not the error path.
 ```rust
 pub struct GenInputRegistration {
     pub group: &'static str,
-    pub type_id: TypeId,
+    /// A function returning the id, not the id itself: a registration is a
+    /// `static`, so it is built in a `const` context, and `TypeId::of` only
+    /// became usable in one in Rust 1.91. A `fn` pointer is
+    /// const-constructible on every version.
+    pub type_id: fn() -> TypeId,
+    pub type_name: &'static str,
     pub make: fn() -> ErasedInput,
 }
 
 pub struct MatrixCandidate {
     pub matrix: &'static str,
     pub name: &'static str,
-    pub input_type: TypeId,          // from the fn signature
+    pub input_type: fn() -> TypeId,  // from the fn signature; see above
     pub is_baseline: bool,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
@@ -615,6 +621,20 @@ actually get linked in?" — the question `inventory`'s failure modes most
 often provoke.
 
 ---
+
+## Two constraints found while building this
+
+**A registration is a `static`, so everything in it must be const.** That
+rules out `TypeId::of::<I>()` as a field value: it only became usable in a
+`const` context in Rust 1.91, far above this crate's 1.66. Registrations
+therefore store `fn() -> TypeId` and assembly calls it. Worth knowing before
+adding any other field - `stringify!` output and `env!` are fine, most things
+that look like values are not. Clippy's `incompatible_msrv` lint catches
+this; a modern toolchain alone does not, since it compiles happily.
+
+**`inventory` wants Rust 1.68**, above this crate's 1.66. Being optional it
+only raises the floor for crates enabling `registry`; the default build is
+unaffected.
 
 ## `inventory` risk
 
