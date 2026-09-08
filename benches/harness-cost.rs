@@ -40,7 +40,7 @@
 //! library has. Two ways of measuring one quantity that agree are evidence;
 //! the interesting day is the one where they stop agreeing.
 
-use scaling::{bench, bench_env, bench_gen_env, bench_scaling, bench_scaling_gen};
+use scaling::{bench, bench_gen_input, bench_input, bench_scaling, bench_scaling_gen};
 use std::time::{Duration, Instant};
 
 /// How many independent runs each row is built from.
@@ -70,10 +70,7 @@ impl Row {
         Row::measure_noting(name, move || (run(), String::new()))
     }
 
-    fn measure_noting(
-        name: &'static str,
-        mut run: impl FnMut() -> (f64, String),
-    ) -> Row {
+    fn measure_noting(name: &'static str, mut run: impl FnMut() -> (f64, String)) -> Row {
         let mut values = Vec::with_capacity(REPEATS);
         let mut notes = Vec::with_capacity(REPEATS);
         let mut total = Duration::ZERO;
@@ -142,7 +139,10 @@ fn table(title: &str, unit: &str, rows: &[Row]) {
     println!("{}", "-".repeat(title.len()));
     println!(
         "  {:<26} {:>12} {:>12} {:>10}",
-        "", format!("reported{unit}"), "spread", "wall"
+        "",
+        format!("reported{unit}"),
+        "spread",
+        "wall"
     );
     for r in rows {
         // Spread as a share of the value is the comparable form, but it is
@@ -200,17 +200,17 @@ fn main() {
     // What the harness adds to each iteration.
     //
     // An empty closure costs nothing, so whatever `bench` reports for one
-    // is the harness: the loop counter, the `black_box`, and for the `env`
-    // forms the lookup into the environment vector. The crate documents
+    // is the harness: the loop counter, the `black_box`, and for the `input`
+    // forms the lookup into the input vector. The crate documents
     // this as negligible; this is the measurement behind that claim.
     // ----------------------------------------------------------------
     let overhead = [
         Row::measure("bench", || bench(|| {}).ns_per_iter),
-        Row::measure("bench_env", || {
-            bench_env(vec![0u8; 16], |v| v.len()).ns_per_iter
+        Row::measure("bench_input", || {
+            bench_input(vec![0u8; 16], |v| v.len()).ns_per_iter
         }),
-        Row::measure("bench_gen_env", || {
-            bench_gen_env(|| vec![0u8; 16], |v| v.len()).ns_per_iter
+        Row::measure("bench_gen_input", || {
+            bench_gen_input(|| vec![0u8; 16], |v| v.len()).ns_per_iter
         }),
     ];
     table("Per-iteration harness overhead", "/iter", &overhead);
@@ -284,18 +284,20 @@ fn main() {
         }),
         Row::measure_noting("O(N log N) sort", || {
             let s = bench_scaling_gen(
-                |n| (0..n as u64).map(|i| (i * 13 + 5) % 137).collect::<Vec<_>>(),
+                |n| {
+                    (0..n as u64)
+                        .map(|i| (i * 13 + 5) % 137)
+                        .collect::<Vec<_>>()
+                },
                 |v| v.sort(),
                 1,
             );
             (reported(&s), note(&s))
         }),
         Row::measure_noting("O(N) sleep", || {
-            let s =
-                bench_scaling(|n| std::thread::sleep(Duration::from_millis(n as u64)), 1);
+            let s = bench_scaling(|n| std::thread::sleep(Duration::from_millis(n as u64)), 1);
             (reported(&s), note(&s))
         }),
     ];
     table("bench_scaling(), by benchmark", "/N^p", &scaling);
-
 }

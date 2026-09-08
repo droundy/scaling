@@ -55,9 +55,9 @@ const MIN_SAMPLES: usize = 6;
 /// ```
 ///
 /// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is [`bench_env`] and [`bench_gen_env`],
+/// the cost moves. The exception is [`bench_input`] and [`bench_gen_input`],
 /// which report about 20% lower, because a smaller batch means a smaller
-/// environment vector to index into - that lookup is harness overhead
+/// input vector to index into - that lookup is harness overhead
 /// rather than the benchmark, so measuring less of it is a gain, but it is
 /// a visible change in what those two report.
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
@@ -69,7 +69,6 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 /// budget, and at [`SAMPLE_TIME`] it allows ~100_000 samples, ten times
 /// below this.
 const MAX_SAMPLES: usize = 1_000_000;
-
 
 /// Statistics for a benchmark run.
 #[derive(Debug, PartialEq, Clone)]
@@ -100,7 +99,7 @@ pub struct Stats {
     /// 32-bit `usize` could not hold.
     pub iterations: u64,
     /// How many samples were taken (ie. how many times we allocated the
-    /// environment and measured the time).
+    /// input and measured the time).
     pub samples: usize,
     /// `true` if the benchmark ran out of time before reaching its accuracy
     /// target: the answer is real, just less precise than you asked for.
@@ -131,7 +130,6 @@ impl Stats {
         self.std_error / self.ns_per_iter
     }
 }
-
 
 impl Display for Stats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -183,7 +181,6 @@ impl Display for Stats {
     }
 }
 
-
 /// Run a benchmark, with default accuracy (see [`Config`]).
 ///
 /// The return value of `f` is not used, but we trick the optimiser into
@@ -197,89 +194,86 @@ where
     Config::default().bench(f)
 }
 
-/// Run a benchmark with an environment, with default accuracy (see
+/// Run a benchmark with an input, with default accuracy (see
 /// [`Config`]).
 ///
-/// See [`Config::bench_env`] for the full documentation.
-pub fn bench_env<F, I, O>(env: I, f: F) -> Stats
+/// See [`Config::bench_input`] for the full documentation.
+pub fn bench_input<F, I, O>(input: I, f: F) -> Stats
 where
     F: FnMut(&mut I) -> O,
     I: Clone,
 {
-    Config::default().bench_env(env, f)
+    Config::default().bench_input(input, f)
 }
 
-/// Run a benchmark with a generated environment, with default
+/// Run a benchmark with a generated input, with default
 /// accuracy (see [`Config`]).
 ///
-/// See [`Config::bench_gen_env`] for the full documentation.
-pub fn bench_gen_env<G, F, I, O>(gen_env: G, f: F) -> Stats
+/// See [`Config::bench_gen_input`] for the full documentation.
+pub fn bench_gen_input<G, F, I, O>(gen_input: G, f: F) -> Stats
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    Config::default().bench_gen_env(gen_env, f)
+    Config::default().bench_gen_input(gen_input, f)
 }
-
 
 impl Config {
     /// Run a benchmark.
     ///
     /// See [`bench`] for the default-accuracy version, and
-    /// [`Config::bench_gen_env`] for the algorithm.
+    /// [`Config::bench_gen_input`] for the algorithm.
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where
         F: FnMut() -> O,
     {
-        self.bench_env((), |_| f())
+        self.bench_input((), |_| f())
     }
 
-    /// Run a benchmark with an environment.
+    /// Run a benchmark with an input.
     ///
-    /// The value `env` is a clonable prototype for the "benchmark
-    /// environment". Each iteration receives a freshly-cloned mutable copy
-    /// of this environment. The time taken to clone the environment is not
+    /// The value `input` is a clonable prototype. Each iteration receives a
+    /// freshly-cloned mutable copy of it. The time taken to clone is not
     /// included in the results.
     ///
     /// Nb: it's very possible that we will end up allocating many (>10,000)
-    /// copies of `env` at the same time. Probably best to keep it small.
+    /// copies of `input` at the same time. Probably best to keep it small.
     ///
-    /// See [`Config::bench_gen_env`] and the module docs for more.
+    /// See [`Config::bench_gen_input`] and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_env` performs a lookup into a big vector in
-    /// order to get the environment for that iteration. If your benchmark
+    /// Every iteration, `bench_input` performs a lookup into a big vector in
+    /// order to get the input for that iteration. If your benchmark
     /// is memory-intensive then this could, in the worst case, amount to a
     /// systematic cache-miss (ie. this vector would have to be fetched from
     /// DRAM at the start of every iteration). In this case the results could
     /// be affected by a hundred nanoseconds. This is a worst-case scenario
     /// however, and I haven't actually been able to trigger it in
     /// practice... but it's good to be aware of the possibility.
-    pub fn bench_env<F, I, O>(&self, env: I, f: F) -> Stats
+    pub fn bench_input<F, I, O>(&self, input: I, f: F) -> Stats
     where
         F: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.bench_gen_env(move || env.clone(), f)
+        self.bench_gen_input(move || input.clone(), f)
     }
 
-    /// Run a benchmark with a generated environment.
+    /// Run a benchmark with a generated input.
     ///
-    /// The function `gen_env` creates the "benchmark environment" for the
-    /// computation. Each iteration receives a freshly-created environment.
-    /// The time taken to create the environment is not included in the
-    /// results.
+    /// The function `gen_input` creates the input for the computation. Each
+    /// iteration receives a freshly-created one. The time taken to create
+    /// them is not included in the results.
     ///
     /// Nb: it's very possible that we will end up generating many (>10,000)
-    /// copies of `env` at the same time. Probably best to keep it small.
+    /// copies of `input` at the same time. Probably best to keep it small.
     ///
     /// See `bench` and the module docs for more.
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_gen_env` performs a lookup into a big vector
-    /// in order to get the environment for that iteration. If your
+    /// Every iteration, `bench_gen_input` performs a lookup into a big vector
+    /// in order to get the input for that iteration. If your
     /// benchmark is memory-intensive then this could, in the worst case,
     /// amount to a systematic cache-miss (ie. this vector would have to be
     /// fetched from DRAM at the start of every iteration). In this case the
@@ -316,16 +310,42 @@ impl Config {
     /// benchmark has `var(batch) ∝ unit` while a deterministic one has
     /// roughly constant per-sample jitter, and this estimator is right for
     /// both.
-    pub fn bench_gen_env<G, F, I, O>(&self, mut gen_env: G, mut f: F) -> Stats
+    pub fn bench_gen_input<G, F, I, O>(&self, gen_input: G, f: F) -> Stats
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
     {
-        quiet::pin_if_requested();
-        let start = Instant::now();
+        let _machine = Machine::claim();
+        let clock = Clock::new(self.max_time);
+        block_on(&clock, self.bench_gen_input_async(&clock, gen_input, f))
+    }
+
+    /// The sampling loop itself, which yields to the scheduler between
+    /// samples.
+    ///
+    /// [`Config::bench_gen_input`] is this driven to completion by
+    /// [`block_on`], and a [`Suite`] instead interleaves it with every other
+    /// benchmark's. There is deliberately only the one loop: a synchronous
+    /// copy alongside an asynchronous one is how a stopping rule and the
+    /// verdict it exists to serve drift apart.
+    ///
+    /// Neither pinning nor the exclusive guard is taken here. The caller owns
+    /// them, so that a suite claims the machine once for the whole session
+    /// rather than once per benchmark.
+    pub(crate) async fn bench_gen_input_async<G, F, I, O>(
+        &self,
+        clock: &Clock,
+        mut gen_input: G,
+        mut f: F,
+    ) -> Stats
+    where
+        G: FnMut() -> I,
+        F: FnMut(&mut I) -> O,
+    {
         let mut xs: Vec<I> = Vec::new();
-        let (unit, first_ns, probed) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
-        if start.elapsed() > self.max_time {
+        let (unit, first_ns, probed) =
+            calibrate(&mut gen_input, &mut f, &mut xs, self, clock).await;
+        if clock.exhausted() {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
             // than paying for a second full-length call just to "warm up".
@@ -341,13 +361,19 @@ impl Config {
         // Otherwise the probe that finished calibration serves as the
         // warmup sample and is discarded.
 
+        // What the floor counts: time spent *running* `f`, not wall-clock
+        // time. A benchmark whose input is expensive to build would
+        // otherwise satisfy the floor by building inputs, which is not
+        // evidence about anything.
+        let mut measured_ns = 0.0;
         let mut samples = Running::default();
         loop {
-            let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
+            let (_, t) = time_batch(&mut gen_input, &mut f, &mut xs, unit);
+            measured_ns += t;
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
 
-            let out_of_budget = samples.count >= MAX_SAMPLES || start.elapsed() > self.max_time;
+            let out_of_budget = samples.count >= MAX_SAMPLES || clock.exhausted();
             // `MIN_SAMPLES` gates only the *voluntary* stop. Its job is to
             // stop us concluding from a standard error so noisy it might
             // have dipped below the target by luck - a hazard that exists
@@ -357,8 +383,9 @@ impl Config {
             // rather than discarding it. A slow function with a short
             // `max_time` may only fit three or four samples, and three
             // samples' worth of error bar beats none.
-            let precise_enough =
-                samples.count >= MIN_SAMPLES && self.accuracy_met(mean, std_error);
+            let precise_enough = samples.count >= MIN_SAMPLES
+                && measured_ns >= MIN_SAMPLE_TIME.as_secs_f64() * 1e9
+                && self.accuracy_met(mean, std_error);
             if precise_enough || out_of_budget {
                 return Stats {
                     ns_per_iter: mean,
@@ -377,17 +404,27 @@ impl Config {
                     untrustworthy: samples.count < MIN_SAMPLES,
                 };
             }
+            // One sample per poll. In a suite this is where every other
+            // benchmark takes its turn, so this benchmark's samples end up
+            // spread across the whole session rather than bunched into one
+            // stretch of it.
+            //
+            // The verdict is ignored because `out_of_budget` above asks the
+            // same question one batch later, which keeps the overrun exactly
+            // what it was before interleaving: at most one batch past the
+            // budget, because the clock is read after a sample rather than
+            // before one.
+            clock.yield_now().await;
         }
     }
-
 }
 
 /// Time `iters` back-to-back calls of `f`, each on its own freshly
-/// generated environment. Returns `(setup_ns, timed_ns)`: the time spent
-/// generating and collecting the `iters` environments (untimed, but still
+/// generated input. Returns `(setup_ns, timed_ns)`: the time spent
+/// generating and collecting the `iters` inputs (untimed, but still
 /// real wall-clock cost that [`calibrate`] must account for so it cannot be
 /// tricked by a benchmark whose timed cost is optimised away), and the time
-/// spent actually running `f` over them. Environments are all created
+/// spent actually running `f` over them. Inputs are all created
 /// before the clock for `timed_ns` starts and all dropped after it stops,
 /// so neither generation nor drop pollutes `timed_ns` itself.
 ///
@@ -402,23 +439,41 @@ impl Config {
 /// one benchmark call can leave enough of a mark on process-wide allocator
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
-fn time_batch<G, F, I, O>(gen_env: &mut G, f: &mut F, xs: &mut Vec<I>, iters: usize) -> (f64, f64)
+pub(crate) fn time_batch<G, F, I, O>(
+    gen_input: &mut G,
+    f: &mut F,
+    xs: &mut Vec<I>,
+    iters: usize,
+) -> (f64, f64)
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
     let setup_start = Instant::now();
     xs.clear();
-    xs.extend(std::iter::repeat_with(&mut *gen_env).take(iters));
+    xs.extend(std::iter::repeat_with(&mut *gen_input).take(iters));
     let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
+    (setup_ns, time_loop(f, xs))
+}
+
+/// Run `f` once over every input in `xs`, and say how long that took in
+/// nanoseconds.
+///
+/// The timed part of [`time_batch`], split out because
+/// [`crate::ComparisonSet`] prepares one batch of inputs and then hands the
+/// same batch - cloned - to each alternative in turn, so its generating and
+/// its timing happen in different places.
+pub(crate) fn time_loop<F, I, O>(f: &mut F, xs: &mut [I]) -> f64
+where
+    F: FnMut(&mut I) -> O,
+{
     let start = Instant::now();
     // We iterate over `&mut *xs` rather than draining it, because we don't
-    // want to drop the env values until after the clock has stopped.
+    // want to drop the input values until after the clock has stopped.
     for x in &mut *xs {
         black_box(f(x));
     }
-    let timed_ns = start.elapsed().as_secs_f64() * 1e9;
-    (setup_ns, timed_ns)
+    start.elapsed().as_secs_f64() * 1e9
 }
 
 /// Find a batch size whose measured duration reaches `cfg.sample_time`.
@@ -426,12 +481,17 @@ where
 /// that reached it, so that probe can be reused as the warmup sample
 /// instead of being measured a second time. `xs` is the same reusable
 /// scratch buffer described on [`time_batch`].
-fn calibrate<G, F, I, O>(
-    gen_env: &mut G,
+///
+/// Calibration yields between probes, so that in a suite it is interleaved
+/// like everything else. Doing it eagerly instead would put every
+/// benchmark's choice of batch size at the very start of the session, in the
+/// one thermal state interleaving exists to stop trusting.
+async fn calibrate<G, F, I, O>(
+    gen_input: &mut G,
     f: &mut F,
     xs: &mut Vec<I>,
     cfg: &Config,
-    start: Instant,
+    clock: &Clock,
 ) -> (usize, f64, u64)
 where
     G: FnMut() -> I,
@@ -440,9 +500,9 @@ where
     // A ceiling on the *total* cost of one probe, setup as well as timing.
     // Ordinarily the extrapolation below is driven by the timed portion
     // approaching `SAMPLE_TIME`, but when `f`'s cost is optimised away (see
-    // the module docs' "Pure functions" caveat, e.g. `bench_env(v, |_| {})`)
+    // the module docs' "Pure functions" caveat, e.g. `bench_input(v, |_| {})`)
     // that portion never grows however large `unit` gets - while untimed
-    // environment construction does, unboundedly, and before the
+    // input construction does, unboundedly, and before the
     // `start.elapsed() > cfg.max_time` check below can ever run, since the
     // allocation is itself what takes the time. A hundredth of `max_time`
     // rather than some large fraction of it, to bound memory as well: on
@@ -454,7 +514,7 @@ where
         * 1e9;
     // Two more ceilings on `unit`, needing no timing at all, whichever is
     // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with
-    // `f` *and* the environment both trivial (`bench(|| {})`, `I` of `()`)
+    // `f` *and* the input both trivial (`bench(|| {})`, `I` of `()`)
     // the optimiser can delete the whole batch, so `setup_ns` and `t` read
     // as ~0 however large `unit` grows. `MAX_CALIBRATION_BYTES` covers an
     // `I` whose per-clone cost is real but too small for `probe_ceiling_ns`
@@ -462,7 +522,7 @@ where
     // `size_of` sees a `Vec` or `String` as its inline handle only. That
     // last case is left to the wall-clock ceiling above, which bounds it
     // only indirectly: between the three every `I` has some backstop and
-    // none has a hard guarantee, so keep environments small.
+    // none has a hard guarantee, so keep inputs small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -473,7 +533,7 @@ where
     // `Stats::iterations` even though their timings are discarded.
     let mut probed = 0u64;
     loop {
-        let (setup_ns, t) = time_batch(gen_env, f, xs, unit);
+        let (setup_ns, t) = time_batch(gen_input, f, xs, unit);
         probed += unit as u64;
         let total_ns = setup_ns + t;
         // Accept immediately, without ever retrying at this size, as soon
@@ -482,11 +542,14 @@ where
         // dominates, and `unit >= unit_cap` is the timing-blind backstop
         // above. Retrying here (rather than accepting) would just re-pay
         // the same large cost for no benefit.
-        if t >= target
-            || total_ns >= probe_ceiling_ns
-            || unit >= unit_cap
-            || start.elapsed() > cfg.max_time
-        {
+        if t >= target || total_ns >= probe_ceiling_ns || unit >= unit_cap || clock.exhausted() {
+            return (unit, t, probed);
+        }
+        // Give the scheduler a turn between probes. This sits *before* the
+        // extrapolation below rather than after it, so that every return from
+        // this function reports a `unit` and a `t` that were measured
+        // together - the caller divides one by the other.
+        if !clock.yield_now().await {
             return (unit, t, probed);
         }
         // Extrapolate from whichever cost is closer to its own ceiling: the
@@ -503,7 +566,6 @@ where
             .min(unit_cap);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -575,11 +637,11 @@ mod tests {
     fn noop() {
         println!();
         println!("noop base: {}", bench(|| {}));
-        println!("noop 0:    {}", bench_env(vec![0u64; 0], |_| {}));
-        println!("noop 16:   {}", bench_env(vec![0u64; 16], |_| {}));
-        println!("noop 64:   {}", bench_env(vec![0u64; 64], |_| {}));
-        println!("noop 256:  {}", bench_env(vec![0u64; 256], |_| {}));
-        println!("noop 512:  {}", bench_env(vec![0u64; 512], |_| {}));
+        println!("noop 0:    {}", bench_input(vec![0u64; 0], |_| {}));
+        println!("noop 16:   {}", bench_input(vec![0u64; 16], |_| {}));
+        println!("noop 64:   {}", bench_input(vec![0u64; 64], |_| {}));
+        println!("noop 256:  {}", bench_input(vec![0u64; 256], |_| {}));
+        println!("noop 512:  {}", bench_input(vec![0u64; 512], |_| {}));
     }
 
     #[test]
@@ -587,40 +649,43 @@ mod tests {
         println!();
         println!(
             "no ret 32:    {}",
-            bench_env(vec![0u64; 32], |x| { x.clone() })
+            bench_input(vec![0u64; 32], |x| { x.clone() })
         );
-        println!("return 32:    {}", bench_env(vec![0u64; 32], |x| x.clone()));
+        println!(
+            "return 32:    {}",
+            bench_input(vec![0u64; 32], |x| x.clone())
+        );
         println!(
             "no ret 256:   {}",
-            bench_env(vec![0u64; 256], |x| { x.clone() })
+            bench_input(vec![0u64; 256], |x| { x.clone() })
         );
         println!(
             "return 256:   {}",
-            bench_env(vec![0u64; 256], |x| x.clone())
+            bench_input(vec![0u64; 256], |x| x.clone())
         );
         println!(
             "no ret 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| { x.clone() })
+            bench_input(vec![0u64; 1024], |x| { x.clone() })
         );
         println!(
             "return 1024:  {}",
-            bench_env(vec![0u64; 1024], |x| x.clone())
+            bench_input(vec![0u64; 1024], |x| x.clone())
         );
         println!(
             "no ret 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| { x.clone() })
+            bench_input(vec![0u64; 4096], |x| { x.clone() })
         );
         println!(
             "return 4096:  {}",
-            bench_env(vec![0u64; 4096], |x| x.clone())
+            bench_input(vec![0u64; 4096], |x| x.clone())
         );
         println!(
             "no ret 50000: {}",
-            bench_env(vec![0u64; 50000], |x| { x.clone() })
+            bench_input(vec![0u64; 50000], |x| { x.clone() })
         );
         println!(
             "return 50000: {}",
-            bench_env(vec![0u64; 50000], |x| x.clone())
+            bench_input(vec![0u64; 50000], |x| x.clone())
         );
     }
 
@@ -663,7 +728,6 @@ mod tests {
     /// fail, and are exercised by running the suite under
     /// `quiet-bench run` - which is what `quiet-bench` is for.
 
-
     #[test]
     fn accuracy_matches_the_request() {
         println!();
@@ -673,10 +737,7 @@ mod tests {
         }
         const REPEATS: usize = 15;
         for &target in &[0.05, 0.01] {
-            let cfg = Config {
-                target_rel_error: target,
-                ..Config::default()
-            };
+            let cfg = Config::relative(target);
             let estimates: Vec<f64> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))).ns_per_iter)
                 .collect();
@@ -702,38 +763,35 @@ mod tests {
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();
-        // Comparing a long run against short ones only isolates the
-        // estimator when the machine holds still. Contention does not
-        // affect the two equally - the long run averages over more of it -
-        // so on a busy machine this measures the neighbours rather than
-        // the estimator, which is the same reason its siblings above skip.
-        if !quiesced() {
-            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
-            return;
+        // This used to compare one long tight-target run against many short
+        // ones, and measured the machine rather than the estimator: twenty
+        // seconds flat out on a core is a different frequency and thermal
+        // regime than a run lasting milliseconds. The bias it reported
+        // swung between -14% and +17% on a *quiesced* machine, against a
+        // 10% bound - and its sign flipped run to run, which is the tell.
+        //
+        // Two workloads of the same mean and very different shape settle it
+        // without a reference run at all. Both are measured back to back in
+        // the same regime, so drift lands on both and divides out, and the
+        // ratio holds to about 1% whether or not the machine is quiesced -
+        // which is why this one no longer skips itself.
+        const REPEATS: usize = 4;
+        for r in 0..REPEATS {
+            let seed = seed_for(r);
+            let bimodal = bench(bimodal_cost(seed)).ns_per_iter;
+            let fixed = bench(fixed_cost(seed)).ns_per_iter;
+            let ratio = bimodal / fixed;
+            println!("bimodal {bimodal:.1} / fixed {fixed:.1} = {ratio:.4}");
+            // An estimator reporting the minimum - or the median, which the
+            // old shape could not have caught - would see nine cheap calls
+            // in ten and land near 0.001. The band is wide because what is
+            // being separated differs by three orders of magnitude, not by
+            // a few percent.
+            assert!(
+                (0.5..1.5).contains(&ratio),
+                "reported cost ratio {ratio:.4} says this is not the mean"
+            );
         }
-        // Ground truth: a long, tight-target run.
-        let truth = Config {
-            target_rel_error: 0.002,
-            max_time: Duration::from_secs(20),
-            ..Config::default()
-        }
-        .bench(variable_cost(0xabcd_ef01))
-        .ns_per_iter;
-
-        const REPEATS: usize = 15;
-        let estimates: Vec<f64> = (0..REPEATS)
-            .map(|r| Config::default().bench(variable_cost(seed_for(r))).ns_per_iter)
-            .collect();
-        let (mean, _) = mean_and_spread(&estimates);
-        let bias = (mean - truth) / truth;
-        println!(
-            "truth {truth:.1} ns/iter, estimated {mean:.1} ns/iter, bias {:+.2}%",
-            100.0 * bias
-        );
-        // An estimator that reported (say) the minimum of each batch rather
-        // than the mean would be biased sharply negative on a workload with
-        // this much variance - well outside this bound.
-        assert!(bias.abs() < 0.1, "bias {:+.2}%", 100.0 * bias);
     }
 
     #[test]
@@ -750,29 +808,18 @@ mod tests {
         // reached and the test can't distinguish "tighter target costs
         // more" from "both stopped at the same floor".
         let loose: Vec<Stats> = (0..REPEATS)
-            .map(|r| {
-                Config {
-                    target_rel_error: 0.05,
-                    ..Config::default()
-                }
-                .bench(variable_cost(seed_for(r)))
-            })
+            .map(|r| Config::relative(0.05).bench(variable_cost(seed_for(r))))
             .collect();
         let tight: Vec<Stats> = (0..REPEATS)
-            .map(|r| {
-                Config {
-                    target_rel_error: 0.003,
-                    ..Config::default()
-                }
-                .bench(variable_cost(seed_for(r)))
-            })
+            .map(|r| Config::relative(0.003).bench(variable_cost(seed_for(r))))
             .collect();
         let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<u64>();
         let (loose_iters, tight_iters) = (iters(&loose), iters(&tight));
         println!("loose iterations {loose_iters}, tight iterations {tight_iters}");
         assert!(tight_iters > 2 * loose_iters);
 
-        let spread = |v: &[Stats]| mean_and_spread(&v.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>()).1;
+        let spread =
+            |v: &[Stats]| mean_and_spread(&v.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>()).1;
         let (loose_spread, tight_spread) = (spread(&loose), spread(&tight));
         println!(
             "loose spread {:.2}%, tight spread {:.2}%",
@@ -781,7 +828,6 @@ mod tests {
         );
         assert!(tight_spread < loose_spread);
     }
-
 
     #[test]
     fn a_zero_standard_error_meets_any_target() {
@@ -798,28 +844,19 @@ mod tests {
         // A real error still has to clear the bar, either way round.
         assert!(!Config::relative(0.01).accuracy_met(100.0, 5.0));
         assert!(Config::relative(0.01).accuracy_met(100.0, 0.5));
-        assert!(!Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(1),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 5.0));
-        assert!(Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(10),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 5.0));
+        assert!(!Config::absolute(Duration::from_nanos(1))
+            .with_relative_error(0.0)
+            .accuracy_met(100.0, 5.0));
+        assert!(Config::absolute(Duration::from_nanos(10))
+            .with_relative_error(0.0)
+            .accuracy_met(100.0, 5.0));
 
         // The two goals are independent, and the coarser one wins: a 1%
         // goal on a 100ns measurement wants the error under 1ns, but a
         // 5ns absolute floor says 5ns is close enough, so it stops.
-        assert!(Config {
-            target_rel_error: 0.01,
-            target_abs_error: Duration::from_nanos(5),
-            ..Config::default()
-        }
-        .accuracy_met(100.0, 4.0));
+        assert!(Config::relative(0.01)
+            .with_absolute_error(Duration::from_nanos(5))
+            .accuracy_met(100.0, 4.0));
     }
 
     #[test]
@@ -875,11 +912,8 @@ mod tests {
         // Only the absolute goal: the relative one is disabled, since
         // sampling stops at whichever goal is coarser and the 1% default
         // would otherwise govern for a workload of this size.
-        let only_absolute = |ns| Config {
-            target_rel_error: 0.0,
-            target_abs_error: Duration::from_nanos(ns),
-            ..Config::default()
-        };
+        let only_absolute =
+            |ns| Config::absolute(Duration::from_nanos(ns)).with_relative_error(0.0);
         // 25ns, not the 5ns this used to ask for. `variable_cost` has a
         // coefficient of variation around 50%, so the standard error falls
         // as the square root of the sample count and the last factor of two
@@ -909,16 +943,25 @@ mod tests {
             stats.std_error
         );
 
-        // A looser absolute ask must be cheaper - the target is doing the
-        // work, not some fixed amount of sampling. 500ns is met by the
-        // minimum sampling every run takes, so this comparison cannot come
-        // down to noise either.
-        let cheap = only_absolute(500).bench(variable_cost(7));
-        println!("absolute 500ns: {cheap}");
+        // A tighter absolute ask must cost more - the target is doing the
+        // work, not some fixed amount of sampling.
+        //
+        // The comparison is 25ns against 5ns rather than 500ns against 25ns,
+        // because `MIN_SAMPLE_TIME` now sets a floor that 25ns already meets:
+        // asking for 500ns instead buys nothing, both runs stop at the floor
+        // having taken the same iterations, and the old form of this test
+        // compared two numbers that the floor had made equal. To show the
+        // target governing, the expensive side has to want more than the
+        // floor supplies. 5ns is not reachable on every machine - it may set
+        // `hit_limit` - which is fine here: a run that spends its whole
+        // budget chasing 5ns has still spent more than one that stopped at
+        // the floor.
+        let dear = only_absolute(5).bench(variable_cost(7));
+        println!("absolute 5ns: {dear}");
         assert!(
-            cheap.iterations < stats.iterations,
-            "loose target used {} iterations, tight used {}",
-            cheap.iterations,
+            dear.iterations > stats.iterations,
+            "tight target used {} iterations, looser used {}",
+            dear.iterations,
             stats.iterations
         );
     }
@@ -930,10 +973,7 @@ mod tests {
         // iteration and each sample takes another, so only a handful fit -
         // fewer than MIN_SAMPLES. We should still get a real error bar out
         // of the samples we managed, rather than NaN.
-        let cfg = Config {
-            max_time: Duration::from_millis(350),
-            ..Config::default()
-        };
+        let cfg = Config::default().with_max_time(Duration::from_millis(350));
         let stats = cfg.bench(|| thread::sleep(Duration::from_millis(100)));
         println!("{stats}");
         assert!(
@@ -960,11 +1000,7 @@ mod tests {
         // An accuracy no amount of sampling will reach, and a budget far too
         // short to try: the benchmark must say it fell short rather than
         // return a confident-looking number.
-        let cfg = Config {
-            target_rel_error: 1e-9,
-            max_time: Duration::from_millis(50),
-            ..Config::default()
-        };
+        let cfg = Config::relative(1e-9).with_max_time(Duration::from_millis(50));
         let stats = cfg.bench(variable_cost(1));
         println!("{stats}");
         assert!(stats.hit_limit);
@@ -985,10 +1021,7 @@ mod tests {
         }
         const REPEATS: usize = 40;
         for &target in &[0.05, 0.02, 0.01] {
-            let cfg = Config {
-                target_rel_error: target,
-                ..Config::default()
-            };
+            let cfg = Config::relative(target);
             let stats: Vec<Stats> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))))
                 .collect();
@@ -1019,4 +1052,3 @@ mod tests {
         }
     }
 }
-

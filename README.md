@@ -7,15 +7,15 @@ A lightweight benchmarking library which:
 * has a very simple API!
 
 ```rust
-use scaling::{bench, bench_env};
+use scaling::{bench, bench_input};
 
 // Simple benchmarks are performed with `bench`.
 println!("fib 200: {}", bench(|| fib(200) ));
 println!("fib 500: {}", bench(|| fib(500) ));
 
-// If a function needs to mutate some state, use `bench_env`.
-println!("reverse: {}", bench_env(vec![0;100], |xs| xs.reverse()));
-println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()));
+// If a function needs to mutate some state, use `bench_input`.
+println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse()));
+println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()));
 ```
 
 Running the above yields the following:
@@ -77,6 +77,54 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 `O(2ᴺ)` - is reported as the integer power it most behaves like over the
 range measured, with `R²=0.000` and `(limit)` to say that nothing described
 it exactly.
+
+## Measuring many benchmarks together
+
+Benchmarks run one after another are measured in different machines: the
+first on a cold package, the fiftieth on a warm one. Their numbers are not
+comparable with each other, nor with the same suite run tomorrow.
+
+A suite measures them interleaved instead — one sample each, in rotation —
+so every benchmark's samples spread across the whole session and all of them
+average the same drift. Each `add` hands back a token holding that
+benchmark's answer once the suite has run.
+
+```rust
+let cfg = scaling::Config::default();
+let mut suite = cfg.suite();
+let sort  = suite.add_input("sort", vec![0; 100], |xs: &mut Vec<i32>| xs.sort());
+let fib   = suite.add("fib 500", || fib(500));
+let growth = suite.add_scaling("fib scaling", |n| fib(n), 0);
+println!("{}", suite.run());
+
+// Each token keeps its own type.
+let sort: scaling::Stats = sort.get().unwrap();
+let growth: scaling::ScalingStats = growth.get().unwrap();
+```
+
+One suite can hold flat benchmarks, scaling benchmarks and whole
+comparisons, and they need not share an input type.
+
+What this buys is a **bound**, not an improvement. Reversing the declaration
+order of eight identical workloads moves an interleaved benchmark by
+0.15–0.45%, whatever the session; measured one after another instead, the
+same workloads move by anywhere from 0.10% to 1.19% depending on nothing but
+how much the machine happened to be drifting at the time. The typical case is
+a wash — the medians are 0.28% and 0.26%. The worst case is four times
+better.
+
+That is the trade the mechanism predicts: interleaving pays a floor it never
+gets back, because every sample starts on a cache the rest of the suite has
+been using, in exchange for a ceiling on drift. Where there is no drift, only
+the floor shows.
+
+So it will not make any single benchmark more reproducible — it averages
+drift in rather than out — and a suite's numbers are not comparable with a
+lone `bench` call. What it gives you is that the numbers within one suite,
+and across runs of it, were measured in the same machine.
+
+Each benchmark still gets the full time budget of its own, so a suite of `n`
+may take `n` times as long as one benchmark.
 
 ## Quiescing the machine (Linux)
 

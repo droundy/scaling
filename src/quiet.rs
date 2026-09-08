@@ -13,16 +13,17 @@ quiet-bench run cargo test --release
 sudo `which quiet-bench` restore     # put everything back
 ```
 
-`quiet-bench run` sets [`CPUS_VAR`] for the command it launches. Every
-benchmark in this crate checks that variable and, if it is set, **pins
-itself to those CPUs automatically** - so a program built against `scaling`
-lands on the reserved CPU without needing a `taskset` wrapper, and without
-any code change. Set [`NO_PIN_VAR`] to `1` to suppress that.
+Once a reservation exists, every benchmark in this crate **pins itself to
+those CPUs automatically** - so a program built against `scaling` lands on
+the reserved CPU without a `taskset` wrapper, without `quiet-bench run`, and
+without any code change. The reservation is taken as permission to use it:
+that is what it is for, and [`exclusive`] makes concurrent benchmarks take
+turns rather than collide. Set [`NO_PIN_VAR`] to `1` to opt out.
 
 Pinning affects only the thread running the benchmark, and happens at most
 once per thread. Nothing here does anything at all on non-Linux platforms,
-or when [`CPUS_VAR`] is unset - which is the normal case for an ordinary
-`cargo bench` on a developer machine.
+or when no reservation exists - the normal case for an ordinary `cargo
+bench` on a developer machine.
 
 Use [`status`] to find out what happened:
 
@@ -43,9 +44,35 @@ use std::fmt::{self, Display, Formatter};
 /// crate.
 pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
 
-/// Set this to `1` to stop `scaling` pinning itself even when [`CPUS_VAR`]
-/// is set.
+/// Set this to `1` to stop `scaling` pinning itself even when CPUs have
+/// been reserved.
 pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
+
+/// Set by `quiet-bench run` to say that it already holds the machine-wide
+/// lock on the reserved CPUs for the whole of the command it launched.
+///
+/// A benchmark that sees this takes the in-process mutex only. Taking the
+/// `flock` as well would be waiting on a lock its own parent is holding,
+/// which never comes free - so this exists to make "the lock is held" and
+/// "*we* hold the lock" different questions.
+pub const LOCK_HELD_VAR: &str = "SCALING_BENCH_LOCKED";
+
+/// Is the machine-wide lock already held on our behalf by an ancestor?
+fn lock_held_by_ancestor() -> bool {
+    std::env::var(LOCK_HELD_VAR)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Could this process take the machine-wide lock if it needed to?
+///
+/// Either an ancestor holds it for us, or the reservation record exists to
+/// be locked. Pinning without one or the other would put us on the reserved
+/// CPUs with nothing to stop another benchmark joining us there.
+#[cfg(target_os = "linux")]
+fn lock_is_available() -> bool {
+    lock_held_by_ancestor() || std::fs::File::open(CPUS_PATH).is_ok()
+}
 
 /// Where `quiet-bench` records the reserved CPUs. On `/run`, which is a
 /// tmpfs, so the record cannot survive a reboot and go stale.
@@ -123,9 +150,8 @@ pub fn reserved_cpus() -> Option<String> {
 #[cfg(target_os = "linux")]
 pub fn current_affinity() -> Option<String> {
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
-    };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
     if rc != 0 {
         return None;
     }
@@ -270,13 +296,25 @@ pub fn status() -> Status {
     }
 }
 
-/// Pin this thread to the reserved CPUs, if a reservation is advertised and
-/// pinning has not been suppressed.
+/// Pin this thread to the reserved CPUs, if there are any and pinning has
+/// not been suppressed.
 ///
 /// Called automatically by every benchmark in this crate, at most once per
 /// thread. Doing it more than once is harmless but pointless, so the result
 /// is remembered.
-pub(crate) fn pin_if_requested() {
+///
+/// A reservation is taken as permission to use it. That is a deliberate
+/// change: pinning used to require [`CPUS_VAR`] to be set explicitly,
+/// because a reservation said CPUs had been set aside but not that *this*
+/// program was meant to have them, and two benchmarks seizing the same core
+/// would each have measured the other. [`exclusive`] answers that now - they
+/// take turns instead of colliding - and the old caution cost more than it
+/// saved: every benchmark launched any way other than `quiet-bench run`
+/// silently went unpinned, including this crate's own accuracy tests, which
+/// therefore skipped themselves on every machine they had ever run on.
+///
+/// Set [`NO_PIN_VAR`] to `1` to opt out.
+pub(crate) fn pin_if_reserved() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -291,15 +329,20 @@ pub(crate) fn pin_if_requested() {
         if std::env::var(NO_PIN_VAR).map(|v| v == "1").unwrap_or(false) {
             return;
         }
-        // Only an explicit request in the environment triggers pinning. The
-        // file at CPUS_PATH says a reservation exists, but not that *this*
-        // program was meant to have it; silently seizing a reserved CPU
-        // because one happens to be set aside would be an unpleasant
-        // surprise for an unrelated process.
-        let cpus = match std::env::var(CPUS_VAR) {
-            Ok(c) => c,
-            Err(_) => return,
+        // `reserved_cpus` prefers CPUS_VAR, which `quiet-bench run` sets,
+        // and falls back to the reservation file - so a benchmark started
+        // any other way notices the reservation too.
+        let cpus = match reserved_cpus() {
+            Some(c) => c,
+            None => return,
         };
+        // Never pin without the means to exclude others from the same CPUs.
+        // `SCALING_BENCH_CPUS` can be set by hand with no reservation behind
+        // it, and pinning on that would put us on a core we have no way to
+        // claim - two such processes would sit on it measuring each other.
+        if !lock_is_available() {
+            return;
+        }
         if let Ok(cpus) = parse_cpu_list(&cpus) {
             // A failure here is not worth aborting a benchmark over: the
             // measurement is still valid, just noisier. `status()` reports
@@ -309,9 +352,232 @@ pub(crate) fn pin_if_requested() {
     });
 }
 
+/// Exclusive use of the reserved CPUs, for as long as this is held.
+///
+/// Benchmarks contend at two scopes, so this closes both. A process-wide
+/// mutex makes parallel test threads take turns - pinned to one core they
+/// cannot run faster in parallel anyway, they only interleave and spoil each
+/// other's timings. An `flock` on [`CPUS_PATH`] then does the same between
+/// separate benchmark processes. The kernel drops a file lock when the
+/// process holding it dies, so a benchmark killed with `SIGKILL` or
+/// interrupted at the terminal cannot strand the CPU the way a PID file
+/// would.
+///
+/// Blocks until both are free. Benchmarks take this for themselves whenever
+/// they are [`Status::Pinned`]; take it by hand around a group of
+/// measurements that must not be interleaved with anything else:
+///
+/// ```
+/// let _held = scaling::quiet::exclusive();
+/// // ... measurements that belong together ...
+/// ```
+///
+/// Re-entrant within a thread: taking it again while it is already held
+/// hands back a claim that does nothing, so a benchmark nested inside
+/// another one's closure cannot deadlock against itself.
+pub struct Exclusive {
+    /// `None` for a re-entrant claim, where an outer [`Exclusive`] on this
+    /// thread holds the real locks - releasing here would hand the CPU away
+    /// while that outer measurement was still running.
+    held: Option<Held>,
+}
+
+/// The locks themselves. Fields drop in declaration order, so the file lock
+/// is released before the mutex - the reverse of the order they are taken.
+struct Held {
+    _machine: Option<std::fs::File>,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+static IN_PROCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static ALREADY_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Claim the reserved CPUs for this process, waiting until they are free.
+///
+/// For `quiet-bench run`, which holds this across the command it launches
+/// and tells that command so with [`LOCK_HELD_VAR`]. Ordinary benchmarks do
+/// not need it - [`exclusive`] claims and releases around each measurement.
+///
+/// `Err` if there is no reservation record to lock, which is what a
+/// reservation *is*: without one there is nothing to claim.
+#[cfg(target_os = "linux")]
+pub fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(CPUS_PATH)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Always fails on non-Linux platforms, which have no reservation to claim.
+#[cfg(not(target_os = "linux"))]
+pub fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "CPU reservation is only supported on Linux",
+    ))
+}
+
+/// The machine-wide half of a claim, or `None` if there is nothing to take.
+///
+/// Only one process in a tree holds the file lock. If `quiet-bench run` took
+/// it before launching us, asking for it here would be waiting on our own
+/// parent, and that wait never ends.
+fn machine_lock() -> Option<std::fs::File> {
+    if lock_held_by_ancestor() {
+        return None;
+    }
+    lock_reservation()
+}
+
+/// Take exclusive use of the reserved CPUs, waiting if another thread or
+/// process has it. See [`Exclusive`].
+pub fn exclusive() -> Exclusive {
+    if ALREADY_HELD.with(|h| h.get()) {
+        return Exclusive { held: None };
+    }
+    // A poisoned mutex means an earlier benchmark panicked while holding it.
+    // That says nothing about whether the CPU is free now, so carry on
+    // rather than letting one failure break every later measurement.
+    let _process = IN_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+    let _machine = machine_lock();
+    ALREADY_HELD.with(|h| h.set(true));
+    Exclusive {
+        held: Some(Held { _machine, _process }),
+    }
+}
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        if self.held.is_some() {
+            ALREADY_HELD.with(|h| h.set(false));
+        }
+    }
+}
+
+/// Take it only when pinned, which is where sharing a core would actually
+/// corrupt a measurement. Unpinned, benchmarks are spread over the machine
+/// and serialising them would cost a test suite dearly for little gain.
+pub(crate) fn exclusive_if_pinned() -> Option<Exclusive> {
+    matches!(status(), Status::Pinned { .. }).then(exclusive)
+}
+
+/// `flock` the reservation record, or `None` if there is no reservation to
+/// coordinate over.
+///
+/// Read-only is enough - `flock` ignores the access mode - and it has to be,
+/// since `/run` is root-owned and an ordinary user could neither create a
+/// lock file there nor open this one for writing.
+#[cfg(target_os = "linux")]
+fn lock_reservation() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(CPUS_PATH).ok()?;
+    // Blocking: waiting our turn is the entire point.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        // A measurement that could not take the lock is still valid, just
+        // possibly sharing the CPU - the same bargain `pin_if_reserved`
+        // makes when pinning fails.
+        return None;
+    }
+    Some(file)
+}
+
+/// Always `None` on non-Linux platforms, which have no reservation to lock
+/// and no pinning for it to protect.
+#[cfg(not(target_os = "linux"))]
+fn lock_reservation() -> Option<std::fs::File> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A benchmark nested inside another one's closure must not deadlock
+    /// against itself, which a plain mutex would do.
+    #[test]
+    fn exclusive_is_reentrant_within_a_thread() {
+        let outer = exclusive();
+        let inner = exclusive();
+        drop(inner);
+        drop(outer);
+    }
+
+    /// ...but it must still make other threads wait, which is the whole
+    /// point: pinned to one core they cannot run at once anyway, they only
+    /// interleave and measure each other.
+    #[test]
+    fn exclusive_makes_other_threads_wait() {
+        use std::time::{Duration, Instant};
+        let held = exclusive();
+        let waiter = std::thread::spawn(|| {
+            let start = Instant::now();
+            let _held = exclusive();
+            start.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        drop(held);
+        let waited = waiter.join().expect("waiter panicked");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "second thread should have waited its turn, got {waited:?}"
+        );
+    }
+
+    /// A benchmark run under `quiet-bench run` must not wait on the lock its
+    /// own parent is holding: that wait never ends.
+    ///
+    /// Tests [`machine_lock`] rather than [`exclusive`], because the latter
+    /// also takes the in-process mutex and would then be timing whatever
+    /// other test happens to be benchmarking. The claim is made on another
+    /// thread so a regression times out here rather than hanging.
+    #[test]
+    fn an_inherited_lock_is_not_waited_on() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        // Under a real `quiet-bench run` the situation being tested already
+        // obtains: an ancestor holds the lock and has said so. Standing in
+        // for it a second time would mean waiting on the very lock that
+        // ancestor holds - which is the hang this test exists to catch,
+        // arrived at from the wrong side.
+        let inherited = std::env::var_os(LOCK_HELD_VAR).is_some();
+        let held = if inherited {
+            None
+        } else {
+            // Stand in for `quiet-bench run`: hold the machine lock, then
+            // say so the way it does.
+            match hold_reserved_cpus() {
+                Ok(h) => {
+                    std::env::set_var(LOCK_HELD_VAR, "1");
+                    Some(h)
+                }
+                Err(_) => {
+                    println!("SKIPPED: no reservation to lock on this machine");
+                    return;
+                }
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let taken = machine_lock();
+            let _ = tx.send(taken.is_some());
+        });
+        let answered = rx.recv_timeout(Duration::from_secs(5));
+        // Only unset what this test set: under `quiet-bench run` the variable
+        // belongs to the process and the rest of the suite depends on it.
+        if !inherited {
+            std::env::remove_var(LOCK_HELD_VAR);
+        }
+        drop(held);
+        match answered {
+            Err(_) => panic!("waited on the lock its own parent was holding"),
+            Ok(took) => assert!(!took, "took the lock again when an ancestor held it"),
+        }
+    }
 
     #[test]
     fn cpu_lists_round_trip() {
