@@ -113,10 +113,15 @@ enum Flavour {
 struct Args {
     name: Option<LitStr>,
     group: Option<LitStr>,
+    matrix: Option<LitStr>,
     baseline: bool,
     input: Option<Expr>,
     gen_input: Option<Expr>,
     nmin: Option<LitInt>,
+    /// `types(A, B)`: instantiate a generic candidate once per type.
+    types: Vec<Type>,
+    /// `sizes(1, 2)`: register an input once per size.
+    sizes: Vec<LitInt>,
 }
 
 impl syn::parse::Parse for Args {
@@ -135,6 +140,44 @@ impl syn::parse::Parse for Args {
                     input.parse::<syn::Token![=]>()?;
                     args.group = Some(input.parse()?);
                 }
+                "matrix" => {
+                    input.parse::<syn::Token![=]>()?;
+                    args.matrix = Some(input.parse()?);
+                }
+                // These two take a parenthesised list rather than a value,
+                // since each stands for several registrations.
+                "types" => {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    let listed =
+                        syn::punctuated::Punctuated::<Type, syn::Token![,]>::parse_terminated(
+                            &inner,
+                        )?;
+                    if listed.is_empty() {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "`types(..)` lists the types to instantiate at, so it needs at \
+                             least one",
+                        ));
+                    }
+                    args.types = listed.into_iter().collect();
+                }
+                "sizes" => {
+                    let inner;
+                    syn::parenthesized!(inner in input);
+                    let listed =
+                        syn::punctuated::Punctuated::<LitInt, syn::Token![,]>::parse_terminated(
+                            &inner,
+                        )?;
+                    if listed.is_empty() {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "`sizes(..)` lists the sizes to register at, so it needs at \
+                             least one",
+                        ));
+                    }
+                    args.sizes = listed.into_iter().collect();
+                }
                 "input" => {
                     input.parse::<syn::Token![=]>()?;
                     args.input = Some(input.parse()?);
@@ -152,7 +195,8 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, input, gen_input, nmin",
+                             name, group, matrix, baseline, input, gen_input, \
+                             nmin, types(..), sizes(..)",
                         ),
                     ))
                 }
@@ -420,4 +464,246 @@ fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+/// Register one implementation of a matrix.
+///
+/// ```ignore
+/// #[scaling::candidate(matrix = "sort", baseline)]
+/// fn std_sort(v: &mut Vec<i32>) { v.sort() }
+///
+/// #[scaling::candidate(matrix = "sort")]
+/// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
+/// ```
+///
+/// Candidates and inputs are registered independently and neither names the
+/// other: a candidate says what type it takes, an input says what type it
+/// makes, and every pairing of the two is measured. Adding an input is one
+/// new function, and every candidate picks it up.
+///
+/// A matrix with two or more candidates of a type becomes one comparison per
+/// input of that type - a comparison carries each candidate's own timing as
+/// well as its difference from the baseline, so nothing is lost by always
+/// comparing. `baseline` says which one the others are reported against; with
+/// none marked the first by name is used, and the report says which it was.
+///
+/// `types(A, B, ...)` registers the same generic function once per listed
+/// type, which is the one place monomorphisation has to be spelled out.
+#[proc_macro_attribute]
+pub fn candidate(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as Args);
+    let func = parse_macro_input!(item as ItemFn);
+    expand_candidate(args, func)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Register one input of a matrix.
+///
+/// ```ignore
+/// #[scaling::input(matrix = "sort", name = "reversed")]
+/// fn reversed() -> Vec<i32> { (0..10_000).rev().collect() }
+///
+/// #[scaling::input(matrix = "sort", sizes(100, 10_000))]
+/// fn random(n: usize) -> Vec<i32> { random_of_len(n) }
+/// ```
+///
+/// With `sizes(..)` the function takes the size and is registered once per
+/// listed size, named `fn_name@size` - which covers wanting the same input
+/// large and small without writing it twice.
+#[proc_macro_attribute]
+pub fn input(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as Args);
+    let func = parse_macro_input!(item as ItemFn);
+    expand_input(args, func)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    let matrix = args.matrix.as_ref().ok_or_else(|| {
+        syn::Error::new(
+            func.sig.span(),
+            "`#[scaling::candidate]` needs `matrix = \"...\"` to say which matrix it is \
+             one implementation of",
+        )
+    })?;
+    let fname = &func.sig.ident;
+    let reported = match &args.name {
+        Some(lit) => quote!(#lit),
+        None => {
+            let bare = fname.to_string();
+            quote!(#bare)
+        }
+    };
+    let baseline = args.baseline;
+    let declared = input_type(&func)?;
+
+    // One registration per listed type, or a single one at whatever the
+    // signature says.
+    let instantiations: Vec<(TokenStream2, TokenStream2, TokenStream2, Option<Type>)> =
+        if args.types.is_empty() {
+            let (ty_id, ty_name, ity) = match &declared {
+                Some(ty) => (
+                    quote!(::core::any::TypeId::of::<#ty>),
+                    quote!(::core::stringify!(#ty)),
+                    Some(ty.clone()),
+                ),
+                None => (quote!(::core::any::TypeId::of::<()>), quote!("()"), None),
+            };
+            vec![(reported.clone(), ty_id, ty_name, ity)]
+        } else {
+            if declared.is_none() {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "`types(..)` lists the types to instantiate this at, so it has to take \
+                     an input of the type being varied",
+                ));
+            }
+            args.types
+                .iter()
+                .map(|ty| {
+                    (
+                        reported.clone(),
+                        quote!(::core::any::TypeId::of::<#ty>),
+                        quote!(::core::stringify!(#ty)),
+                        Some(ty.clone()),
+                    )
+                })
+                .collect()
+        };
+
+    let mut out = quote! {
+        #[allow(clippy::ptr_arg)]
+        #func
+    };
+    for (n, (name, ty_id, ty_name, ity)) in instantiations.into_iter().enumerate() {
+        let flat = format_ident!("__scaling_mflat_{}_{}", fname, n);
+        let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
+        let call = match &ity {
+            Some(ty) => quote!(#fname(__e.get_mut::<#ty>())),
+            None => quote!(#fname()),
+        };
+        out.extend(quote! {
+            #[doc(hidden)]
+            fn #flat(
+                __suite: &mut ::scaling::Suite<'_>,
+                __cfg: &::scaling::Config,
+                __name: &str,
+                __make: fn() -> ::scaling::registry::ErasedInput,
+            ) -> ::scaling::Token<::scaling::Stats> {
+                let _ = __cfg;
+                __suite.add_gen_input(
+                    __name,
+                    __make,
+                    |__e: &mut ::scaling::registry::ErasedInput| #call,
+                )
+            }
+            #[doc(hidden)]
+            fn #alt<'__s>(
+                __set: ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput>,
+                __name: &str,
+            ) -> ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput> {
+                __set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+            }
+            ::scaling::inventory::submit! {
+                ::scaling::registry::MatrixCandidate {
+                    matrix: #matrix,
+                    name: #name,
+                    input_type: #ty_id,
+                    input_type_name: #ty_name,
+                    is_baseline: #baseline,
+                    crate_name: ::core::env!("CARGO_PKG_NAME"),
+                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
+                    add_flat: #flat,
+                    add_alt: #alt,
+                }
+            }
+        });
+    }
+    Ok(out)
+}
+
+fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    let matrix = args.matrix.as_ref().ok_or_else(|| {
+        syn::Error::new(
+            func.sig.span(),
+            "`#[scaling::input]` needs `matrix = \"...\"` to say which matrix it is an \
+             input of",
+        )
+    })?;
+    let ty = match &func.sig.output {
+        ReturnType::Type(_, ty) => (**ty).clone(),
+        ReturnType::Default => {
+            return Err(syn::Error::new(
+                func.sig.span(),
+                "an input has to return the input it makes",
+            ))
+        }
+    };
+    let fname = &func.sig.ident;
+
+    if args.sizes.is_empty() {
+        if !func.sig.inputs.is_empty() {
+            return Err(syn::Error::new(
+                func.sig.inputs.span(),
+                "an input takes no arguments unless it is registered at several `sizes(..)`, \
+                 in which case it takes the size",
+            ));
+        }
+        let name = match &args.name {
+            Some(lit) => quote!(#lit),
+            None => {
+                let bare = fname.to_string();
+                quote!(#bare)
+            }
+        };
+        let shim = format_ident!("__scaling_minput_{}", fname);
+        return Ok(quote! {
+            #func
+            #[doc(hidden)]
+            fn #shim() -> ::scaling::registry::ErasedInput {
+                ::scaling::registry::ErasedInput::new(#fname())
+            }
+            ::scaling::inventory::submit! {
+                ::scaling::registry::MatrixInput {
+                    matrix: #matrix,
+                    name: #name,
+                    type_id: ::core::any::TypeId::of::<#ty>,
+                    type_name: ::core::stringify!(#ty),
+                    make: #shim,
+                }
+            }
+        });
+    }
+
+    if func.sig.inputs.len() != 1 {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "an input registered at several `sizes(..)` takes the size as its one argument",
+        ));
+    }
+    let mut out = quote! { #func };
+    for (n, size) in args.sizes.iter().enumerate() {
+        let shim = format_ident!("__scaling_minput_{}_{}", fname, n);
+        let bare = fname.to_string();
+        let size_txt = size.base10_digits().to_string();
+        let name = format!("{bare}@{size_txt}");
+        out.extend(quote! {
+            #[doc(hidden)]
+            fn #shim() -> ::scaling::registry::ErasedInput {
+                ::scaling::registry::ErasedInput::new(#fname(#size))
+            }
+            ::scaling::inventory::submit! {
+                ::scaling::registry::MatrixInput {
+                    matrix: #matrix,
+                    name: #name,
+                    type_id: ::core::any::TypeId::of::<#ty>,
+                    type_name: ::core::stringify!(#ty),
+                    make: #shim,
+                }
+            }
+        });
+    }
+    Ok(out)
 }

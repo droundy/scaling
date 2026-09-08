@@ -17,6 +17,34 @@
 use crate::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
 
+/// How a flat benchmark adds itself to a suite.
+///
+/// Named, along with its siblings below, because these signatures appear in
+/// several places and are easier to compare when they are spelled once.
+pub type AddFlat = fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>;
+
+/// How a scaling benchmark adds itself to a suite.
+pub type AddScaling = fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>;
+
+/// How one alternative joins a comparison.
+pub type AddAlt =
+    for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>;
+
+/// How a matrix candidate is added as a plain benchmark, given a maker for
+/// the input it is paired with.
+pub type AddPaired = fn(&mut Suite<'_>, &Config, &str, MakeInput) -> Token<Stats>;
+
+/// Builds one erased input.
+pub type MakeInput = fn() -> ErasedInput;
+
+/// Reports a type, rather than being one.
+///
+/// A registration is a `static`, so it is built in a `const` context, where
+/// `TypeId::of` only became usable in Rust 1.91 - far above this crate's
+/// 1.66. A `fn` pointer is const-constructible on every version, and calling
+/// it during assembly costs nothing worth counting.
+pub type TypeIdOf = fn() -> TypeId;
+
 /// One registered benchmark.
 ///
 /// Submitted by [`inventory::submit!`] from wherever the benchmark is
@@ -97,11 +125,11 @@ pub enum Kind {
     /// Hands back the token that `add` returned, so that a caller can still
     /// look this benchmark's answer up by name after the suite has run
     /// rather than only reading it out of the printed report.
-    Flat(fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>),
+    Flat(AddFlat),
     /// Adds itself with [`Suite::add_scaling`] or
     /// [`Suite::add_scaling_gen`]. `nmin` is baked in too, since this
     /// signature has nowhere to pass it.
-    Scaling(fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>),
+    Scaling(AddScaling),
     /// Adds itself to a comparison group's [`ComparisonSet`].
     Alt {
         /// Takes the set and gives it back because `ComparisonSet` is a
@@ -109,7 +137,7 @@ pub enum Kind {
         /// serve whatever `Config` borrow assembly ends up with, rather than
         /// being tied to a lifetime chosen at registration time - which,
         /// being a `static`, would have to be `'static`.
-        add: for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>,
+        add: AddAlt,
         /// The input type this alternative expects, before erasure.
         ///
         /// Carried so that assembly can check every member of a group agrees
@@ -122,7 +150,7 @@ pub enum Kind {
         /// context - where `TypeId::of` only became usable in Rust 1.91. A
         /// `fn` pointer is const-constructible on every version, and calling
         /// it during assembly costs nothing worth counting.
-        input_type: fn() -> TypeId,
+        input_type: TypeIdOf,
         /// The same type, spelled the way the source spells it, because a
         /// `TypeId` says nothing to a reader and a diagnostic has to.
         ///
@@ -247,16 +275,83 @@ pub struct GenInputRegistration {
     /// The generated input's type, so assembly can check the group's
     /// alternatives agree with it. A function for the same reason
     /// [`Kind::Alt`]'s is: a registration is built in a `const` context.
-    pub type_id: fn() -> TypeId,
+    pub type_id: TypeIdOf,
     /// The same type as the source spells it, for diagnostics. See
     /// [`Kind::Alt::input_type_name`](Kind#variant.Alt.field.input_type_name).
     pub type_name: &'static str,
     /// Called once per round.
-    pub make: fn() -> ErasedInput,
+    pub make: MakeInput,
 }
 
 #[cfg(feature = "registry")]
 inventory::collect!(GenInputRegistration);
+
+/// One implementation to be measured against the others in a matrix.
+///
+/// # Why candidates and inputs are registered separately
+///
+/// The point of a matrix is to write each implementation once and each input
+/// once, and have every pairing measured. Writing an entry per pairing would
+/// put the cross-product back in the source - and worse, back in one place,
+/// which is the central list this whole design exists to remove. Adding an
+/// input would then mean editing every implementation, or a list somewhere
+/// else.
+///
+/// So neither side names the other. A candidate says what type of input it
+/// wants, an input says what type it is, and assembly pairs them up.
+///
+/// "Candidate" rather than "row" because it is already this crate's word for
+/// one side of a measured difference - [`crate::Comparison`] holds a baseline
+/// and a candidate - and every cell of a matrix ends up in exactly that role.
+#[derive(Debug)]
+pub struct MatrixCandidate {
+    /// Which matrix this belongs to.
+    pub matrix: &'static str,
+    /// What to call this candidate in the report.
+    pub name: &'static str,
+    /// The type of input it takes, which is what it is paired on. A function
+    /// for the same reason [`Kind::Alt`]'s is: a registration is a `static`.
+    pub input_type: TypeIdOf,
+    /// That type as the source spells it, for diagnostics.
+    pub input_type_name: &'static str,
+    /// Whether this is the one the others are reported against. If nobody in
+    /// a lane says so, assembly picks the first by name - see
+    /// `REGISTRATION.md`, and note that adding a candidate sorting earlier
+    /// then moves the baseline, which is why the report names it.
+    pub is_baseline: bool,
+    pub crate_name: &'static str,
+    pub crate_version: &'static str,
+    /// Added as a plain benchmark, for the case where a lane holds only one
+    /// candidate and so has nothing to compare against. Takes the maker for
+    /// the input it is being paired with as an argument rather than
+    /// capturing it, which is exactly what lets one registered candidate be
+    /// paired with any number of separately registered inputs.
+    pub add_flat: AddPaired,
+    /// The usual path: one alternative of this input's comparison.
+    pub add_alt: AddAlt,
+}
+
+#[cfg(feature = "registry")]
+inventory::collect!(MatrixCandidate);
+
+/// One input every candidate of its type in a matrix is measured on.
+#[derive(Debug)]
+pub struct MatrixInput {
+    /// Which matrix this belongs to.
+    pub matrix: &'static str,
+    /// What to call this input in the report.
+    pub name: &'static str,
+    /// The type it produces, which is what candidates are paired to it on.
+    pub type_id: TypeIdOf,
+    /// That type as the source spells it, for diagnostics.
+    pub type_name: &'static str,
+    /// Called once per round, and the value cloned for each candidate, so
+    /// that all of them meet the same one. See [`ErasedInput`].
+    pub make: MakeInput,
+}
+
+#[cfg(feature = "registry")]
+inventory::collect!(MatrixInput);
 
 #[cfg(test)]
 mod tests {

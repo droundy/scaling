@@ -316,6 +316,8 @@ pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
 pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
+#[cfg(feature = "registry")]
+pub use self::suite::RegisteredTokens;
 pub use self::suite::{Report, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
@@ -327,7 +329,7 @@ pub use inventory;
 /// Attribute macros that register a benchmark where it is written, rather
 /// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
 #[cfg(feature = "registry")]
-pub use scaling_macros::{bench, bench_scaling, gen_input};
+pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 
 use std::f64;
 use std::sync::atomic::Ordering::{Acquire, Release};

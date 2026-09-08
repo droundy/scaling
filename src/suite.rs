@@ -54,7 +54,7 @@
 
 use super::*;
 #[cfg(feature = "registry")]
-use crate::registry::{GenInputRegistration, Kind, Registered};
+use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
 use std::cell::Cell;
 #[cfg(feature = "registry")]
 use std::collections::BTreeMap;
@@ -669,8 +669,14 @@ pub struct RegisteredTokens {
     pub flat: BTreeMap<String, Token<Stats>>,
     /// Scaling benchmarks, by name.
     pub scaling: BTreeMap<String, Token<ScalingStats>>,
-    /// Comparison groups, by group name.
+    /// Comparison groups, by group name. A matrix contributes one per input,
+    /// named `matrix@input`.
     pub comparisons: BTreeMap<String, Token<Comparisons>>,
+    /// Things worth saying that did not stop the run - a matrix candidate no
+    /// input matches, say. Errors come back through
+    /// [`Suite::try_add_registered`] instead; these are the complaints that
+    /// leave the rest of the run perfectly good.
+    pub warnings: Vec<crate::assemble::Diagnostic>,
 }
 
 #[cfg(feature = "registry")]
@@ -760,6 +766,38 @@ impl<'a> Suite<'a> {
             tokens
                 .comparisons
                 .insert(group.name.to_string(), self.add_comparison(group.name, set));
+        }
+
+        // Matrices: candidates and inputs registered apart from each other,
+        // paired by type into lanes, every pairing measured.
+        let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
+        let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
+        let (lanes, lane_problems) = crate::assemble::lanes(&cands, &mins);
+        // Orphans and duplicates are said out loud but do not stop the run;
+        // a contradiction inside a lane skips that lane. Either way what is
+        // left is coherent, so the rest is measured.
+        tokens.warnings = lane_problems;
+
+        for lane in lanes {
+            for input in &lane.inputs {
+                if lane.candidates.len() < 2 {
+                    // Nothing to compare against, so this is a plain
+                    // benchmark rather than a one-sided comparison.
+                    let c = lane.candidates[0];
+                    let name = lane.flat_name(c, input);
+                    let token = (c.add_flat)(self, cfg, &name, input.make);
+                    tokens.flat.insert(name, token);
+                    continue;
+                }
+                let make = input.make;
+                let mut set = cfg.comparison_gen_input(make);
+                for c in &lane.candidates {
+                    set = (c.add_alt)(set, c.name);
+                }
+                let name = lane.comparison_name(input);
+                let token = self.add_comparison(&name, set);
+                tokens.comparisons.insert(name, token);
+            }
         }
 
         Ok(tokens)

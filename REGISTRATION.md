@@ -484,6 +484,19 @@ An **orphan** (a candidate whose lane has no inputs, or an input whose lane
 has no candidates) is almost always a typo or a type mismatch, so it is a
 startup warning naming the item and its type.
 
+Warnings and errors are separated deliberately, and reach the caller by
+different routes. A contradiction — two baselines, two candidates of a name,
+a lane whose types do not really match — makes that lane untrustworthy, so it
+is skipped, while an orphan leaves everything else perfectly good. Both come
+back in `RegisteredTokens::warnings` rather than stopping the run; only the
+whole-registry errors of stage 2 come back as `Err`.
+
+One subtlety worth knowing: a lane is keyed on the type's *spelled name*,
+since `TypeId` is not `Ord` and cannot bucket. The real `TypeId`s are then
+checked within each lane, so two different types that happen to spell
+themselves alike are caught rather than paired — which would otherwise be a
+downcast panic later.
+
 ### Generic candidates and sized inputs
 
 ```rust

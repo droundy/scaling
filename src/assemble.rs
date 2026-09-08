@@ -17,7 +17,9 @@
 //!
 //! Stage 2 of `REGISTRATION.md`.
 
-use crate::registry::{ErasedInput, GenInputRegistration, Kind, Registered};
+use crate::registry::{
+    ErasedInput, GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
+};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 
@@ -54,6 +56,35 @@ pub enum Diagnostic {
     /// More than one input generator declared for one group. They cannot
     /// both be the group's shared input.
     ManyGenerators { group: String, sources: Vec<String> },
+    /// A matrix candidate whose lane holds no inputs, or vice versa.
+    ///
+    /// Not a contradiction, so not an error - but almost always a typo or a
+    /// type that is not what the writer thought, so it is said out loud and
+    /// the entry skipped.
+    OrphanCandidate {
+        matrix: String,
+        name: String,
+        type_name: &'static str,
+    },
+    /// A matrix input no candidate in its matrix takes.
+    OrphanInput {
+        matrix: String,
+        name: String,
+        type_name: &'static str,
+    },
+    /// Two candidates, or two inputs, of one name in one matrix.
+    DuplicateMatrixEntry {
+        matrix: String,
+        /// `"candidate"` or `"input"`.
+        what: &'static str,
+        name: String,
+    },
+    /// Two types spelled alike in one matrix lane are not the same type.
+    MatrixTypeMismatch {
+        matrix: String,
+        candidate: String,
+        type_name: &'static str,
+    },
     /// An alternative expects a different input type from the one its
     /// group's generator produces.
     ///
@@ -99,6 +130,36 @@ impl Display for Diagnostic {
                 f,
                 "comparison group `{group}` has more than one input generator: {}",
                 list(sources),
+            ),
+            Diagnostic::OrphanCandidate {
+                matrix,
+                name,
+                type_name,
+            } => write!(
+                f,
+                "in matrix `{matrix}`, `{name}` takes `{type_name}` but no input of \
+                 that type is registered, so it was measured on nothing",
+            ),
+            Diagnostic::OrphanInput {
+                matrix,
+                name,
+                type_name,
+            } => write!(
+                f,
+                "in matrix `{matrix}`, the input `{name}` produces `{type_name}` but no \
+                 candidate takes that type, so nothing was measured on it",
+            ),
+            Diagnostic::DuplicateMatrixEntry { matrix, what, name } => {
+                write!(f, "matrix `{matrix}` has two {what}s called `{name}`",)
+            }
+            Diagnostic::MatrixTypeMismatch {
+                matrix,
+                candidate,
+                type_name,
+            } => write!(
+                f,
+                "in matrix `{matrix}`, `{candidate}` takes a different `{type_name}` from \
+                 the one the inputs produce - two types of the same name are still two types",
             ),
             Diagnostic::InputTypeMismatch {
                 group,
@@ -149,12 +210,198 @@ pub struct Group {
 
 impl Group {
     /// A maker for this group's input, defaulting to the unit input.
-    pub fn make_input(&self) -> fn() -> ErasedInput {
+    pub fn make_input(&self) -> crate::registry::MakeInput {
         match self.gen_input {
             Some(g) => g.make,
             None => || ErasedInput::new(()),
         }
     }
+}
+
+/// One matrix's candidates and inputs of a single type, paired up.
+///
+/// A matrix partitions into lanes rather than being one grid, because
+/// candidates and inputs are registered independently and need not all agree
+/// about the type. Pairing within a lane is what lets one matrix hold
+/// several unrelated type families and still be correct - a `String`
+/// candidate is simply never handed a `Vec<u8>`.
+#[derive(Debug)]
+pub struct Lane {
+    /// The matrix this lane belongs to.
+    pub matrix: &'static str,
+    /// The input type shared by everything in it, as the source spells it.
+    pub type_name: &'static str,
+    /// Candidates, baseline first, then sorted by name - the same ordering,
+    /// and for the same reason, as a comparison group's members.
+    pub candidates: Vec<&'static MatrixCandidate>,
+    /// Inputs, sorted by name.
+    pub inputs: Vec<&'static MatrixInput>,
+}
+
+impl Lane {
+    /// What a cell of this lane is called.
+    ///
+    /// A lane with two or more candidates becomes one comparison per input,
+    /// so the comparison is named for the matrix and the input and the
+    /// candidates are its alternatives. A lone candidate has nothing to
+    /// compare against and is a plain benchmark, which needs its own name.
+    pub fn comparison_name(&self, input: &MatrixInput) -> String {
+        format!("{}@{}", self.matrix, input.name)
+    }
+
+    pub fn flat_name(&self, candidate: &MatrixCandidate, input: &MatrixInput) -> String {
+        format!("{}::{}@{}", self.matrix, candidate.name, input.name)
+    }
+}
+
+/// Partition a matrix's registrations into lanes and pair them up.
+///
+/// Pure, like [`plan`], and for the same reason: everything that can be
+/// wrong is decided before the machine is claimed.
+///
+/// # Orphans are warnings, not errors
+///
+/// A candidate whose lane has no inputs, or an input whose lane has no
+/// candidates, is almost always a typo or a type that does not match what
+/// the writer thought - but it is not a contradiction, and rejecting the
+/// whole run over it would be unhelpful when the rest is fine. So orphans
+/// are reported and skipped.
+pub fn lanes(
+    candidates: &[&'static MatrixCandidate],
+    inputs: &[&'static MatrixInput],
+) -> (Vec<Lane>, Vec<Diagnostic>) {
+    let mut problems = Vec::new();
+
+    // (matrix, input type) is the lane key. `TypeId` is not `Ord`, so bucket
+    // by the type's name, which the macro takes from the source: two
+    // different types cannot spell themselves the same way within one crate,
+    // and the id is checked below in any case.
+    let mut cands: BTreeMap<(&str, &str), Vec<&'static MatrixCandidate>> = BTreeMap::new();
+    let mut ins: BTreeMap<(&str, &str), Vec<&'static MatrixInput>> = BTreeMap::new();
+    for c in candidates {
+        cands
+            .entry((c.matrix, c.input_type_name))
+            .or_default()
+            .push(c);
+    }
+    for i in inputs {
+        ins.entry((i.matrix, i.type_name)).or_default().push(i);
+    }
+
+    // Duplicates within a lane would make two rows or columns indistinguishable.
+    for (key, cs) in &cands {
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in cs {
+            *seen.entry(c.name).or_insert(0) += 1;
+        }
+        for (name, n) in seen {
+            if n > 1 {
+                problems.push(Diagnostic::DuplicateMatrixEntry {
+                    matrix: key.0.to_string(),
+                    what: "candidate",
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+    for (key, is) in &ins {
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for i in is {
+            *seen.entry(i.name).or_insert(0) += 1;
+        }
+        for (name, n) in seen {
+            if n > 1 {
+                problems.push(Diagnostic::DuplicateMatrixEntry {
+                    matrix: key.0.to_string(),
+                    what: "input",
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+
+    let mut lanes = Vec::new();
+    let mut keys: Vec<&(&str, &str)> = cands.keys().chain(ins.keys()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    for key in keys {
+        let mut cs = cands.get(key).cloned().unwrap_or_default();
+        let mut is = ins.get(key).cloned().unwrap_or_default();
+
+        if is.is_empty() {
+            for c in &cs {
+                problems.push(Diagnostic::OrphanCandidate {
+                    matrix: key.0.to_string(),
+                    name: c.name.to_string(),
+                    type_name: c.input_type_name,
+                });
+            }
+            continue;
+        }
+        if cs.is_empty() {
+            for i in &is {
+                problems.push(Diagnostic::OrphanInput {
+                    matrix: key.0.to_string(),
+                    name: i.name.to_string(),
+                    type_name: i.type_name,
+                });
+            }
+            continue;
+        }
+
+        // The name-keyed lane must agree on the actual type too, or a
+        // downcast would go wrong later on two types that happen to be
+        // spelled alike in different modules.
+        let want = (is[0].type_id)();
+        let mut mismatched = false;
+        for c in &cs {
+            if (c.input_type)() != want {
+                problems.push(Diagnostic::MatrixTypeMismatch {
+                    matrix: key.0.to_string(),
+                    candidate: c.name.to_string(),
+                    type_name: c.input_type_name,
+                });
+                mismatched = true;
+            }
+        }
+        if mismatched {
+            continue;
+        }
+
+        is.sort_by_key(|i| i.name);
+        cs.sort_by_key(|c| c.name);
+
+        // Baseline: whoever said so, else the first by name. Two claimants is
+        // a contradiction; none is not, since a matrix is meant to be written
+        // without ceremony.
+        let claimants: Vec<&&'static MatrixCandidate> =
+            cs.iter().filter(|c| c.is_baseline).collect();
+        let baseline = match claimants.len() {
+            0 => cs[0].name,
+            1 => claimants[0].name,
+            _ => {
+                problems.push(Diagnostic::ManyBaselines {
+                    group: key.0.to_string(),
+                    claimants: claimants
+                        .iter()
+                        .map(|c| format!("{}@{} ({})", c.crate_name, c.crate_version, c.name))
+                        .collect(),
+                });
+                continue;
+            }
+        };
+        cs.sort_by_key(|c| (c.name != baseline, c.name));
+
+        lanes.push(Lane {
+            matrix: key.0,
+            type_name: key.1,
+            candidates: cs,
+            inputs: is,
+        });
+    }
+
+    (lanes, problems)
 }
 
 /// Where a registration came from, for a diagnostic to name.
@@ -684,6 +931,290 @@ mod pairing {
             "the paired error bar ({paired:.4}) is no better than combining the \
              halves ({combined:.4}), so the alternatives were not measured on \
              the same inputs - erasure lost the pairing",
+        );
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use crate::registry::{ErasedInput, MatrixCandidate, MatrixInput};
+    use crate::{ComparisonSet, Config, Stats, Suite, Token};
+    use std::any::TypeId;
+
+    fn noop_flat(
+        suite: &mut Suite<'_>,
+        _: &Config,
+        name: &str,
+        make: fn() -> ErasedInput,
+    ) -> Token<Stats> {
+        suite.add_gen_input(name, make, |_: &mut ErasedInput| ())
+    }
+    fn noop_alt<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        _: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set
+    }
+
+    fn cand<I: 'static>(
+        matrix: &'static str,
+        name: &'static str,
+        ty: &'static str,
+        is_baseline: bool,
+    ) -> MatrixCandidate {
+        MatrixCandidate {
+            matrix,
+            name,
+            input_type: TypeId::of::<I>,
+            input_type_name: ty,
+            is_baseline,
+            crate_name: "testcrate",
+            crate_version: "1.0.0",
+            add_flat: noop_flat,
+            add_alt: noop_alt,
+        }
+    }
+
+    fn inp<I: 'static>(matrix: &'static str, name: &'static str, ty: &'static str) -> MatrixInput {
+        MatrixInput {
+            matrix,
+            name,
+            type_id: TypeId::of::<I>,
+            type_name: ty,
+            make: || ErasedInput::new(()),
+        }
+    }
+
+    fn leak_c(v: Vec<MatrixCandidate>) -> Vec<&'static MatrixCandidate> {
+        v.into_iter().map(|x| &*Box::leak(Box::new(x))).collect()
+    }
+    fn leak_i(v: Vec<MatrixInput>) -> Vec<&'static MatrixInput> {
+        v.into_iter().map(|x| &*Box::leak(Box::new(x))).collect()
+    }
+
+    /// The cross-product forms from declarations that never mention each
+    /// other, which is the whole point.
+    #[test]
+    fn candidates_and_inputs_pair_up_by_type() {
+        let cs = leak_c(vec![
+            cand::<Vec<u8>>("m", "b", "Vec<u8>", false),
+            cand::<Vec<u8>>("m", "a", "Vec<u8>", true),
+        ]);
+        let is = leak_i(vec![
+            inp::<Vec<u8>>("m", "big", "Vec<u8>"),
+            inp::<Vec<u8>>("m", "small", "Vec<u8>"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].candidates.len(), 2);
+        assert_eq!(lanes[0].inputs.len(), 2);
+        // Baseline first, then by name; inputs by name.
+        assert_eq!(
+            lanes[0]
+                .candidates
+                .iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+        );
+        assert_eq!(
+            lanes[0].inputs.iter().map(|i| i.name).collect::<Vec<_>>(),
+            ["big", "small"],
+        );
+    }
+
+    /// One matrix, two unrelated types: two lanes, and nothing crosses.
+    ///
+    /// This is what makes a heterogeneous matrix work rather than being a
+    /// type error - a `String` candidate is simply never offered a `Vec<u8>`.
+    #[test]
+    fn a_matrix_of_two_types_becomes_two_lanes() {
+        let cs = leak_c(vec![
+            cand::<Vec<u8>>("m", "bytes_a", "Vec<u8>", true),
+            cand::<Vec<u8>>("m", "bytes_b", "Vec<u8>", false),
+            cand::<String>("m", "text_a", "String", true),
+            cand::<String>("m", "text_b", "String", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<Vec<u8>>("m", "buf", "Vec<u8>"),
+            inp::<String>("m", "words", "String"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 2);
+        for lane in &lanes {
+            let ty = lane.type_name;
+            assert!(
+                lane.candidates.iter().all(|c| c.input_type_name == ty),
+                "a lane holds one type only",
+            );
+            assert!(lane.inputs.iter().all(|i| i.type_name == ty));
+        }
+    }
+
+    /// With nobody marked, the first by name is the baseline - a matrix
+    /// should be writable without ceremony.
+    #[test]
+    fn an_unmarked_lane_takes_the_first_name_as_baseline() {
+        let cs = leak_c(vec![
+            cand::<u8>("m", "zulu", "u8", false),
+            cand::<u8>("m", "alpha", "u8", false),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes[0].candidates[0].name, "alpha");
+    }
+
+    /// And a candidate sorting earlier displaces it, which is the documented
+    /// cost of not marking one. Asserted deliberately so the behaviour is
+    /// pinned rather than discovered.
+    #[test]
+    fn adding_an_earlier_name_moves_an_unmarked_baseline() {
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let before = leak_c(vec![
+            cand::<u8>("m", "bravo", "u8", false),
+            cand::<u8>("m", "charlie", "u8", false),
+        ]);
+        assert_eq!(lanes(&before, &is).0[0].candidates[0].name, "bravo");
+
+        let after = leak_c(vec![
+            cand::<u8>("m", "bravo", "u8", false),
+            cand::<u8>("m", "charlie", "u8", false),
+            cand::<u8>("m", "alpha", "u8", false),
+        ]);
+        assert_eq!(
+            lanes(&after, &is).0[0].candidates[0].name,
+            "alpha",
+            "an unmarked baseline is whichever name sorts first, so adding one \
+             ahead of it re-bases every reported difference",
+        );
+    }
+
+    /// An explicit mark beats the alphabet.
+    #[test]
+    fn a_marked_baseline_beats_the_alphabet() {
+        let cs = leak_c(vec![
+            cand::<u8>("m", "alpha", "u8", false),
+            cand::<u8>("m", "zulu", "u8", true),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        assert_eq!(lanes(&cs, &is).0[0].candidates[0].name, "zulu");
+    }
+
+    /// Two marked is a contradiction, unlike none.
+    #[test]
+    fn two_marked_baselines_are_rejected() {
+        let cs = leak_c(vec![
+            cand::<u8>("m", "a", "u8", true),
+            cand::<u8>("m", "b", "u8", true),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(lanes.is_empty(), "the lane is skipped");
+        assert!(
+            matches!(&problems[0], Diagnostic::ManyBaselines { .. }),
+            "{problems:?}",
+        );
+    }
+
+    /// A candidate no input matches is almost always a typo, but it is not a
+    /// contradiction - so it is said out loud and skipped, leaving the rest
+    /// of the run to happen.
+    #[test]
+    fn a_candidate_with_no_matching_input_warns() {
+        let cs = leak_c(vec![cand::<String>("m", "lonely", "String", true)]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(lanes.is_empty());
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, Diagnostic::OrphanCandidate { name, .. } if name == "lonely")),
+            "{problems:?}",
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, Diagnostic::OrphanInput { name, .. } if name == "i")),
+            "{problems:?}",
+        );
+    }
+
+    /// A lone candidate has nothing to compare against. It is still measured,
+    /// as a plain benchmark, rather than being dropped or panicking inside
+    /// `add_comparison`.
+    #[test]
+    fn a_lane_with_one_candidate_is_kept_for_plain_measurement() {
+        let cs = leak_c(vec![cand::<u8>("m", "only", "u8", false)]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].candidates.len(), 1);
+        assert_eq!(
+            lanes[0].flat_name(lanes[0].candidates[0], lanes[0].inputs[0]),
+            "m::only@i"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_within_a_matrix_are_rejected() {
+        let cs = leak_c(vec![
+            cand::<u8>("m", "same", "u8", true),
+            cand::<u8>("m", "same", "u8", false),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (_, problems) = lanes(&cs, &is);
+        assert!(
+            problems.iter().any(|p| matches!(
+                p,
+                Diagnostic::DuplicateMatrixEntry { what, name, .. }
+                    if *what == "candidate" && name == "same"
+            )),
+            "{problems:?}",
+        );
+    }
+
+    /// Two types spelled alike in different modules are still two types, and
+    /// pairing them would be a downcast panic later.
+    #[test]
+    fn a_name_collision_between_two_real_types_is_caught() {
+        // Same spelling, different actual type.
+        let cs = leak_c(vec![
+            cand::<u8>("m", "a", "Thing", true),
+            cand::<u16>("m", "b", "Thing", false),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "Thing")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(lanes.is_empty(), "the lane cannot be trusted");
+        assert!(
+            problems.iter().any(
+                |p| matches!(p, Diagnostic::MatrixTypeMismatch { candidate, .. } if candidate == "b")
+            ),
+            "{problems:?}",
+        );
+    }
+
+    /// Lanes come out sorted, for the reason everything else does.
+    #[test]
+    fn lanes_come_out_sorted() {
+        let cs = leak_c(vec![
+            cand::<u8>("zebra", "a", "u8", true),
+            cand::<u8>("zebra", "b", "u8", false),
+            cand::<u8>("apple", "a", "u8", true),
+            cand::<u8>("apple", "b", "u8", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<u8>("zebra", "i", "u8"),
+            inp::<u8>("apple", "i", "u8"),
+        ]);
+        let (lanes, _) = lanes(&cs, &is);
+        assert_eq!(
+            lanes.iter().map(|l| l.matrix).collect::<Vec<_>>(),
+            ["apple", "zebra"],
         );
     }
 }
