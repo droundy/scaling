@@ -408,13 +408,26 @@ silent overwrite.
 
 ### Compiling out of normal builds
 
-A `#[test]` fn is *not* erased by `#[test]` alone — it is `#[cfg(test)]`,
-evaluated by rustc, that removes it. An attribute proc macro can do better
-by construction, because it chooses its own expansion: wrap everything it
-emits, the original function included, in `#[cfg(feature = "scaling-bench")]`.
-With the feature off — the default — none of it is compiled, type-checked or
-linked, so annotated benchmarks can live in `src/` next to what they measure
-at zero cost to ordinary builds and to published-crate consumers.
+An earlier draft had the macro emit `#[cfg(feature = "scaling-bench")]`
+around its whole expansion. **Don't.** That invents a feature name the
+caller never chose, and compiles silently to nothing for anyone who has not
+defined that exact feature.
+
+It is also unnecessary. A `#[cfg]` written *above* the attribute strips the
+item before the macro ever runs — verified: a proc macro placed under a false
+`#[cfg]` never executes. So the caller picks their own name and nothing has
+to be built in:
+
+```rust
+#[cfg(feature = "my-benchmarks")]
+#[scaling::bench]
+fn something() { ... }
+```
+
+With that feature off, none of it is compiled, type-checked or linked, so
+annotated benchmarks can live in `src/` next to what they measure at zero
+cost to ordinary builds and to published-crate consumers. It also works with
+any `cfg`, not only features.
 
 Two consequences:
 

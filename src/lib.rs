@@ -128,7 +128,7 @@ separately because they fail independently:
   and it is what the `±` in the output shows. Measuring continues until it
   meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
-  for [`bench`].
+  for [`bench`](fn@bench).
 
 The two are deliberately not merged into one number, and measured error bars
 are what keeps them apart. Where errors are only assumed, the usual move is
@@ -193,7 +193,7 @@ the suite has been using - in exchange for a ceiling on drift.
 
 So it does *not* make any single benchmark more precise - it averages drift
 in rather than out - and it does not make a suite's numbers comparable with
-a lone [`bench`] call. What it gives you is that the numbers within one
+a lone [`bench`](fn@bench) call. What it gives you is that the numbers within one
 suite, and across runs of it, were measured in the same machine.
 
 Each benchmark still gets [`Config::max_time`] of its own running time, so a
@@ -324,6 +324,11 @@ pub use self::suite::{Report, Suite, Token};
 #[doc(hidden)]
 pub use inventory;
 
+/// Attribute macros that register a benchmark where it is written, rather
+/// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
+#[cfg(feature = "registry")]
+pub use scaling_macros::{bench, bench_scaling, gen_input};
+
 use std::f64;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -388,7 +393,7 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`], [`bench_input`] and [`bench_gen_input`] use [`Config::default`];
+/// [`bench`](fn@bench), [`bench_input`] and [`bench_gen_input`] use [`Config::default`];
 /// call the same-named methods on a `Config` to choose your own.
 ///
 /// ```
@@ -435,7 +440,7 @@ pub struct Config {
     /// how long the caller waits - a benchmark whose input is slow to build
     /// has still taken that long. The `compare_*` functions allow twice
     /// this, since they produce two [`Stats`] and would otherwise give each
-    /// side half the budget a lone [`bench`] gets for the same target.
+    /// side half the budget a lone [`bench`](fn@bench) gets for the same target.
     pub max_time: Duration,
     /// The multiple-comparison plan, shared by every clone of this `Config`
     /// *until* one of them plans, which detaches it.

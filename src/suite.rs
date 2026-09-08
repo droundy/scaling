@@ -469,7 +469,7 @@ impl<'a> Suite<'a> {
         self.scheduler.push(clock, future);
     }
 
-    /// Add a benchmark, as [`bench`] would run it.
+    /// Add a benchmark, as [`bench`](fn@bench) would run it.
     pub fn add<F, O>(&mut self, name: &str, mut f: F) -> Token<Stats>
     where
         F: FnMut() -> O + 'a,
@@ -514,7 +514,7 @@ impl<'a> Suite<'a> {
         token
     }
 
-    /// Add a scaling benchmark, as [`bench_scaling`] would run it.
+    /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
     pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
     where
         F: Fn(usize) -> O + 'a,
