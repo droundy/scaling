@@ -65,7 +65,7 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
@@ -451,6 +451,18 @@ pub struct Suite<'a> {
     comparisons: u64,
     /// Which entries to measure. Everything, unless a caller says otherwise.
     filter: Filter,
+    /// The Bonferroni limit, shared with every comparison this suite holds.
+    ///
+    /// A cell because the comparisons are boxed as they are added, before the
+    /// total is known: [`Suite::run`] fills this in once, and every
+    /// comparison reads it when it starts sampling, which is strictly
+    /// afterwards. That ordering is the whole reason a suite can correct for
+    /// its own size without anyone promising the count in advance - and it is
+    /// why the read has to stay lazy. An eager one would hand every
+    /// comparison `NaN`, which fails silently: nothing is ever significant,
+    /// each spends its whole budget, and the report reads as a page of honest
+    /// "unchanged" results.
+    z_alpha: Rc<Cell<f64>>,
 }
 
 impl Config {
@@ -467,6 +479,9 @@ impl Config {
             entries: Vec::new(),
             comparisons: 0,
             filter: Filter::everything(),
+            // `NaN` until `run` sets it. Nothing reads it before then, and a
+            // suite holding no comparisons never reads it at all.
+            z_alpha: Rc::new(Cell::new(f64::NAN)),
         }
     }
 }
@@ -547,12 +562,24 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
-    pub fn add<F, O>(&mut self, name: &str, mut f: F) -> Token<Stats>
+    pub fn add<F, O>(&mut self, name: &str, f: F) -> Token<Stats>
     where
         F: FnMut() -> O + 'a,
         O: 'a,
     {
-        self.add_gen_input(name, || (), move |_: &mut ()| f())
+        self.add_with(self.cfg, name, f)
+    }
+
+    /// [`Suite::add`], measured against `cfg` rather than the suite's own.
+    ///
+    /// See [`Suite::add_gen_input_with`] for what a per-benchmark `Config`
+    /// is for and what it does not change.
+    pub fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F) -> Token<Stats>
+    where
+        F: FnMut() -> O + 'a,
+        O: 'a,
+    {
+        self.add_gen_input_with(cfg, name, || (), move |_: &mut ()| f())
     }
 
     /// Add a benchmark over a mutable input, as [`bench_input`] would run it.
@@ -562,12 +589,77 @@ impl<'a> Suite<'a> {
         I: Clone + 'a,
         O: 'a,
     {
-        self.add_gen_input(name, move || input.clone(), f)
+        self.add_input_with(self.cfg, name, input, f)
+    }
+
+    /// [`Suite::add_input`], measured against `cfg` rather than the suite's
+    /// own. See [`Suite::add_gen_input_with`].
+    pub fn add_input_with<F, I, O>(
+        &mut self,
+        cfg: &'a Config,
+        name: &str,
+        input: I,
+        f: F,
+    ) -> Token<Stats>
+    where
+        F: FnMut(&mut I) -> O + 'a,
+        I: Clone + 'a,
+        O: 'a,
+    {
+        self.add_gen_input_with(cfg, name, move || input.clone(), f)
     }
 
     /// Add a benchmark over generated inputs, as [`bench_gen_input`] would
     /// run it.
     pub fn add_gen_input<G, F, I, O>(&mut self, name: &str, gen_input: G, f: F) -> Token<Stats>
+    where
+        G: FnMut() -> I + 'a,
+        F: FnMut(&mut I) -> O + 'a,
+        I: 'a,
+        O: 'a,
+    {
+        self.add_gen_input_with(self.cfg, name, gen_input, f)
+    }
+
+    /// [`Suite::add_gen_input`], measured against `cfg` rather than the
+    /// suite's own.
+    ///
+    /// One benchmark in a suite may want a different accuracy goal or a
+    /// different budget from the rest - a slow one nobody wants to spend the
+    /// default on, or a fickle one worth chasing further. The `Config` given
+    /// here governs this benchmark alone: its goals, and the budget its clock
+    /// is built from.
+    ///
+    /// It must outlive the suite, since the benchmark holds it until it runs.
+    /// A caller with several wants them somewhere stable - a `Vec<Config>`
+    /// declared before the suite will do - rather than built inline per call.
+    ///
+    /// # What it does not change
+    ///
+    /// The multiple-comparison threshold, which belongs to the whole suite
+    /// and is worked out in [`Suite::run`] from the number of comparisons the
+    /// suite holds. A benchmark cannot opt out of the family it is part of by
+    /// bringing its own `Config`.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// let cfg = scaling::Config::default();
+    /// // Declared before the suite, so it outlives it.
+    /// let quick = scaling::Config::relative(0.1)
+    ///     .with_max_time(Duration::from_millis(5));
+    /// let mut suite = cfg.suite();
+    /// let slow = suite.add_with(&quick, "slow_one", || (0..1000u64).sum::<u64>());
+    /// let rest = suite.add("rest", || (0..10u64).sum::<u64>());
+    /// let report = suite.run();
+    /// # let _ = (slow.get(), rest.get(), report);
+    /// ```
+    pub fn add_gen_input_with<G, F, I, O>(
+        &mut self,
+        cfg: &'a Config,
+        name: &str,
+        gen_input: G,
+        f: F,
+    ) -> Token<Stats>
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
@@ -580,7 +672,6 @@ impl<'a> Suite<'a> {
         if !self.filter.matches(name) {
             return Token::new();
         }
-        let cfg = self.cfg;
         let clock = Rc::new(Clock::new(cfg.max_time));
         let token = Token::new();
         let cell = token.clone();
@@ -603,13 +694,28 @@ impl<'a> Suite<'a> {
         F: Fn(usize) -> O + 'a,
         O: 'a,
     {
+        self.add_scaling_with(self.cfg, name, f, nmin)
+    }
+
+    /// [`Suite::add_scaling`], measured against `cfg` rather than the suite's
+    /// own. See [`Suite::add_gen_input_with`].
+    pub fn add_scaling_with<F, O>(
+        &mut self,
+        cfg: &'a Config,
+        name: &str,
+        f: F,
+        nmin: usize,
+    ) -> Token<ScalingStats>
+    where
+        F: Fn(usize) -> O + 'a,
+        O: 'a,
+    {
         // Filtered out: build nothing. The token is still handed back and
         // simply never fills, which is what happens to any token when a
         // suite is not run.
         if !self.filter.matches(name) {
             return Token::new();
         }
-        let cfg = self.cfg;
         let clock = Rc::new(Clock::new(cfg.max_time));
         let token = Token::new();
         let cell = token.clone();
@@ -640,13 +746,31 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
+        self.add_scaling_gen_with(self.cfg, name, gen_input, f, nmin)
+    }
+
+    /// [`Suite::add_scaling_gen`], measured against `cfg` rather than the
+    /// suite's own. See [`Suite::add_gen_input_with`].
+    pub fn add_scaling_gen_with<G, F, I, O>(
+        &mut self,
+        cfg: &'a Config,
+        name: &str,
+        gen_input: G,
+        f: F,
+        nmin: usize,
+    ) -> Token<ScalingStats>
+    where
+        G: FnMut(usize) -> I + 'a,
+        F: Fn(&mut I) -> O + 'a,
+        I: 'a,
+        O: 'a,
+    {
         // Filtered out: build nothing. The token is still handed back and
         // simply never fills, which is what happens to any token when a
         // suite is not run.
         if !self.filter.matches(name) {
             return Token::new();
         }
-        let cfg = self.cfg;
         let clock = Rc::new(Clock::new(cfg.max_time));
         let token = Token::new();
         let cell = token.clone();
@@ -711,7 +835,15 @@ impl<'a> Suite<'a> {
         // Every alternative beyond the baseline is a chance at a false
         // positive, and so counts against the plan `run` will set.
         self.comparisons += k as u64 - 1;
-        let clock = Rc::new(Clock::new(self.cfg.max_time * k as u32));
+        // Each comparison gets a different seed, so two sitting in one suite
+        // do not draw the same order of alternatives round after round.
+        let seed = self.comparisons;
+        let z_alpha = self.z_alpha.clone();
+        // The set's own `Config`, not the suite's: it is what `run_async`
+        // consults for the accuracy goal, so it must also be what the budget
+        // comes from. A set built from a different `Config` than the suite
+        // would otherwise chase one target on the other's clock.
+        let clock = Rc::new(Clock::new(set.cfg().max_time * k as u32));
         let token = Token::new();
         let cell = token.clone();
         let mine = clock.clone();
@@ -720,7 +852,7 @@ impl<'a> Suite<'a> {
             &token,
             clock,
             Box::pin(async move {
-                let results = set.run_async(&mine).await;
+                let results = set.run_async(&mine, z_alpha.get(), seed).await;
                 *cell.cell() = Some(results);
             }),
         );
@@ -729,24 +861,18 @@ impl<'a> Suite<'a> {
 
     /// Measure every benchmark, interleaved, and report them together.
     ///
-    /// If the suite holds comparisons and the caller set no plan of their
-    /// own, the suite *adds* its own comparisons to the plan here. It can
-    /// only be done at this point - the count is not known until the last one
-    /// is added - and it is only possible at all because a suite collects
+    /// The suite's own comparisons are its family, and the Bonferroni limit
+    /// they are judged against is worked out here from the count. It can only
+    /// be done at this point - the count is not known until the last one is
+    /// added - and it is only possible at all because a suite collects
     /// everything before running anything, which is exactly what a caller
     /// invoking [`Config::compare`] in a loop cannot do.
     ///
-    /// Adding rather than setting is what lets a second suite built from the
-    /// same [`Config`] account for itself. Setting would leave the first
-    /// suite's number in place, and dropping the `Config` would then complain
-    /// about a count the caller never chose.
-    ///
-    /// A plan the caller set by hand wins outright and is never added to,
-    /// since they may be planning comparisons outside this suite as well.
+    /// Nothing is promised in advance and nothing is checked afterwards: the
+    /// scheduler runs every entry that was added, so the number corrected for
+    /// and the number made are the same number by construction.
     pub fn run(mut self) -> Report {
-        if self.comparisons > 0 && !self.cfg.plan_set_by_caller() {
-            self.cfg.add_comparisons_planned(self.comparisons);
-        }
+        self.z_alpha.set(Config::z_alpha_for(self.comparisons));
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
@@ -1259,7 +1385,6 @@ mod tests {
         assert!(stats.ns_per_iter > 0.0);
         let comparisons = cmp.get().expect("the comparison reported");
         assert_eq!(comparisons.stats().len(), 2);
-        drop(cfg); // the plan was set for us; `Drop` must be satisfied
     }
 
     /// All three kinds in one suite, interleaved: this is the whole point of
@@ -1290,7 +1415,6 @@ mod tests {
         assert!(with_input.get().is_some());
         assert!(scaled.get().is_some(), "the scaling benchmark reported");
         assert_eq!(cmp.get().unwrap().stats().len(), 2);
-        drop(cfg);
     }
 
     /// The table is in declaration order, not alphabetical and not whatever
@@ -1310,14 +1434,12 @@ mod tests {
             .map(|l| l.split_whitespace().next().unwrap())
             .collect();
         assert_eq!(names, ["middle", "zebra", "apple"], "{shown}");
-        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
     }
 
-    /// The suite counts its own comparisons, so the caller does not have to.
-    /// Getting this wrong is a panic in `Config::drop`, so reaching the end
-    /// of this test is the assertion.
+    /// The suite counts its own comparisons and corrects for exactly that
+    /// many, with nothing promised in advance.
     #[test]
-    fn the_suite_sets_the_plan_itself() {
+    fn the_suite_computes_its_own_threshold() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         // Three alternatives is two comparisons; two alternatives is one.
@@ -1333,20 +1455,19 @@ mod tests {
             cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
         );
         assert_eq!(suite.comparisons, 3);
+        // The cell every comparison in this suite reads from.
+        let z = suite.z_alpha.clone();
         suite.run();
-        assert_eq!(cfg.num_comparisons_planned(), 3);
-        drop(cfg);
+        assert_eq!(z.get(), Config::z_alpha_for(3));
     }
 
-    /// Two suites off one `Config` must each account for themselves.
+    /// Two suites off one `Config` each correct for themselves alone.
     ///
-    /// The suite used to *set* the plan only when it was still zero, so a
-    /// second suite silently skipped its own comparisons while still
-    /// claiming them - and dropping the `Config` then complained about a
-    /// count the caller never chose. Reaching the end of this test without a
-    /// panic from `Drop` is the assertion.
+    /// The `Config` carries no count now, so a second suite cannot inherit or
+    /// disturb the first one's threshold - which was the whole failure mode
+    /// the old shared plan had to be careful about.
     #[test]
-    fn a_second_suite_adds_its_own_comparisons() {
+    fn each_suite_corrects_for_itself_alone() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         for _ in 0..2 {
             let mut suite = cfg.suite();
@@ -1354,10 +1475,46 @@ mod tests {
                 "pair",
                 cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
             );
+            let z = suite.z_alpha.clone();
             suite.run();
+            // One comparison each time, not two accumulating across suites.
+            assert_eq!(z.get(), Config::z_alpha_for(1));
         }
-        assert_eq!(cfg.num_comparisons_planned(), 2);
-        drop(cfg);
+    }
+
+    /// The suite's threshold must actually *reach* the comparisons it holds.
+    ///
+    /// It travels by a different route from everything else here - a shared
+    /// cell the comparisons read on their first poll, because they are boxed
+    /// before the suite knows its own size. If that read ever happened before
+    /// `run` filled the cell, every comparison would be judged against `NaN`:
+    /// nothing would be significant, each would sample until its budget ran
+    /// out, and the report would look like a pile of honest "unchanged"
+    /// results. Nothing else in this file would fail, so check it here.
+    #[test]
+    fn the_threshold_reaches_every_comparison() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let mut suite = cfg.suite();
+        let pair = suite.add_comparison(
+            "pair",
+            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+        );
+        let trio = suite.add_comparison(
+            "trio",
+            cfg.comparison()
+                .add("a", || 1u64 + 1)
+                .add("b", || 1u64 + 1)
+                .add("c", || 1u64 + 1),
+        );
+        suite.run();
+        for token in [pair, trio] {
+            for (name, cmp) in token.get().unwrap().against_baseline() {
+                assert!(
+                    cmp.min_detectable_difference().is_finite(),
+                    "{name} was judged against a NaN threshold",
+                );
+            }
+        }
     }
 
     /// A comparison that is not the last entry must not leave a blank line
@@ -1382,27 +1539,6 @@ mod tests {
             "blank line in report:\n{shown}"
         );
         assert!(shown.lines().last().unwrap().starts_with("flat"), "{shown}");
-        drop(cfg);
-    }
-
-    /// A plan set by hand must win, because the caller may be planning
-    /// comparisons outside the suite too.
-    #[test]
-    fn a_hand_set_plan_is_not_overwritten() {
-        let cfg = Config::default()
-            .with_max_time(Duration::from_millis(20))
-            .with_comparisons_planned(2);
-        let mut suite = cfg.suite();
-        let _ = suite.add_comparison(
-            "pair",
-            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
-        );
-        suite.run();
-        assert_eq!(cfg.num_comparisons_planned(), 2);
-        // One comparison made against a plan of two: the caller said they
-        // would make another elsewhere, so account for it.
-        cfg.claim_comparisons(1);
-        drop(cfg);
     }
 
     /// A lone alternative is caught where the mistake was made, rather than
@@ -1426,7 +1562,6 @@ mod tests {
         let suite = cfg.suite();
         assert!(suite.is_empty());
         assert_eq!(format!("{}", suite.run()), "");
-        std::mem::forget(cfg);
     }
 
     /// A fixed amount of integer work, as one closure type however many are
@@ -1546,7 +1681,6 @@ mod tests {
                 report("sequential", &sf, &sr);
             }
         }
-        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
     }
 
     /// Does reaching a benchmark through a [`Suite`] change what it reads?
@@ -1608,7 +1742,6 @@ mod tests {
         println!("  bench()      median {d:7.2}ns");
         println!("  suite of 1   median {s:7.2}ns");
         println!("  difference          {:+7.2}%", 100.0 * (s - d) / d);
-        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
     }
 
     /// Does interleaving stop a benchmark believing an error bar it has not
@@ -1721,7 +1854,6 @@ mod tests {
         report("sequential", &seq);
         report("suite of 1", &alone);
         report("interleaved", &inter);
-        std::mem::forget(cfg); // no comparisons; nothing for `Drop` to check
     }
 
     /// Time spent by *other* benchmarks must not count against this one, or a
@@ -2058,5 +2190,97 @@ mod filtering {
             .suite()
             .with_filter(Filter::everything().matching("nothing matches this"));
         let _ = suite.add_comparison("lonely", cfg.comparison().add("only", || 1u64));
+    }
+}
+
+#[cfg(test)]
+mod per_benchmark_config {
+    use super::*;
+    use std::time::Duration;
+
+    /// A per-benchmark `Config` governs that benchmark and nothing else.
+    ///
+    /// The budget is the visible half: a benchmark given a microsecond gives
+    /// up early and says so, while its neighbour on the suite's own generous
+    /// budget does not.
+    #[test]
+    fn a_per_benchmark_config_governs_only_that_benchmark() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(500));
+        let stingy = Config::relative(1e-9).with_max_time(Duration::from_micros(1));
+        let mut suite = cfg.suite();
+        let ordinary = suite.add("ordinary", || (0..50u64).sum::<u64>());
+        let starved = suite.add_with(&stingy, "starved", || (0..50u64).sum::<u64>());
+        suite.run();
+        assert!(
+            starved.get().unwrap().hit_limit,
+            "the benchmark given a microsecond should have run out",
+        );
+        assert!(
+            !ordinary.get().unwrap().hit_limit,
+            "its neighbour keeps the suite's budget",
+        );
+    }
+
+    /// A comparison is measured against the `Config` it was built from, on
+    /// every axis.
+    ///
+    /// The accuracy goal already came from the set's own `Config`; the clock
+    /// used to be sized from the suite's, so a set built from a different
+    /// `Config` chased one target on the other's budget.
+    ///
+    /// `hit_limit` cannot see this - an unreachable goal ends at the budget
+    /// whichever budget it was - so what is measured is the elapsed time,
+    /// where the two differ by a hundredfold.
+    #[test]
+    fn a_comparison_follows_its_own_config() {
+        let generous = Duration::from_secs(2);
+        let cfg = Config::default().with_max_time(generous);
+        let stingy = Config::relative(1e-9).with_max_time(Duration::from_millis(10));
+        let mut suite = cfg.suite();
+        let starved = suite.add_comparison(
+            "starved",
+            stingy
+                .comparison()
+                .add("a", || (0..50u64).sum::<u64>())
+                .add("b", || (0..50u64).sum::<u64>()),
+        );
+        let _held = crate::quiet::exclusive();
+        let started = Instant::now();
+        suite.run();
+        let elapsed = started.elapsed();
+        assert!(
+            starved.get().unwrap().stats().iter().any(|s| s.hit_limit),
+            "an unreachable goal must end at the budget",
+        );
+        assert!(
+            elapsed < generous,
+            "the comparison spent the suite's budget, not its own: {elapsed:?}",
+        );
+    }
+
+    /// A benchmark cannot opt out of the family it is in by bringing its own
+    /// `Config`: the threshold belongs to the suite.
+    #[test]
+    fn a_per_benchmark_config_does_not_change_the_threshold() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let other = Config::relative(0.5);
+        let mut suite = cfg.suite();
+        let _ = suite.add_with(&other, "flat", || (0..32u64).sum::<u64>());
+        for name in ["one", "two"] {
+            let _ = suite.add_comparison(
+                name,
+                cfg.comparison()
+                    .add("a", || (0..32u64).sum::<u64>())
+                    .add("b", || (0..32u64).sum::<u64>()),
+            );
+        }
+        let z = suite.z_alpha.clone();
+        suite.run();
+        assert_eq!(
+            z.get(),
+            Config::z_alpha_for(2),
+            "the limit counts the suite's comparisons, whatever config each \
+             benchmark was measured under",
+        );
     }
 }

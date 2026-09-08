@@ -56,7 +56,7 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 /// # fn old() -> u64 { 0 }
 /// # fn new() -> u64 { 0 }
 /// # fn newer() -> u64 { 0 }
-/// let cfg = scaling::Config::default().with_comparisons_planned(2);
+/// let cfg = scaling::Config::default();
 /// let results = cfg
 ///     .comparison()
 ///     .add("old", old)
@@ -66,8 +66,14 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 /// println!("{results}");
 /// ```
 ///
-/// Two of the alternatives are reported against the baseline, so this plans
-/// two comparisons, not three.
+/// Two of the alternatives are reported against the baseline, so this is a
+/// family of two comparisons, not three, and it is corrected for two.
+/// Nothing has to be declared: the set knows its own size.
+///
+/// That correction covers the alternatives *within* one set. Running several
+/// sets and reading them together is a larger family than any of them knows
+/// about, and [`ComparisonSet::run`] cannot correct for it - add them to a
+/// [`Suite`] instead, which sees them all before running any.
 pub struct ComparisonSet<'a, I> {
     cfg: &'a Config,
     gen_input: Box<GenInput<'a, I>>,
@@ -150,6 +156,16 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         self.entries.len()
     }
 
+    /// The `Config` this set was built from, which governs both its accuracy
+    /// goal and its budget.
+    ///
+    /// For [`Suite::add_comparison`], which sizes the comparison's clock and
+    /// so needs the same `Config` the sampling loop will consult - the set
+    /// carries its own, and it is not necessarily the suite's.
+    pub(crate) fn cfg(&self) -> &'a Config {
+        self.cfg
+    }
+
     /// Whether no alternatives have been added yet.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -198,7 +214,14 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         // single budget each alternative would get a `k`th of the wall clock
         // a lone `bench` call is allowed, for the same target.
         let clock = Clock::new(self.cfg.max_time * self.entries.len().max(1) as u32);
-        block_on(&clock, self.run_async(&clock))
+        // A family of `k - 1`: one comparison is reported per alternative
+        // beyond the baseline, and nothing outside this set shares the
+        // threshold.
+        let z_alpha = Config::z_alpha_for(self.entries.len() as u64 - 1);
+        block_on(
+            &clock,
+            self.run_async(&clock, z_alpha, Config::next_comparison_seed()),
+        )
     }
 
     /// The k-way sampling loop, which yields to the scheduler between rounds.
@@ -214,7 +237,10 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// # Panics
     ///
     /// If fewer than two alternatives were added.
-    pub(crate) async fn run_async(self, clock: &Clock) -> Comparisons {
+    /// `z_alpha` is the Bonferroni limit for the family this set belongs to -
+    /// its own `k - 1` when run alone, or the whole suite's total when run in
+    /// one - and `seed` distinguishes its random stream from its siblings'.
+    pub(crate) async fn run_async(self, clock: &Clock, z_alpha: f64, seed: u64) -> Comparisons {
         assert!(
             self.entries.len() >= 2,
             "a comparison needs at least two alternatives, got {}",
@@ -226,10 +252,6 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             mut entries,
         } = self;
         let k = entries.len();
-        // One comparison is reported per alternative beyond the baseline,
-        // and each of those is a chance at a false positive, so each is
-        // counted against the plan.
-        let made = cfg.claim_comparisons(k as u64 - 1);
         // `master` holds the round's inputs; `xs` is the copy an alternative
         // is actually handed, and may be left in any state.
         let mut master: Vec<I> = Vec::new();
@@ -245,7 +267,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         // `MIN_SAMPLE_TIME` is per alternative, and a round buys evidence
         // about all of them, so the round-total floor is `k` times as large.
         let floor_ns = k as f64 * MIN_SAMPLE_TIME.as_secs_f64() * 1e9;
-        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ made.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D);
 
         let precise_enough = loop {
             flip ^= flip << 13;
@@ -274,7 +296,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             // stands behind all of them at once.
             let all_precise = (1..k).all(|i| {
                 let (_, std_error) = diffs[i].mean_and_stderr();
-                cfg.comparison_accuracy_met(base_mean, std_error)
+                cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
             });
             let precise_enough = rounds >= MIN_SAMPLES && measured_ns >= floor_ns && all_precise;
             if precise_enough || out_of_budget {
@@ -313,7 +335,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             names: entries.into_iter().map(|e| e.name).collect(),
             stats,
             paired,
-            z_alpha: cfg.z_alpha(),
+            z_alpha,
         }
     }
 }
@@ -474,19 +496,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "at least two alternatives")]
     fn one_alternative_is_not_a_comparison() {
-        let cfg = Config::default().with_comparisons_planned(1);
+        let cfg = Config::default();
         cfg.comparison().add("only", || 1u64).run();
         // Unreachable, but were the panic ever to stop happening, `Drop`
         // would report a plan of 1 against 0 made rather than the missing
         // panic, which is a confusing way to fail.
-        std::mem::forget(cfg);
     }
 
     #[test]
     fn each_alternative_beyond_the_baseline_counts_as_one_comparison() {
-        let cfg = Config::default()
-            .with_max_time(Duration::from_millis(200))
-            .with_comparisons_planned(3);
+        let cfg = Config::default().with_max_time(Duration::from_millis(200));
         // Four alternatives, three of them reported against the baseline.
         let _ = cfg
             .comparison()
@@ -503,9 +522,7 @@ mod tests {
     /// they are handed - so long as they agree on its type.
     #[test]
     fn alternatives_need_not_share_a_return_type() {
-        let cfg = Config::default()
-            .with_max_time(Duration::from_millis(200))
-            .with_comparisons_planned(1);
+        let cfg = Config::default().with_max_time(Duration::from_millis(200));
         let mut n = 0u64;
         let r = cfg
             .comparison_gen_input(move || {
@@ -530,9 +547,7 @@ mod tests {
             return;
         }
         const REPEATS: u64 = 10;
-        let cfg = Config::relative(0.05)
-            .with_max_time(Duration::from_secs(2))
-            .with_comparisons_planned(2 * REPEATS);
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(2));
         let mut changed = 0u64;
         for r in 0..REPEATS {
             let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
@@ -591,9 +606,7 @@ mod tests {
             return;
         }
         const REPEATS: u64 = 8;
-        let cfg = Config::relative(0.05)
-            .with_max_time(Duration::from_secs(2))
-            .with_comparisons_planned(2 * REPEATS);
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(2));
         let mut ratios = Vec::new();
         for r in 0..REPEATS {
             let mut rng = XorShift(0x243f_6a88_85a3_08d3u64.wrapping_mul(r + 1) | 1);
@@ -633,9 +646,7 @@ mod tests {
             return;
         }
         const REPEATS: u64 = 10;
-        let cfg = Config::relative(0.05)
-            .with_max_time(Duration::from_secs(3))
-            .with_comparisons_planned(2 * REPEATS);
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(3));
         let mut caught = 0u64;
         for r in 0..REPEATS {
             let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);

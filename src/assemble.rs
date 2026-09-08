@@ -1473,9 +1473,7 @@ mod pairing {
         let seen_b: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
         let (rec_a, rec_b) = (seen_a.clone(), seen_b.clone());
 
-        let cfg = Config::relative(0.5)
-            .with_max_time(Duration::from_millis(50))
-            .with_comparisons_planned(1);
+        let cfg = Config::relative(0.5).with_max_time(Duration::from_millis(50));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let _ = cfg
             .comparison_gen_input(move || {
@@ -1533,9 +1531,7 @@ mod pairing {
             println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
             return;
         }
-        let cfg = Config::relative(0.02)
-            .with_max_time(Duration::from_millis(300))
-            .with_comparisons_planned(1);
+        let cfg = Config::relative(0.02).with_max_time(Duration::from_millis(300));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let results = cfg
             .comparison_gen_input(move || {

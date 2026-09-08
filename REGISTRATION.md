@@ -59,7 +59,7 @@ that drive them are deferred together to stage 6.
 | 3 | `Suite::add_registered()` — this completes **Design B** | yes |
 | 4 | `scaling-macros`: the attribute proc macros | yes |
 | 5 | matrices: candidates × inputs | yes |
-| 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | no |
+| 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | **done** |
 | 7 | runner, CLI, output formats — this completes **Design A** | mostly |
 | 8 | migrate docs, README, `benches/` | no |
 
@@ -594,7 +594,7 @@ That scenario is what the tests exercise, rather than only the mechanism:
 they throw the tokens away, find a benchmark by searching `names()`, and ask
 which alternative of a comparison actually measured fastest.
 
-### Removing `Plan` / `Drop`
+### Removing `Plan` / `Drop` — **done**
 
 `Config` carries a `Plan` behind an `Arc` — promised count, cached
 `z_alpha`, count made — plus a `Drop` asserting the counts match, plus a
@@ -632,7 +632,7 @@ Two implementation notes found by building this once already:
   process-global seed counter. The tests that would catch this are gated on
   a quiesced machine and **skip silently on most**, reporting `ok` in 0.00s.
 
-### Per-benchmark `Config`
+### Per-benchmark `Config` — **done**
 
 Add `add_with`, `add_input_with`, `add_gen_input_with`, `add_scaling_with`,
 `add_scaling_gen_with`, each taking the `Config` that one benchmark is
