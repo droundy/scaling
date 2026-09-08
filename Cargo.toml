@@ -11,6 +11,13 @@ keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
 # Set by `std::hint::black_box`, stabilised in 1.66. (`libc`, which we
 # depend on only to pin benchmarks to a reserved CPU on Linux, wants 1.65.)
+#
+# This is the floor for the *default* build, which is what it can be: cargo
+# has no way to say that one feature needs more than another. Turning on
+# `registry` raises it to 1.71, set by the proc-macro crates behind
+# `scaling-macros` - `syn`, `quote`, `proc-macro2` and `unicode-ident` all
+# want 1.71, and `inventory` wants 1.68. Nobody is left guessing when they
+# meet it: cargo names the offending package and the version it needs.
 rust-version = "1.66"
 
 # Only used to set CPU affinity, which only exists on Linux. Elsewhere the

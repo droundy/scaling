@@ -7,9 +7,11 @@ edition = "2021"
 documentation = "https://docs.rs/scaling/"
 repository = "https://github.com/droundy/scaling"
 license = "MIT OR Apache-2.0"
-# `syn` 2 wants 1.61; this matches the rest of the workspace. The `registry`
-# feature that pulls this in already needs 1.68 for `inventory`.
-rust-version = "1.66"
+# Set by this crate's own dependencies rather than by anything it does:
+# `syn`, `quote`, `proc-macro2` and `unicode-ident` all declare 1.71. It said
+# 1.66 before, matching the library, which was simply untrue - `cargo check
+# --all` on 1.66 fails here, not in the library.
+rust-version = "1.71"
 
 [lib]
 proc-macro = true

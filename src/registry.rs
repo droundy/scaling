@@ -16,6 +16,7 @@
 
 use crate::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
+use std::fmt;
 
 /// How a flat benchmark adds itself to a suite.
 ///
@@ -116,7 +117,6 @@ pub struct Registered {
 /// [`ScalingStats`]: crate::ScalingStats
 /// [`Comparisons`]: crate::Comparisons
 /// [`Config::bench`]: crate::Config::bench
-#[derive(Debug)]
 pub enum Kind {
     /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
     /// [`Suite::add_gen_input`] - which of the three, and any input
@@ -158,6 +158,26 @@ pub enum Kind {
         /// literal and so usable in the `static` a registration becomes.
         input_type_name: &'static str,
     },
+}
+
+impl fmt::Debug for Kind {
+    /// Written out rather than derived, for two reasons that happen to
+    /// agree. A derived one would print the shims as bare addresses, which
+    /// tell a reader nothing; and deriving `Debug` over the higher-ranked
+    /// `AddAlt` needs a compiler newer than this crate supports, so the
+    /// derive quietly raised the floor for everyone, feature or no feature.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Kind::Flat(_) => f.write_str("Flat"),
+            Kind::Scaling(_) => f.write_str("Scaling"),
+            Kind::Alt {
+                input_type_name, ..
+            } => f
+                .debug_struct("Alt")
+                .field("input_type_name", input_type_name)
+                .finish(),
+        }
+    }
 }
 
 impl Kind {
@@ -312,7 +332,6 @@ inventory::collect!(GenInputRegistration);
 /// "Candidate" rather than "row" because it is already this crate's word for
 /// one side of a measured difference - [`crate::Comparison`] holds a baseline
 /// and a candidate - and every cell of a matrix ends up in exactly that role.
-#[derive(Debug)]
 pub struct MatrixCandidate {
     /// Which matrix this belongs to.
     pub matrix: &'static str,
@@ -338,6 +357,22 @@ pub struct MatrixCandidate {
     pub add_flat: AddPaired,
     /// The usual path: one alternative of this input's comparison.
     pub add_alt: AddAlt,
+}
+
+impl fmt::Debug for MatrixCandidate {
+    /// Hand-written for the same reasons as [`Kind`]'s: the shims are noise
+    /// as addresses, and deriving over `AddAlt` demands a newer compiler
+    /// than this crate claims to need.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MatrixCandidate")
+            .field("matrix", &self.matrix)
+            .field("name", &self.name)
+            .field("input_type_name", &self.input_type_name)
+            .field("is_baseline", &self.is_baseline)
+            .field("crate_name", &self.crate_name)
+            .field("crate_version", &self.crate_version)
+            .finish()
+    }
 }
 
 #[cfg(feature = "registry")]
