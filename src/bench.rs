@@ -120,6 +120,30 @@ pub struct Stats {
     /// simply needed longer sets only `hit_limit`, and its error bar is
     /// perfectly believable - just wider than requested.
     pub untrustworthy: bool,
+    /// `true` if the machine's clock moved under this measurement: the
+    /// core's frequency changed during the run, or the benchmark ran on
+    /// more than one core.
+    ///
+    /// This is the one flag here that is *not* derived from the timings,
+    /// and it exists because the other two cannot be. A run that was
+    /// uniformly slow - throttled for its whole duration - has every sample
+    /// slow together, so the spread between them stays tight and
+    /// `std_error` reports a confident `±` on a number that may be wrong by
+    /// a factor of two. Nothing computed from the sample timings can see
+    /// that; the kernel can, and this is what it said. See the
+    /// [`machine`](crate::machine) module for how it is read and what it
+    /// costs.
+    ///
+    /// It flags and does not filter: no sample is dropped and no number is
+    /// adjusted on account of it. Treat it as "compare this against another
+    /// run before believing it", not as an error.
+    ///
+    /// Always `false` where nothing could be read - off Linux, or on a
+    /// kernel without cpufreq - which is a silence rather than a clean bill
+    /// of health. On a machine quiesced by `quiet-bench reserve`, which
+    /// pins the governor and disables turbo, it should stay `false`; a run
+    /// that sets it there is saying the quiescing did not take.
+    pub clock_moved: bool,
 }
 
 impl Stats {
@@ -133,6 +157,26 @@ impl Stats {
 }
 
 
+/// Assemble the parenthesised marks that follow a result line, listing
+/// only those that apply: `""`, `" (limit)"`, `" (limit, clock moved)"`.
+///
+/// A single group rather than one pair of parentheses per mark, because
+/// these lines are meant to be scanned in a column and `(limit) (untrusted)
+/// (clock moved)` puts three times as much punctuation in the way of that
+/// as `(limit, untrusted, clock moved)` does.
+fn marks(all: &[(bool, &str)]) -> String {
+    let shown: Vec<&str> = all
+        .iter()
+        .filter(|(set, _)| *set)
+        .map(|(_, name)| *name)
+        .collect();
+    if shown.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", shown.join(", "))
+    }
+}
+
 impl Display for Stats {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         // Report the error bar in the *same* unit as the measurement, even
@@ -143,16 +187,19 @@ impl Display for Stats {
         // makes them do a unit conversion in their head first, and
         // "± 0.02%" makes them do arithmetic.
         let (div, unit) = unit_for(self.ns_per_iter);
-        // Two separate things can be wrong with a line, so they get two
-        // separate marks: `(limit)` means the answer is less precise than
-        // requested, `(untrusted)` means the `±` itself is not worth
-        // reading. A slow function on a short budget earns both.
-        let limit = match (self.hit_limit, self.untrustworthy) {
-            (true, true) => " (limit, untrusted)",
-            (true, false) => " (limit)",
-            (false, true) => " (untrusted)",
-            (false, false) => "",
-        };
+        // Several different things can be wrong with a line, so each gets
+        // its own mark rather than one summary verdict: `(limit)` means the
+        // answer is less precise than requested, `(untrusted)` means the
+        // `±` itself is not worth reading, and `(clock moved)` means the
+        // machine changed speed underneath it - which no `±` can express,
+        // however honest. A slow function on a short budget earns the first
+        // two; a laptop that dropped out of turbo mid-run earns the third
+        // alongside whatever else is true.
+        let limit = marks(&[
+            (self.hit_limit, "limit"),
+            (self.untrustworthy, "untrusted"),
+            (self.clock_moved, "clock moved"),
+        ]);
         if self.std_error.is_nan() {
             // `Running::mean_and_stderr` gives NaN for exactly one reason:
             // fewer than two samples to estimate a standard error from,
@@ -324,7 +371,9 @@ impl Config {
         quiet::pin_if_requested();
         let start = Instant::now();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, first_ns, probed) = calibrate(&mut gen_env, &mut f, &mut xs, self, start);
+        let mut probes = machine::Probes::new();
+        let (unit, first_ns, probed) =
+            calibrate(&mut gen_env, &mut f, &mut xs, self, start, &mut probes);
         if start.elapsed() > self.max_time {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
@@ -336,14 +385,25 @@ impl Config {
                 samples: 1,
                 hit_limit: true,
                 untrustworthy: true,
+                // Calibration is warmup, and warmup is exactly when a
+                // sleeping core climbs to its working frequency. Reporting
+                // that climb as the clock having moved would be true and
+                // useless. See `Probes::forget` below.
+                clock_moved: false,
             };
         }
         // Otherwise the probe that finished calibration serves as the
-        // warmup sample and is discarded.
+        // warmup sample and is discarded - and so is everything the probes
+        // saw while it ran, for the same reason. A core waking up and
+        // ramping from 400 MHz to its working speed is what calibration is
+        // for; carrying those readings into the run would mark every
+        // benchmark on every laptop as having moved its clock, which is a
+        // flag nobody would read twice. The descriptors stay open.
+        probes.forget();
 
         let mut samples = Running::default();
         loop {
-            let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit);
+            let (_, t) = time_batch(&mut gen_env, &mut f, &mut xs, unit, &mut probes);
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
 
@@ -375,6 +435,9 @@ impl Config {
                     // means what it says; stopping below `MIN_SAMPLES`
                     // leaves an error bar too noisy to read at all.
                     untrustworthy: samples.count < MIN_SAMPLES,
+                    // And a third, which neither of those can express: the
+                    // machine changed speed while we measured it.
+                    clock_moved: probes.clock_moved(),
                 };
             }
         }
@@ -402,22 +465,35 @@ impl Config {
 /// one benchmark call can leave enough of a mark on process-wide allocator
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
-fn time_batch<G, F, I, O>(gen_env: &mut G, f: &mut F, xs: &mut Vec<I>, iters: usize) -> (f64, f64)
+///
+/// `probes` are read either side of the timed region - outside it, so that
+/// asking the kernel what the machine was doing costs the measurement
+/// nothing but a little wall time between samples. See the [`machine`]
+/// module.
+fn time_batch<G, F, I, O>(
+    gen_env: &mut G,
+    f: &mut F,
+    xs: &mut Vec<I>,
+    iters: usize,
+    probes: &mut machine::Probes,
+) -> (f64, f64)
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    let setup_start = Instant::now();
+    let setup_start = machine::Timer::start();
     xs.clear();
     xs.extend(std::iter::repeat_with(&mut *gen_env).take(iters));
-    let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
-    let start = Instant::now();
+    let setup_ns = setup_start.elapsed_ns();
+    probes.read();
+    let start = machine::Timer::start();
     // We iterate over `&mut *xs` rather than draining it, because we don't
     // want to drop the env values until after the clock has stopped.
     for x in &mut *xs {
         black_box(f(x));
     }
-    let timed_ns = start.elapsed().as_secs_f64() * 1e9;
+    let timed_ns = start.elapsed_ns();
+    probes.read();
     (setup_ns, timed_ns)
 }
 
@@ -432,6 +508,7 @@ fn calibrate<G, F, I, O>(
     xs: &mut Vec<I>,
     cfg: &Config,
     start: Instant,
+    probes: &mut machine::Probes,
 ) -> (usize, f64, u64)
 where
     G: FnMut() -> I,
@@ -473,7 +550,7 @@ where
     // `Stats::iterations` even though their timings are discarded.
     let mut probed = 0u64;
     loop {
-        let (setup_ns, t) = time_batch(gen_env, f, xs, unit);
+        let (setup_ns, t) = time_batch(gen_env, f, xs, unit, probes);
         probed += unit as u64;
         let total_ns = setup_ns + t;
         // Accept immediately, without ever retrying at this size, as soon
@@ -822,23 +899,23 @@ mod tests {
         .accuracy_met(100.0, 4.0));
     }
 
+    /// A `Stats` with nothing wrong with it, for the tests that care only
+    /// about how a line is formatted.
+    fn clean(ns: f64, rel: f64) -> Stats {
+        Stats {
+            ns_per_iter: ns,
+            std_error: ns * rel,
+            iterations: 10,
+            samples: 6,
+            hit_limit: false,
+            untrustworthy: false,
+            clock_moved: false,
+        }
+    }
+
     #[test]
     fn display_reports_an_absolute_error_in_the_value_s_own_unit() {
-        let shown = |ns: f64, rel: f64| {
-            format!(
-                "{}",
-                Stats {
-                    ns_per_iter: ns,
-                    std_error: ns * rel,
-                    iterations: 10,
-                    samples: 6,
-                    hit_limit: false,
-                    untrustworthy: false,
-                }
-            )
-            .trim_start()
-            .to_string()
-        };
+        let shown = |ns: f64, rel: f64| format!("{}", clean(ns, rel)).trim_start().to_string();
 
         // A sub-nanosecond error bar has to survive: it is the ordinary case
         // for a fast function, and formatting via `Duration` (which has
@@ -867,6 +944,71 @@ mod tests {
         // own unit says `± 25ns`, not `± 25.0ns`, which would be a third
         // digit the measurement cannot support.
         assert_eq!(shown(500.0, 0.05), "500ns ± 25ns");
+    }
+
+    #[test]
+    fn every_complaint_gets_its_own_mark_and_they_share_one_bracket() {
+        // Needs no timing at all: the marks are a pure function of the
+        // flags, and the point is that a reader can tell three independent
+        // failures apart on a line they are meant to scan in a column.
+        let with = |limit, untrusted, moved| {
+            let stats = Stats {
+                hit_limit: limit,
+                untrustworthy: untrusted,
+                clock_moved: moved,
+                ..clean(500.0, 0.05)
+            };
+            format!("{stats}").trim_start().to_string()
+        };
+        assert_eq!(with(false, false, false), "500ns ± 25ns");
+        assert_eq!(with(true, false, false), "500ns ± 25ns (limit)");
+        assert_eq!(with(false, true, false), "500ns ± 25ns (untrusted)");
+        // The new one, alone: a perfectly precise answer measured on a
+        // machine that changed speed underneath it. Nothing about the `±`
+        // says so, which is the whole reason the mark exists.
+        assert_eq!(with(false, false, true), "500ns ± 25ns (clock moved)");
+        assert_eq!(
+            with(true, true, true),
+            "500ns ± 25ns (limit, untrusted, clock moved)"
+        );
+        // And on the no-error-bar path, which formats separately.
+        let single = Stats {
+            std_error: f64::NAN,
+            samples: 1,
+            hit_limit: true,
+            untrustworthy: true,
+            clock_moved: true,
+            ..clean(500.0, 0.0)
+        };
+        assert!(
+            format!("{single}").ends_with("(limit, untrusted, clock moved)"),
+            "{single}"
+        );
+    }
+
+    #[test]
+    fn a_quiesced_machine_reports_a_steady_clock() {
+        println!();
+        // The point of the flag, tested the only way it can be: on a
+        // machine that has been told to hold its clock still, it must stay
+        // quiet. `quiet-bench reserve` pins the governor and disables
+        // turbo, so a run that still reports movement there is either a
+        // broken reading or a failed quiescing - both worth knowing.
+        //
+        // There is no useful converse to assert. An unquiesced machine
+        // *usually* moves its clock, but is under no obligation to during
+        // any particular half-second, so asserting that it does would be
+        // asserting a single draw of a stochastic process.
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
+        const REPEATS: usize = 10;
+        let moved = (0..REPEATS)
+            .filter(|r| bench(variable_cost(seed_for(*r))).clock_moved)
+            .count();
+        println!("clock moved in {moved} of {REPEATS} runs on a quiesced machine");
+        assert_eq!(0, moved);
     }
 
     #[test]
