@@ -155,6 +155,24 @@ impl Origin {
     }
 }
 
+/// What makes two registrations the same thing, apart from where they came
+/// from.
+///
+/// Everything here has to match before two registrations can be versions of
+/// each other. The `type_name` is the part it is easy to leave out and
+/// expensive to: without it, the registrations `types(A, B)` makes from one
+/// generic function look like one function registered twice, and asking for
+/// only the latest of each crate drops all but one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Key {
+    /// The matrix or comparison group, or `""` for a standalone benchmark.
+    pub scope: &'static str,
+    /// The input type as the source spells it, or `""` where there is none.
+    pub type_name: &'static str,
+    /// The registered name.
+    pub name: &'static str,
+}
+
 /// One registration, with the name it should be reported under.
 ///
 /// The name is owned because it is not always the registered one: when
@@ -174,25 +192,24 @@ pub struct Named<T: 'static> {
 /// Returns the survivors in the input's order; callers sort afterwards.
 pub(crate) fn resolve_versions<T: 'static>(
     items: &[&'static T],
-    origin_of: impl Fn(&'static T) -> (&'static str, &'static str, Origin),
+    key_of: impl Fn(&'static T) -> (Key, Origin),
     policy: VersionPolicy,
 ) -> Vec<Named<T>> {
-    // Group by scope *and* name. Two candidates called `sort` in different
-    // matrices are unrelated; only ones sharing a scope are versions or
-    // rivals of the same idea. Grouping on the name alone quietly merged
-    // them, which cost a whole matrix.
-    let mut by_name: BTreeMap<(&'static str, &'static str), Vec<(&'static T, Origin)>> =
-        BTreeMap::new();
+    // Group on the whole key, not the name alone. Two things sharing a name
+    // are versions of each other only if everything *else* about what they
+    // are matches - the matrix they belong to and the type they take. Two
+    // candidates called `sort` in different matrices are unrelated, and so
+    // are the two registrations `types(String, Vec<u8>)` makes from one
+    // generic function: they differ in type, which is the thing being
+    // varied, not in version.
+    let mut by_key: BTreeMap<Key, Vec<(&'static T, Origin)>> = BTreeMap::new();
     for it in items {
-        let (scope, name, origin) = origin_of(it);
-        by_name
-            .entry((scope, name))
-            .or_default()
-            .push((*it, origin));
+        let (key, origin) = key_of(it);
+        by_key.entry(key).or_default().push((*it, origin));
     }
 
     let mut out = Vec::new();
-    for ((_scope, name), mut sharers) in by_name {
+    for (Key { name, .. }, mut sharers) in by_key {
         if sharers.len() == 1 {
             let (reg, origin) = sharers.pop().expect("just checked");
             out.push(Named {
@@ -353,6 +370,24 @@ pub enum Diagnostic {
     },
 }
 
+impl Diagnostic {
+    /// Whether this one means work the caller wrote is not being measured.
+    ///
+    /// The distinction matters because these travel by different routes. An
+    /// orphan is a remark: something registered is unused, and everything
+    /// else still runs. A contradiction is not - the lane holding it is
+    /// discarded, so benchmarks that were written produce nothing, and
+    /// saying so only in a field of the returned value means a caller who
+    /// writes `suite.add_registered();` and drops the result sees a run that
+    /// silently measured nothing.
+    pub fn is_fatal(&self) -> bool {
+        !matches!(
+            self,
+            Diagnostic::OrphanCandidate { .. } | Diagnostic::OrphanInput { .. }
+        )
+    }
+}
+
 impl Display for Diagnostic {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -448,7 +483,7 @@ fn list(items: &[String]) -> String {
 #[derive(Debug)]
 pub struct Plan {
     /// Benchmarks that stand alone, sorted by name.
-    pub flat: Vec<&'static Registered>,
+    pub flat: Vec<Named<Registered>>,
     /// Comparison groups, sorted by group name, each with its baseline
     /// first.
     pub groups: Vec<Group>,
@@ -461,7 +496,7 @@ pub struct Group {
     /// The baseline first, then the rest sorted by name. `ComparisonSet`
     /// takes its first alternative as the baseline, so this ordering is what
     /// carries the decision made here into the set built later.
-    pub members: Vec<&'static Registered>,
+    pub members: Vec<Named<Registered>>,
     /// The group's shared input generator, if one was declared.
     ///
     /// `None` means the group takes no input, and assembly will use
@@ -558,8 +593,11 @@ pub fn lanes(
         candidates,
         |c| {
             (
-                c.matrix,
-                c.name,
+                Key {
+                    scope: c.matrix,
+                    type_name: c.input_type_name,
+                    name: c.name,
+                },
                 Origin {
                     crate_name: c.crate_name,
                     crate_version: c.crate_version,
@@ -574,8 +612,11 @@ pub fn lanes(
         inputs,
         |i| {
             (
-                i.matrix,
-                i.name,
+                Key {
+                    scope: i.matrix,
+                    type_name: i.type_name,
+                    name: i.name,
+                },
                 Origin {
                     crate_name: i.crate_name,
                     crate_version: i.crate_version,
@@ -586,14 +627,21 @@ pub fn lanes(
     );
     // `LatestPerCrate` leaves one per crate; an input registered by two
     // different crates is still redundant, so keep the newest of those too.
-    let mut best: BTreeMap<(&'static str, &'static str), Named<MatrixInput>> = BTreeMap::new();
+    // Keyed on the type as well as the name, matching the lane key. Inputs
+    // get named for their character - "small", "large" - so one matrix
+    // holding two type lanes very naturally has an input called `small` in
+    // each. Keyed on the name alone those two look redundant, and dropping
+    // one orphans a whole lane.
+    let mut best: BTreeMap<(&'static str, &'static str, &'static str), Named<MatrixInput>> =
+        BTreeMap::new();
     for n in named_i {
-        match best.get(&(n.reg.matrix, n.reg.name)) {
+        let key = (n.reg.matrix, n.reg.type_name, n.reg.name);
+        match best.get(&key) {
             Some(held)
                 if Version::parse(held.origin.crate_version)
                     >= Version::parse(n.origin.crate_version) => {}
             _ => {
-                best.insert((n.reg.matrix, n.reg.name), n);
+                best.insert(key, n);
             }
         }
     }
@@ -678,6 +726,23 @@ pub fn lanes(
         // spelled alike in different modules.
         let want = (is[0].reg.type_id)();
         let mut mismatched = false;
+        // The inputs are checked against each other as well as the
+        // candidates against them. Checking only the candidates left a hole:
+        // the lane is bucketed on the type's *name*, so two inputs spelling
+        // their types alike sit in one lane whatever they really are, and a
+        // candidate that agrees with the first would still be handed the
+        // second - a downcast panic from inside the scheduler, which is
+        // precisely what this check exists to turn into a named error.
+        for i in &is {
+            if (i.reg.type_id)() != want {
+                problems.push(Diagnostic::MatrixTypeMismatch {
+                    matrix: key.0.to_string(),
+                    candidate: i.name.clone(),
+                    type_name: i.reg.type_name,
+                });
+                mismatched = true;
+            }
+        }
         for c in &cs {
             if (c.reg.input_type)() != want {
                 problems.push(Diagnostic::MatrixTypeMismatch {
@@ -821,54 +886,106 @@ fn source(r: &Registered) -> String {
 pub fn plan(
     regs: &[&'static Registered],
     gens: &[&'static GenInputRegistration],
+    options: RegistryOptions,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let mut problems = Vec::new();
 
-    // Duplicate names, across everything. Checked first because a duplicate
-    // makes every later message ambiguous about which one it means.
-    let mut by_name: BTreeMap<&str, Vec<&Registered>> = BTreeMap::new();
-    for r in regs {
-        by_name.entry(r.name).or_default().push(r);
+    // Version resolution first, exactly as a matrix gets it. Without this a
+    // plain `#[scaling::bench]` registered by two versions of one crate -
+    // which is what pulling an old copy in as a dev-dependency produces -
+    // collides with itself and the whole run is refused, so the documented
+    // way of comparing against an older version worked only for matrices.
+    let named = resolve_versions(
+        regs,
+        |r| {
+            (
+                Key {
+                    scope: r.group.unwrap_or(""),
+                    type_name: r.kind.input_type_name(),
+                    name: r.name,
+                },
+                Origin {
+                    crate_name: r.crate_name,
+                    crate_version: r.crate_version,
+                },
+            )
+        },
+        options.versions,
+    );
+
+    // Names still shared afterwards are genuine duplicates. Checked first
+    // because a duplicate makes every later message ambiguous about which
+    // one it means.
+    let mut by_name: BTreeMap<&str, Vec<&Named<Registered>>> = BTreeMap::new();
+    for r in &named {
+        by_name.entry(r.name.as_str()).or_default().push(r);
     }
-    for (name, rs) in &by_name {
+    for rs in by_name.values() {
         if rs.len() > 1 {
             problems.push(Diagnostic::DuplicateName {
-                name: (*name).to_string(),
-                sources: rs.iter().map(|r| source(r)).collect(),
+                // The registered name, not the resolved one: a message about
+                // `same@1.0.0` when the source says `same` sends the reader
+                // looking for the wrong thing.
+                name: rs[0].reg.name.to_string(),
+                sources: rs.iter().map(|r| source(r.reg)).collect(),
             });
         }
     }
 
     // Generators, bucketed by group, so a group can be asked for its one.
+    // Deduplicated across versions the way a matrix input is, and for the
+    // same reason: two versions of one generator are meant to build the same
+    // thing, so keeping both would be redundant rather than a comparison.
     let mut gens_by_group: BTreeMap<&str, Vec<&'static GenInputRegistration>> = BTreeMap::new();
     for g in gens {
         gens_by_group.entry(g.group).or_default().push(g);
     }
+    let mut chosen_gen: BTreeMap<&str, &'static GenInputRegistration> = BTreeMap::new();
     for (group, gs) in &gens_by_group {
-        if gs.len() > 1 {
+        // Two from one crate at one version is a contradiction: they cannot
+        // both be the group's one shared input. Two from different origins
+        // is the redundant case - the same generator a version apart, or a
+        // rival's - so the newest is kept, as a matrix input would be.
+        let mut per_origin: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for g in gs {
+            *per_origin
+                .entry((g.crate_name, g.crate_version))
+                .or_insert(0) += 1;
+        }
+        if per_origin.values().any(|n| *n > 1) {
             problems.push(Diagnostic::ManyGenerators {
                 group: (*group).to_string(),
-                // A generator has no name of its own, so say how many and
-                // for which group; the type is the only distinguishing mark.
-                sources: gs.iter().map(|g| g.type_name.to_string()).collect(),
+                // A generator has no name of its own, so say where each came
+                // from and what it makes.
+                sources: gs
+                    .iter()
+                    .map(|g| format!("{}@{} ({})", g.crate_name, g.crate_version, g.type_name))
+                    .collect(),
             });
+            continue;
         }
+        let newest = gs
+            .iter()
+            .copied()
+            .max_by_key(|g| Version::parse(g.crate_version))
+            .expect("a group in this map has at least one generator");
+        chosen_gen.insert(group, newest);
     }
 
-    let mut flat: Vec<&'static Registered> = Vec::new();
-    let mut grouped: BTreeMap<&'static str, Vec<&'static Registered>> = BTreeMap::new();
-    for r in regs {
-        match r.group {
+    let mut flat: Vec<Named<Registered>> = Vec::new();
+    let mut grouped: BTreeMap<&'static str, Vec<Named<Registered>>> = BTreeMap::new();
+    for r in named {
+        match r.reg.group {
             None => flat.push(r),
             Some(g) => grouped.entry(g).or_default().push(r),
         }
     }
-    flat.sort_by_key(|r| r.name);
+    flat.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut groups = Vec::new();
     for (name, mut members) in grouped {
-        members.sort_by_key(|r| r.name);
-        let names: Vec<String> = members.iter().map(|r| r.name.to_string()).collect();
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<String> = members.iter().map(|r| r.name.clone()).collect();
 
         if members.len() < 2 {
             problems.push(Diagnostic::LonelyGroup {
@@ -878,10 +995,29 @@ pub fn plan(
             continue;
         }
 
-        let claimants: Vec<&&'static Registered> =
-            members.iter().filter(|r| r.is_baseline).collect();
-        let baseline = match claimants.len() {
-            1 => claimants[0].name,
+        // Several claimants is expected once one declaration is registered
+        // at several versions - they all say `baseline` because they are the
+        // same line of source - and a policy settles it. Two *different*
+        // members claiming it within one crate at one version is not that,
+        // and resolving it by version would pick one and hide the mistake.
+        let claimants: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.reg.is_baseline)
+            .map(|(i, _)| i)
+            .collect();
+        let mut per_origin: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for i in &claimants {
+            *per_origin
+                .entry((
+                    members[*i].origin.crate_name,
+                    members[*i].origin.crate_version,
+                ))
+                .or_insert(0) += 1;
+        }
+        let contradicts_itself = per_origin.values().any(|n| *n > 1);
+        let baseline: String = match claimants.len() {
+            1 => members[claimants[0]].name.clone(),
             0 => {
                 problems.push(Diagnostic::NoBaseline {
                     group: name.to_string(),
@@ -889,31 +1025,48 @@ pub fn plan(
                 });
                 continue;
             }
-            _ => {
+            _ if contradicts_itself => {
                 problems.push(Diagnostic::ManyBaselines {
                     group: name.to_string(),
-                    claimants: claimants.iter().map(|r| source(r)).collect(),
+                    claimants: claimants.iter().map(|i| source(members[*i].reg)).collect(),
                 });
                 continue;
             }
+            _ => match pick_baseline(&members, &claimants, options.baseline) {
+                Some(i) => members[i].name.clone(),
+                None => {
+                    problems.push(Diagnostic::NoSuchBaseline {
+                        group: name.to_string(),
+                        wanted: match options.baseline {
+                            BaselinePolicy::Exact {
+                                crate_name,
+                                crate_version,
+                            } => format!("{crate_name}@{crate_version}"),
+                            other => format!("{other:?}"),
+                        },
+                        claimants: claimants.iter().map(|i| source(members[*i].reg)).collect(),
+                    });
+                    continue;
+                }
+            },
         };
 
         // The generator, and whether everyone agrees about its type. A group
         // with no generator takes `()`, and its members must expect `()`.
-        let gen_input = gens_by_group.get(name).and_then(|gs| gs.first()).copied();
+        let gen_input = chosen_gen.get(name).copied();
         let (gen_type, gen_name) = match gen_input {
             Some(g) => ((g.type_id)(), g.type_name),
             None => (std::any::TypeId::of::<()>(), "()"),
         };
         let mut mismatched = false;
         for m in &members {
-            if let Kind::Alt { input_type, .. } = &m.kind {
+            if let Kind::Alt { input_type, .. } = &m.reg.kind {
                 if input_type() != gen_type {
                     problems.push(Diagnostic::InputTypeMismatch {
                         group: name.to_string(),
-                        member: m.name.to_string(),
+                        member: m.name.clone(),
                         generator_type: gen_name,
-                        member_type: m.kind.input_type_name(),
+                        member_type: m.reg.kind.input_type_name(),
                     });
                     mismatched = true;
                 }
@@ -926,7 +1079,7 @@ pub fn plan(
         // Baseline first: `ComparisonSet` takes its first alternative as the
         // baseline, so this is where the decision above becomes the order the
         // set is built in.
-        members.sort_by_key(|r| (r.name != baseline, r.name));
+        members.sort_by(|a, b| (a.name != baseline, &a.name).cmp(&(b.name != baseline, &b.name)));
         groups.push(Group {
             name,
             members,
@@ -997,6 +1150,8 @@ mod tests {
     fn generator<I: 'static>(group: &'static str, type_name: &'static str) -> GenInputRegistration {
         GenInputRegistration {
             group,
+            crate_name: "testcrate",
+            crate_version: "1.0.0",
             type_id: TypeId::of::<I>,
             type_name,
             make: || ErasedInput::new(()),
@@ -1020,8 +1175,8 @@ mod tests {
     #[test]
     fn flat_benchmarks_come_out_sorted() {
         let regs = leak(vec![flat("zebra"), flat("apple"), flat("middle")]);
-        let plan = plan(&regs, &[]).expect("nothing wrong with these");
-        let names: Vec<&str> = plan.flat.iter().map(|r| r.name).collect();
+        let plan = plan(&regs, &[], RegistryOptions::default()).expect("nothing wrong with these");
+        let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["apple", "middle", "zebra"]);
         assert!(plan.groups.is_empty());
     }
@@ -1033,8 +1188,8 @@ mod tests {
     fn the_order_registrations_arrive_in_does_not_matter() {
         let forward = leak(vec![flat("a"), flat("b"), flat("c")]);
         let backward = leak(vec![flat("c"), flat("b"), flat("a")]);
-        let one = plan(&forward, &[]).unwrap();
-        let two = plan(&backward, &[]).unwrap();
+        let one = plan(&forward, &[], RegistryOptions::default()).unwrap();
+        let two = plan(&backward, &[], RegistryOptions::default()).unwrap();
         let names =
             |p: &Plan| -> Vec<String> { p.flat.iter().map(|r| r.name.to_string()).collect() };
         assert_eq!(names(&one), names(&two));
@@ -1050,9 +1205,13 @@ mod tests {
             alt::<()>("z_the_baseline", "g", true, "()"),
             alt::<()>("m_middle", "g", false, "()"),
         ]);
-        let plan = plan(&regs, &[]).expect("a well-formed group");
+        let plan = plan(&regs, &[], RegistryOptions::default()).expect("a well-formed group");
         assert_eq!(plan.groups.len(), 1);
-        let names: Vec<&str> = plan.groups[0].members.iter().map(|r| r.name).collect();
+        let names: Vec<&str> = plan.groups[0]
+            .members
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
         assert_eq!(
             names,
             ["z_the_baseline", "a_first_alphabetically", "m_middle"],
@@ -1066,7 +1225,8 @@ mod tests {
     #[test]
     fn duplicate_names_are_rejected_and_name_their_sources() {
         let regs = leak(vec![flat("same"), flat("same"), flat("fine")]);
-        let problems = plan(&regs, &[]).expect_err("a duplicate is an error");
+        let problems =
+            plan(&regs, &[], RegistryOptions::default()).expect_err("a duplicate is an error");
         assert_eq!(problems.len(), 1);
         match &problems[0] {
             Diagnostic::DuplicateName { name, sources } => {
@@ -1084,7 +1244,8 @@ mod tests {
     #[test]
     fn a_group_of_one_is_rejected() {
         let regs = leak(vec![alt::<()>("only", "lonely", true, "()")]);
-        let problems = plan(&regs, &[]).expect_err("one alternative is not a comparison");
+        let problems = plan(&regs, &[], RegistryOptions::default())
+            .expect_err("one alternative is not a comparison");
         assert!(
             matches!(&problems[0], Diagnostic::LonelyGroup { group, .. } if group == "lonely"),
             "{problems:?}",
@@ -1100,7 +1261,8 @@ mod tests {
             alt::<()>("a", "g", false, "()"),
             alt::<()>("b", "g", false, "()"),
         ]);
-        let problems = plan(&regs, &[]).expect_err("somebody must be the baseline");
+        let problems = plan(&regs, &[], RegistryOptions::default())
+            .expect_err("somebody must be the baseline");
         assert!(
             matches!(&problems[0], Diagnostic::NoBaseline { group, .. } if group == "g"),
             "{problems:?}",
@@ -1113,7 +1275,8 @@ mod tests {
             alt::<()>("a", "g", true, "()"),
             alt::<()>("b", "g", true, "()"),
         ]);
-        let problems = plan(&regs, &[]).expect_err("only one may be the baseline");
+        let problems =
+            plan(&regs, &[], RegistryOptions::default()).expect_err("only one may be the baseline");
         match &problems[0] {
             Diagnostic::ManyBaselines { group, claimants } => {
                 assert_eq!(group, "g");
@@ -1134,7 +1297,8 @@ mod tests {
             alt::<String>("wrong", "g", false, "String"),
         ]);
         let gens = leak_gens(vec![generator::<Vec<i32>>("g", "Vec<i32>")]);
-        let problems = plan(&regs, &gens).expect_err("types must agree");
+        let problems =
+            plan(&regs, &gens, RegistryOptions::default()).expect_err("types must agree");
         match &problems[0] {
             Diagnostic::InputTypeMismatch {
                 group,
@@ -1160,13 +1324,14 @@ mod tests {
             alt::<()>("a", "g", true, "()"),
             alt::<()>("b", "g", false, "()"),
         ]);
-        assert!(plan(&ok, &[]).is_ok());
+        assert!(plan(&ok, &[], RegistryOptions::default()).is_ok());
 
         let bad = leak(vec![
             alt::<()>("a", "h", true, "()"),
             alt::<Vec<i32>>("b", "h", false, "Vec<i32>"),
         ]);
-        let problems = plan(&bad, &[]).expect_err("b wants an input this group does not make");
+        let problems = plan(&bad, &[], RegistryOptions::default())
+            .expect_err("b wants an input this group does not make");
         assert!(
             matches!(&problems[0], Diagnostic::InputTypeMismatch { member, .. } if member == "b"),
             "{problems:?}",
@@ -1180,7 +1345,8 @@ mod tests {
             alt::<()>("b", "g", false, "()"),
         ]);
         let gens = leak_gens(vec![generator::<()>("g", "()"), generator::<()>("g", "()")]);
-        let problems = plan(&regs, &gens).expect_err("a group has one shared input");
+        let problems = plan(&regs, &gens, RegistryOptions::default())
+            .expect_err("a group has one shared input");
         assert!(
             matches!(&problems[0], Diagnostic::ManyGenerators { group, .. } if group == "g"),
             "{problems:?}",
@@ -1198,7 +1364,8 @@ mod tests {
             alt::<()>("x", "none", false, "()"),
             alt::<()>("y", "none", false, "()"),
         ]);
-        let problems = plan(&regs, &[]).expect_err("three separate mistakes");
+        let problems =
+            plan(&regs, &[], RegistryOptions::default()).expect_err("three separate mistakes");
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems
             .iter()
@@ -1220,7 +1387,7 @@ mod tests {
             alt::<()>("c", "apple", true, "()"),
             alt::<()>("d", "apple", false, "()"),
         ]);
-        let plan = plan(&regs, &[]).unwrap();
+        let plan = plan(&regs, &[], RegistryOptions::default()).unwrap();
         let names: Vec<&str> = plan.groups.iter().map(|g| g.name).collect();
         assert_eq!(names, ["apple", "zebra"]);
     }
@@ -1233,7 +1400,7 @@ mod tests {
             alt::<()>("a", "g", true, "()"),
             alt::<()>("b", "g", false, "()"),
         ]);
-        let plan = plan(&regs, &[]).unwrap();
+        let plan = plan(&regs, &[], RegistryOptions::default()).unwrap();
         let make = plan.groups[0].make_input();
         assert_eq!(make().type_id(), TypeId::of::<()>());
     }
@@ -1243,7 +1410,10 @@ mod tests {
     #[test]
     fn diagnostics_name_what_they_are_about() {
         let regs = leak(vec![alt::<()>("only", "lonely", true, "()")]);
-        let shown = format!("{}", plan(&regs, &[]).unwrap_err()[0]);
+        let shown = format!(
+            "{}",
+            plan(&regs, &[], RegistryOptions::default()).unwrap_err()[0]
+        );
         assert!(shown.contains("lonely"), "{shown}");
         assert!(shown.contains("only"), "{shown}");
     }
@@ -1895,5 +2065,213 @@ mod version_tests {
                 lane.matrix
             );
         }
+    }
+}
+
+/// Regressions for the five faults a review of this work turned up. Each
+/// arose where two axes met - a type varying *and* a version varying - which
+/// is why none of the tests written a stage at a time had caught them.
+#[cfg(test)]
+mod review_regressions {
+    use super::lane_tests::*;
+    use super::*;
+    use crate::registry::Kind;
+
+    /// `types(A, B)` makes several registrations of one name that differ in
+    /// type. They are instantiations, not versions of each other, so asking
+    /// for only the latest of each crate must not drop all but one.
+    ///
+    /// It did: the whole `Vec<u8>` half of a generic matrix disappeared and
+    /// its input was reported as an orphan.
+    #[test]
+    fn generic_instantiations_survive_latest_per_crate() {
+        let cs = leak_c(vec![
+            cand::<String>("m", "byte_sum", "String", true),
+            cand::<Vec<u8>>("m", "byte_sum", "Vec<u8>", true),
+            cand::<String>("m", "byte_fold", "String", false),
+            cand::<Vec<u8>>("m", "byte_fold", "Vec<u8>", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<String>("m", "text", "String"),
+            inp::<Vec<u8>>("m", "bytes", "Vec<u8>"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::latest_per_crate());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 2, "both instantiations keep their lane");
+        for lane in &lanes {
+            assert_eq!(
+                lane.candidates.len(),
+                2,
+                "lane {} lost a candidate",
+                lane.type_name,
+            );
+        }
+    }
+
+    /// And under the default policy they are not renamed either: one crate
+    /// at one version has nothing to disambiguate against.
+    #[test]
+    fn generic_instantiations_keep_their_plain_names() {
+        let cs = leak_c(vec![
+            cand::<String>("m", "byte_sum", "String", true),
+            cand::<Vec<u8>>("m", "byte_sum", "Vec<u8>", true),
+        ]);
+        let is = leak_i(vec![
+            inp::<String>("m", "text", "String"),
+            inp::<Vec<u8>>("m", "bytes", "Vec<u8>"),
+        ]);
+        let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
+        for lane in &lanes {
+            assert_eq!(
+                lane.candidates[0].name, "byte_sum",
+                "nothing needed distinguishing, so nothing should be appended",
+            );
+        }
+    }
+
+    /// Inputs get named for their character - "small", "large" - so one
+    /// matrix holding two type lanes very naturally has an input called
+    /// `small` in each. They are not redundant copies of one another.
+    ///
+    /// Deduplicating on the name alone dropped one and orphaned a whole lane.
+    #[test]
+    fn same_input_name_in_two_lanes_is_two_inputs() {
+        let cs = leak_c(vec![
+            cand::<String>("m", "text_a", "String", true),
+            cand::<String>("m", "text_b", "String", false),
+            cand::<Vec<u8>>("m", "bytes_a", "Vec<u8>", true),
+            cand::<Vec<u8>>("m", "bytes_b", "Vec<u8>", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<String>("m", "small", "String"),
+            inp::<Vec<u8>>("m", "small", "Vec<u8>"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 2, "neither lane may be orphaned");
+        for lane in &lanes {
+            assert_eq!(lane.inputs.len(), 1);
+            assert_eq!(lane.inputs[0].name, "small");
+            assert_eq!(lane.candidates.len(), 2);
+        }
+    }
+
+    /// A lane is bucketed on the type's *name*, so two inputs spelling their
+    /// types alike land in one lane whatever they really are. Checking only
+    /// the candidates against the first input left the second free to be
+    /// handed to a candidate expecting something else - a downcast panic
+    /// from inside the scheduler, which is what this check exists to
+    /// forestall.
+    #[test]
+    fn inputs_are_checked_against_each_other_too() {
+        let cs = leak_c(vec![
+            cand::<u8>("m", "a", "Thing", true),
+            cand::<u8>("m", "b", "Thing", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<u8>("m", "first", "Thing"),
+            inp::<u16>("m", "second", "Thing"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        assert!(lanes.is_empty(), "the lane cannot be trusted");
+        assert!(
+            problems.iter().any(
+                |p| matches!(p, Diagnostic::MatrixTypeMismatch { candidate, .. }
+                                  if candidate == "second")
+            ),
+            "{problems:?}",
+        );
+    }
+
+    /// A contradiction inside a lane discards that lane, so it has to be
+    /// fatal. Reported only as a warning it meant a caller who wrote
+    /// `suite.add_registered();` and dropped the result saw a run that
+    /// silently measured nothing.
+    #[test]
+    fn a_lane_contradiction_is_fatal_but_an_orphan_is_not() {
+        let two_baselines = Diagnostic::ManyBaselines {
+            group: "m".into(),
+            claimants: vec![],
+        };
+        assert!(two_baselines.is_fatal());
+        let orphan = Diagnostic::OrphanCandidate {
+            matrix: "m".into(),
+            name: "x".into(),
+            type_name: "u8",
+        };
+        assert!(
+            !orphan.is_fatal(),
+            "an unused registration leaves the rest of the run perfectly good",
+        );
+    }
+
+    fn flat_at(name: &'static str, version: &'static str) -> Registered {
+        Registered {
+            name,
+            crate_name: "mycrate",
+            crate_version: version,
+            group: None,
+            is_baseline: false,
+            kind: Kind::Flat(|s, _, n| s.add(n, || ())),
+        }
+    }
+
+    fn leak_r(rs: Vec<Registered>) -> Vec<&'static Registered> {
+        rs.into_iter().map(|r| &*Box::leak(Box::new(r))).collect()
+    }
+
+    /// The cross-version support has to reach plain benchmarks too, not only
+    /// matrices - `#[scaling::bench]` registered by an old copy of a crate
+    /// used to collide with itself and refuse the whole run.
+    #[test]
+    fn a_plain_benchmark_can_come_from_two_versions() {
+        let regs = leak_r(vec![flat_at("fib", "0.9.0"), flat_at("fib", "0.8.0")]);
+        let plan = plan(&regs, &[], RegistryOptions::default())
+            .expect("two versions of one benchmark is not a duplicate");
+        let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"fib@0.8.0"), "{names:?}");
+        assert!(names.contains(&"fib@0.9.0"), "{names:?}");
+    }
+
+    /// And to comparison groups, where every version of a member marked
+    /// `baseline` says so - which is what the policy is for.
+    #[test]
+    fn a_group_can_span_two_versions() {
+        let mut a = flat_at("sort", "0.9.0");
+        a.group = Some("g");
+        a.is_baseline = true;
+        let mut b = flat_at("sort", "0.8.0");
+        b.group = Some("g");
+        b.is_baseline = true;
+        let regs = leak_r(vec![a, b]);
+        let plan = plan(&regs, &[], RegistryOptions::default())
+            .expect("a group spanning two versions is the point");
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(
+            plan.groups[0].members[0].name, "sort@0.8.0",
+            "the older version is the baseline by default",
+        );
+    }
+
+    /// Two different members claiming the baseline within one version stays
+    /// a contradiction, though - it is not a version spread, and resolving
+    /// it by version would pick one and hide the mistake.
+    #[test]
+    fn two_members_claiming_baseline_in_one_version_is_still_an_error() {
+        let mut a = flat_at("a", "1.0.0");
+        a.group = Some("g");
+        a.is_baseline = true;
+        let mut b = flat_at("b", "1.0.0");
+        b.group = Some("g");
+        b.is_baseline = true;
+        let regs = leak_r(vec![a, b]);
+        let problems =
+            plan(&regs, &[], RegistryOptions::default()).expect_err("both cannot be the baseline");
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, Diagnostic::ManyBaselines { .. })),
+            "{problems:?}",
+        );
     }
 }

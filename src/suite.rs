@@ -776,22 +776,20 @@ impl<'a> Suite<'a> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let gens: Vec<&'static GenInputRegistration> =
             inventory::iter::<GenInputRegistration>().collect();
-        let plan = crate::assemble::plan(&regs, &gens)?;
+        let plan = crate::assemble::plan(&regs, &gens, options)?;
 
         let cfg = self.cfg;
         let mut tokens = RegisteredTokens::default();
 
         for r in plan.flat {
-            match r.kind {
+            match r.reg.kind {
                 Kind::Flat(add) => {
-                    tokens
-                        .flat
-                        .insert(r.name.to_string(), add(self, cfg, r.name));
+                    let token = add(self, cfg, &r.name);
+                    tokens.flat.insert(r.name, token);
                 }
                 Kind::Scaling(add) => {
-                    tokens
-                        .scaling
-                        .insert(r.name.to_string(), add(self, cfg, r.name));
+                    let token = add(self, cfg, &r.name);
+                    tokens.scaling.insert(r.name, token);
                 }
                 // `plan` puts anything with a group in `groups`, so a bare
                 // alternative cannot reach here.
@@ -804,9 +802,9 @@ impl<'a> Suite<'a> {
             // is what makes the differences paired - see `ErasedInput`.
             let make = group.make_input();
             let mut set = cfg.comparison_gen_input(make);
-            for m in group.members {
-                match m.kind {
-                    Kind::Alt { add, .. } => set = add(set, m.name),
+            for m in &group.members {
+                match m.reg.kind {
+                    Kind::Alt { add, .. } => set = add(set, &m.name),
                     // `plan` only puts alternatives in a group.
                     _ => unreachable!("a group member that is not an alternative"),
                 }
@@ -821,10 +819,17 @@ impl<'a> Suite<'a> {
         let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
         let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
         let (lanes, lane_problems) = crate::assemble::lanes(&cands, &mins, options);
-        // Orphans and duplicates are said out loud but do not stop the run;
-        // a contradiction inside a lane skips that lane. Either way what is
-        // left is coherent, so the rest is measured.
-        tokens.warnings = lane_problems;
+        // A contradiction inside a lane discards that lane, so benchmarks
+        // that were written measure nothing - that has to be as loud as any
+        // other error, not a field on the returned value that a caller
+        // discarding the result never sees. An orphan is different: it means
+        // something registered went unused, and everything else still ran.
+        let (fatal, warnings): (Vec<_>, Vec<_>) =
+            lane_problems.into_iter().partition(|p| p.is_fatal());
+        if !fatal.is_empty() {
+            return Err(fatal);
+        }
+        tokens.warnings = warnings;
 
         for lane in lanes {
             for input in &lane.inputs {

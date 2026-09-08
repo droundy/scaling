@@ -272,6 +272,15 @@ impl Clone for ErasedInput {
 pub struct GenInputRegistration {
     /// The group this generates input for.
     pub group: &'static str,
+    /// Which crate registered it, and at what version.
+    ///
+    /// A group's generator registered by two versions of one crate is the
+    /// redundant case, exactly as a matrix input is: both build the same
+    /// thing, so one is kept. Two registered by one crate at one version is
+    /// a contradiction instead, and without the origin the two cannot be
+    /// told apart.
+    pub crate_name: &'static str,
+    pub crate_version: &'static str,
     /// The generated input's type, so assembly can check the group's
     /// alternatives agree with it. A function for the same reason
     /// [`Kind::Alt`]'s is: a registration is built in a `const` context.

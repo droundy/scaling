@@ -458,6 +458,8 @@ fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         ::scaling::inventory::submit! {
             ::scaling::registry::GenInputRegistration {
                 group: #group,
+                crate_name: ::core::env!("CARGO_PKG_NAME"),
+                crate_version: ::core::env!("CARGO_PKG_VERSION"),
                 type_id: ::core::any::TypeId::of::<#ty>,
                 type_name: ::core::stringify!(#ty),
                 make: #shim,

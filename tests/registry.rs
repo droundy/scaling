@@ -76,6 +76,8 @@ fn make_input() -> ErasedInput {
 scaling::inventory::submit! {
     GenInputRegistration {
         group: "e2e-sort",
+        crate_name: env!("CARGO_PKG_NAME"),
+        crate_version: env!("CARGO_PKG_VERSION"),
         type_id: TypeId::of::<Vec<u64>>,
         type_name: "Vec<u64>",
         make: make_input,
