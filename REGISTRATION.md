@@ -872,15 +872,20 @@ Three consequences:
    means "compile and exit quickly", not "measure everything". Worth a
    `--test` style fast path later; out of scope here.
 
-## Surface
+## Surface — **built**
 
 ```
-[FILTER]...          keep entries whose name contains any of these
---exact              match the whole name instead of a substring
+--filter PATTERN     keep entries whose name contains this; repeatable
 --skip PATTERN       drop entries matching this, after the filters
+--exact              match the whole name instead of a substring
 --list               print what would run, and measure nothing
---bench              ignored; cargo passes it whether or not you do
+--bench, --test      ignored; cargo passes these whether or not you do
 ```
+
+Parsed with [`auto-args`], behind the optional `cli` feature — the matching
+itself needs no dependency and is always available. `auto-args` has no
+positional arguments, so the filter is `--filter sort` where `cargo test`
+would take a bare `sort`.
 
 | variable | equivalent |
 | --- | --- |
@@ -950,14 +955,23 @@ differ between a filtered and an unfiltered run**, and the docs must say so
 rather than leaving someone to discover that a change was "significant"
 alone and not in the suite.
 
-## Staging
+## What was built
 
-1. `Filter` — parsing, matching, `--bench` swallowed, env fallback. Pure and
-   testable without running a benchmark, like `plan`.
-2. `Suite::with_filter`, consulted by every `add*`.
-3. `--list`, which needs the names before anything is measured.
-4. Wire into `add_registered` so registered benchmarks report what was
-   skipped rather than silently vanishing.
+`Filter` (matching, always available), `Filter::from_args` /
+`from_env` / `from_env_and_args` (behind `cli`), `Suite::with_filter`,
+`Suite::names`, and `benches/filtered.rs` as a worked example. Verified
+through real `cargo bench` invocations rather than only in tests: plain,
+`-- --list`, `-- --filter sorting`, `-- --filter sorting --skip large`, and
+`SCALING_FILTER=hashing` with no arguments passed at all.
 
-Stages 1 and 2 are additive. Nothing here needs the stage 6 removals, and
-none of it is blocked by the A-vs-B decision.
+Still open:
+
+- **Registered benchmarks do not yet say what a filter skipped.** They
+  simply do not appear, which is right for a report and thin for someone
+  wondering whether their pattern matched anything.
+- **`--list` shows entries, not alternatives.** A comparison lists under its
+  own name, so the alternative names — the ones you would have to *stop*
+  filtering on — are not shown. Indenting them under their comparison is the
+  suggested fix.
+
+[`auto-args`]: https://crates.io/crates/auto-args

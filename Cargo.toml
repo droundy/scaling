@@ -33,6 +33,10 @@ libc = "0.2"
 # floor for anyone who turns it on; the default build is unaffected and
 # still compiles on 1.66.
 [dependencies]
+# Parses the command line for `Filter::from_args`. Optional: filtering by
+# name is useful, but a crate that does not want an argument parser in its
+# dependency tree should not get one.
+auto-args = { version = "0.3.2", optional = true }
 inventory = { version = "0.3.21", optional = true }
 # The attribute macros. Optional for the same reason `inventory` is: a crate
 # not using `registry` should pay for neither, and this one brings `syn` with
@@ -51,6 +55,15 @@ harness = false
 # Discover benchmarks registered anywhere in a crate, rather than assembling
 # them by hand into one `Suite`. See REGISTRATION.md.
 registry = ["dep:inventory", "dep:scaling-macros"]
+# Build a `Filter` from the command line. The matching itself needs no
+# dependency and is always available; this is only the parsing.
+cli = ["dep:auto-args"]
 
 [workspace]
 members = [".", "macros"]
+
+# Shows a benchmark binary shaped the way one using this crate would be,
+# with a filter read from the command line and the environment.
+[[bench]]
+name = "filtered"
+harness = false

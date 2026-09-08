@@ -292,6 +292,7 @@ effect.
 pub mod assemble;
 mod bench;
 mod compare;
+mod filter;
 mod kway;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate. See `REGISTRATION.md`.
@@ -314,6 +315,7 @@ pub(crate) mod significant;
 // toolchain, and only when building doctests rather than the library.
 pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
+pub use self::filter::Filter;
 pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
 #[cfg(feature = "registry")]
