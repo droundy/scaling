@@ -563,6 +563,27 @@ a worst-case estimate before starting.
 Only now, with the registry working, do the internal changes become
 motivated rather than speculative.
 
+### Prerequisite: results have to be reachable by name
+
+**Before any of the direct API is removed**, a `Stats` or a `Comparison` has
+to be gettable out of a finished suite *by name* — looked up by its group or
+benchmark name — and not only through the `Token` returned when it was
+added.
+
+Benchmarks get driven by scripts, not only read by people: checking whether
+the best version of a function is really the one being used under some
+circumstance, say. A script like that discovers what it wants at runtime and
+cannot hold a token that was returned when the benchmark was registered —
+and under `Suite::add_registered` nobody holds those tokens at all, because
+nothing wrote the `add` call.
+
+This is not a small addition to bolt on afterwards. `Report` keeps
+`Vec<(String, Arc<dyn Reportable>)>`, and `Reportable` can only render to a
+string, so the typed value genuinely cannot be recovered from a `Report` as
+it stands — that erasure is what has to change. `RegisteredTokens`
+(name → `Token`) already does this for the registry path and may be the
+shape to generalise.
+
 ### Removing `Plan` / `Drop`
 
 `Config` carries a `Plan` behind an `Arc` — promised count, cached
@@ -705,6 +726,57 @@ process-wide registry. Three limits, worst first:
    at comparison time.
 
 Given (2), manual wrappers stay the recommended default.
+
+### Registrations from more than one crate or version
+
+Once an old copy of a crate, or a rival crate, registers alongside the
+current one, several registrations arrive under the same name — they *are*
+the same source, a version apart. Before this was handled, that was not
+merely unsupported: the duplicate-name check rejected the whole matrix, so
+the automatic-pickup path above produced zero lanes.
+
+Candidates and inputs need opposite treatment, which is the crux:
+
+- **Candidates are the point.** Two versions of one implementation are
+  exactly the comparison being asked for, so both are kept and told apart.
+- **Inputs are redundant.** Two versions of one generator are meant to build
+  the same data, so measuring on both doubles the work for nothing — and
+  worse, an old generator paired with new implementations quietly changes
+  what is being measured if the generator itself has changed since. One is
+  kept: the newest.
+
+**Names carry only what distinguishes them.** Two versions of one crate give
+`sort@0.8.0` and `sort@0.9.0`; two different crates give `sort@mine` and
+`sort@theirs`; both differing gives `sort@mine-2.0.0`. Asking merely whether
+crates *differ* is the wrong question — with one implementation per crate
+the versions differ too, and `sort@mine-2.0.0` says nothing `sort@mine`
+does not.
+
+**`VersionPolicy::LatestPerCrate` keeps the newest of *each crate*.** Per
+crate, not overall: when the point is measuring against other crates,
+dropping a rival's implementation because your own version number happens to
+be higher would be exactly wrong. `RegistryOptions::latest_per_crate()` is
+the way to ask for it, and it is what you want when several rivals are
+present and only their current releases are interesting.
+
+**Versions compare numerically.** `"0.10.0" < "0.9.0"` as text, which is
+backwards and silently so — a policy picking the newest would take 0.9.0
+over 0.10.0 and nothing would look wrong. A pre-release or build suffix is
+dropped rather than made to mean something, and an unparseable version reads
+as `0.0.0` rather than stopping a run. Three integers do not justify a
+`semver` dependency in a crate whose default build has none.
+
+**Several baseline claimants is expected here**, since every version of a
+declaration marked `baseline` says so. `BaselinePolicy` settles it, and
+defaults to `Oldest` — which makes a regression read the right way round,
+the new code measured *against* the old. Picking the newest would report
+every older version as a change *from* the code being written, which is
+backwards.
+
+That is only true across origins. Two *different* functions claiming the
+baseline within one crate at one version is a plain contradiction, not a
+version spread, and is still an error — resolving it by version would pick
+one silently and hide the mistake.
 
 ### `BaselinePolicy`
 

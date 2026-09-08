@@ -669,6 +669,8 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 ::scaling::registry::MatrixInput {
                     matrix: #matrix,
                     name: #name,
+                    crate_name: ::core::env!("CARGO_PKG_NAME"),
+                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
                     type_id: ::core::any::TypeId::of::<#ty>,
                     type_name: ::core::stringify!(#ty),
                     make: #shim,
@@ -698,6 +700,8 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 ::scaling::registry::MatrixInput {
                     matrix: #matrix,
                     name: #name,
+                    crate_name: ::core::env!("CARGO_PKG_NAME"),
+                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
                     type_id: ::core::any::TypeId::of::<#ty>,
                     type_name: ::core::stringify!(#ty),
                     make: #shim,

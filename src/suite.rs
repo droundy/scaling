@@ -54,6 +54,8 @@
 
 use super::*;
 #[cfg(feature = "registry")]
+use crate::assemble::RegistryOptions;
+#[cfg(feature = "registry")]
 use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
 use std::cell::Cell;
 #[cfg(feature = "registry")]
@@ -703,7 +705,26 @@ impl<'a> Suite<'a> {
     /// Use [`Suite::try_add_registered`] to handle them instead, which is
     /// what a runner printing diagnostics of its own should do.
     pub fn add_registered(&mut self) -> RegisteredTokens {
-        match self.try_add_registered() {
+        self.add_registered_with(RegistryOptions::default())
+    }
+
+    /// [`Suite::add_registered`], saying what to do about registrations that
+    /// come from more than one crate or version.
+    ///
+    /// The case this is for: a crate pulls an older copy of itself, or a
+    /// rival crate, in as a dev-dependency with registrations enabled. Both
+    /// register, and both may use the same names for the same ideas.
+    ///
+    /// ```no_run
+    /// # let cfg = scaling::Config::default();
+    /// # let mut suite = cfg.suite();
+    /// use scaling::assemble::RegistryOptions;
+    /// // Measure only the newest version of each crate that registered.
+    /// suite.add_registered_with(RegistryOptions::latest_per_crate());
+    /// # let _ = suite;
+    /// ```
+    pub fn add_registered_with(&mut self, options: RegistryOptions) -> RegisteredTokens {
+        match self.try_add_registered_with(options) {
             Ok(tokens) => tokens,
             Err(problems) => {
                 let mut msg = String::from("registered benchmarks do not make sense together:");
@@ -724,6 +745,15 @@ impl<'a> Suite<'a> {
     /// left holding half of a set that did not check out.
     pub fn try_add_registered(
         &mut self,
+    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
+        self.try_add_registered_with(RegistryOptions::default())
+    }
+
+    /// [`Suite::try_add_registered`], with [`RegistryOptions`]. See
+    /// [`Suite::add_registered_with`].
+    pub fn try_add_registered_with(
+        &mut self,
+        options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let gens: Vec<&'static GenInputRegistration> =
@@ -772,7 +802,7 @@ impl<'a> Suite<'a> {
         // paired by type into lanes, every pairing measured.
         let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
         let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
-        let (lanes, lane_problems) = crate::assemble::lanes(&cands, &mins);
+        let (lanes, lane_problems) = crate::assemble::lanes(&cands, &mins, options);
         // Orphans and duplicates are said out loud but do not stop the run;
         // a contradiction inside a lane skips that lane. Either way what is
         // left is coherent, so the rest is measured.
@@ -783,16 +813,16 @@ impl<'a> Suite<'a> {
                 if lane.candidates.len() < 2 {
                     // Nothing to compare against, so this is a plain
                     // benchmark rather than a one-sided comparison.
-                    let c = lane.candidates[0];
+                    let c = &lane.candidates[0];
                     let name = lane.flat_name(c, input);
-                    let token = (c.add_flat)(self, cfg, &name, input.make);
+                    let token = (c.reg.add_flat)(self, cfg, &name, input.reg.make);
                     tokens.flat.insert(name, token);
                     continue;
                 }
-                let make = input.make;
+                let make = input.reg.make;
                 let mut set = cfg.comparison_gen_input(make);
                 for c in &lane.candidates {
-                    set = (c.add_alt)(set, c.name);
+                    set = (c.reg.add_alt)(set, &c.name);
                 }
                 let name = lane.comparison_name(input);
                 let token = self.add_comparison(&name, set);

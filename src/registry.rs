@@ -341,6 +341,13 @@ pub struct MatrixInput {
     pub matrix: &'static str,
     /// What to call this input in the report.
     pub name: &'static str,
+    /// Which crate registered it, and at what version.
+    ///
+    /// Inputs carry this for the opposite reason candidates do: not to tell
+    /// several versions apart, but to pick one of them. See
+    /// [`crate::assemble::Lane::inputs`].
+    pub crate_name: &'static str,
+    pub crate_version: &'static str,
     /// The type it produces, which is what candidates are paired to it on.
     pub type_id: TypeIdOf,
     /// That type as the source spells it, for diagnostics.
