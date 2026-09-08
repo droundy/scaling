@@ -825,3 +825,139 @@ is a parameter to `add_registered`; under A, a CLI flag.
 startup check. The check is exhaustive and reported before measuring, but it
 is a check rather than a proof, and it is unavoidable if separately
 registered functions are to share one generated input.
+
+---
+
+# Running only some of the benchmarks
+
+Once benchmarks are registered rather than assembled, a binary holds every
+benchmark in the crate and a run measures all of them. That is the wrong
+default for iterating on one function, and it gets worse as a crate grows —
+`Suite` gives each entry its own `max_time`, so the cost of a run is linear
+in how many there are.
+
+## Command line *and* environment, not one or the other
+
+Both, with the command line taking precedence. They fail in different places
+and neither covers the other:
+
+- **The command line** is what someone types. It is discoverable, it can
+  have a `--help`, and `cargo bench -- <filter>` is the shape people already
+  know from `cargo test`.
+- **The environment** is what survives a wrapper. `make bench`, a CI step, a
+  `cargo bench --workspace` that fans out over several crates — none of
+  those thread arguments through without being taught to, and
+  `SCALING_FILTER=sort make bench` needs nobody's cooperation.
+
+## What cargo actually passes, measured
+
+This is the part worth knowing before writing a parser, because it is not
+what you would guess:
+
+| invocation | argv the binary sees |
+| --- | --- |
+| `cargo bench --bench b` | `["…/b-<hash>", "--bench"]` |
+| `cargo bench --bench b -- sort --exact` | `["…/b-<hash>", "sort", "--exact", "--bench"]` |
+| `cargo test --bench b` | `["…/b-<hash>"]` |
+
+Three consequences:
+
+1. **`--bench` arrives even with `harness = false`, and even when the user
+   passed no arguments at all.** A parser that rejects unknown flags fails on
+   the plainest possible invocation, `cargo bench`. It has to be swallowed.
+2. **Cargo appends it *after* the user's arguments**, so a parser cannot
+   assume its own flags come last.
+3. **`cargo test` passes nothing**, so the same binary must do something
+   sensible with no arguments — which for a bench target under `cargo test`
+   means "compile and exit quickly", not "measure everything". Worth a
+   `--test` style fast path later; out of scope here.
+
+## Surface
+
+```
+[FILTER]...          keep entries whose name contains any of these
+--exact              match the whole name instead of a substring
+--skip PATTERN       drop entries matching this, after the filters
+--list               print what would run, and measure nothing
+--bench              ignored; cargo passes it whether or not you do
+```
+
+| variable | equivalent |
+| --- | --- |
+| `SCALING_FILTER` | space-separated `FILTER`s |
+| `SCALING_SKIP` | space-separated `--skip` patterns |
+| `SCALING_EXACT` | set to anything for `--exact` |
+
+Substring by default, following `cargo test`; several filters are an OR, and
+`--skip` is applied afterwards so `--skip` can carve a hole in a broad
+filter.
+
+`--list` earns its place here more than in most harnesses: with registered
+benchmarks nobody wrote the names down, so "what is there?" has no other
+answer. It should print the name and kind of each entry and exit 0 without
+claiming the machine.
+
+## What a filter matches, and the one thing it cannot do
+
+Names are what the report shows: `mymod::fib_200` for a benchmark,
+`sorting@reversed` for a matrix cell, the group name for a comparison.
+
+**A comparison is atomic.** Its alternatives are measured in one interleaved
+round precisely so their differences are paired, so "run only the
+`unstable` alternative of the `sorting` comparison" is not a smaller version
+of that comparison — it is a different measurement, and a worse one. So
+filtering works at *entry* granularity: a comparison is in or out as a
+whole, and a filter matching its name takes all of it.
+
+Whether a filter matching an *alternative's* name should pull in its whole
+comparison is a real choice. Pulling it in is surprising (you asked for one
+thing and got four); not pulling it in is surprising the other way (you named
+something real and got nothing). **Suggest: not matched, but `--list` shows
+alternatives indented under their comparison** so the name you would have to
+filter on is visible.
+
+## Where it lives
+
+A `Filter` on the `Suite`, not on `add_registered`, so that hand-added
+benchmarks obey it too — a run that honours `--filter` for registered
+benchmarks and silently ignores it for the two you added by hand is worse
+than not having it.
+
+```rust
+let mut suite = cfg.suite().with_filter(Filter::from_env_and_args());
+suite.add_registered();
+suite.add("by_hand", || work());   // filtered on the same terms
+println!("{}", suite.run());
+```
+
+`Filter::from_env_and_args()` is explicit rather than automatic: a library
+that reads `argv` because it was linked in, without being asked, is a
+library that surprises somebody. Under Design A the generated runner calls
+it, so this composes forward rather than being replaced.
+
+Filtered-out entries are **not added at all** — no `Clock`, no scheduler
+slot, no time. `add*` still returns a `Token`, which simply never fills;
+that matches what already happens when a suite is built and not run, and
+keeps the return type honest without an `Option` at every call site.
+
+### One consequence worth stating
+
+Filtering changes the Bonferroni count, and it should. Run five comparisons
+and you are exposed to five chances of a false positive; run one and you are
+exposed to one. `Suite::run` computes the limit from what the suite actually
+holds, so this already falls out — but it means **a comparison's verdict can
+differ between a filtered and an unfiltered run**, and the docs must say so
+rather than leaving someone to discover that a change was "significant"
+alone and not in the suite.
+
+## Staging
+
+1. `Filter` — parsing, matching, `--bench` swallowed, env fallback. Pure and
+   testable without running a benchmark, like `plan`.
+2. `Suite::with_filter`, consulted by every `add*`.
+3. `--list`, which needs the names before anything is measured.
+4. Wire into `add_registered` so registered benchmarks report what was
+   skipped rather than silently vanishing.
+
+Stages 1 and 2 are additive. Nothing here needs the stage 6 removals, and
+none of it is blocked by the A-vs-B decision.
