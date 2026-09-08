@@ -57,6 +57,7 @@ use super::*;
 use crate::assemble::RegistryOptions;
 #[cfg(feature = "registry")]
 use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
+use std::any::Any;
 use std::cell::Cell;
 #[cfg(feature = "registry")]
 use std::collections::BTreeMap;
@@ -387,17 +388,34 @@ impl<T> fmt::Debug for Token<T> {
 /// `Arc<Mutex<Option<T>>>` coerces straight to `Arc<dyn Reportable>`, so the
 /// suite can keep every benchmark's cell in one list - in declaration order,
 /// for printing - while the caller keeps the same cells typed, in tokens.
-/// Neither an enum of result kinds nor any downcasting is needed.
+/// No enum of result kinds is needed.
+///
+/// # Why there is an `as_any` as well
+///
+/// Rendering was once all this had to do, because a caller who wanted the
+/// measurement rather than its text held a [`Token`] for it. That stops
+/// being true as soon as the caller did not write the `add` call:
+/// [`Suite::add_registered`] adds benchmarks nobody named, so nobody holds
+/// their tokens, and a script wanting to *ask* something of the results -
+/// which of these is fastest, is the one we ship still the best - has only
+/// the [`Report`]. Recovering the value from it needs the type back, and
+/// that means a downcast.
 trait Reportable {
     fn render(&self) -> Option<String>;
+    /// The cell itself, for [`Report::get`] to downcast.
+    fn as_any(&self) -> &(dyn Any + 'static);
 }
 
-impl<T: Display> Reportable for Mutex<Option<T>> {
+impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
     fn render(&self) -> Option<String> {
         self.lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|v| v.to_string())
+    }
+
+    fn as_any(&self) -> &(dyn Any + 'static) {
+        self
     }
 }
 
@@ -837,6 +855,96 @@ impl<'a> Suite<'a> {
 /// Everything a [`Suite`] measured, in the order it was declared.
 pub struct Report {
     entries: Vec<(String, Arc<dyn Reportable>)>,
+}
+
+impl Report {
+    /// What every entry is called, in the order they were added.
+    ///
+    /// The way to find out what a run produced when the names were not
+    /// written by hand - a registered benchmark is called after its module
+    /// and function, and a matrix cell after its matrix and input.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(name, _)| name.as_str())
+    }
+
+    /// Whether anything was measured under this name.
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|(n, _)| n == name)
+    }
+
+    /// One measurement, by name and type.
+    ///
+    /// `None` if nothing of that name was measured, if it was measured but
+    /// is of another type, or if the suite has not run. The three concrete
+    /// forms - [`Report::stats`], [`Report::scaling`],
+    /// [`Report::comparison`] - are usually what you want; this is here for
+    /// completeness and for anything added later.
+    ///
+    /// ```
+    /// let cfg = scaling::Config::default();
+    /// let mut suite = cfg.suite();
+    /// let _ = suite.add("sum", || (0..100u64).sum::<u64>());
+    /// let report = suite.run();
+    /// let stats: scaling::Stats = report.get("sum").expect("it ran");
+    /// assert!(stats.ns_per_iter > 0.0);
+    /// ```
+    pub fn get<T: Clone + 'static>(&self, name: &str) -> Option<T> {
+        let (_, cell) = self.entries.iter().find(|(n, _)| n == name)?;
+        let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
+        typed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+    }
+
+    /// A flat benchmark's measurement, by name.
+    ///
+    /// `None` if that name was something else - a comparison, say - so a
+    /// caller that does not know what it is looking at can simply ask.
+    pub fn stats(&self, name: &str) -> Option<Stats> {
+        self.get(name)
+    }
+
+    /// A scaling benchmark's measurement, by name.
+    pub fn scaling(&self, name: &str) -> Option<ScalingStats> {
+        self.get(name)
+    }
+
+    /// A comparison's results, by name.
+    ///
+    /// For a matrix, the name is `matrix@input`; for a group, the group's
+    /// name. What comes back carries every alternative's own measurement as
+    /// well as its difference from the baseline, so this is what a script
+    /// asking "which of these is actually fastest here" wants.
+    pub fn comparison(&self, name: &str) -> Option<Comparisons> {
+        self.get(name)
+    }
+
+    /// Every flat measurement, with its name, in the order they were added.
+    pub fn all_stats(&self) -> impl Iterator<Item = (&str, Stats)> {
+        self.all()
+    }
+
+    /// Every comparison, with its name, in the order they were added.
+    pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Comparisons)> {
+        self.all()
+    }
+
+    /// Every entry of one type, with its name. Entries of other types are
+    /// skipped rather than being an error, which is what makes this usable
+    /// on a report holding a mixture.
+    fn all<T: Clone + 'static>(&self) -> impl Iterator<Item = (&str, T)> {
+        self.entries.iter().filter_map(|(name, cell)| {
+            let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
+            let value = typed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .cloned()?;
+            Some((name.as_str(), value))
+        })
+    }
 }
 
 impl Display for Report {
@@ -1566,6 +1674,148 @@ mod tests {
             idle.spent() < Duration::from_millis(5),
             "idle was charged for its neighbour: {:?}",
             idle.spent()
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_lookup {
+    use super::*;
+    use std::time::Duration;
+
+    fn cfg() -> Config {
+        Config::default().with_max_time(Duration::from_millis(20))
+    }
+
+    /// A measurement can be had from a finished report by name, without
+    /// having kept the token that was handed out when it was added.
+    ///
+    /// Which is the whole point: under `add_registered` nobody wrote the
+    /// `add` call, so nobody holds those tokens, and a script that wants to
+    /// ask something of the results has only the report.
+    #[test]
+    fn a_measurement_can_be_had_by_name_without_its_token() {
+        let cfg = cfg();
+        let mut suite = cfg.suite();
+        // Deliberately dropped: this is the situation being tested.
+        drop(suite.add("summing", || (0..64u64).sum::<u64>()));
+        let report = suite.run();
+
+        let stats = report.stats("summing").expect("it was measured");
+        assert!(stats.ns_per_iter > 0.0);
+        assert!(report.contains("summing"));
+        assert_eq!(report.names().collect::<Vec<_>>(), ["summing"]);
+    }
+
+    /// Asking for the wrong type gives nothing rather than the wrong thing,
+    /// so a caller that does not know what a name refers to can simply ask.
+    #[test]
+    fn asking_for_the_wrong_type_gives_nothing() {
+        let cfg = cfg();
+        let mut suite = cfg.suite();
+        let _ = suite.add("flat", || (0..64u64).sum::<u64>());
+        let _ = suite.add_comparison(
+            "pair",
+            cfg.comparison()
+                .add("a", || (0..64u64).sum::<u64>())
+                .add("b", || (0..64u64).sum::<u64>()),
+        );
+        let report = suite.run();
+
+        assert!(report.stats("flat").is_some());
+        assert!(
+            report.comparison("flat").is_none(),
+            "a flat benchmark is not a comparison",
+        );
+        assert!(report.comparison("pair").is_some());
+        assert!(
+            report.stats("pair").is_none(),
+            "a comparison is not a flat benchmark",
+        );
+        assert!(report.stats("never added").is_none());
+    }
+
+    /// Each kind comes back as itself, from one report holding all three.
+    #[test]
+    fn every_kind_of_result_can_be_recovered() {
+        let cfg = cfg();
+        let mut suite = cfg.suite();
+        let _ = suite.add("flat", || (0..64u64).sum::<u64>());
+        let _ = suite.add_scaling("scaled", |n: usize| (0..n as u64).sum::<u64>(), 32);
+        let _ = suite.add_comparison(
+            "pair",
+            cfg.comparison()
+                .add("a", || (0..64u64).sum::<u64>())
+                .add("b", || (0..64u64).sum::<u64>()),
+        );
+        let report = suite.run();
+
+        assert!(report.stats("flat").is_some());
+        assert!(report.scaling("scaled").is_some());
+        let cmp = report.comparison("pair").expect("the comparison ran");
+        assert_eq!(cmp.stats().len(), 2);
+    }
+
+    /// Iterating one kind skips the others rather than failing on them,
+    /// which is what makes it usable on a report holding a mixture.
+    #[test]
+    fn iterating_one_kind_skips_the_rest() {
+        let cfg = cfg();
+        let mut suite = cfg.suite();
+        let _ = suite.add("one", || (0..64u64).sum::<u64>());
+        let _ = suite.add("two", || (0..64u64).sum::<u64>());
+        let _ = suite.add_comparison(
+            "pair",
+            cfg.comparison()
+                .add("a", || (0..64u64).sum::<u64>())
+                .add("b", || (0..64u64).sum::<u64>()),
+        );
+        let report = suite.run();
+
+        let flat: Vec<&str> = report.all_stats().map(|(n, _)| n).collect();
+        assert_eq!(flat, ["one", "two"], "the comparison is not a `Stats`");
+        let cmps: Vec<&str> = report.all_comparisons().map(|(n, _)| n).collect();
+        assert_eq!(cmps, ["pair"]);
+    }
+
+    /// The use this exists for: a script asking whether the implementation
+    /// being shipped is really the best one here.
+    ///
+    /// Nothing in it holds a token, and nothing in it knows the names in
+    /// advance - it finds the comparison, reads every alternative's own
+    /// measurement out of it, and decides.
+    #[test]
+    fn a_script_can_ask_which_alternative_is_actually_fastest() {
+        let cfg = cfg();
+        let mut suite = cfg.suite();
+        let _ = suite.add_comparison(
+            "hashing",
+            cfg.comparison()
+                // The one we ship, and a deliberately slower rival.
+                .add("shipped", || (0..64u64).sum::<u64>())
+                .add("rival", || (0..512u64).sum::<u64>()),
+        );
+        let report = suite.run();
+
+        let cmp = report
+            .all_comparisons()
+            .find(|(name, _)| *name == "hashing")
+            .map(|(_, c)| c)
+            .expect("a comparison called `hashing`");
+
+        let fastest = cmp
+            .names()
+            .zip(cmp.stats())
+            .min_by(|a, b| {
+                a.1.ns_per_iter
+                    .partial_cmp(&b.1.ns_per_iter)
+                    .expect("no NaN timings")
+            })
+            .map(|(name, _)| name)
+            .expect("at least one alternative");
+        assert_eq!(
+            fastest, "shipped",
+            "the shipped implementation should be the quick one here",
         );
     }
 }

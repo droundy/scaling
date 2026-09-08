@@ -252,3 +252,72 @@ fn registered_and_hand_added_benchmarks_mix() {
     assert!(shown.contains("by_hand"), "{shown}");
     assert!(shown.contains("e2e::flat"), "{shown}");
 }
+
+/// Results are recoverable from the report even when nobody ever held a
+/// token - which is the situation `add_registered` always creates, since
+/// nothing wrote the `add` call that would have returned one.
+#[test]
+fn registered_results_are_recoverable_from_the_report_alone() {
+    let cfg = Config::default().with_max_time(Duration::from_millis(30));
+    let mut suite = cfg.suite();
+    // Deliberately thrown away: a script driving a benchmark binary has no
+    // way to get hold of these.
+    drop(suite.add_registered());
+    let report = suite.run();
+
+    // Names are discoverable rather than having to be known in advance.
+    let flat_name = report
+        .names()
+        .find(|n| n.ends_with("::flat"))
+        .expect("the flat benchmark is in the report")
+        .to_string();
+    let stats = report
+        .stats(&flat_name)
+        .expect("and its measurement comes back");
+    assert!(stats.ns_per_iter > 0.0);
+
+    let cmp = report
+        .comparison("e2e-sort")
+        .expect("the comparison comes back too");
+    assert_eq!(cmp.stats().len(), 3);
+
+    // And the scaling benchmark, which is a third type again.
+    let scaling_name = report
+        .names()
+        .find(|n| n.ends_with("::scaling"))
+        .expect("the scaling benchmark is there")
+        .to_string();
+    assert!(report.scaling(&scaling_name).is_some());
+}
+
+/// The question the lookup exists to answer: is the implementation being
+/// shipped really the best one under these conditions?
+///
+/// Nothing here holds a token and nothing knows a name in advance.
+#[test]
+fn a_script_can_check_which_registered_alternative_wins() {
+    let cfg = Config::default().with_max_time(Duration::from_millis(30));
+    let mut suite = cfg.suite();
+    drop(suite.add_registered());
+    let report = suite.run();
+
+    let (_, cmp) = report
+        .all_comparisons()
+        .find(|(name, _)| *name == "e2e-sort")
+        .expect("the sorting comparison");
+
+    let slowest = cmp
+        .names()
+        .zip(cmp.stats())
+        .max_by(|a, b| {
+            a.1.ns_per_iter
+                .partial_cmp(&b.1.ns_per_iter)
+                .expect("no NaN timings")
+        })
+        .map(|(name, _)| name)
+        .expect("at least one alternative");
+    assert_eq!(
+        slowest, "e2e::sort_thrice",
+        "the one that sorts three times should be the slow one",
+    );
+}

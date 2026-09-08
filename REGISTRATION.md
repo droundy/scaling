@@ -563,12 +563,25 @@ a worst-case estimate before starting.
 Only now, with the registry working, do the internal changes become
 motivated rather than speculative.
 
-### Prerequisite: results have to be reachable by name
+### Prerequisite: results reachable by name — **done**
 
 **Before any of the direct API is removed**, a `Stats` or a `Comparison` has
 to be gettable out of a finished suite *by name* — looked up by its group or
 benchmark name — and not only through the `Token` returned when it was
 added.
+
+This is now in place: `Report::names`, `Report::contains`, `Report::stats`,
+`Report::scaling`, `Report::comparison`, the generic `Report::get`, and
+`Report::all_stats`/`all_comparisons` for iterating one kind out of a mixed
+report. Asking for the wrong type gives `None` rather than the wrong value,
+so a caller that does not know what a name refers to can simply ask.
+
+`Reportable` grew an `as_any` to make it possible. Rendering was once all it
+had to do, because anyone wanting the measurement rather than its text held
+a `Token`; that stops being true the moment the caller did not write the
+`add` call. The original design note — "neither an enum of result kinds nor
+any downcasting is needed" — was true of the problem as it stood then and is
+not true of this one.
 
 Benchmarks get driven by scripts, not only read by people: checking whether
 the best version of a function is really the one being used under some
@@ -577,12 +590,9 @@ cannot hold a token that was returned when the benchmark was registered —
 and under `Suite::add_registered` nobody holds those tokens at all, because
 nothing wrote the `add` call.
 
-This is not a small addition to bolt on afterwards. `Report` keeps
-`Vec<(String, Arc<dyn Reportable>)>`, and `Reportable` can only render to a
-string, so the typed value genuinely cannot be recovered from a `Report` as
-it stands — that erasure is what has to change. `RegisteredTokens`
-(name → `Token`) already does this for the registry path and may be the
-shape to generalise.
+That scenario is what the tests exercise, rather than only the mechanism:
+they throw the tokens away, find a benchmark by searching `names()`, and ask
+which alternative of a comparison actually measured fastest.
 
 ### Removing `Plan` / `Drop`
 
