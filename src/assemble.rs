@@ -1422,7 +1422,10 @@ mod tests {
 #[cfg(test)]
 mod pairing {
     use crate::registry::ErasedInput;
+    use crate::testutil::quiesced;
     use crate::Config;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::time::Duration;
 
     struct XorShift(u64);
@@ -1444,60 +1447,111 @@ mod pairing {
     /// This is the assumption `ErasedInput` exists to keep, and it is not
     /// visible to the type system: a comparison whose alternatives were
     /// handed *different* inputs still runs, still prints a number, and is
-    /// simply worse - its error bar carries the spread between two draws on
-    /// top of the spread it meant to measure. Nothing would say so.
+    /// simply worse. Nothing would say so.
     ///
-    /// So measure it. The workload's cost varies by a factor of fifteen from
-    /// round to round, which is exactly the spread pairing is supposed to
-    /// cancel: both alternatives meet the same draw, so it cancels out of
-    /// their difference while remaining in each of their individual error
-    /// bars. If the sharing works, the paired error bar comes out far
-    /// narrower than the two combined; if it broke, the two would be about
-    /// equal.
+    /// # Why this asks what the alternatives saw, rather than timing them
     ///
-    /// Measured both ways when this was written, on the same workload:
+    /// The first version of this test timed the two and asserted the paired
+    /// error bar came out narrower than combining the halves. That measured
+    /// the right thing on a quiet machine - about 0.15 here - and failed on
+    /// CI at 0.75. Nor was measuring a control instead enough: under a
+    /// saturated machine both come out at 1.0 and the comparison is a coin
+    /// flip. That is not a flaw in the assertion but a fact about pairing.
+    /// It cancels the spread in the *workload*; a busy machine adds a second
+    /// spread, between one instant and the next, which is not shared between
+    /// two alternatives and so does not cancel. When that one dominates,
+    /// there is nothing left to see.
     ///
-    /// ```none
-    ///   shared input (what the registry does)   ratio 0.154
-    ///   each alternative drawing its own        ratio 0.975
-    /// ```
-    ///
-    /// So a half is a threshold with a wide margin either side, and it fails
-    /// decisively rather than marginally if the sharing is ever lost.
+    /// What actually has to be true is simpler and has no timing in it: both
+    /// alternatives are handed the same value. So that is what is asserted,
+    /// and it holds on any machine. The statistical consequence is checked
+    /// separately, where it can be.
     #[test]
-    fn erasing_the_input_keeps_the_pairing() {
-        let cfg = Config::relative(0.02)
-            .with_max_time(Duration::from_millis(400))
-            // `ComparisonSet::run` is a family of one comparison. Stage 6
-            // removes this requirement; until then a standalone comparison
-            // has to say so, or `Config::drop` complains.
+    fn erasing_the_input_hands_both_alternatives_the_same_value() {
+        // What each alternative was given, round by round.
+        let seen_a: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_b: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
+        let (rec_a, rec_b) = (seen_a.clone(), seen_b.clone());
+
+        let cfg = Config::relative(0.5)
+            .with_max_time(Duration::from_millis(50))
             .with_comparisons_planned(1);
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        let _ = cfg
+            .comparison_gen_input(move || {
+                // Varying, so that "they saw the same thing" is a real
+                // claim rather than one a constant would satisfy.
+                let n = 4 + (rng.next() % 16) as usize;
+                ErasedInput::new(
+                    (0..n as u64)
+                        .map(|x| x * 7 + n as u64)
+                        .collect::<Vec<u64>>(),
+                )
+            })
+            .add_input("a", |e: &mut ErasedInput| {
+                let v = e.get_mut::<Vec<u64>>();
+                rec_a.borrow_mut().push(v.clone());
+                sum(v)
+            })
+            .add_input("b", |e: &mut ErasedInput| {
+                let v = e.get_mut::<Vec<u64>>();
+                rec_b.borrow_mut().push(v.clone());
+                sum(v)
+            })
+            .run();
 
+        let a = seen_a.borrow();
+        let b = seen_b.borrow();
+        assert!(!a.is_empty(), "the comparison ran at all");
+        assert_eq!(a.len(), b.len(), "both alternatives ran equally often");
+        assert!(
+            a.iter().any(|v| v.len() != a[0].len()),
+            "the generator must actually vary, or this asserts nothing",
+        );
+        // The alternatives run in a rotating order, so the *i*th value each
+        // saw is the *i*th one generated for both of them.
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x, y,
+                "on round {i} the two alternatives were handed different \
+                 inputs, so their difference carries the gap between two \
+                 draws as well as the one it meant to measure",
+            );
+        }
+    }
+
+    /// And the consequence: with the input shared, the paired error bar is
+    /// narrower than combining the two halves.
+    ///
+    /// Only checkable on a machine quiet enough for a timing assertion to
+    /// mean anything, for the reason given above - so it is gated, like the
+    /// crate's other statistical tests. The mechanism it follows from is
+    /// checked unconditionally by the test before it.
+    #[test]
+    fn sharing_the_input_narrows_the_error_bar() {
+        if !quiesced() {
+            println!("SKIPPED: machine is not quiesced (see `quiet-bench reserve`)");
+            return;
+        }
+        let cfg = Config::relative(0.02)
+            .with_max_time(Duration::from_millis(300))
+            .with_comparisons_planned(1);
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let results = cfg
             .comparison_gen_input(move || {
-                let n = 200 + (rng.next() % 3000) as usize;
+                let n = 100 + (rng.next() % 8000) as usize;
                 ErasedInput::new((0..n as u64).collect::<Vec<u64>>())
             })
             .add_input("a", |e: &mut ErasedInput| sum(e.get_mut::<Vec<u64>>()))
             .add_input("b", |e: &mut ErasedInput| sum(e.get_mut::<Vec<u64>>()))
             .run();
-
-        let (name, c) = results
-            .against_baseline()
-            .next()
-            .expect("one alternative beyond the baseline");
+        let (_, c) = results.against_baseline().next().expect("one alternative");
         let combined = (c.candidate.std_error.powi(2) + c.baseline.std_error.powi(2)).sqrt();
         let paired = c.std_error();
-        println!(
-            "{name}: combined={combined:.4} paired={paired:.4} ratio={:.3}",
-            paired / combined,
-        );
+        println!("combined={combined:.4} paired={paired:.4}");
         assert!(
             paired < combined / 2.0,
-            "the paired error bar ({paired:.4}) is no better than combining the \
-             halves ({combined:.4}), so the alternatives were not measured on \
-             the same inputs - erasure lost the pairing",
+            "paired {paired:.4} against combined {combined:.4}",
         );
     }
 }
