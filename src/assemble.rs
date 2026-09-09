@@ -164,7 +164,7 @@ impl Origin {
 /// generic function look like one function registered twice, and asking for
 /// only the latest of each crate drops all but one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Key {
+pub(crate) struct Key {
     /// The matrix or comparison group, or `""` for a standalone benchmark.
     pub scope: &'static str,
     /// The input type as the source spells it, or `""` where there is none.
@@ -806,13 +806,7 @@ pub fn lanes(
                 None => {
                     problems.push(Diagnostic::NoSuchBaseline {
                         group: key.0.to_string(),
-                        wanted: match options.baseline {
-                            BaselinePolicy::Exact {
-                                crate_name,
-                                crate_version,
-                            } => format!("{crate_name}@{crate_version}"),
-                            other => format!("{other:?}"),
-                        },
+                        wanted: describe_baseline_policy(options.baseline),
                         claimants: cs
                             .iter()
                             .filter(|c| c.reg.is_baseline)
@@ -839,6 +833,17 @@ pub fn lanes(
     }
 
     (lanes, problems)
+}
+
+/// How a diagnostic should name the baseline `policy` asked for.
+fn describe_baseline_policy(policy: BaselinePolicy) -> String {
+    match policy {
+        BaselinePolicy::Exact {
+            crate_name,
+            crate_version,
+        } => format!("{crate_name}@{crate_version}"),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Which claimant the policy picks, or `None` if it names one that is not
@@ -1037,13 +1042,7 @@ pub fn plan(
                 None => {
                     problems.push(Diagnostic::NoSuchBaseline {
                         group: name.to_string(),
-                        wanted: match options.baseline {
-                            BaselinePolicy::Exact {
-                                crate_name,
-                                crate_version,
-                            } => format!("{crate_name}@{crate_version}"),
-                            other => format!("{other:?}"),
-                        },
+                        wanted: describe_baseline_policy(options.baseline),
                         claimants: claimants.iter().map(|i| source(members[*i].reg)).collect(),
                     });
                     continue;

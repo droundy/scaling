@@ -173,9 +173,7 @@ fn the_declared_baseline_is_used() {
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
     assert_eq!(against.len(), 2);
     assert!(
-        !against
-            .iter()
-            .any(|n| n.ends_with("stable") && !n.ends_with("unstable")),
+        !against.iter().any(|n| n.ends_with("::stable")),
         "{against:?}"
     );
     assert!(

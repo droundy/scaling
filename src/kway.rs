@@ -264,7 +264,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         let (unit, probed) =
             calibrate(&mut gen_input, &mut entries, &mut master, &mut xs, clock).await;
 
-        let mut per = vec![Running::default(); k];
+        let mut own = vec![Running::default(); k];
         let mut diffs = vec![Running::default(); k];
         let mut times = vec![0.0f64; k];
         let mut measured_ns = 0.0;
@@ -288,7 +288,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
                 measured_ns += t;
             }
             for i in 0..k {
-                per[i].push(times[i]);
+                own[i].push(times[i]);
                 if i > 0 {
                     diffs[i].push(times[i] - times[0]);
                 }
@@ -296,7 +296,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             rounds += 1;
 
             let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
-            let (base_mean, _) = per[0].mean_and_stderr();
+            let (base_mean, _) = own[0].mean_and_stderr();
             // Good enough only when every difference is, since the report
             // stands behind all of them at once.
             let all_precise = (1..k).all(|i| {
@@ -314,7 +314,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         let iterations = probed + rounds as u64 * unit as u64;
         let stats = (0..k)
             .map(|i| {
-                let (ns_per_iter, std_error) = per[i].mean_and_stderr();
+                let (ns_per_iter, std_error) = own[i].mean_and_stderr();
                 Stats {
                     ns_per_iter,
                     std_error,
@@ -327,7 +327,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             .collect();
         // Index zero is the baseline, which has no difference from itself to
         // report an error for.
-        let paired = (0..k)
+        let paired_std_errors = (0..k)
             .map(|i| {
                 if i == 0 {
                     f64::NAN
@@ -339,7 +339,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         Comparisons {
             names: entries.into_iter().map(|e| e.name).collect(),
             stats,
-            paired,
+            paired_std_errors,
             z_alpha,
         }
     }
@@ -425,7 +425,7 @@ pub struct Comparisons {
     stats: Vec<Stats>,
     /// Standard error of each alternative's difference from the baseline,
     /// accumulated per round. `NaN` at index zero, the baseline itself.
-    paired: Vec<f64>,
+    paired_std_errors: Vec<f64>,
     z_alpha: f64,
 }
 
@@ -456,7 +456,7 @@ impl Comparisons {
                     self.stats[0].clone(),
                     self.stats[i].clone(),
                     self.z_alpha,
-                    self.paired[i],
+                    self.paired_std_errors[i],
                 ),
             )
         })

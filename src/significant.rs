@@ -12,7 +12,6 @@ pub(super) fn bonferroni_z_limit(n: u64, fwer: f64) -> f64 {
     let p = alpha_adj / 2.0;
 
     // Abramowitz and Stegun rational approximation for the inverse normal CDF upper tail.
-    // t = sqrt(-2 * ln(p))
     let t = (-2.0 * p.ln()).sqrt();
 
     let c0 = 2.515517;

@@ -459,7 +459,6 @@ macro_rules! main {
     };
 }
 
-use std::f64;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::*;
@@ -519,7 +518,7 @@ const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
 /// A backstop rather than a target: both kinds of benchmark stop as soon as
 /// they have the accuracy asked for, and neither sizes any of its work
 /// against the time available.
-const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
+const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
@@ -580,7 +579,7 @@ impl Default for Config {
         Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
-            max_time: BENCH_TIME_MAX,
+            max_time: MAX_BENCH_TIME,
         }
     }
 }
@@ -705,8 +704,7 @@ impl Config {
         if std_error == 0.0 {
             return true;
         }
-        std_error < self.target_rel_error * ns_per_iter
-            || std_error < self.target_abs_error.as_secs_f64() * 1e9
+        std_error < self.comparison_goal_ns(ns_per_iter)
     }
 }
 

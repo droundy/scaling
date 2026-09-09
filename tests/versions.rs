@@ -38,10 +38,10 @@ fn work(v: &[u64], rounds: usize) -> u64 {
 
 // The current crate's implementation, and the same function a version back.
 // They differ in speed so the comparison has something to find.
-fn sort_new(v: &mut Vec<u64>) -> u64 {
+fn mix_new(v: &mut Vec<u64>) -> u64 {
     work(v, 1)
 }
-fn sort_old(v: &mut Vec<u64>) -> u64 {
+fn mix_old(v: &mut Vec<u64>) -> u64 {
     work(v, 3)
 }
 
@@ -52,7 +52,7 @@ fn add_flat_new(
     make: fn() -> ErasedInput,
 ) -> Token<Stats> {
     suite.add_gen_input(name, make, |e: &mut ErasedInput| {
-        sort_new(e.get_mut::<Vec<u64>>())
+        mix_new(e.get_mut::<Vec<u64>>())
     })
 }
 fn add_flat_old(
@@ -62,36 +62,32 @@ fn add_flat_old(
     make: fn() -> ErasedInput,
 ) -> Token<Stats> {
     suite.add_gen_input(name, make, |e: &mut ErasedInput| {
-        sort_old(e.get_mut::<Vec<u64>>())
+        mix_old(e.get_mut::<Vec<u64>>())
     })
 }
 fn add_alt_new<'a>(
     set: ComparisonSet<'a, ErasedInput>,
     name: &str,
 ) -> ComparisonSet<'a, ErasedInput> {
-    set.add_input(name, |e: &mut ErasedInput| {
-        sort_new(e.get_mut::<Vec<u64>>())
-    })
+    set.add_input(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
 }
 fn add_alt_old<'a>(
     set: ComparisonSet<'a, ErasedInput>,
     name: &str,
 ) -> ComparisonSet<'a, ErasedInput> {
-    set.add_input(name, |e: &mut ErasedInput| {
-        sort_old(e.get_mut::<Vec<u64>>())
-    })
+    set.add_input(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
 }
 
 fn make_data() -> ErasedInput {
     ErasedInput::new((0..300u64).rev().collect::<Vec<u64>>())
 }
 
-// Both versions call the function `sort`, and both call themselves the
+// Both versions call the function `mix`, and both call themselves the
 // baseline - because they are the same line of source, a version apart.
 scaling::inventory::submit! {
     MatrixCandidate {
         matrix: "regress",
-        name: "sort",
+        name: "mix",
         input_type: TypeId::of::<Vec<u64>>,
         input_type_name: "Vec<u64>",
         is_baseline: true,
@@ -105,7 +101,7 @@ scaling::inventory::submit! {
 scaling::inventory::submit! {
     MatrixCandidate {
         matrix: "regress",
-        name: "sort",
+        name: "mix",
         input_type: TypeId::of::<Vec<u64>>,
         input_type_name: "Vec<u64>",
         is_baseline: true,
@@ -120,7 +116,7 @@ scaling::inventory::submit! {
 scaling::inventory::submit! {
     MatrixCandidate {
         matrix: "regress",
-        name: "sort",
+        name: "mix",
         input_type: TypeId::of::<Vec<u64>>,
         input_type_name: "Vec<u64>",
         is_baseline: false,
@@ -185,9 +181,9 @@ fn versions_and_rivals_are_all_measured_and_distinguished() {
         .expect("the comparison ran");
     let names: Vec<&str> = cmps.names().collect();
     assert_eq!(names.len(), 3, "two of ours and one of theirs: {names:?}");
-    assert!(names.contains(&"sort@mycrate-0.9.0"), "{names:?}");
-    assert!(names.contains(&"sort@mycrate-0.8.0"), "{names:?}");
-    assert!(names.contains(&"sort@theircrate-0.1.0"), "{names:?}");
+    assert!(names.contains(&"mix@mycrate-0.9.0"), "{names:?}");
+    assert!(names.contains(&"mix@mycrate-0.8.0"), "{names:?}");
+    assert!(names.contains(&"mix@theircrate-0.1.0"), "{names:?}");
 }
 
 /// The redundant input is dropped: one comparison, not one per version of
@@ -215,10 +211,10 @@ fn the_old_version_is_what_the_new_one_is_measured_against() {
     let cmps = tokens.comparisons["regress@data"].get().unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
     assert!(
-        !against.contains(&"sort@mycrate-0.8.0"),
+        !against.contains(&"mix@mycrate-0.8.0"),
         "the old version is the baseline, not a candidate: {against:?}",
     );
-    assert!(against.contains(&"sort@mycrate-0.9.0"), "{against:?}");
+    assert!(against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
 }
 
 /// `Newest` flips which end the comparison is anchored at.
@@ -227,8 +223,8 @@ fn the_baseline_policy_can_anchor_on_the_newest_instead() {
     let tokens = run(RegistryOptions::default().with_baseline(BaselinePolicy::Newest));
     let cmps = tokens.comparisons["regress@data"].get().unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
-    assert!(!against.contains(&"sort@mycrate-0.9.0"), "{against:?}");
-    assert!(against.contains(&"sort@mycrate-0.8.0"), "{against:?}");
+    assert!(!against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
+    assert!(against.contains(&"mix@mycrate-0.8.0"), "{against:?}");
 }
 
 /// Asking for only the latest of each crate drops our old copy but keeps
@@ -239,9 +235,9 @@ fn latest_per_crate_keeps_the_rival_and_drops_our_old_copy() {
     let cmps = tokens.comparisons["regress@data"].get().unwrap();
     let names: Vec<&str> = cmps.names().collect();
     assert_eq!(names.len(), 2, "one per crate: {names:?}");
-    assert!(names.contains(&"sort@mycrate"), "{names:?}");
+    assert!(names.contains(&"mix@mycrate"), "{names:?}");
     assert!(
-        names.contains(&"sort@theircrate"),
+        names.contains(&"mix@theircrate"),
         "a rival on a lower version number must survive: {names:?}",
     );
     // Only the crate tells them apart now, so the version is not in the name.
