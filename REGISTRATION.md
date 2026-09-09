@@ -18,7 +18,12 @@ mechanism. Benchmarks therefore cannot live next to the code they measure.
 be submitted from anywhere in a crate via `inventory::submit!` and collected
 later via `inventory::iter`, with no central list.
 
-## Two designs, and why the choice is deferred
+## Two designs, and why the choice was deferred
+
+> **Resolved: Design A**, at stage 8. The two sections below are kept as
+> written, because the argument they set out is what stages 1–7 were built
+> to make answerable with real code rather than by guessing. What follows
+> the staging table records what each stage actually turned out to cost.
 
 **Design B ("hybrid")** — registration becomes *one more way* to fill a
 `Suite`, via a new `Suite::add_registered()`. Everything existing keeps
@@ -34,6 +39,14 @@ assembly logic, the same matrix support. A adds a runner that owns output,
 and removes the manual API. So there is no need to choose now — build the
 shared substrate, and the choice becomes "do we also build the runner and
 delete the builder?", answerable with real code in hand.
+
+That is how it went. Stage 3 completed B and it worked; stage 7 added the
+runner and stage 8 removed the builder. The deciding argument was not any of
+the ones weighed below but the one that only became visible with both in
+front of you: under B a caller still writes a `main`, builds a `Config`,
+calls `.suite()`, decides what `--list` means, and prints — so the ceremony
+that motivated this work survives, with discovery filling in one line inside
+it. What A buys is that the exposed API gets to be small.
 
 ## Staging: additive first
 
@@ -61,7 +74,7 @@ that drive them are deferred together to stage 6.
 | 5 | matrices: candidates × inputs | yes |
 | 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | **done** |
 | 7 | runner, CLI, output formats — this completes **Design A** | **done**, and additive after all |
-| 8 | migrate docs, README, `benches/`; remove what A replaces | no |
+| 8 | migrate docs, README, `benches/`; remove what A replaces | **done** — no |
 
 Stage 2 before 4 is the load-bearing order: it validates `inventory`,
 `ErasedInput`, and the whole assembly path against real registrations
@@ -779,6 +792,101 @@ the test failed. It had been asserting a property of the standard library
 rather than of the runner. It now uses a ten-times difference pointed the
 other way, which no library change moves. Found only because the MSRV job
 runs the whole suite on 1.71.
+
+---
+
+## Stage 8: all the way in — **built**
+
+The one stage that removes rather than adds, and the point where the
+A-versus-B decision actually binds. Everything before it was reversible.
+
+### No feature to choose
+
+`registry` and `cli` existed to protect a crate that used only the
+hand-assembled `Suite`: it paid for neither `inventory`'s linker machinery
+nor `syn` nor an argument parser, and the default build had no dependencies
+at all. There is one way to write a benchmark suite now, so every build
+needs all three and a feature to turn them off would only turn the crate
+off. `[features]` is gone, and with it 29 `#[cfg]` attributes, the question
+of which combination anybody is on, and the second CI invocation that
+existed to keep the dependency-free build honest.
+
+The MSRV is unchanged and unchanged in kind: 1.71 was always set by the
+proc-macro dependencies rather than by anything the library does. What
+changes is that it applies to everyone rather than to whoever turned
+`registry` on.
+
+### What came off the documented API
+
+| | |
+| --- | --- |
+| **deleted** | `Config::compare`, `Config::compare_input`, `Config::compare_gen_input`, and the 219-line sampling loop behind them |
+| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input` |
+| **added** | `runner::measure`, and `RegistryOptions` / `VersionPolicy` / `BaselinePolicy` / `Diagnostic` re-exported from `runner` |
+| **kept** | `Config`, the result types, `Filter`, `runner`, `main!`, the attribute macros, the five one-shot measuring functions, `quiet` |
+
+Roughly thirty-five methods came off. What is left is one way to declare a
+benchmark and one way to run it.
+
+**The deletion found more than it removed.** `Config::compare*` turned out
+to be the only callers of `compare_gen_input_async` and its `calibrate` -
+`ComparisonSet` has never used them, having its own loop - so deleting three
+public functions turned 219 lines dead, and the compiler said so. There is
+now one comparison sampling loop rather than two implementations of the same
+statistics, and the survivor is the one every registered comparison was
+already going through. The sensitivity calibration test moved onto it: two
+alternatives is a family of one, so it is judged at the same threshold.
+
+**The hidden types cannot be private.** An attribute macro expands to a shim
+that names `scaling::Suite` and `scaling::Token` in the *calling* crate, so
+generated code needs them public to compile - the same reason `registry` and
+`assemble` are already public and hidden. What changed is that they are no
+longer documented as a way to write anything. A follow-up could put them
+behind an opaque `registry::Adder` façade and make them genuinely private;
+this stops short of that, and the doc comment says so.
+
+### `runner::measure`, which is why hiding `Suite` costs nothing
+
+`run` prints and returns a verdict, which answers "did anything regress" and
+not "which of these is actually fastest under these conditions" - and the
+second is what a benchmark-driven script asks. `measure` hands back the
+`Report` instead, which reaches results by name: `report.comparison("lookup")`,
+`report.stats("mymod::fib")`. Names are how, because nobody wrote them down -
+they come from the module and function the benchmark was declared in. `run`
+and `measure` share their assembly, so what one hands back is what the other
+would have printed.
+
+This is the requirement recorded before stage 6 began: a way to get `Stats`
+and `Comparison` out of a finished run without holding a token. `Report`'s
+by-name lookup was built then; this is what makes it reachable once the
+suite behind it is no longer public.
+
+### The free functions stay, against the plan
+
+Design A's cons above list removing `bench`, `bench_scaling` and
+`bench_scaling_gen` as one of its costs, on the "one way to define a
+benchmark" argument. They are not a way to define a benchmark.
+`bench(|| f())` measures a closure once, where it is called, the way
+`Instant::now()` does: it does not register anything, join a suite, or take
+part in a correction.
+
+Two things say so concretely. They are the whole of the published 0.1.3 API.
+And `benches/harness-cost.rs` measures what it costs to take a benchmark by
+calling `bench` in a loop timed with an `Instant` - there is no version of
+that written against the registry, because measuring the harness with the
+harness would hide a regression in the harness. Removing them would delete a
+target that exists to catch exactly that.
+
+### Docs
+
+`README.md` and the crate's front page are rewritten around declaring a
+suite and `scaling::main!()`, with the comparison and matrix attributes
+shown, and the interleaving argument kept but moved under "why they are
+measured together" - where it now also carries the multiple-comparison
+argument, which is the other half of why a suite is one unit.
+
+`benches/filtered.rs` is deleted. It was the worked example of Design B, and
+`benches/registered.rs` is the same benchmarks the other way.
 
 ---
 

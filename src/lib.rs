@@ -153,34 +153,72 @@ that nothing described it exactly. Naming those shapes needs a different
 kind of fit and would be a different feature; measuring a power well is the
 thing this does.
 
-# Suites: measuring many benchmarks together
+# A benchmark suite: declare, don't assemble
+
+Everything above measures one thing, where you called it. A *suite* is the
+other half of this crate: many benchmarks measured together, declared
+wherever they belong rather than gathered into a list.
+
+Put an attribute on a function and it is part of the suite:
+
+```
+# fn fib(_: usize) -> usize { 0 }
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
+
+#[scaling::bench(gen_input = || vec![5i32, 3, 1, 4, 2])]
+fn sorting(v: &mut Vec<i32>) { v.sort() }
+```
+
+They can live anywhere in the crate, next to what they measure. The whole of
+the binary that runs them is:
+
+```ignore
+// benches/bench.rs
+scaling::main!();
+```
+
+which discovers every registered benchmark, measures them together, and
+prints them. What used to be written out - an accuracy, a budget, which
+benchmarks to run, how to print them - is asked for on the command line
+instead:
+
+```none
+cargo bench --bench bench -- --list
+cargo bench --bench bench -- --filter sort --max-time 30s
+cargo bench --bench bench -- --format json > today.json
+cargo bench --bench bench -- --fail-on-regression
+```
+
+See [`main!`] for the whole of it, [`runner`] for what the flags do, and
+[`runner::measure`] for reading the numbers in a script rather than printing
+them.
+
+Comparisons are declared the same way. `group = "..."` makes a function one
+alternative of a comparison, and `#[scaling::candidate]` with
+`#[scaling::input]` builds a matrix of implementations against inputs -
+paired by type, with no list of the pairings anywhere. `REGISTRATION.md` in
+the repository has the design.
+
+## Why they are measured together
 
 Benchmarks run one after another are measured in different machines. The
 first runs on a cold package and the fiftieth on a warm one, so their
 numbers are not comparable with each other, and neither is either of them
 with the same suite run tomorrow.
 
-[`Config::suite`] measures them interleaved instead, one sample each in
-rotation, so every benchmark's samples spread across the whole session and
-all of them average the same drift. Each `add` returns a token to read that
-benchmark's answer from once [`Suite::run`] has finished:
+A suite measures them interleaved instead, one sample each in rotation, so
+every benchmark's samples spread across the whole session and all of them
+average the same drift. A comparison counts as *one* participant in that
+rotation, because its round must stay whole for the paired error bar to mean
+anything - which is also fair, since one of its turns runs `k` batches and
+produces `k` [`Stats`].
 
-```
-let cfg = scaling::Config::default();
-let mut suite = cfg.suite();
-let sort = suite.add_input("sort", vec![5, 3, 1, 4, 2], |v: &mut Vec<i32>| v.sort());
-let sum = suite.add("sum", || (0..100u64).sum::<u64>());
-println!("{}", suite.run());
-# let _ = (sort.get().unwrap(), sum.get().unwrap());
-```
-
-A suite is not restricted to one kind or one input type: [`Suite::add_scaling`]
-takes a scaling benchmark and [`Suite::add_comparison`] takes a whole
-[`ComparisonSet`], and the token remembers which, so each answer keeps its
-own type. A comparison counts as *one* participant in the rotation, because
-its round must stay whole for the paired error bar to mean anything - which
-is also fair, since one of its turns runs `k` batches and produces `k`
-[`Stats`].
+Measuring them together is also what lets the multiple-comparison correction
+be right: the threshold each comparison is judged at comes from how many
+comparisons the run actually holds, which is knowable only once they have
+all been collected. Filter a run down to one comparison and it is judged
+more leniently, correctly so.
 
 What this buys is a *bound*, not an improvement. Reversing the declaration
 order of eight identical workloads moves an interleaved benchmark by
