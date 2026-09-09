@@ -821,12 +821,22 @@ changes is that it applies to everyone rather than to whoever turned
 | | |
 | --- | --- |
 | **deleted** | `Config::compare`, `Config::compare_input`, `Config::compare_gen_input`, and the 219-line sampling loop behind them |
-| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input` |
+| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input`; `bench`, `bench_input`, `bench_gen_input`, `bench_scaling`, `bench_scaling_gen` and `Config`'s five methods of those names |
 | **added** | `runner::measure`, and `RegistryOptions` / `VersionPolicy` / `BaselinePolicy` / `Diagnostic` re-exported from `runner` |
-| **kept** | `Config`, the result types, `Filter`, `runner`, `main!`, the attribute macros, the five one-shot measuring functions, `quiet` |
+| **kept** | `Config` (four builders), the result types, `Filter`, `runner`, `main!`, the attribute macros, `quiet` |
 
-Roughly thirty-five methods came off. What is left is one way to declare a
-benchmark and one way to run it.
+What is left, in full:
+
+```
+scaling::  Config  Stats  ScalingStats  Scaling  Comparison  Comparisons  Report  Filter
+           main!   #[bench] #[bench_scaling] #[candidate] #[gen_input] #[input]
+scaling::runner::  Options  Format  Outcome  main  run  measure
+                   RegistryOptions  VersionPolicy  BaselinePolicy  Diagnostic
+scaling::quiet::   (unchanged)
+```
+
+Forty-odd methods came off. One way to declare a benchmark, one way to run
+it.
 
 **The deletion found more than it removed.** `Config::compare*` turned out
 to be the only callers of `compare_gen_input_async` and its `calibrate` -
@@ -841,9 +851,77 @@ alternatives is a family of one, so it is judged at the same threshold.
 that names `scaling::Suite` and `scaling::Token` in the *calling* crate, so
 generated code needs them public to compile - the same reason `registry` and
 `assemble` are already public and hidden. What changed is that they are no
-longer documented as a way to write anything. A follow-up could put them
-behind an opaque `registry::Adder` façade and make them genuinely private;
-this stops short of that, and the doc comment says so.
+longer documented as a way to write anything.
+
+### The façade that would make them private, and why it is not here
+
+`#[scaling::bench]` currently expands to a shim spelled in the crate's own
+vocabulary:
+
+```rust
+fn __shim(
+    suite: &mut ::scaling::Suite<'_>,
+    cfg: &::scaling::Config,
+    name: &str,
+) -> ::scaling::Token<::scaling::Stats> {
+    suite.add_gen_input(name, gen, f)
+}
+```
+
+Three public names, and `Suite` brings twenty public methods with it. The
+alternative is to give generated code a vocabulary of its own - a newtype
+over exactly the capability a shim needs, and nothing else:
+
+```rust
+// in the already-hidden `registry` module
+pub struct Adder<'a, 'b> { suite: &'b mut Suite<'a>, cfg: &'a Config }
+
+impl Adder<'_, '_> {
+    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle { ... }
+    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle { ... }
+    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen: G, f: F) -> Handle { ... }
+    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle { ... }
+    pub fn scaling_gen<G, F, I, O>(&mut self, name: &str, gen: G, f: F, nmin: usize) -> Handle { ... }
+}
+
+/// Opaque. A shim's caller keeps it; nothing else can look inside.
+pub struct Handle(Token<Stats>);
+```
+
+and the shim becomes
+
+```rust
+fn __shim(adder: &mut ::scaling::registry::Adder<'_, '_>, name: &str) -> Handle {
+    adder.gen_input(name, gen, f)
+}
+```
+
+`Suite`, `Token` and `Config::suite` can then be `pub(crate)`. What that
+buys is not smaller docs - they are hidden either way - but two things a
+`#[doc(hidden)]` does not:
+
+- **The contract becomes readable.** `Adder` has five methods and they are
+  exactly what a macro may do. Today the contract is "whatever of `Suite`'s
+  twenty methods the macros happen to call", which is a thing you learn by
+  reading the macro crate.
+- **It stops being reachable at all.** Nothing outside can assemble a suite
+  by hand, even by ignoring the docs, so there is no undocumented second way
+  that quietly keeps working.
+
+Three things make it more than a rename. `ComparisonSet` is a *consuming*
+builder threaded through the `Alt` shims by value, so it needs a second
+façade with the same by-value threading rather than sharing `Adder`'s
+`&mut self`. `RegisteredTokens` holds `Token<T>` by kind, so it becomes
+`Handle`s or goes `pub(crate)` - and the runner reads it for the listing, so
+whichever is chosen has to keep that working. And `tests/registry.rs` and
+`tests/registry_bad.rs` build registrations by hand, which is what proved
+the runtime path *before* any macro existed; they would be rewritten against
+the façade, and the point of writing them by hand was to be independent of
+the thing the façade is for.
+
+Deferred rather than rejected: it is the right shape, it is invisible on
+docs.rs either way, and it only bites against someone deliberately reaching
+for undocumented API.
 
 ### `runner::measure`, which is why hiding `Suite` costs nothing
 
@@ -861,21 +939,34 @@ and `Comparison` out of a finished run without holding a token. `Report`'s
 by-name lookup was built then; this is what makes it reachable once the
 suite behind it is no longer public.
 
-### The free functions stay, against the plan
+### The one-shot functions go too
 
 Design A's cons above list removing `bench`, `bench_scaling` and
-`bench_scaling_gen` as one of its costs, on the "one way to define a
-benchmark" argument. They are not a way to define a benchmark.
-`bench(|| f())` measures a closure once, where it is called, the way
-`Instant::now()` does: it does not register anything, join a suite, or take
-part in a correction.
+`bench_scaling_gen` as one of its costs. They are hidden, along with
+`bench_input` and `bench_gen_input` and `Config`'s five methods of the same
+names — `bench(f)` is `Config::default().bench(f)`, so hiding one and
+documenting the other would leave the API exactly as wide with a longer path
+to the same place.
 
-Two things say so concretely. They are the whole of the published 0.1.3 API.
-And `benches/harness-cost.rs` measures what it costs to take a benchmark by
-calling `bench` in a loop timed with an `Instant` - there is no version of
-that written against the registry, because measuring the harness with the
-harness would hide a regression in the harness. Removing them would delete a
-target that exists to catch exactly that.
+Hidden rather than deleted, and for the same reason as `Suite`: something
+still has to name them. `benches/harness-cost.rs` measures what it costs to
+take a benchmark by calling `bench` in a loop timed with a plain `Instant`,
+and that cannot be written against the registry — measuring the harness with
+the harness would hide a regression in exactly the case where it matters,
+since if `bench` went wrong the numbers reporting on it would go wrong the
+same way and still look right. The target that exists to catch a harness
+regression is the whole of what keeps them reachable.
+
+`Config` is left with `relative`, `absolute`, `default` and the three
+`with_*` builders: two accuracy goals and a time budget, which is what its
+docs always said it was.
+
+**A hidden item gets no page**, so every intra-doc link to one renders as a
+dead link — and rustdoc says nothing about it, because it resolves the path
+perfectly well. Nine such links were on pages that are still published: the
+crate front page, and `Stats` and `ScalingStats`, which stay documented
+though the functions producing them do not. Worth knowing before hiding
+anything else.
 
 ### Docs
 
