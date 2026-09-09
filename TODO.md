@@ -598,6 +598,41 @@ system whether a sample is trustworthy, rather than inferring it from the
 sample's own size. They likely want one shared place to record what was true
 around a batch.
 
+**Measured against a first implementation.** Four things a second attempt
+should start from:
+
+* **`scaling_cur_freq` is an *effective* frequency, not a P-state.** Under
+  `intel_pstate` it is an APERF/MPERF average, so it falls whenever the core
+  halts briefly - an interrupt, or the read syscall itself. On a machine
+  quiesced with the governor pinned and turbo off, three of four long runs
+  still read 1.64GHz against a pinned max of 1.700GHz and flagged movement.
+  Whatever tolerance is chosen, idle time reads as a lower clock.
+* **Migration never fired.** Across every run measured - unquiesced,
+  `taskset` to a pair, and a two-CPU reservation - `sched_getcpu()` changing
+  was never what set the flag; the frequency term always was, and always
+  fired first. On an unquiesced machine migration is redundant, and on a
+  quiesced one it is the only term that *can* fire spuriously. Worth
+  dropping from the flag and keeping only to know when to reopen the fd.
+* **A short run cannot see anything.** `scaling_cur_freq` refreshes about
+  once per millisecond here, so every reading in a run shorter than that is
+  the same cached value. Before (1) landed, a fast benchmark stopped at six
+  samples, i.e. 0.6ms - structurally blind. `MIN_SAMPLE_TIME` of 3ms mostly
+  fixes this, which is worth noting as a dependency rather than a
+  coincidence.
+* **Hold the descriptor, and remember when you could not open it.** The
+  `open`+`read`+`close` against held-open `pread` gap is the 7.7us/0.5us in
+  the findings below. But a failed `open` needs recording too: retrying it
+  per sample costs a failed syscall and a path allocation on every read
+  forever, on exactly the machines that have no cpufreq to read.
+
+And one thing the clock swap costs, which the paragraph above under-rates:
+`CLOCK_MONOTONIC_RAW` runs slower than `CLOCK_MONOTONIC` by a *measured*
+5.36ppm here - steady, not noise. That is -59us over the 11-second sleep in
+`painfully_slow`, whose assertion has only a ~120us margin, so the test
+became flaky. NTP is permitted 500ppm, which would be 5.5ms and would fail
+it outright. Timing a `thread::sleep` with a clock other than the one sleeps
+are scheduled against needs the margin to be checked, not assumed.
+
 ### [ ] 15. Count cycles as well as nanoseconds
 
 Open a `perf_event_open` counter for `PERF_COUNT_HW_CPU_CYCLES` and read it
@@ -674,6 +709,165 @@ wall time, which is why it is 8.34ns (13.00ns behind an `lfence`) against
 cheaper clock, not a counter. Worth remembering if (6) ever wants batches
 small enough for 26.8ns to matter.
 
+### [ ] 16. Report a ratio, not only a difference, from `compare`
+
+`Comparison::std_error` reasons that whatever the machine does slowly
+"moves both together and cancels out of each round's difference". That is
+true of *additive* drift. The drift this machine actually has is
+multiplicative - a frequency ramp scales everything - and under
+`a_r = A·s_r` the round difference is `(A-B)·s_r`, which still carries
+`s_r`.
+
+Measured on interleaved rounds with known ground truth (two workloads, one
+doing twice the work of the other; 8 runs per condition, 8000 rounds each):
+
+| statistic | quiesced | unquiesced |
+| --- | --- | --- |
+| difference | 11791.7ns ± 0.1 | 12541.5ns ± 1077.0 |
+| ratio | 1.99757 ± 0.00028 | 1.99713 ± 0.00185 |
+
+The unquiesced runs drifted 1.6-2.1x within a run. The ratio survives it;
+the difference is biased +6.4% and its run-to-run spread grows by three
+orders of magnitude. So interleaving makes the *sign and existence* of a
+change robust to drift, and does not make its *magnitude* robust.
+
+Aggregating per-round log-ratios with a median is what recovers it - the
+only statistic tried whose unquiesced performance matched its quiesced
+performance:
+
+| aggregation | null (truth 1.0), unquiesced | 2x config, unquiesced |
+| --- | --- | --- |
+| ratio of means | 0.99965 ± 0.00156 | 1.99713 ± 0.00185 |
+| median of log-ratios | 1.00000 ± 0.00000 | 1.99785 ± 0.00009 |
+
+*The median works here because the drift is concentrated in a minority of
+rounds - the opening ramp.* A run that was uniformly slow throughout would
+still bias the difference; only the ratio is safe there. That is the same
+failure (14) exists to flag.
+
+Note this also makes `is_changed()` perverse under drift: the spread of
+round differences picks up a `|A-B|·sd(s)` term, so a *larger* true
+difference becomes harder to call significant. The log-ratio has no such
+term.
+
+### [ ] 17. Trim whole rounds, on the round total
+
+If (16) or any robust aggregation lands, the unit of trimming has to be the
+round, not the sample. `paired_std_error` exists only because round *r*
+contributed to both halves; trimming per function deletes `a_r` without
+`b_r` and silently reverts the paired estimator to the combined form that
+(5) measured as a third too wide.
+
+**Select on the round total, never on the difference.** In a paired design
+the sum and the difference are orthogonal contrasts - `Cov(a+b, a-b) =
+Var(a) - Var(b)`, zero when the alternatives have similar spread - so
+trimming on the sum does not bias the difference, while trimming on the
+difference is selecting on the outcome. Measured against a true ratio of
+exactly 1.0:
+
+| selector | quiesced | unquiesced |
+| --- | --- | --- |
+| round total | 1.00000 | 0.99999 |
+| round difference | 0.99451 (-0.55%) | 0.99079 (-0.92%) |
+
+Selecting on the difference manufactures a half-percent difference where
+there is none, and does so *even quiesced*, so it is selection bias and not
+drift. Round-total trimming also beat per-function trimming 1.7x on the
+config where the alternatives differ (sd 0.00057 against 0.00096) and was a
+wash where they are identical - i.e. it matters exactly in the case worth
+caring about.
+
+Two limits: the orthogonality is exact only when the alternatives have
+comparable spread, and the sum contains each function's own time, so
+exogeneity is roughly `1/k` contaminated - solid for a `ComparisonSet`,
+weakest at k=2, meaningless at k=1.
+
+### [ ] 18. Fit out the fixed per-measurement cost in `bench`
+
+`bench` times a batch and divides by its length, which is the move
+`bench_scaling` deliberately rejects: dividing turns the fixed per-batch
+overhead into a `c/N` term no polynomial represents, so it smears into the
+answer. Measured, that overhead is **58ns** - two `Instant::now()` calls -
+and it biases a 2x comparison by 0.115%, always toward 1. It is recoverable
+from the same ladder-of-sizes machinery `bench_scaling` already has:
+`weighted_poly_fit(ns, means, ses, 1)` returns `coefficients[0]` as the
+overhead and `coefficients[1]` as the per-iteration cost with it removed.
+
+Three things make that fit the right primitive rather than a coincidence of
+shape: it already carries the constant term; its weights are *measured*
+error bars with no residual rescaling, so `ses[1]` is a real standard error
+for the slope; and `chi2_per_dof` at degree 1 is exactly a test of whether
+per-iteration cost depends on batch size. `measure_scaling`'s loop shape
+transfers too - a `Running` per rung, refit each round, stop on the
+coefficient of interest. What does not transfer is everything about
+locating an unknown power: `discover_sizes`, `choose_sizes`, `next_size`,
+`power_fit`.
+
+For `compare` this threatens to multiply the round by the number of rungs,
+which would be self-defeating - a round only works while everything in it
+sees the same machine state. Two things stop it:
+
+* **The intercept is a property of the harness, not of the function.** Two
+  clock reads cost the same whatever sits between them.
+* **It drifts, so it wants measuring continuously rather than once.** The
+  clock reads are themselves CPU work, so `c₀` at 850MHz is twice `c₀` at
+  1.7GHz; a one-off calibration goes stale.
+
+Which suggests: **the baseline carries the ladder and everyone else uses a
+fixed batch.** Round cost becomes `m + (k-1)` rather than `k·m`, `c₀` is
+re-measured every round by the function that deserves the most measurement
+anyway, and the per-function fit demotes to an occasional diagnostic. The
+one thing to carry: an error in `c₀` propagates as a *common* bias into
+every candidate's slope and does not cancel in a ratio - it pushes ratios
+away from 1 - so `ses[0]` is worth reporting rather than discarding.
+
+### [ ] 19. Sample sizes below 100us
+
+The "larger batches" null in the section below was measured from 100us
+upward. Downward there is something: sweeping `SAMPLE_TIME` quiesced and
+scoring by precision per second of budget (consecutive windows, so
+correlation is preserved) rather than by sample count,
+
+| nominal | wall/sample | CV/sample | true SE in 300ms | reported/true |
+| --- | --- | --- | --- | --- |
+| 10us | 23.1us | 5.888% | 0.000733 | 0.37 |
+| **30us** | **63.3us** | **2.298%** | **0.000124** | 1.46 |
+| 100us | 203.0us | 1.262% | 0.000520 | 0.37 |
+| 300us | 582.5us | 2.630% | 0.000776 | 0.57 |
+| 1ms | 1199.5us | 14.579% | 0.015817 | 0.11 |
+
+30us is ~4x better than the current 100us, and 10us is *worse* than either -
+per-sample CV rises faster than the extra samples repay. Note this is not
+the overhead (18) removes: the fit takes out a bias, and what limits small
+batches is variance. *One pool per size, 10-30 windows each, so each SE
+carries ±13-22%. Wants three replicates before a constant moves.*
+
+Two things fell out of the same sweep and are worth more than the sweep:
+
+* **Every batch carries ~100% wall overhead** - 203us of wall time per
+  nominal 100us sample. That is the untimed `xs.extend` setup loop; for
+  plain `bench` the environment is `()`, so it is building a `Vec<()>` of
+  ~169,000 elements at a cost comparable to the timed region. Removing it
+  for the no-environment case roughly doubles samples per second at *any*
+  batch size, and needs no statistical argument at all.
+* **`reported/true` is 0.37-0.57 nearly everywhere**, on a quiesced machine,
+  with lag-1 autocorrelation at ~0. So the `±` is 2-3x optimistic about a
+  repeat run at the same budget, and the correlation responsible is
+  long-range - the 1/f floor below, not sample-to-sample.
+
+### [ ] 20. Measure the drift time, and set the sample time from it
+
+(7) wants a machine-fitness check; this is the same probe with a number
+attached. Take a long run of fixed batches and plot the variance of the mean
+against block size - an Allan-deviation curve. Where it stops falling like
+`1/n` *is* the correlation time of the machine's drift, and that is the
+right criterion for both `MIN_SAMPLE_TIME` and the length of a round, both
+of which are currently constants chosen on one laptop.
+
+It would also explain the `reported/true` gap in (19) directly, rather than
+leaving it as an observation, and it gives `quiet-bench status` the evidence
+(7) asks for.
+
 ## Tried without success so far
 
 Read this section with suspicion. A negative result holds only over the
@@ -714,7 +908,29 @@ the answer. None of these is closed.
   2ms. *Tested at one workload, with 100ms blocks - which straddles the
   crossover found in (1) - and only up to 5ms batches.* The aliasing it was
   meant to fix is real (lag-1 of -0.58 at half a tick), so the null may be
-  regime-specific rather than general. Related to item (6).
+  regime-specific rather than general. Related to item (6). See (19) for
+  what happens *below* 100us, which this did not cover.
+- **A robust estimator (median or trimmed mean) instead of the mean.** The
+  sign flips with the machine, which is why it is not a default. Applied to
+  identical timings, relative to the mean's standard error:
+
+  | | n=10 | n=30 | n=100 |
+  | --- | --- | --- | --- |
+  | quiesced, median | 0.53x | 0.27x | 0.33x |
+  | quiesced, 10% trim | 0.84x | 0.93x | 0.87x |
+  | unquiesced, median | 1.43x | 1.75x | 1.71x |
+  | unquiesced, 10% trim | 1.05x | 1.09x | 1.11x |
+
+  Quiesced, the residual noise really is a sparse right tail and the median
+  is worth ~14x the samples. Unquiesced, the spread is *drift* - the whole
+  distribution translating - which no robust estimator touches, while the
+  widened pooled distribution makes them less efficient. Confirmed directly:
+  under sustained contention every estimator shifted by ~70% (mean +69.4%,
+  median +70.7%, trimmed +66.8%), so there is no clean subpopulation to
+  recover. *Also: part of the quiesced gain may be quantisation - the
+  median's SE stops falling like 1/sqrt(n) above n≈30, which looks like it
+  snapping to a grid.* Where robustness does pay is on per-round contrasts,
+  which is (16) and (17), not on raw samples.
 
 ### Decisions, not measurements
 
@@ -769,3 +985,32 @@ the answer. None of these is closed.
   every time. Three results that looked clean under sequential measurement
   evaporated under interleaving. It is why `compare` beats two `bench` runs,
   and it is the reason for items 2, 3 and 4.
+- **The drift is multiplicative, and that is why ratios survive it.** A
+  frequency ramp scales every size and every alternative by the same factor,
+  so a ratio taken within a round is invariant to it and a difference is
+  not. Measured across a 1.6-2.1x within-run drift, a ratio held to 0.005%
+  while the difference of the same rounds moved 6.4%. This is the single
+  fact behind items (16) and (17), and it is also why a *fitted power* is
+  already safe - a common multiplier moves the log-log intercept, not the
+  slope - while a fitted *coefficient* is not.
+- **The opening of an unquiesced run is a different machine.** Timing the
+  same benchmark for three seconds unquiesced, the first hundred samples run
+  1.76-1.77x slower than the steady state, and the transient lasts ~200ms -
+  hundreds of samples. It is *entirely* frequency: quiesced, the same
+  measurement gives 1.000-1.004x, and three runs then agree to 0.045%
+  against a claimed 0.009%. Two consequences. Where the governor is pinned,
+  warm-up buys nothing and the "warm-up before measuring" entry above stays
+  shut. Where it is not - anywhere `quiet-bench` has not been run, which is
+  most places - a benchmark that finishes inside the transient reports a
+  number wrong by nearly 2x with a tight `±` on it, which is exactly the
+  failure (14) is for and the strongest argument that (14) is worth having.
+- **Round-total normalisation is safe, and smaller than hoped.** Dividing
+  each round by its own total before pooling, then rescaling by the median
+  round total, leaves a fitted power unchanged to four decimals with no
+  drift (0.8987 -> 0.8988 in L1, 1.0146 -> 1.0147 in DRAM) and under uniform
+  drift. Under an *N-dependent* drift - the case where clock scaling reaches
+  core-bound rungs more than memory-bound ones - it recovers only ~17% of a
+  0.036 power bias, which integer rounding absorbs anyway. *The N-dependent
+  model was synthetic, not measured; calibrating it needs two frequencies.*
+  So the case for normalising is the coefficient and the per-rung error
+  bars, not the power.
