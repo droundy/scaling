@@ -434,8 +434,7 @@ impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
 ///
 /// Every benchmark here gets [`Config::max_time`] of its *own* running time,
 /// so a suite of `n` may take `n` times as long as one benchmark - the same
-/// arithmetic [`Config::compare`] uses for two and [`ComparisonSet`] uses for
-/// `k`. What interleaving changes is not how long it takes but *when* each
+/// arithmetic [`ComparisonSet`] uses for its `k` alternatives. What interleaving changes is not how long it takes but *when* each
 /// benchmark's samples are drawn: across the whole session rather than in one
 /// stretch of it, so that no benchmark is measured in a machine state its
 /// neighbours never saw.
@@ -465,7 +464,9 @@ pub struct Suite<'a> {
 impl Config {
     /// Begin a suite of benchmarks to be measured together.
     ///
-    /// See [`Suite`].
+    /// See [`Suite`], and note that it is hidden: this is what
+    /// [`crate::runner`] calls, not what a benchmark is written against.
+    #[doc(hidden)]
     pub fn suite(&self) -> Suite<'_> {
         Suite {
             cfg: self,

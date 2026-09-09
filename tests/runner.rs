@@ -6,9 +6,9 @@
 //! written with the attributes rather than by hand, because the thing under
 //! test is the whole path from an attribute to an exit status.
 //!
-//! Stage 7 of `REGISTRATION.md`.
+//! Stages 7 and 8 of `REGISTRATION.md`.
 
-use scaling::runner::{run, Format, Options, Outcome};
+use scaling::runner::{measure, run, Format, Options, Outcome};
 use scaling::{Config, Filter};
 use std::time::Duration;
 
@@ -173,6 +173,53 @@ fn a_filter_matching_nothing_still_succeeds() {
         ..quick()
     });
     assert_eq!(outcome, Outcome::Measured);
+}
+
+/// A script can measure and then read the numbers, rather than reading a
+/// printout of them.
+///
+/// This is the path that has to survive the removal of the hand-assembled
+/// API: `run` prints and returns a verdict, which answers "did anything
+/// regress" but not "which of these is actually fastest here". Names are how
+/// results are reached, because nobody wrote them down - they come from the
+/// module and function a benchmark was declared in.
+#[test]
+fn a_script_can_read_the_numbers_it_measured() {
+    let report = measure(&Options {
+        filter: Filter::everything().matching("regressing"),
+        ..quick()
+    })
+    .expect("these registrations compose");
+
+    let comparison = report
+        .comparison("regressing")
+        .expect("the group was measured");
+    assert_eq!(comparison.baseline_name(), "fast");
+
+    let (name, against) = comparison
+        .against_baseline()
+        .next()
+        .expect("one alternative beyond the baseline");
+    assert_eq!(name, "slow");
+    assert!(
+        against.difference_ns() > 0.0,
+        "ten times the work should measure slower, not faster",
+    );
+
+    assert!(
+        report.stats("flat").is_none(),
+        "the filter kept one group, so nothing else is in the report",
+    );
+}
+
+/// Registrations that do not compose come back as a list rather than a
+/// panic, so a script can say what is wrong in its own words.
+#[test]
+fn measure_hands_back_what_it_could_not_assemble() {
+    // Nothing here contradicts anything, so this is the `Ok` half; the `Err`
+    // half is covered against deliberately broken registrations in
+    // `tests/registry_bad.rs`, which cannot share a binary with these.
+    assert!(measure(&quick()).is_ok());
 }
 
 /// `--list` measures nothing, so it is fast whatever the budget says - and

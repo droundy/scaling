@@ -197,8 +197,8 @@ a lone [`bench`](fn@bench) call. What it gives you is that the numbers within on
 suite, and across runs of it, were measured in the same machine.
 
 Each benchmark still gets [`Config::max_time`] of its own running time, so a
-suite of `n` may take `n` times as long as one - the same arithmetic
-[`Config::compare`] uses for two.
+suite of `n` may take `n` times as long as one, and a comparison of `k`
+alternatives costs `k` times a single benchmark.
 
 # Caveats
 
@@ -305,7 +305,7 @@ pub mod registry;
 pub mod runner;
 mod scaling;
 mod suite;
-pub(crate) use bench::{time_batch, time_loop};
+pub(crate) use bench::time_loop;
 pub(crate) use suite::{block_on, Clock, Machine};
 pub(crate) mod significant;
 
@@ -318,10 +318,26 @@ pub(crate) mod significant;
 pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
 pub use self::compare::Comparison;
 pub use self::filter::Filter;
-pub use self::kway::{ComparisonSet, Comparisons};
+pub use self::kway::Comparisons;
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
-pub use self::suite::RegisteredTokens;
-pub use self::suite::{Report, Suite, Token};
+pub use self::suite::Report;
+
+/// The machinery a registration is written against.
+///
+/// Reachable but not documented, for the same reason [`registry`] and
+/// [`assemble`] are: an attribute macro expands to a shim that names
+/// `scaling::Suite` and `scaling::Token` in the *calling* crate, so these
+/// have to be public for generated code to compile. They are not how a
+/// benchmark is written - `#[scaling::bench]` and [`main!`] are - and their
+/// shapes are not stable.
+///
+/// Before stage 8 these were the documented way to assemble a suite by hand.
+/// That path is gone; what is left is the contract between the macros and
+/// the runner, which happens to be spelled in public types.
+#[doc(hidden)]
+pub use self::kway::ComparisonSet;
+#[doc(hidden)]
+pub use self::suite::{RegisteredTokens, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.
@@ -457,10 +473,10 @@ pub struct Config {
     /// Stop once the standard error falls below this fraction of the
     /// measurement (`0.01` = 1%).
     ///
-    /// The `compare_*` functions read this as a *sensitivity* rather than a
-    /// precision: the smallest difference worth detecting, as a fraction of
-    /// the baseline. See [`Config::compare_gen_input`], which spells out what
-    /// that floor is and is not worth.
+    /// A comparison reads this as a *sensitivity* rather than a precision:
+    /// the smallest difference worth detecting, as a fraction of the
+    /// baseline. See [`Comparison::min_detectable_difference`], which is what
+    /// that floor came to on a result that reported no change.
     pub target_rel_error: f64,
     /// Stop once the standard error falls below this duration.
     ///

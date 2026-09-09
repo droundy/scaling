@@ -87,7 +87,9 @@ struct Entry<'a, I> {
 
 impl Config {
     /// Start gathering alternatives that take no input. See
-    /// [`ComparisonSet`].
+    /// [`ComparisonSet`], and note that it is hidden: a comparison is
+    /// declared with `group = "..."` or a matrix, not built here.
+    #[doc(hidden)]
     pub fn comparison(&self) -> ComparisonSet<'_, ()> {
         ComparisonSet {
             cfg: self,
@@ -106,8 +108,11 @@ impl Config {
     /// buffer with the original is not being measured on its own input.
     ///
     /// Neither the generating nor the cloning is timed, but both are paid
-    /// out of [`Config::max_time`]. See [`Config::compare_gen_input`] for
-    /// the rest of what per-iteration inputs cost.
+    /// out of [`Config::max_time`].
+    ///
+    /// Hidden, like [`Config::comparison`]: this is what assembles a
+    /// registered comparison group or matrix lane.
+    #[doc(hidden)]
     pub fn comparison_gen_input<'a, G, I: Clone>(&'a self, gen_input: G) -> ComparisonSet<'a, I>
     where
         G: FnMut() -> I + 'a,

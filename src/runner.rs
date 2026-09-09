@@ -25,9 +25,19 @@
 //! holding JSON and nothing else, without anybody having to remember to
 //! silence the rest.
 
-use crate::assemble::{BaselinePolicy, Lane, RegistryOptions, VersionPolicy};
+use crate::assemble::Lane;
 use crate::{Comparisons, Config, Filter, RegisteredTokens, Report, ScalingStats, Stats, Suite};
 use auto_args::AutoArgs;
+
+/// The four assembly types a caller actually touches, re-exported here
+/// because here is where they are used.
+///
+/// [`crate::assemble`] is not documented - most of what is in it is the
+/// pairing and version-resolution machinery, which nobody outside writes
+/// against. These four are different: two are what `--versions` and
+/// `--baseline` set, one is what a failure to assemble comes back as, and
+/// one is what those two are carried in.
+pub use crate::assemble::{BaselinePolicy, Diagnostic, RegistryOptions, VersionPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -295,20 +305,49 @@ pub fn main() -> ExitCode {
     }
 }
 
+/// Discover everything registered and assemble it into a suite, ready to
+/// run.
+///
+/// Shared by [`run`] and [`measure`] so that the two cannot drift: what
+/// `measure` hands back is what `run` would have printed, assembled by the
+/// same code under the same options.
+fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diagnostic>> {
+    let mut suite = options.cfg.suite().with_filter(options.filter.clone());
+    let tokens = suite.try_add_registered_with(options.registry)?;
+    Ok((suite, tokens))
+}
+
+/// Discover and measure, handing back the results rather than printing them.
+///
+/// For a benchmark-driven script rather than a benchmark run: "is the fast
+/// path actually being taken under these conditions?" is a question you
+/// answer by measuring and then *looking at* the numbers, and [`run`] prints
+/// them and returns a verdict. [`Report`] reaches them by name -
+/// [`Report::stats`], [`Report::comparison`], [`Report::scaling`] - which is
+/// what makes this usable without knowing in advance what a run will hold.
+///
+/// The filter applies, so a script can measure the one comparison it cares
+/// about. `Err` carries every reason the registrations do not compose, the
+/// same list [`run`] would have printed.
+///
+/// ```no_run
+/// use scaling::runner::{measure, Options};
+///
+/// let mut options = Options::default();
+/// options.filter = scaling::Filter::everything().matching("lookup");
+/// let report = measure(&options).expect("the registrations compose");
+/// let fast = report.comparison("lookup").expect("it ran");
+/// assert_eq!(fast.baseline_name(), "linear_scan");
+/// ```
+pub fn measure(options: &Options) -> Result<Report, Vec<Diagnostic>> {
+    let (suite, _tokens) = assemble(options)?;
+    Ok(suite.run())
+}
+
 /// Discover, measure and print, under options built by someone else.
 pub fn run(options: Options) -> Outcome {
-    let Options {
-        cfg,
-        filter,
-        format,
-        registry,
-        fail_on_regression,
-        fail_on_untrustworthy,
-    } = options;
-
-    let mut suite = cfg.suite().with_filter(filter);
-    let tokens = match suite.try_add_registered_with(registry) {
-        Ok(tokens) => tokens,
+    let (suite, tokens) = match assemble(&options) {
+        Ok(assembled) => assembled,
         Err(problems) => {
             eprintln!("registered benchmarks do not make sense together:");
             for p in &problems {
@@ -317,6 +356,13 @@ pub fn run(options: Options) -> Outcome {
             return Outcome::NotRun;
         }
     };
+    let Options {
+        format,
+        fail_on_regression,
+        fail_on_untrustworthy,
+        ..
+    } = options;
+
     for w in &tokens.warnings {
         eprintln!("warning: {w}");
     }
