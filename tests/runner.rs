@@ -8,8 +8,6 @@
 //!
 //! Stage 7 of `REGISTRATION.md`.
 
-#![cfg(feature = "registry")]
-
 use scaling::runner::{run, Format, Options, Outcome};
 use scaling::{Config, Filter};
 use std::time::Duration;

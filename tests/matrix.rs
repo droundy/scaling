@@ -8,8 +8,6 @@
 //!
 //! Stage 5 of `REGISTRATION.md`.
 
-#![cfg(feature = "registry")]
-
 use scaling::Config;
 use std::time::Duration;
 

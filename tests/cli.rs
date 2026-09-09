@@ -2,8 +2,6 @@
 //!
 //! Stage 1 of the filtering plan in `REGISTRATION.md`.
 
-#![cfg(feature = "cli")]
-
 use scaling::Filter;
 
 /// `from_arg_iter` takes what `std::env::args` gives, program name and all.

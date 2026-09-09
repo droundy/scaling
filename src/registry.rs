@@ -7,12 +7,11 @@
 //! `fn` item that knows how to add it - see [`Kind`](crate::registry::Kind)
 //! for why "add" rather than "run".
 //!
-//! Everything here is behind the `registry` feature and is additive: the
-//! types below are new, nothing else changes, and a crate that does not
-//! enable the feature is exactly as it was.
+//! Nothing here is written by hand. The attribute macros emit it, and it is
+//! documented so that what they emit can be read and checked rather than
+//! taken on faith.
 //!
-//! See `REGISTRATION.md` for the design this implements and the stages still
-//! to come.
+//! See `REGISTRATION.md` for the design this implements.
 
 use crate::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
@@ -197,7 +196,6 @@ impl Kind {
     }
 }
 
-#[cfg(feature = "registry")]
 inventory::collect!(Registered);
 
 /// The shared input of a comparison group, with its type erased.
@@ -316,7 +314,6 @@ pub struct GenInputRegistration {
     pub make: MakeInput,
 }
 
-#[cfg(feature = "registry")]
 inventory::collect!(GenInputRegistration);
 
 /// One implementation to be measured against the others in a matrix.
@@ -379,7 +376,6 @@ impl fmt::Debug for MatrixCandidate {
     }
 }
 
-#[cfg(feature = "registry")]
 inventory::collect!(MatrixCandidate);
 
 /// One input every candidate of its type in a matrix is measured on.
@@ -405,7 +401,6 @@ pub struct MatrixInput {
     pub make: MakeInput,
 }
 
-#[cfg(feature = "registry")]
 inventory::collect!(MatrixInput);
 
 #[cfg(test)]
@@ -457,7 +452,6 @@ mod tests {
     /// item, since nothing references it by name. If that ever happens here,
     /// every other test still passes and benchmarks simply go missing - so
     /// check it directly.
-    #[cfg(feature = "registry")]
     #[test]
     fn submissions_are_collected() {
         let found: Vec<&str> = inventory::iter::<Registered>()
@@ -480,7 +474,6 @@ mod tests {
     /// This is the shape claim from [`Kind`] made concrete: the registration
     /// is a `static`, the shim is a bare `fn`, and yet what comes out the far
     /// end is a normal interleaved suite entry with a real measurement in it.
-    #[cfg(feature = "registry")]
     #[test]
     fn a_registered_shim_adds_itself_and_is_measured() {
         use std::time::Duration;
@@ -513,17 +506,14 @@ mod tests {
     // Two registrations, written the way generated code will write them.
     // Deliberately at item position in a test module: that is where
     // `submit!` has to work, and it is the arrangement a macro produces.
-    #[cfg(feature = "registry")]
     fn add_alpha(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
         suite.add(name, || (0..32u64).sum::<u64>())
     }
 
-    #[cfg(feature = "registry")]
     fn add_beta(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
         suite.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort())
     }
 
-    #[cfg(feature = "registry")]
     inventory::submit! {
         Registered {
             name: "registry-selftest::alpha",
@@ -535,7 +525,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "registry")]
     inventory::submit! {
         Registered {
             name: "registry-selftest::beta",

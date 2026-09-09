@@ -3,8 +3,9 @@ on: [push, pull_request]
 name: Continuous integration
 
 jobs:
-  # One floor for the whole workspace, tested with the feature on, since
-  # that is what sets it.
+  # One floor for the whole workspace. Set by the proc-macro dependencies
+  # rather than by the library, which compiles well below it - so this is
+  # checking a promise about the dependency tree as much as about the code.
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -18,7 +19,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --all --features registry
+          args: --all
 
   check:
     name: Check
@@ -37,7 +38,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --all --features registry
+          args: --all
 
   test:
     name: Test Suite
@@ -53,15 +54,11 @@ jobs:
           profile: minimal
           toolchain: ${{ matrix.rust }}
           override: true
-      # Both ways round. With the feature off the crate must still build
-      # with no dependencies at all, which is the thing easiest to break by
-      # accident and hardest to notice - nothing fails, the dependency tree
-      # just quietly grows.
+      # One invocation, because there is now one way to build this. It used
+      # to run twice, with and without the `registry` feature, to hold the
+      # dependency-free default build honest; stage 8 removed the feature
+      # along with the path it gated.
       - uses: actions-rs/cargo@v1
         with:
           command: test
           args: --all
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all --features registry

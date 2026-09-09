@@ -53,13 +53,10 @@
 //!   nothing at all.
 
 use super::*;
-#[cfg(feature = "registry")]
 use crate::assemble::RegistryOptions;
-#[cfg(feature = "registry")]
 use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
 use std::any::Any;
 use std::cell::Cell;
-#[cfg(feature = "registry")]
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
@@ -893,7 +890,6 @@ impl<'a> Suite<'a> {
 /// Keyed by the name the benchmark registered under. Split by kind rather
 /// than mixed, because the three answers are different types and a token
 /// remembers which: that is exactly what stops a caller having to downcast.
-#[cfg(feature = "registry")]
 #[derive(Debug, Default)]
 pub struct RegisteredTokens {
     /// Flat benchmarks, by name.
@@ -926,7 +922,6 @@ pub struct RegisteredTokens {
     pub lanes: Vec<crate::assemble::Lane>,
 }
 
-#[cfg(feature = "registry")]
 impl<'a> Suite<'a> {
     /// Add every benchmark registered anywhere in this binary.
     ///

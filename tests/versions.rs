@@ -13,7 +13,6 @@
 //!
 //! Stage 5b of `REGISTRATION.md`.
 
-#![cfg(feature = "registry")]
 // These registrations are written by hand, so they do not get the
 // `allow(clippy::ptr_arg)` that `#[scaling::candidate]` puts on what it
 // emits. The reason for it is the same: a benchmark's argument type is the

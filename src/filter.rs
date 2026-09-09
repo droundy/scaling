@@ -5,10 +5,9 @@
 //! [`Config::max_time`], so the cost of a run grows with how many there are.
 //! That is the wrong shape for working on one function.
 //!
-//! The matching lives here and needs no dependency. Building a [`Filter`]
-//! from the command line does need an argument parser, so that part is
-//! behind the `cli` feature - a crate that wants to choose its benchmarks
-//! some other way should not get a parser in its dependency tree.
+//! Usually built for you: [`crate::runner`] reads one from the command line
+//! and the environment. This is what it builds, and what a caller assembling
+//! [`crate::runner::Options`] by hand would fill in.
 //!
 //! [`Suite`]: crate::Suite
 //! [`Config::max_time`]: crate::Config::max_time
@@ -141,7 +140,6 @@ impl Filter {
     }
 }
 
-#[cfg(feature = "cli")]
 pub(crate) mod cli {
     use super::Filter;
     use auto_args::AutoArgs;

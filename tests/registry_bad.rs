@@ -6,8 +6,6 @@
 //! itself worth knowing - it is the same reason two `[[bench]]` targets
 //! linking one library would each discover that library's registrations.
 
-#![cfg(feature = "registry")]
-
 use scaling::assemble::Diagnostic;
 use scaling::registry::{Kind, Registered};
 use scaling::{Config, Stats, Suite, Token};

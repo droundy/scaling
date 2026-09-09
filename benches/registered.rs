@@ -1,19 +1,19 @@
-//! A benchmark binary with Design A gone all the way in.
+//! A benchmark binary, entire.
 //!
-//! Compare it with `benches/filtered.rs`, which is the same idea assembled by
-//! hand: a `Config`, a `Suite`, an `add` per benchmark, a decision about what
-//! to do when `--list` was asked for, and a `println!`. None of that is here.
 //! Every benchmark below says what it is where it is written, and the last
-//! line is the whole program.
+//! line is the whole program - no `Config`, no `Suite`, no `add` per
+//! benchmark, no decision about what to do when `--list` was asked for, no
+//! `println!`. All of that is the runner's, and is asked for on the command
+//! line.
 //!
 //! ```none
-//! cargo bench --features registry --bench registered -- --list
-//! cargo bench --features registry --bench registered -- --filter sorting
-//! cargo bench --features registry --bench registered -- --max-time 200ms
-//! cargo bench --features registry --bench registered -- --format json
+//! cargo bench --bench registered -- --list
+//! cargo bench --bench registered -- --filter sorting
+//! cargo bench --bench registered -- --max-time 200ms
+//! cargo bench --bench registered -- --format json
 //! ```
 //!
-//! Stage 7 of `REGISTRATION.md`.
+//! Stages 7 and 8 of `REGISTRATION.md`.
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))

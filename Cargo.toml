@@ -9,77 +9,49 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
-# One floor for the whole crate, rather than one per feature - cargo cannot
-# express the latter anyway, and a single number is a promise people can
-# hold in their heads.
-#
-# Nothing in the default build needs this much: it compiles on 1.66, where
-# `std::hint::black_box` was stabilised. What sets it is the `registry`
-# feature, whose proc-macro dependencies - `syn`, `quote`, `proc-macro2`,
-# `unicode-ident` - all want 1.71. (`inventory` wants 1.68.)
+# Set by the dependencies below rather than by anything this crate does: the
+# library itself compiles on 1.66, where `std::hint::black_box` was
+# stabilised. `syn`, `quote`, `proc-macro2` and `unicode-ident` all declare
+# 1.71; `inventory` declares 1.68.
 rust-version = "1.71"
 
-# Only used to set CPU affinity, which only exists on Linux. Elsewhere the
-# default build of this crate still has no dependencies at all - `inventory`
-# below is optional and off unless `registry` is enabled.
+# Only used to set CPU affinity, which only exists on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# Collects benchmarks registered anywhere in a crate. Optional, so that a
-# crate not using `registry` pays neither the dependency nor the linker
-# machinery behind it. See REGISTRATION.md.
-#
-# It wants Rust 1.68 where this crate wants 1.66, so `registry` raises the
-# floor for anyone who turns it on; the default build is unaffected and
-# still compiles on 1.66.
 [dependencies]
-# Parses the command line for `Filter::from_args`. Optional: filtering by
-# name is useful, but a crate that does not want an argument parser in its
-# dependency tree should not get one.
-auto-args = { version = "0.3.2", optional = true }
-inventory = { version = "0.3.21", optional = true }
-# The attribute macros. Optional for the same reason `inventory` is: a crate
-# not using `registry` should pay for neither, and this one brings `syn` with
-# it.
-scaling-macros = { version = "0.9.0", path = "macros", optional = true }
+# Parses the command line for the runner - `--filter`, `--format`, the
+# accuracy and budget flags. See `scaling::runner`.
+auto-args = "0.3.2"
+# Collects benchmarks registered anywhere in a crate, through linker
+# sections, so that they need not be assembled into one list by hand. This is
+# what makes `#[scaling::bench]` work from wherever it is written. See
+# REGISTRATION.md.
+inventory = "0.3.21"
+# The attribute macros themselves.
+scaling-macros = { version = "0.9.0", path = "macros" }
 
-# Measures the library itself: what it costs to take a benchmark, and how
-# reproducible the answer is. Not a `#[bench]` harness - it is a plain
-# `main` that times `bench` with an `Instant`, because measuring the
-# harness with the harness would hide a regression in the harness.
-[[bench]]
-name = "harness-cost"
-harness = false
-
-[features]
-# Discover benchmarks registered anywhere in a crate, rather than assembling
-# them by hand into one `Suite`. See REGISTRATION.md.
-#
-# Implies `cli`, because the runner it brings - `scaling::main!()` - is a
-# whole benchmark binary, and a benchmark binary that cannot be told which
-# benchmarks to run is not much of one. Keeping them separate would have
-# meant a third feature for the combination, which is more surface rather
-# than less.
-registry = ["dep:inventory", "dep:scaling-macros", "cli"]
-# Build a `Filter` from the command line. The matching itself needs no
-# dependency and is always available; this is only the parsing.
-cli = ["dep:auto-args"]
+# These three were optional, behind `registry` and `cli` features, while the
+# hand-assembled `Suite` was still a supported way to write benchmarks - a
+# crate using only that path paid for neither. There is no such path now:
+# registration is how a benchmark is declared and `scaling::runner` is how it
+# is run, so every build needs all three and a feature to turn them off would
+# only turn the crate off. See "Stage 8" in REGISTRATION.md.
 
 [workspace]
 members = [".", "macros"]
 
-# Shows a benchmark binary shaped the way one using this crate would be,
-# with a filter read from the command line and the environment.
+# Measures the library itself: what it costs to take a benchmark, and how
+# reproducible the answer is. Not a registered suite - it is a plain `main`
+# that times `bench` with an `Instant`, because measuring the harness with
+# the harness would hide a regression in the harness.
 [[bench]]
-name = "filtered"
+name = "harness-cost"
 harness = false
 
-# The same idea with Design A gone all the way in: benchmarks declared where
-# they are written, and `scaling::main!()` for the whole program. Needs the
-# `registry` feature, without which the attributes do not exist - so
-# `required-features`, which makes `cargo bench` skip it rather than fail to
-# build it.
+# A benchmark binary shaped the way one using this crate is meant to be:
+# benchmarks declared where they are written, and `scaling::main!()` for the
+# whole program.
 [[bench]]
 name = "registered"
 harness = false
-required-features = ["registry"]

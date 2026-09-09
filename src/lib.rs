@@ -287,7 +287,6 @@ effect.
 */
 
 /// Assembling registered benchmarks into a suite. See `REGISTRATION.md`.
-#[cfg(feature = "registry")]
 #[doc(hidden)]
 pub mod assemble;
 mod bench;
@@ -303,7 +302,6 @@ pub mod quiet;
 pub mod registry;
 /// The whole of a benchmark binary: discover, measure, print. See
 /// [`main!`](crate::main).
-#[cfg(feature = "registry")]
 pub mod runner;
 mod scaling;
 mod suite;
@@ -322,19 +320,16 @@ pub use self::compare::Comparison;
 pub use self::filter::Filter;
 pub use self::kway::{ComparisonSet, Comparisons};
 pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
-#[cfg(feature = "registry")]
 pub use self::suite::RegisteredTokens;
 pub use self::suite::{Report, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.
-#[cfg(feature = "registry")]
 #[doc(hidden)]
 pub use inventory;
 
 /// Attribute macros that register a benchmark where it is written, rather
 /// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
-#[cfg(feature = "registry")]
 pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 
 /// A whole benchmark binary, in one line.
@@ -371,7 +366,6 @@ pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 /// measured slower than its baseline by more than this run's own threshold.
 /// The distinction is deliberate: `2` means the question was not asked, `1`
 /// means it was asked and answered badly.
-#[cfg(feature = "registry")]
 #[macro_export]
 macro_rules! main {
     () => {
