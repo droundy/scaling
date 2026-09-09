@@ -552,7 +552,7 @@ struct Cell {
 fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<String> {
     let mut columns: Vec<String> = Vec::new();
     let mut cells: BTreeMap<(String, String), Cell> = BTreeMap::new();
-    let mut rows: Vec<String> = lane.candidates.iter().map(|c| c.name.clone()).collect();
+    let rows: Vec<String> = lane.candidates.iter().map(|c| c.name.clone()).collect();
 
     for input in &lane.inputs {
         if lane.candidates.len() < 2 {
@@ -598,20 +598,6 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
     }
     if columns.is_empty() {
         return None;
-    }
-
-    // The baseline is whatever the comparisons themselves say it is, which
-    // is what `assemble` decided; the lane's own ordering already puts it
-    // first, and this only keeps the two from ever disagreeing.
-    if let Some(first) = columns.first() {
-        if let Some(i) = rows.iter().position(|r| {
-            cells
-                .get(&(r.clone(), first.clone()))
-                .is_some_and(|c| c.percent.is_none())
-        }) {
-            let baseline = rows.remove(i);
-            rows.insert(0, baseline);
-        }
     }
 
     let value = |row: &str, column: &str| -> (String, Option<String>) {

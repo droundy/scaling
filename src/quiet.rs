@@ -329,9 +329,6 @@ pub(crate) fn pin_if_reserved() {
         if std::env::var(NO_PIN_VAR).map(|v| v == "1").unwrap_or(false) {
             return;
         }
-        // `reserved_cpus` prefers CPUS_VAR, which `quiet-bench run` sets,
-        // and falls back to the reservation file - so a benchmark started
-        // any other way notices the reservation too.
         let cpus = match reserved_cpus() {
             Some(c) => c,
             None => return,

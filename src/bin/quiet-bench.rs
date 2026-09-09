@@ -66,19 +66,10 @@ backticks; or copy it to /usr/local/bin to type the short form.
         let args: Vec<String> = std::env::args().skip(1).collect();
         let cmd = args.first().map(String::as_str);
         match (cmd, args.len()) {
-            (Some("reserve"), 2) => match cmd_reserve(&args[1]) {
-                Ok(()) => 0,
-                Err(e) => fail(&e),
-            },
-            (Some("restore"), 1) => match cmd_restore() {
-                Ok(()) => 0,
-                Err(e) => fail(&e),
-            },
+            (Some("reserve"), 2) => cmd_reserve(&args[1]).unwrap_or_else(|e| fail(&e)),
+            (Some("restore"), 1) => cmd_restore().unwrap_or_else(|e| fail(&e)),
             (Some("status"), 1) => cmd_status(),
-            (Some("run"), n) if n >= 2 => match cmd_run(&args[1..]) {
-                Ok(code) => code,
-                Err(e) => fail(&e),
-            },
+            (Some("run"), n) if n >= 2 => cmd_run(&args[1..]).unwrap_or_else(|e| fail(&e)),
             _ => {
                 eprint!("{USAGE}");
                 2
@@ -150,7 +141,7 @@ backticks; or copy it to /usr/local/bin to type the short form.
 
     // ------------------------------------------------------------ reserve
 
-    fn cmd_reserve(list: &str) -> Result<(), String> {
+    fn cmd_reserve(list: &str) -> Result<i32, String> {
         require_root()?;
         let bench_cpus = parse_cpu_list(list)?;
         let ncpu = num_cpus()?;
@@ -305,12 +296,12 @@ backticks; or copy it to /usr/local/bin to type the short form.
         );
         println!();
         println!("Undo with:  sudo quiet-bench restore");
-        Ok(())
+        Ok(0)
     }
 
     // ------------------------------------------------------------ restore
 
-    fn cmd_restore() -> Result<(), String> {
+    fn cmd_restore() -> Result<i32, String> {
         require_root()?;
         let ncpu = num_cpus()?;
         let saved = load_original_state();
@@ -356,7 +347,7 @@ backticks; or copy it to /usr/local/bin to type the short form.
         let _ = fs::remove_file("/usr/local/bin/bench");
 
         println!("restored: {restored} settings put back, {moved} tasks unpinned");
-        Ok(())
+        Ok(0)
     }
 
     // ------------------------------------------------------------- state

@@ -559,6 +559,27 @@ impl<'a> Suite<'a> {
         self.scheduler.push(clock, future);
     }
 
+    /// The filter check, clock, token and [`Suite::push`] shared by every
+    /// `add_*_with` method: only the future `body` builds differs between
+    /// them.
+    fn add_task<T: Display + 'static>(
+        &mut self,
+        name: &str,
+        max_time: Duration,
+        body: impl FnOnce(Rc<Clock>, Token<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
+    ) -> Token<T> {
+        // Filtered out: build nothing. The token is still handed back and
+        // simply never fills, which is what happens to any token when a
+        // suite is not run.
+        if !self.filter.matches(name) {
+            return Token::new();
+        }
+        let clock = Rc::new(Clock::new(max_time));
+        let token = Token::new();
+        self.push(name, &token, clock.clone(), body(clock, token.clone()));
+        token
+    }
+
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
     pub fn add<F, O>(&mut self, name: &str, f: F) -> Token<Stats>
     where
@@ -664,26 +685,12 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                let stats = cfg.bench_gen_input_async(&mine, gen_input, f).await;
-                *cell.cell() = Some(stats);
-            }),
-        );
-        token
+                let stats = cfg.bench_gen_input_async(&clock, gen_input, f).await;
+                *token.cell() = Some(stats);
+            })
+        })
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
@@ -708,25 +715,11 @@ impl<'a> Suite<'a> {
         F: Fn(usize) -> O + 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                *cell.cell() = Some(cfg.bench_scaling_async(&mine, f, nmin).await);
-            }),
-        );
-        token
+                *token.cell() = Some(cfg.bench_scaling_async(&clock, f, nmin).await);
+            })
+        })
     }
 
     /// Add a scaling benchmark over generated inputs, as
@@ -763,25 +756,14 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                *cell.cell() = Some(cfg.bench_scaling_gen_async(&mine, gen_input, f, nmin).await);
-            }),
-        );
-        token
+                *token.cell() = Some(
+                    cfg.bench_scaling_gen_async(&clock, gen_input, f, nmin)
+                        .await,
+                );
+            })
+        })
     }
 
     /// Add a whole k-way comparison, built with [`Config::comparison`].
@@ -843,7 +825,7 @@ impl<'a> Suite<'a> {
         // would otherwise chase one target on the other's clock.
         let clock = Rc::new(Clock::new(set.cfg().max_time * k as u32));
         let token = Token::new();
-        let cell = token.clone();
+        let answer = token.clone();
         let mine = clock.clone();
         self.push(
             name,
@@ -851,7 +833,7 @@ impl<'a> Suite<'a> {
             clock,
             Box::pin(async move {
                 let results = set.run_async(&mine, z_alpha.get(), seed).await;
-                *cell.cell() = Some(results);
+                *answer.cell() = Some(results);
             }),
         );
         token

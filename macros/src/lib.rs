@@ -279,6 +279,34 @@ fn type_name(ty: &Type) -> TokenStream2 {
     quote!(#out)
 }
 
+/// The `TypeId::of` expression and the printable name for `ty`, or `()`'s
+/// when there is none.
+fn ty_id_and_name(ty: Option<&Type>) -> (TokenStream2, TokenStream2) {
+    match ty {
+        Some(ty) => (quote!(::core::any::TypeId::of::<#ty>), type_name(ty)),
+        None => (quote!(::core::any::TypeId::of::<()>), quote!("()")),
+    }
+}
+
+/// The expression a shim uses to call `fname` on its input, or with none.
+fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
+    match ty {
+        Some(ty) => quote!(#fname(__e.get_mut::<#ty>())),
+        None => quote!(#fname()),
+    }
+}
+
+/// The reported name: the override if given, else the bare function name.
+fn name_or_bare(name: &Option<LitStr>, fname: &syn::Ident) -> TokenStream2 {
+    match name {
+        Some(lit) => quote!(#lit),
+        None => {
+            let bare = fname.to_string();
+            quote!(#bare)
+        }
+    }
+}
+
 /// `concat!(module_path!(), "::", "fn_name")`, or the override.
 fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     match &args.name {
@@ -320,21 +348,11 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     let registration = match (&args.group, &flavour) {
         // An alternative in a comparison group.
         (Some(group), Flavour::Flat) => {
-            let ity = input_type(&func)?;
+            let declared = input_type(&func)?;
             let baseline = args.baseline;
             // The call, and the type the group's input must have.
-            let (call, ty_id, ty_name) = match &ity {
-                Some(ty) => (
-                    quote!(#fname(__e.get_mut::<#ty>())),
-                    quote!(::core::any::TypeId::of::<#ty>),
-                    type_name(ty),
-                ),
-                None => (
-                    quote!(#fname()),
-                    quote!(::core::any::TypeId::of::<()>),
-                    quote!("()"),
-                ),
-            };
+            let call = call_expr(fname, declared.as_ref());
+            let (ty_id, ty_name) = ty_id_and_name(declared.as_ref());
             quote! {
                 #[doc(hidden)]
                 fn #shim<'__s>(
@@ -565,61 +583,65 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         )
     })?;
     let fname = &func.sig.ident;
-    let reported = match &args.name {
-        Some(lit) => quote!(#lit),
-        None => {
-            let bare = fname.to_string();
-            quote!(#bare)
-        }
-    };
+    let reported = name_or_bare(&args.name, fname);
     let baseline = args.baseline;
     let declared = input_type(&func)?;
 
     // One registration per listed type, or a single one at whatever the
     // signature says.
-    let instantiations: Vec<(TokenStream2, TokenStream2, TokenStream2, Option<Type>)> =
-        if args.types.is_empty() {
-            let (ty_id, ty_name, ity) = match &declared {
-                Some(ty) => (
-                    quote!(::core::any::TypeId::of::<#ty>),
-                    type_name(ty),
-                    Some(ty.clone()),
-                ),
-                None => (quote!(::core::any::TypeId::of::<()>), quote!("()"), None),
-            };
-            vec![(reported.clone(), ty_id, ty_name, ity)]
-        } else {
-            if declared.is_none() {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "`types(..)` lists the types to instantiate this at, so it has to take \
+    struct Instantiation {
+        name: TokenStream2,
+        ty_id: TokenStream2,
+        ty_name: TokenStream2,
+        ty: Option<Type>,
+    }
+    let instantiations: Vec<Instantiation> = if args.types.is_empty() {
+        let (ty_id, ty_name) = ty_id_and_name(declared.as_ref());
+        vec![Instantiation {
+            name: reported.clone(),
+            ty_id,
+            ty_name,
+            ty: declared.clone(),
+        }]
+    } else {
+        if declared.is_none() {
+            return Err(syn::Error::new(
+                func.sig.span(),
+                "`types(..)` lists the types to instantiate this at, so it has to take \
                      an input of the type being varied",
-                ));
-            }
-            args.types
-                .iter()
-                .map(|ty| {
-                    (
-                        reported.clone(),
-                        quote!(::core::any::TypeId::of::<#ty>),
-                        type_name(ty),
-                        Some(ty.clone()),
-                    )
-                })
-                .collect()
-        };
+            ));
+        }
+        args.types
+            .iter()
+            .map(|ty| {
+                let (ty_id, ty_name) = ty_id_and_name(Some(ty));
+                Instantiation {
+                    name: reported.clone(),
+                    ty_id,
+                    ty_name,
+                    ty: Some(ty.clone()),
+                }
+            })
+            .collect()
+    };
 
     let mut out = quote! {
         #[allow(clippy::ptr_arg)]
         #func
     };
-    for (n, (name, ty_id, ty_name, ity)) in instantiations.into_iter().enumerate() {
+    for (
+        n,
+        Instantiation {
+            name,
+            ty_id,
+            ty_name,
+            ty,
+        },
+    ) in instantiations.into_iter().enumerate()
+    {
         let flat = format_ident!("__scaling_mflat_{}_{}", fname, n);
         let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
-        let call = match &ity {
-            Some(ty) => quote!(#fname(__e.get_mut::<#ty>())),
-            None => quote!(#fname()),
-        };
+        let call = call_expr(fname, ty.as_ref());
         out.extend(quote! {
             #[doc(hidden)]
             fn #flat(
@@ -688,13 +710,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                  in which case it takes the size",
             ));
         }
-        let name = match &args.name {
-            Some(lit) => quote!(#lit),
-            None => {
-                let bare = fname.to_string();
-                quote!(#bare)
-            }
-        };
+        let name = name_or_bare(&args.name, fname);
         let shim = format_ident!("__scaling_minput_{}", fname);
         return Ok(quote! {
             #func
