@@ -10,23 +10,43 @@ A lightweight benchmarking library which:
   one-line binary;
 * has a very simple API!
 
+Put an attribute on a function and it is a benchmark. These can live
+anywhere in your crate, next to the code they measure:
+
 ```rust
-use scaling::{bench, bench_input};
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
 
-// Simple benchmarks are performed with `bench`.
-println!("fib 200: {}", bench(|| fib(200) ));
-println!("fib 500: {}", bench(|| fib(500) ));
+#[scaling::bench]
+fn fib_500() -> usize { fib(500) }
 
-// If a function needs to mutate some state, use `bench_input`.
-println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse()));
-println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()));
+// A benchmark that mutates state says where the state comes from.
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
+
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn sort(xs: &mut Vec<i32>) { xs.sort() }
 ```
 
-Running the above yields the following:
+The binary that runs them is one line:
+
+```rust
+// benches/bench.rs, in its entirety
+scaling::main!();
+```
+
+```toml
+# Cargo.toml
+[[bench]]
+name = "bench"
+harness = false
+```
+
+`cargo bench` then yields:
 
 ```none
-fib 200:    71.716ns ± 0.057ns
-fib 500:    262.75ns ± 0.14ns
+fib_200:    71.716ns ± 0.057ns
+fib_500:    262.75ns ± 0.14ns
 reverse:     51.80ns ± 0.62ns
 sort:        111.3ns ± 1.1ns
 ```
@@ -43,8 +63,13 @@ everything is in the same unit.
 
 ## Scaling behaviour
 
-`bench_scaling` measures how the cost grows with `N` and reports the
-constant in front of the law it found, with the same kind of error bar:
+`#[scaling::bench_scaling]` measures how the cost grows with `N` and reports
+the constant in front of the law it found, with the same kind of error bar:
+
+```rust
+#[scaling::bench_scaling(nmin = 0)]
+fn fib_scaling(n: usize) -> usize { fib(n) }
+```
 
 ```none
 fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
@@ -82,42 +107,11 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 range measured, with `R²=0.000` and `(limit)` to say that nothing described
 it exactly.
 
-## A benchmark suite
+## Running them
 
-The functions above measure one thing where you call them. A *suite* is the
-other half: many benchmarks measured together, declared wherever they belong
-rather than gathered into a list somewhere.
-
-Put an attribute on a function and it is part of the suite. These can live
-anywhere in your crate, next to the code they measure:
-
-```rust
-#[scaling::bench]
-fn fib_500() -> usize { fib(500) }
-
-#[scaling::bench(gen_input = || vec![0i32; 100])]
-fn sorting(xs: &mut Vec<i32>) { xs.sort() }
-
-#[scaling::bench_scaling(nmin = 0)]
-fn fib_scaling(n: usize) -> usize { fib(n) }
-```
-
-The binary that runs them is one line:
-
-```rust
-// benches/bench.rs, in its entirety
-scaling::main!();
-```
-
-```toml
-# Cargo.toml
-[[bench]]
-name = "bench"
-harness = false
-```
-
-There is no `Config` to build, no list to add to, and no printing to write.
-All of that is asked for on the command line:
+Every benchmark declared anywhere in the crate is discovered, measured
+together, and printed. There is no `Config` to build, no list to add to and
+no printing to write: all of that is asked for on the command line.
 
 ```none
 cargo bench --bench bench -- --list
@@ -129,9 +123,11 @@ cargo bench --bench bench -- --fail-on-regression
 `--fail-on-regression` exits non-zero when an alternative measured slower
 than its baseline, which is what makes this usable as a CI gate.
 `runner::measure` hands back the results instead of printing them, for a
-script that wants to look at the numbers rather than show them.
+script that wants to look at the numbers rather than show them - reached by
+name, since nobody wrote those names down: they come from the module and
+function each benchmark was declared in. `--list` prints them.
 
-### Comparisons and matrices
+## Comparisons and matrices
 
 A comparison is declared the same way — `group` makes a function one
 alternative of one, and exactly one of them is the `baseline` the others are
@@ -184,7 +180,7 @@ sorting  (Vec<u64>)  baseline: stable
                 -7.0%     -3.9%
 ```
 
-### Why measuring them together matters
+## Why measuring them together matters
 
 Benchmarks run one after another are measured in different machines: the
 first on a cold package, the fiftieth on a warm one. Their numbers are not
@@ -216,8 +212,9 @@ the floor shows.
 
 So it will not make any single benchmark more reproducible — it averages
 drift in rather than out — and a suite's numbers are not comparable with a
-lone `bench` call. What it gives you is that the numbers within one suite,
-and across runs of it, were measured in the same machine.
+the same benchmark measured on its own. What it gives you is that the
+numbers within one suite, and across runs of it, were measured in the same
+machine.
 
 Each benchmark still gets the full time budget of its own, so a suite of `n`
 may take `n` times as long as one benchmark.

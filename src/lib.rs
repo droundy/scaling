@@ -15,36 +15,43 @@ analysis (no outlier detection, no HTML output).
 [easybench]: https://crates.io/crates/easybench
 [criterion]: https://crates.io/crates/criterion
 
-```
-use scaling::{bench,bench_input,bench_scaling};
+Put an attribute on a function and it is a benchmark. They can live anywhere
+in your crate, next to the code they measure:
 
+```
 # fn fib(_: usize) -> usize { 0 }
-#
-// Simple benchmarks are performed with `bench` or `bench_scaling`.
-println!("fib 200: {}", bench(|| fib(200) ));
-println!("fib 500: {}", bench(|| fib(500) ));
-println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
 
-// If a function needs to mutate some state, use `bench_input`.
-println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse() ));
-println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()    ));
+// A benchmark that mutates state says where the state comes from.
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
+
+// And one can measure how the cost grows with `N`.
+#[scaling::bench_scaling(nmin = 0)]
+fn fib_scaling(n: usize) -> usize { fib(n) }
 ```
 
-Running the above yields the following results:
+The binary that runs them is one line, and [`main!`] is the whole of it:
+
+```ignore
+// benches/bench.rs
+scaling::main!();
+```
+
+`cargo bench` then yields:
 
 ```none
-fib 200:    71.716ns ± 0.057ns
-fib 500:    262.75ns ± 0.14ns
-fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
-reverse:     51.80ns ± 0.62ns
-sort:        111.3ns ± 1.1ns
+fib_200:      71.716ns ± 0.057ns
+reverse:       51.80ns ± 0.62ns
+fib_scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
 
 # Benchmarking algorithm
 
-## Flat benchmarks: `bench`, `bench_input`, `bench_gen_input`
+## Flat benchmarks: `#[bench]`
 
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
@@ -78,7 +85,7 @@ Those are marked `(limit)` and `(untrusted)` in the output.
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
 
-## Scaling benchmarks: `bench_scaling`, `bench_scaling_gen`
+## Scaling benchmarks: `#[bench_scaling]`
 
 These work in two stages, and the split is the point of the design.
 
@@ -128,7 +135,7 @@ separately because they fail independently:
   and it is what the `±` in the output shows. Measuring continues until it
   meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
-  for [`bench`](fn@bench).
+  for a flat one.
 
 The two are deliberately not merged into one number, and measured error bars
 are what keeps them apart. Where errors are only assumed, the usual move is
@@ -231,8 +238,9 @@ the suite has been using - in exchange for a ceiling on drift.
 
 So it does *not* make any single benchmark more precise - it averages drift
 in rather than out - and it does not make a suite's numbers comparable with
-a lone [`bench`](fn@bench) call. What it gives you is that the numbers within one
-suite, and across runs of it, were measured in the same machine.
+the same benchmark measured on its own. What it gives you is that the
+numbers within one suite, and across runs of it, were measured in the same
+machine.
 
 Each benchmark still gets [`Config::max_time`] of its own running time, so a
 suite of `n` may take `n` times as long as one, and a comparison of `k`
@@ -252,10 +260,10 @@ benchmarks size each batch so that a sample takes far longer than the two
 sizes large enough that a single call dwarfs them. However, work which is
 done once-per-iteration *will* be counted in the final times.
 
-* In the case of [`bench()`] this amounts to incrementing the loop counter and
-  passing the return value through `std::hint::black_box`.
-* In the case of [`bench_input`] and [`bench_gen_input`], we also do a lookup into a big vector in
-  order to get the input for that iteration.
+* For a benchmark taking no input this amounts to incrementing the loop
+  counter and passing the return value through `std::hint::black_box`.
+* For one taking an input, we also do a lookup into a big vector in order to
+  get the input for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
 
 The cost of the above operations depend on the details of your benchmark;
@@ -272,14 +280,15 @@ Benchmarking pure functions involves a nasty gotcha which users should be
 aware of. Consider the following benchmarks:
 
 ```
-# use scaling::{bench,bench_input};
-#
 # fn fib(_: usize) -> usize { 0 }
-#
-let fib_1 = bench(|| fib(500) );                     // fine
-let fib_2 = bench(|| { fib(500); } );                // spoiler: NOT fine
-let fib_3 = bench_input(0, |x| { *x = fib(500); } );   // also fine, but ugly
-# let _ = (fib_1, fib_2, fib_3);
+#[scaling::bench]
+fn fib_1() -> usize { fib(500) }                      // fine
+
+#[scaling::bench]
+fn fib_2() { fib(500); }                              // spoiler: NOT fine
+
+#[scaling::bench(gen_input = || 0usize)]
+fn fib_3(x: &mut usize) { *x = fib(500); }            // also fine, but ugly
 ```
 
 The results are a little surprising:
@@ -353,11 +362,32 @@ pub(crate) mod significant;
 // whole crate. Rust 1.66 calls that ambiguity an error; later compilers
 // quietly pick one, so this only ever failed on the oldest supported
 // toolchain, and only when building doctests rather than the library.
-pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
+pub use self::bench::Stats;
+
+/// Measure one closure, once, where you call it.
+///
+/// Hidden rather than deleted, and reachable only because one thing needs
+/// it: `benches/harness-cost.rs` measures what it costs to take a benchmark
+/// by calling [`bench`](fn@bench) in a loop timed with a plain `Instant`.
+/// That cannot be written against the registry - measuring the harness with
+/// the harness would hide a regression in exactly the case where it matters,
+/// since if `bench` went wrong the numbers reporting on it would go wrong
+/// the same way and still look right.
+///
+/// They are not how a benchmark is written. `#[scaling::bench]` and
+/// [`main!`] are, and unlike these they get an interleaved measurement, a
+/// name in the report, and a share of the multiple-comparison correction.
+#[doc(hidden)]
+pub use self::bench::{bench, bench_gen_input, bench_input};
 pub use self::compare::Comparison;
 pub use self::filter::Filter;
 pub use self::kway::Comparisons;
-pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
+pub use self::scaling::{Scaling, ScalingStats};
+
+/// Measure one closure's scaling, once, where you call it. Hidden for the
+/// same reason as [`bench`](fn@bench); see there.
+#[doc(hidden)]
+pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
 /// The machinery a registration is written against.
@@ -446,8 +476,9 @@ use std::time::*;
 /// A comparison gets twice this, since a round there buys evidence about
 /// two functions and is only as good as its weaker half.
 ///
-/// All three sampling loops used to stop on a count - six samples in [`bench`],
-/// six rounds in [`bench_scaling`] - and a count is the wrong unit. Six
+/// All three sampling loops used to stop on a count - six samples for a flat
+/// benchmark, six rounds for a scaling one - and a count is the wrong unit.
+/// Six
 /// samples of a nanosecond-scale function is barely a millisecond of
 /// evidence, and the accuracy target is then met by whichever six happened
 /// to agree. Measured across seven workloads, 95% of `bench` runs stopped
@@ -492,8 +523,9 @@ const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`](fn@bench), [`bench_input`] and [`bench_gen_input`] use [`Config::default`];
-/// call the same-named methods on a `Config` to choose your own.
+/// A benchmark uses [`Config::default`] unless the run says otherwise;
+/// [`crate::runner`] builds one from `--rel-error`, `--abs-error` and
+/// `--max-time`, and the methods below build one directly.
 ///
 /// ```
 /// use scaling::Config;
@@ -537,9 +569,9 @@ pub struct Config {
     ///
     /// Wall clock rather than measured time, because this is a promise about
     /// how long the caller waits - a benchmark whose input is slow to build
-    /// has still taken that long. The `compare_*` functions allow twice
-    /// this, since they produce two [`Stats`] and would otherwise give each
-    /// side half the budget a lone [`bench`](fn@bench) gets for the same target.
+    /// has still taken that long. A comparison allows this much per
+    /// alternative, since each produces its own [`Stats`] and would otherwise
+    /// get a fraction of the budget one benchmark gets for the same target.
     pub max_time: Duration,
 }
 

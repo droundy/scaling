@@ -1,4 +1,4 @@
-//! Timing a benchmark that does not take a size: [`bench`] and its
+//! Timing a benchmark that does not take a size: `bench` and its
 //! variants, and the sampling loop behind them.
 //!
 //! The loop keeps taking samples until the standard error of the mean is
@@ -55,7 +55,7 @@ const MIN_SAMPLES: usize = 6;
 /// ```
 ///
 /// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is [`bench_input`] and [`bench_gen_input`],
+/// the cost moves. The exception is a benchmark taking an input,
 /// which report about 20% lower, because a smaller batch means a smaller
 /// input vector to index into - that lookup is harness overhead
 /// rather than the benchmark, so measuring less of it is a gain, but it is
@@ -223,6 +223,10 @@ impl Config {
     ///
     /// See [`bench`](fn@bench) for the default-accuracy version, and
     /// [`Config::bench_gen_input`] for the algorithm.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where
         F: FnMut() -> O,
@@ -251,6 +255,10 @@ impl Config {
     /// be affected by a hundred nanoseconds. This is a worst-case scenario
     /// however, and I haven't actually been able to trigger it in
     /// practice... but it's good to be aware of the possibility.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_input<F, I, O>(&self, input: I, f: F) -> Stats
     where
         F: FnMut(&mut I) -> O,
@@ -310,6 +318,10 @@ impl Config {
     /// benchmark has `var(batch) ∝ unit` while a deterministic one has
     /// roughly constant per-sample jitter, and this estimator is right for
     /// both.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_gen_input<G, F, I, O>(&self, gen_input: G, f: F) -> Stats
     where
         G: FnMut() -> I,

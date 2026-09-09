@@ -24,6 +24,10 @@ impl Config {
     /// `target_rel_error` is the one that makes sense here.
     /// `target_abs_error` is accepted and well defined, but its units are
     /// nanoseconds per `Nᴾ`, which makes it confusing.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
         F: Fn(usize) -> O,
@@ -61,6 +65,10 @@ impl Config {
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_scaling_gen<G, F, I, O>(&self, gen_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
@@ -2458,7 +2466,7 @@ mod tests {
     ///
     /// The caller's remedy is `nmin`: start above the size where the
     /// workload changes character and it becomes a power law again, with an
-    /// honest error bar. See [`bench_scaling`] for the measurements.
+    /// honest error bar. See `bench_scaling` for the measurements.
     #[test]
     fn a_flagged_fit_does_not_pretend_to_a_trustworthy_error_bar() {
         println!();
