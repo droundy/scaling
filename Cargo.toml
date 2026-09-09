@@ -54,7 +54,13 @@ harness = false
 [features]
 # Discover benchmarks registered anywhere in a crate, rather than assembling
 # them by hand into one `Suite`. See REGISTRATION.md.
-registry = ["dep:inventory", "dep:scaling-macros"]
+#
+# Implies `cli`, because the runner it brings - `scaling::main!()` - is a
+# whole benchmark binary, and a benchmark binary that cannot be told which
+# benchmarks to run is not much of one. Keeping them separate would have
+# meant a third feature for the combination, which is more surface rather
+# than less.
+registry = ["dep:inventory", "dep:scaling-macros", "cli"]
 # Build a `Filter` from the command line. The matching itself needs no
 # dependency and is always available; this is only the parsing.
 cli = ["dep:auto-args"]
@@ -67,3 +73,13 @@ members = [".", "macros"]
 [[bench]]
 name = "filtered"
 harness = false
+
+# The same idea with Design A gone all the way in: benchmarks declared where
+# they are written, and `scaling::main!()` for the whole program. Needs the
+# `registry` feature, without which the attributes do not exist - so
+# `required-features`, which makes `cargo bench` skip it rather than fail to
+# build it.
+[[bench]]
+name = "registered"
+harness = false
+required-features = ["registry"]

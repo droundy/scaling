@@ -246,6 +246,39 @@ fn input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
     }
 }
 
+/// The input type, spelled the way a person would.
+///
+/// Not `stringify!`: that keeps the spacing of the tokens it was handed, and
+/// tokens re-emitted by a proc macro have lost theirs - so `Vec<u64>` comes
+/// out as `Vec < u64 >`, which then appears in a matrix heading and in every
+/// diagnostic that names a type. Rebuilding it here rather than tidying it
+/// up at each place it is printed keeps one spelling, which matters because
+/// this string is an *identity*: assembly pairs candidates with inputs by
+/// comparing it.
+fn type_name(ty: &Type) -> TokenStream2 {
+    let spaced = quote!(#ty).to_string();
+    let hugs = |c: char| "<>()[]&:;,".contains(c);
+    let mut out = String::with_capacity(spaced.len());
+    let chars: Vec<char> = spaced.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if *c != ' ' {
+            out.push(*c);
+            continue;
+        }
+        // A space survives only between two things that would otherwise run
+        // together - `&mut u8`, `dyn Any` - and after a separator, where
+        // dropping it would give `HashMap<String,u8>`.
+        let previous = out.chars().last();
+        let next = chars.get(i + 1).copied();
+        if let (Some(p), Some(n)) = (previous, next) {
+            if (!hugs(p) && !hugs(n)) || p == ',' || p == ';' {
+                out.push(' ');
+            }
+        }
+    }
+    quote!(#out)
+}
+
 /// `concat!(module_path!(), "::", "fn_name")`, or the override.
 fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     match &args.name {
@@ -294,7 +327,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 Some(ty) => (
                     quote!(#fname(__e.get_mut::<#ty>())),
                     quote!(::core::any::TypeId::of::<#ty>),
-                    quote!(::core::stringify!(#ty)),
+                    type_name(ty),
                 ),
                 None => (
                     quote!(#fname()),
@@ -449,6 +482,7 @@ fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     let fname = &func.sig.ident;
     let shim = format_ident!("__scaling_gen_{}", fname);
+    let ty_name = type_name(&ty);
     Ok(quote! {
         #func
         #[doc(hidden)]
@@ -461,7 +495,7 @@ fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 crate_name: ::core::env!("CARGO_PKG_NAME"),
                 crate_version: ::core::env!("CARGO_PKG_VERSION"),
                 type_id: ::core::any::TypeId::of::<#ty>,
-                type_name: ::core::stringify!(#ty),
+                type_name: #ty_name,
                 make: #shim,
             }
         }
@@ -548,7 +582,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             let (ty_id, ty_name, ity) = match &declared {
                 Some(ty) => (
                     quote!(::core::any::TypeId::of::<#ty>),
-                    quote!(::core::stringify!(#ty)),
+                    type_name(ty),
                     Some(ty.clone()),
                 ),
                 None => (quote!(::core::any::TypeId::of::<()>), quote!("()"), None),
@@ -568,7 +602,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     (
                         reported.clone(),
                         quote!(::core::any::TypeId::of::<#ty>),
-                        quote!(::core::stringify!(#ty)),
+                        type_name(ty),
                         Some(ty.clone()),
                     )
                 })
@@ -644,6 +678,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
     let fname = &func.sig.ident;
+    let ty_name = type_name(&ty);
 
     if args.sizes.is_empty() {
         if !func.sig.inputs.is_empty() {
@@ -674,7 +709,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     crate_name: ::core::env!("CARGO_PKG_NAME"),
                     crate_version: ::core::env!("CARGO_PKG_VERSION"),
                     type_id: ::core::any::TypeId::of::<#ty>,
-                    type_name: ::core::stringify!(#ty),
+                    type_name: #ty_name,
                     make: #shim,
                 }
             }
@@ -705,7 +740,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     crate_name: ::core::env!("CARGO_PKG_NAME"),
                     crate_version: ::core::env!("CARGO_PKG_VERSION"),
                     type_id: ::core::any::TypeId::of::<#ty>,
-                    type_name: ::core::stringify!(#ty),
+                    type_name: #ty_name,
                     make: #shim,
                 }
             }

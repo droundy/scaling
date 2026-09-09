@@ -97,6 +97,32 @@ impl Filter {
         self
     }
 
+    /// Fill in from `fallback` wherever this filter says nothing.
+    ///
+    /// Field by field rather than all or nothing, so that a filter from one
+    /// source can narrow a filter from another without replacing it:
+    /// `SCALING_SKIP=slow` alongside `--filter sort` means both, which is
+    /// what it appears to mean.
+    ///
+    /// The two flags are an *or* rather than an override, there being no way
+    /// to say "not exact" or "do not list" that could be overridden.
+    pub fn or(self, fallback: Filter) -> Filter {
+        Filter {
+            patterns: if self.patterns.is_empty() {
+                fallback.patterns
+            } else {
+                self.patterns
+            },
+            skip: if self.skip.is_empty() {
+                fallback.skip
+            } else {
+                self.skip
+            },
+            exact: self.exact || fallback.exact,
+            list: self.list || fallback.list,
+        }
+    }
+
     /// Whether a benchmark of this name should be measured.
     pub fn matches(&self, name: &str) -> bool {
         let hit = |p: &String| {
@@ -116,7 +142,7 @@ impl Filter {
 }
 
 #[cfg(feature = "cli")]
-mod cli {
+pub(crate) mod cli {
     use super::Filter;
     use auto_args::AutoArgs;
 
@@ -125,16 +151,44 @@ mod cli {
     /// Named flags rather than a bare word for the filter, because
     /// `auto-args` has no positional arguments - so `--filter sort` where
     /// `cargo test` would take `sort`.
+    ///
+    /// Shared with the runner rather than restated there: it flattens this
+    /// in as `_filter`, which `auto-args` reads as "these flags, without a
+    /// prefix". Two lists of the same four flags would be two lists to keep
+    /// in step.
     #[derive(AutoArgs, Debug, Default)]
-    struct Flags {
+    pub(crate) struct Flags {
         /// Measure only benchmarks whose name contains this.
-        filter: Vec<String>,
+        pub filter: Vec<String>,
         /// Do not measure benchmarks whose name contains this.
-        skip: Vec<String>,
+        pub skip: Vec<String>,
         /// Match the whole name rather than any part of it.
-        exact: bool,
+        pub exact: bool,
         /// Print what would be measured, and measure nothing.
-        list: bool,
+        pub list: bool,
+    }
+
+    impl Flags {
+        pub(crate) fn to_filter(&self) -> Filter {
+            Filter {
+                patterns: self.filter.clone(),
+                skip: self.skip.clone(),
+                exact: self.exact,
+                list: self.list,
+            }
+        }
+    }
+
+    /// Drop what cargo appends on its own account. See [`CARGO_ADDS`].
+    pub(crate) fn without_cargo_adds<I, S>(args: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        args.into_iter()
+            .map(Into::into)
+            .filter(|a| !CARGO_ADDS.contains(&a.as_str()))
+            .collect()
     }
 
     /// What cargo passes on its own account, and what this must ignore.
@@ -153,7 +207,7 @@ mod cli {
     /// invocation there is, `cargo bench`, having been given nothing by
     /// anybody. `auto-args` does reject it - `Err(UnexpectedOption)` - so it
     /// is dropped before parsing rather than taught about.
-    const CARGO_ADDS: &[&str] = &["--bench", "--test"];
+    pub(crate) const CARGO_ADDS: &[&str] = &["--bench", "--test"];
 
     impl Filter {
         /// Read the command line, and give up with a message if it does not
@@ -182,18 +236,9 @@ mod cli {
             I: IntoIterator<Item = S>,
             S: Into<String>,
         {
-            let kept: Vec<String> = args
-                .into_iter()
-                .map(Into::into)
-                .filter(|a| !CARGO_ADDS.contains(&a.as_str()))
-                .collect();
+            let kept = without_cargo_adds(args);
             let flags = Flags::from_iter(kept).map_err(|e| format!("{e:?}"))?;
-            Ok(Filter {
-                patterns: flags.filter,
-                skip: flags.skip,
-                exact: flags.exact,
-                list: flags.list,
-            })
+            Ok(flags.to_filter())
         }
 
         /// Read `SCALING_FILTER`, `SCALING_SKIP` and `SCALING_EXACT`.
@@ -228,22 +273,7 @@ mod cli {
         /// `SCALING_SKIP=slow cargo bench -- --filter sort` means what it
         /// appears to.
         pub fn from_env_and_args() -> Filter {
-            let env = Filter::from_env();
-            let args = Filter::from_args();
-            Filter {
-                patterns: if args.patterns.is_empty() {
-                    env.patterns
-                } else {
-                    args.patterns
-                },
-                skip: if args.skip.is_empty() {
-                    env.skip
-                } else {
-                    args.skip
-                },
-                exact: args.exact || env.exact,
-                list: args.list || env.list,
-            }
+            Filter::from_args().or(Filter::from_env())
         }
     }
 }

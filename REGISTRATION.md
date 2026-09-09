@@ -60,8 +60,8 @@ that drive them are deferred together to stage 6.
 | 4 | `scaling-macros`: the attribute proc macros | yes |
 | 5 | matrices: candidates × inputs | yes |
 | 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | **done** |
-| 7 | runner, CLI, output formats — this completes **Design A** | mostly |
-| 8 | migrate docs, README, `benches/` | no |
+| 7 | runner, CLI, output formats — this completes **Design A** | **done**, and additive after all |
+| 8 | migrate docs, README, `benches/`; remove what A replaces | no |
 
 Stage 2 before 4 is the load-bearing order: it validates `inventory`,
 `ErasedInput`, and the whole assembly path against real registrations
@@ -651,31 +651,134 @@ goal ends at the budget either way — so test elapsed time instead.
 
 ---
 
-## Stage 7: runner and output — Design A
+## Stage 7: runner and output — Design A — **built**
 
-Everything above is Design B plus shared substrate. Design A adds:
+Everything above is Design B plus shared substrate. Stage 7 is the half of
+Design A that is not about registration: `scaling` owning the top level.
 
-- `scaling::main!()` expanding to a runner that discovers, assembles, runs
-  and prints — turning `benches/bench.rs` into one line.
-- Hand-rolled CLI (~100 lines, no `clap`): name filter, `--exact`,
-  `--list`, `--format table|json|matrix`, accuracy and budget flags,
-  `--baseline`.
-- Output formats: the existing `Report` `Display` for tables, a 2-D matrix
-  layout per lane, and a hand-rolled JSON emitter (~40 lines — every field
-  is a number, bool or string, so `serde` would earn nothing).
-- Non-zero exit on `untrustworthy`, or with `--fail-on-regression` on a
-  detected slowdown — which is what makes the runner usable as a CI gate,
-  and is only possible because `scaling` owns the top level.
-- `Config` becomes implicit, built from flags rather than written in a
-  `main()` you control. This is the real ergonomic cost of A.
-- `inventory` and `scaling-macros` become unconditional dependencies, since
-  there is no "without it" mode left to preserve. A permanent departure from
-  the crate's zero-dependency posture.
+`src/runner.rs`, and `scaling::main!()`:
 
-`--list` deserves emphasis: it makes the registry inspectable without
-running anything, which is the practical answer to "did my benchmark
-actually get linked in?" — the question `inventory`'s failure modes most
-often provoke.
+```rust
+// benches/bench.rs, in its entirety
+scaling::main!();
+```
+
+```none
+cargo bench --bench bench -- --list
+cargo bench --bench bench -- --filter sort --max-time 30s
+cargo bench --bench bench -- --format json > today.json
+cargo bench --bench bench -- --fail-on-regression
+```
+
+`benches/registered.rs` is the worked example, and is deliberately the same
+shape as `benches/filtered.rs` so the two can be read side by side: same
+kinds of benchmark, one assembled by hand and one declared where it is
+written.
+
+### What the exposed API becomes
+
+This is the thing Design A is actually *for*. A crate adopting it writes
+attributes and one line; everything below is either decided at the
+declaration or asked for on the command line.
+
+| what a caller used to write | under A |
+| --- | --- |
+| `Config::relative(0.01).with_max_time(...)` | `--rel-error`, `--abs-error`, `--max-time` |
+| `cfg.suite()`, an `add_*` per benchmark | the attribute on each function |
+| `cfg.comparison().add(..).add(..)` | `group = "..."` and `baseline` |
+| the N×M pairings of a matrix | `#[candidate]` and `#[input]`, paired by type |
+| `Filter::from_env_and_args()`, `with_filter` | `--filter`, `--skip`, `--exact` |
+| `if suite.filter().is_listing() { … }` | `--list` |
+| `println!("{}", suite.run())` | `--format table\|list\|json` |
+| a hand-written CI check over the tokens | `--fail-on-regression` |
+
+What remains public and hand-written is the part that is genuinely per-crate:
+the benchmark bodies, and `runner::Options` + `runner::run` for a crate that
+wants one thing different without giving up the rest.
+
+### Four decisions that differ from the draft above
+
+**Three formats, not `table|json|matrix`.** The draft had `--format matrix`
+alongside `table`, and said `table` would use the matrix layout whenever
+matrices were present — which makes the two identical in every case where
+either means anything. `table` now draws grids for matrices and lines for
+everything else, and the third format is `list`: every entry as one line,
+matrices included. That one is not cosmetic. A grid cell shows a time and a
+percentage; the line form shows the error bar on both and says outright when
+a difference was too small to call. `table` answers "which of these wins",
+`list` answers "is that number real".
+
+**`untrustworthy` does not fail a run by default.** The draft had it exit
+non-zero on its own. It should not: `untrustworthy` says the `±` came from
+too few samples to believe, and the ordinary cause is a benchmark slow enough
+that the budget bought a handful of them — a fact about the budget, not about
+the code under test. Defaulting it on means a slow benchmark breaks CI while
+measuring exactly what it was asked to. It is `--fail-on-untrustworthy`.
+
+**Exit `2` is a separate thing from exit `1`.** `1` means a check was asked
+for and found something. `2` means the run never started — a command line
+that did not parse, or registrations that contradict each other. Collapsing
+them would report "no regressions" as the same news as "your benchmarks do
+not compose", which is the wrong way round for a CI gate.
+
+**`auto-args`, not a hand-rolled parser.** The draft budgeted ~100 lines for
+argument parsing. The filtering work already uses [`auto-args`], so the
+runner flattens `Filter`'s own flag struct into its own and adds the rest —
+one list of flags rather than two to keep in step, and `--help` comes out of
+the derive. Consequently **`registry` now implies `cli`**: the runner is a
+whole benchmark binary, and one that cannot be told which benchmarks to run
+is not much of one. A third feature for the combination would have been more
+surface, not less.
+
+### Still hypothetical, still A's real cost
+
+`inventory` and `scaling-macros` are **still optional**. Stage 7 built the
+runner; it did not delete the hand-assembled path, so both modes exist and
+the default build still has no dependencies. Going all the way in means
+stage 8's removals, and that is where the A-versus-B decision actually
+binds — everything up to here is reversible.
+
+### Two things fixed on the way
+
+**`Vec < u64 >`.** A registration's `type_name` came from
+`stringify!(#ty)` on tokens a proc macro had re-emitted, which have lost
+their spacing — so a matrix heading read `sorting (Vec < u64 >)`, as did
+every diagnostic naming a type. `macros::type_name` now builds the string
+itself. It is done at the macro rather than at each place the name is
+printed because this string is an *identity*: assembly pairs candidates with
+inputs by comparing it, and one spelling is the point.
+
+**`--list` shows a comparison's alternatives**, which was listed as still
+open under filtering. `RegisteredTokens` now carries the assembled `groups`
+and `lanes`, so the runner can indent a comparison's members underneath it:
+
+```none
+summing
+    registered::by_loop  (baseline)
+    registered::by_fold
+    registered::by_sum
+sorting@reversed
+    stable  (baseline)
+    unstable
+```
+
+`--list` earns the emphasis the draft gave it: it makes the registry
+inspectable without running anything, which is the practical answer to "did
+my benchmark actually get linked in?" — the question `inventory`'s failure
+modes most often provoke. A run that registered nothing at all now says so
+in those terms rather than printing an empty report.
+
+### A test that was asserting the wrong thing
+
+`fail_on_regression` has to check the *direction* of a detected change, not
+just that one was detected — otherwise every run in which anything got
+faster fails. The first test of that compared `sort` against `sort_unstable`
+on the theory that they measure the same. They do not: on Rust 1.71 the
+unstable sort came out 7.3% slower on that input, correctly detected, and
+the test failed. It had been asserting a property of the standard library
+rather than of the runner. It now uses a ten-times difference pointed the
+other way, which no library change moves. Found only because the MSRV job
+runs the whole suite on 1.71.
 
 ---
 
@@ -964,14 +1067,24 @@ through real `cargo bench` invocations rather than only in tests: plain,
 `-- --list`, `-- --filter sorting`, `-- --filter sorting --skip large`, and
 `SCALING_FILTER=hashing` with no arguments passed at all.
 
+Stage 7 added `--format`, the accuracy and budget flags, `--versions`,
+`--baseline` and the two `--fail-on-*` flags to the same parser, and
+`benches/registered.rs` as the worked example of the whole thing.
+
 Still open:
 
 - **Registered benchmarks do not yet say what a filter skipped.** They
   simply do not appear, which is right for a report and thin for someone
-  wondering whether their pattern matched anything.
-- **`--list` shows entries, not alternatives.** A comparison lists under its
-  own name, so the alternative names — the ones you would have to *stop*
-  filtering on — are not shown. Indenting them under their comparison is the
-  suggested fix.
+  wondering whether their pattern matched anything. A run the filter emptied
+  now says so and names the count, which covers the worst case; a run that
+  kept some and dropped others still says nothing about the ones it dropped.
+- ~~**`--list` shows entries, not alternatives.**~~ Fixed in stage 7: the
+  runner indents a comparison's members under it.
+- **Per-benchmark accuracy attributes are still not wired up.** Stage 6
+  added `Suite::add_*_with` for them and the shims take a `&Config`, but
+  every generated shim ignores it and uses the suite's. The attributes
+  (`target_rel_error = …`, `max_time = …` on a `#[bench]`) were never added
+  to the macro grammar, so nothing is broken — the feature simply is not
+  there yet, and `--max-time` is process-wide.
 
 [`auto-args`]: https://crates.io/crates/auto-args

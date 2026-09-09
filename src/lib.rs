@@ -301,6 +301,10 @@ pub mod quiet;
 /// code rather than written by hand, and their shapes are not yet stable.
 #[doc(hidden)]
 pub mod registry;
+/// The whole of a benchmark binary: discover, measure, print. See
+/// [`main!`](crate::main).
+#[cfg(feature = "registry")]
+pub mod runner;
 mod scaling;
 mod suite;
 pub(crate) use bench::{time_batch, time_loop};
@@ -332,6 +336,50 @@ pub use inventory;
 /// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
 #[cfg(feature = "registry")]
 pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
+
+/// A whole benchmark binary, in one line.
+///
+/// ```ignore
+/// // benches/bench.rs, in its entirety
+/// scaling::main!();
+/// ```
+///
+/// Every benchmark registered anywhere in this binary is discovered,
+/// measured together, and printed. What used to be written out - a
+/// [`Config`], a [`Suite`], the `add` calls, the printing - is either
+/// decided by the attributes on the benchmarks themselves or asked for on
+/// the command line:
+///
+/// ```none
+/// cargo bench --bench bench -- --list
+/// cargo bench --bench bench -- --filter sort
+/// cargo bench --bench bench -- --max-time 30s --rel-error 0.002
+/// cargo bench --bench bench -- --format json > today.json
+/// cargo bench --bench bench -- --fail-on-regression
+/// ```
+///
+/// This is sugar, not machinery: it expands to a `main` calling
+/// [`runner::main`], which is public and can be called from a `main` of your
+/// own. [`runner::run`] takes [`runner::Options`] built however you like,
+/// for a crate that wants one thing different.
+///
+/// # Its exit status means something
+///
+/// Zero unless asked otherwise. `2` if the run never started - a command
+/// line that did not parse, or registrations that contradict each other -
+/// and `1` with `--fail-on-regression` if a comparison's alternative
+/// measured slower than its baseline by more than this run's own threshold.
+/// The distinction is deliberate: `2` means the question was not asked, `1`
+/// means it was asked and answered badly.
+#[cfg(feature = "registry")]
+#[macro_export]
+macro_rules! main {
+    () => {
+        fn main() -> ::std::process::ExitCode {
+            $crate::runner::main()
+        }
+    };
+}
 
 use std::f64;
 use std::sync::atomic::AtomicU64;

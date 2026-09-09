@@ -908,6 +908,22 @@ pub struct RegisteredTokens {
     /// [`Suite::try_add_registered`] instead; these are the complaints that
     /// leave the rest of the run perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
+    /// The comparison groups as they were assembled, in the order they were
+    /// added.
+    ///
+    /// Here because a comparison reaches the report under one name while
+    /// holding several alternatives, and nothing else can say what they
+    /// were. A caller listing what would run - which is the only way to find
+    /// out what a binary registered - would otherwise print the group and
+    /// leave the reader guessing what is in it.
+    pub groups: Vec<crate::assemble::Group>,
+    /// The matrix lanes as they were assembled.
+    ///
+    /// Same reason as [`RegisteredTokens::groups`], plus one more: a matrix
+    /// is a grid, and the grid is only recoverable from the lane. The report
+    /// holds one comparison per input under a flattened `matrix@input` name,
+    /// which is the right thing to *measure* and the wrong shape to read.
+    pub lanes: Vec<crate::assemble::Lane>,
 }
 
 #[cfg(feature = "registry")]
@@ -1008,7 +1024,7 @@ impl<'a> Suite<'a> {
             }
         }
 
-        for group in plan.groups {
+        for group in &plan.groups {
             // One generator for the whole group, cloned per alternative, which
             // is what makes the differences paired - see `ErasedInput`.
             let make = group.make_input();
@@ -1024,6 +1040,7 @@ impl<'a> Suite<'a> {
                 .comparisons
                 .insert(group.name.to_string(), self.add_comparison(group.name, set));
         }
+        tokens.groups = plan.groups;
 
         // Matrices: candidates and inputs registered apart from each other,
         // paired by type into lanes, every pairing measured.
@@ -1042,7 +1059,7 @@ impl<'a> Suite<'a> {
         }
         tokens.warnings = warnings;
 
-        for lane in lanes {
+        for lane in &lanes {
             for input in &lane.inputs {
                 if lane.candidates.len() < 2 {
                     // Nothing to compare against, so this is a plain
@@ -1063,6 +1080,7 @@ impl<'a> Suite<'a> {
                 tokens.comparisons.insert(name, token);
             }
         }
+        tokens.lanes = lanes;
 
         Ok(tokens)
     }
