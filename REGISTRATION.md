@@ -18,7 +18,12 @@ mechanism. Benchmarks therefore cannot live next to the code they measure.
 be submitted from anywhere in a crate via `inventory::submit!` and collected
 later via `inventory::iter`, with no central list.
 
-## Two designs, and why the choice is deferred
+## Two designs, and why the choice was deferred
+
+> **Resolved: Design A**, at stage 8. The two sections below are kept as
+> written, because the argument they set out is what stages 1–7 were built
+> to make answerable with real code rather than by guessing. What follows
+> the staging table records what each stage actually turned out to cost.
 
 **Design B ("hybrid")** — registration becomes *one more way* to fill a
 `Suite`, via a new `Suite::add_registered()`. Everything existing keeps
@@ -34,6 +39,14 @@ assembly logic, the same matrix support. A adds a runner that owns output,
 and removes the manual API. So there is no need to choose now — build the
 shared substrate, and the choice becomes "do we also build the runner and
 delete the builder?", answerable with real code in hand.
+
+That is how it went. Stage 3 completed B and it worked; stage 7 added the
+runner and stage 8 removed the builder. The deciding argument was not any of
+the ones weighed below but the one that only became visible with both in
+front of you: under B a caller still writes a `main`, builds a `Config`,
+calls `.suite()`, decides what `--list` means, and prints — so the ceremony
+that motivated this work survives, with discovery filling in one line inside
+it. What A buys is that the exposed API gets to be small.
 
 ## Staging: additive first
 
@@ -60,8 +73,8 @@ that drive them are deferred together to stage 6.
 | 4 | `scaling-macros`: the attribute proc macros | yes |
 | 5 | matrices: candidates × inputs | yes |
 | 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | **done** |
-| 7 | runner, CLI, output formats — this completes **Design A** | mostly |
-| 8 | migrate docs, README, `benches/` | no |
+| 7 | runner, CLI, output formats — this completes **Design A** | **done**, and additive after all |
+| 8 | migrate docs, README, `benches/`; remove what A replaces | **done** — no |
 
 Stage 2 before 4 is the load-bearing order: it validates `inventory`,
 `ErasedInput`, and the whole assembly path against real registrations
@@ -651,31 +664,320 @@ goal ends at the budget either way — so test elapsed time instead.
 
 ---
 
-## Stage 7: runner and output — Design A
+## Stage 7: runner and output — Design A — **built**
 
-Everything above is Design B plus shared substrate. Design A adds:
+Everything above is Design B plus shared substrate. Stage 7 is the half of
+Design A that is not about registration: `scaling` owning the top level.
 
-- `scaling::main!()` expanding to a runner that discovers, assembles, runs
-  and prints — turning `benches/bench.rs` into one line.
-- Hand-rolled CLI (~100 lines, no `clap`): name filter, `--exact`,
-  `--list`, `--format table|json|matrix`, accuracy and budget flags,
-  `--baseline`.
-- Output formats: the existing `Report` `Display` for tables, a 2-D matrix
-  layout per lane, and a hand-rolled JSON emitter (~40 lines — every field
-  is a number, bool or string, so `serde` would earn nothing).
-- Non-zero exit on `untrustworthy`, or with `--fail-on-regression` on a
-  detected slowdown — which is what makes the runner usable as a CI gate,
-  and is only possible because `scaling` owns the top level.
-- `Config` becomes implicit, built from flags rather than written in a
-  `main()` you control. This is the real ergonomic cost of A.
-- `inventory` and `scaling-macros` become unconditional dependencies, since
-  there is no "without it" mode left to preserve. A permanent departure from
-  the crate's zero-dependency posture.
+`src/runner.rs`, and `scaling::main!()`:
 
-`--list` deserves emphasis: it makes the registry inspectable without
-running anything, which is the practical answer to "did my benchmark
-actually get linked in?" — the question `inventory`'s failure modes most
-often provoke.
+```rust
+// benches/bench.rs, in its entirety
+scaling::main!();
+```
+
+```none
+cargo bench --bench bench -- --list
+cargo bench --bench bench -- --filter sort --max-time 30s
+cargo bench --bench bench -- --format json > today.json
+cargo bench --bench bench -- --fail-on-regression
+```
+
+`benches/registered.rs` is the worked example, and is deliberately the same
+shape as `benches/filtered.rs` so the two can be read side by side: same
+kinds of benchmark, one assembled by hand and one declared where it is
+written.
+
+### What the exposed API becomes
+
+This is the thing Design A is actually *for*. A crate adopting it writes
+attributes and one line; everything below is either decided at the
+declaration or asked for on the command line.
+
+| what a caller used to write | under A |
+| --- | --- |
+| `Config::relative(0.01).with_max_time(...)` | `--rel-error`, `--abs-error`, `--max-time` |
+| `cfg.suite()`, an `add_*` per benchmark | the attribute on each function |
+| `cfg.comparison().add(..).add(..)` | `group = "..."` and `baseline` |
+| the N×M pairings of a matrix | `#[candidate]` and `#[input]`, paired by type |
+| `Filter::from_env_and_args()`, `with_filter` | `--filter`, `--skip`, `--exact` |
+| `if suite.filter().is_listing() { … }` | `--list` |
+| `println!("{}", suite.run())` | `--format table\|list\|json` |
+| a hand-written CI check over the tokens | `--fail-on-regression` |
+
+What remains public and hand-written is the part that is genuinely per-crate:
+the benchmark bodies, and `runner::Options` + `runner::run` for a crate that
+wants one thing different without giving up the rest.
+
+### Four decisions that differ from the draft above
+
+**Three formats, not `table|json|matrix`.** The draft had `--format matrix`
+alongside `table`, and said `table` would use the matrix layout whenever
+matrices were present — which makes the two identical in every case where
+either means anything. `table` now draws grids for matrices and lines for
+everything else, and the third format is `list`: every entry as one line,
+matrices included. That one is not cosmetic. A grid cell shows a time and a
+percentage; the line form shows the error bar on both and says outright when
+a difference was too small to call. `table` answers "which of these wins",
+`list` answers "is that number real".
+
+**`untrustworthy` does not fail a run by default.** The draft had it exit
+non-zero on its own. It should not: `untrustworthy` says the `±` came from
+too few samples to believe, and the ordinary cause is a benchmark slow enough
+that the budget bought a handful of them — a fact about the budget, not about
+the code under test. Defaulting it on means a slow benchmark breaks CI while
+measuring exactly what it was asked to. It is `--fail-on-untrustworthy`.
+
+**Exit `2` is a separate thing from exit `1`.** `1` means a check was asked
+for and found something. `2` means the run never started — a command line
+that did not parse, or registrations that contradict each other. Collapsing
+them would report "no regressions" as the same news as "your benchmarks do
+not compose", which is the wrong way round for a CI gate.
+
+**`auto-args`, not a hand-rolled parser.** The draft budgeted ~100 lines for
+argument parsing. The filtering work already uses [`auto-args`], so the
+runner flattens `Filter`'s own flag struct into its own and adds the rest —
+one list of flags rather than two to keep in step, and `--help` comes out of
+the derive. Consequently **`registry` now implies `cli`**: the runner is a
+whole benchmark binary, and one that cannot be told which benchmarks to run
+is not much of one. A third feature for the combination would have been more
+surface, not less.
+
+### Still hypothetical, still A's real cost
+
+`inventory` and `scaling-macros` are **still optional**. Stage 7 built the
+runner; it did not delete the hand-assembled path, so both modes exist and
+the default build still has no dependencies. Going all the way in means
+stage 8's removals, and that is where the A-versus-B decision actually
+binds — everything up to here is reversible.
+
+### Two things fixed on the way
+
+**`Vec < u64 >`.** A registration's `type_name` came from
+`stringify!(#ty)` on tokens a proc macro had re-emitted, which have lost
+their spacing — so a matrix heading read `sorting (Vec < u64 >)`, as did
+every diagnostic naming a type. `macros::type_name` now builds the string
+itself. It is done at the macro rather than at each place the name is
+printed because this string is an *identity*: assembly pairs candidates with
+inputs by comparing it, and one spelling is the point.
+
+**`--list` shows a comparison's alternatives**, which was listed as still
+open under filtering. `RegisteredTokens` now carries the assembled `groups`
+and `lanes`, so the runner can indent a comparison's members underneath it:
+
+```none
+summing
+    registered::by_loop  (baseline)
+    registered::by_fold
+    registered::by_sum
+sorting@reversed
+    stable  (baseline)
+    unstable
+```
+
+`--list` earns the emphasis the draft gave it: it makes the registry
+inspectable without running anything, which is the practical answer to "did
+my benchmark actually get linked in?" — the question `inventory`'s failure
+modes most often provoke. A run that registered nothing at all now says so
+in those terms rather than printing an empty report.
+
+### A test that was asserting the wrong thing
+
+`fail_on_regression` has to check the *direction* of a detected change, not
+just that one was detected — otherwise every run in which anything got
+faster fails. The first test of that compared `sort` against `sort_unstable`
+on the theory that they measure the same. They do not: on Rust 1.71 the
+unstable sort came out 7.3% slower on that input, correctly detected, and
+the test failed. It had been asserting a property of the standard library
+rather than of the runner. It now uses a ten-times difference pointed the
+other way, which no library change moves. Found only because the MSRV job
+runs the whole suite on 1.71.
+
+---
+
+## Stage 8: all the way in — **built**
+
+The one stage that removes rather than adds, and the point where the
+A-versus-B decision actually binds. Everything before it was reversible.
+
+### No feature to choose
+
+`registry` and `cli` existed to protect a crate that used only the
+hand-assembled `Suite`: it paid for neither `inventory`'s linker machinery
+nor `syn` nor an argument parser, and the default build had no dependencies
+at all. There is one way to write a benchmark suite now, so every build
+needs all three and a feature to turn them off would only turn the crate
+off. `[features]` is gone, and with it 29 `#[cfg]` attributes, the question
+of which combination anybody is on, and the second CI invocation that
+existed to keep the dependency-free build honest.
+
+The MSRV is unchanged and unchanged in kind: 1.71 was always set by the
+proc-macro dependencies rather than by anything the library does. What
+changes is that it applies to everyone rather than to whoever turned
+`registry` on.
+
+### What came off the documented API
+
+| | |
+| --- | --- |
+| **deleted** | `Config::compare`, `Config::compare_input`, `Config::compare_gen_input`, and the 219-line sampling loop behind them |
+| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input`; `bench`, `bench_input`, `bench_gen_input`, `bench_scaling`, `bench_scaling_gen` and `Config`'s five methods of those names |
+| **added** | `runner::measure`, and `RegistryOptions` / `VersionPolicy` / `BaselinePolicy` / `Diagnostic` re-exported from `runner` |
+| **kept** | `Config` (four builders), the result types, `Filter`, `runner`, `main!`, the attribute macros, `quiet` |
+
+What is left, in full:
+
+```
+scaling::  Config  Stats  ScalingStats  Scaling  Comparison  Comparisons  Report  Filter
+           main!   #[bench] #[bench_scaling] #[candidate] #[gen_input] #[input]
+scaling::runner::  Options  Format  Outcome  main  run  measure
+                   RegistryOptions  VersionPolicy  BaselinePolicy  Diagnostic
+scaling::quiet::   (unchanged)
+```
+
+Forty-odd methods came off. One way to declare a benchmark, one way to run
+it.
+
+**The deletion found more than it removed.** `Config::compare*` turned out
+to be the only callers of `compare_gen_input_async` and its `calibrate` -
+`ComparisonSet` has never used them, having its own loop - so deleting three
+public functions turned 219 lines dead, and the compiler said so. There is
+now one comparison sampling loop rather than two implementations of the same
+statistics, and the survivor is the one every registered comparison was
+already going through. The sensitivity calibration test moved onto it: two
+alternatives is a family of one, so it is judged at the same threshold.
+
+**The hidden types cannot be private.** An attribute macro expands to a shim
+that names `scaling::Suite` and `scaling::Token` in the *calling* crate, so
+generated code needs them public to compile - the same reason `registry` and
+`assemble` are already public and hidden. What changed is that they are no
+longer documented as a way to write anything.
+
+### The façade that would make them private, and why it is not here
+
+`#[scaling::bench]` currently expands to a shim spelled in the crate's own
+vocabulary:
+
+```rust
+fn __shim(
+    suite: &mut ::scaling::Suite<'_>,
+    cfg: &::scaling::Config,
+    name: &str,
+) -> ::scaling::Token<::scaling::Stats> {
+    suite.add_gen_input(name, gen, f)
+}
+```
+
+Three public names, and `Suite` brings twenty public methods with it. The
+alternative is to give generated code a vocabulary of its own - a newtype
+over exactly the capability a shim needs, and nothing else:
+
+```rust
+// in the already-hidden `registry` module
+pub struct Adder<'a, 'b> { suite: &'b mut Suite<'a>, cfg: &'a Config }
+
+impl Adder<'_, '_> {
+    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle { ... }
+    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle { ... }
+    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen: G, f: F) -> Handle { ... }
+    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle { ... }
+    pub fn scaling_gen<G, F, I, O>(&mut self, name: &str, gen: G, f: F, nmin: usize) -> Handle { ... }
+}
+
+/// Opaque. A shim's caller keeps it; nothing else can look inside.
+pub struct Handle(Token<Stats>);
+```
+
+and the shim becomes
+
+```rust
+fn __shim(adder: &mut ::scaling::registry::Adder<'_, '_>, name: &str) -> Handle {
+    adder.gen_input(name, gen, f)
+}
+```
+
+`Suite`, `Token` and `Config::suite` can then be `pub(crate)`. What that
+buys is not smaller docs - they are hidden either way - but two things a
+`#[doc(hidden)]` does not:
+
+- **The contract becomes readable.** `Adder` has five methods and they are
+  exactly what a macro may do. Today the contract is "whatever of `Suite`'s
+  twenty methods the macros happen to call", which is a thing you learn by
+  reading the macro crate.
+- **It stops being reachable at all.** Nothing outside can assemble a suite
+  by hand, even by ignoring the docs, so there is no undocumented second way
+  that quietly keeps working.
+
+Three things make it more than a rename. `ComparisonSet` is a *consuming*
+builder threaded through the `Alt` shims by value, so it needs a second
+façade with the same by-value threading rather than sharing `Adder`'s
+`&mut self`. `RegisteredTokens` holds `Token<T>` by kind, so it becomes
+`Handle`s or goes `pub(crate)` - and the runner reads it for the listing, so
+whichever is chosen has to keep that working. And `tests/registry.rs` and
+`tests/registry_bad.rs` build registrations by hand, which is what proved
+the runtime path *before* any macro existed; they would be rewritten against
+the façade, and the point of writing them by hand was to be independent of
+the thing the façade is for.
+
+Deferred rather than rejected: it is the right shape, it is invisible on
+docs.rs either way, and it only bites against someone deliberately reaching
+for undocumented API.
+
+### `runner::measure`, which is why hiding `Suite` costs nothing
+
+`run` prints and returns a verdict, which answers "did anything regress" and
+not "which of these is actually fastest under these conditions" - and the
+second is what a benchmark-driven script asks. `measure` hands back the
+`Report` instead, which reaches results by name: `report.comparison("lookup")`,
+`report.stats("mymod::fib")`. Names are how, because nobody wrote them down -
+they come from the module and function the benchmark was declared in. `run`
+and `measure` share their assembly, so what one hands back is what the other
+would have printed.
+
+This is the requirement recorded before stage 6 began: a way to get `Stats`
+and `Comparison` out of a finished run without holding a token. `Report`'s
+by-name lookup was built then; this is what makes it reachable once the
+suite behind it is no longer public.
+
+### The one-shot functions go too
+
+Design A's cons above list removing `bench`, `bench_scaling` and
+`bench_scaling_gen` as one of its costs. They are hidden, along with
+`bench_input` and `bench_gen_input` and `Config`'s five methods of the same
+names — `bench(f)` is `Config::default().bench(f)`, so hiding one and
+documenting the other would leave the API exactly as wide with a longer path
+to the same place.
+
+Hidden rather than deleted, and for the same reason as `Suite`: something
+still has to name them. `benches/harness-cost.rs` measures what it costs to
+take a benchmark by calling `bench` in a loop timed with a plain `Instant`,
+and that cannot be written against the registry — measuring the harness with
+the harness would hide a regression in exactly the case where it matters,
+since if `bench` went wrong the numbers reporting on it would go wrong the
+same way and still look right. The target that exists to catch a harness
+regression is the whole of what keeps them reachable.
+
+`Config` is left with `relative`, `absolute`, `default` and the three
+`with_*` builders: two accuracy goals and a time budget, which is what its
+docs always said it was.
+
+**A hidden item gets no page**, so every intra-doc link to one renders as a
+dead link — and rustdoc says nothing about it, because it resolves the path
+perfectly well. Nine such links were on pages that are still published: the
+crate front page, and `Stats` and `ScalingStats`, which stay documented
+though the functions producing them do not. Worth knowing before hiding
+anything else.
+
+### Docs
+
+`README.md` and the crate's front page are rewritten around declaring a
+suite and `scaling::main!()`, with the comparison and matrix attributes
+shown, and the interleaving argument kept but moved under "why they are
+measured together" - where it now also carries the multiple-comparison
+argument, which is the other half of why a suite is one unit.
+
+`benches/filtered.rs` is deleted. It was the worked example of Design B, and
+`benches/registered.rs` is the same benchmarks the other way.
 
 ---
 
@@ -964,14 +1266,24 @@ through real `cargo bench` invocations rather than only in tests: plain,
 `-- --list`, `-- --filter sorting`, `-- --filter sorting --skip large`, and
 `SCALING_FILTER=hashing` with no arguments passed at all.
 
+Stage 7 added `--format`, the accuracy and budget flags, `--versions`,
+`--baseline` and the two `--fail-on-*` flags to the same parser, and
+`benches/registered.rs` as the worked example of the whole thing.
+
 Still open:
 
 - **Registered benchmarks do not yet say what a filter skipped.** They
   simply do not appear, which is right for a report and thin for someone
-  wondering whether their pattern matched anything.
-- **`--list` shows entries, not alternatives.** A comparison lists under its
-  own name, so the alternative names — the ones you would have to *stop*
-  filtering on — are not shown. Indenting them under their comparison is the
-  suggested fix.
+  wondering whether their pattern matched anything. A run the filter emptied
+  now says so and names the count, which covers the worst case; a run that
+  kept some and dropped others still says nothing about the ones it dropped.
+- ~~**`--list` shows entries, not alternatives.**~~ Fixed in stage 7: the
+  runner indents a comparison's members under it.
+- **Per-benchmark accuracy attributes are still not wired up.** Stage 6
+  added `Suite::add_*_with` for them and the shims take a `&Config`, but
+  every generated shim ignores it and uses the suite's. The attributes
+  (`target_rel_error = …`, `max_time = …` on a `#[bench]`) were never added
+  to the macro grammar, so nothing is broken — the feature simply is not
+  there yet, and `--max-time` is process-wide.
 
 [`auto-args`]: https://crates.io/crates/auto-args

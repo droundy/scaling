@@ -1,4 +1,4 @@
-//! Timing a benchmark that does not take a size: [`bench`] and its
+//! Timing a benchmark that does not take a size: `bench` and its
 //! variants, and the sampling loop behind them.
 //!
 //! The loop keeps taking samples until the standard error of the mean is
@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 /// and a good deal more use than none at all. So a budget-forced stop
 /// reports whatever standard error it has (and sets [`Stats::hit_limit`]).
 ///
-/// Not a knob: callers control accuracy with [`Config::accuracy`]
-/// and cost with [`Config::max_time`], and no useful benchmark wants a
-/// different answer here.
+/// Not a knob: callers control accuracy with [`Config::relative`] and
+/// [`Config::absolute`], and cost with [`Config::max_time`], and no useful
+/// benchmark wants a different answer here.
 const MIN_SAMPLES: usize = 6;
 
 /// How long one sample should take: calibration picks a batch size aiming
@@ -55,7 +55,7 @@ const MIN_SAMPLES: usize = 6;
 /// ```
 ///
 /// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is [`bench_input`] and [`bench_gen_input`],
+/// the cost moves. The exception is a benchmark taking an input,
 /// which report about 20% lower, because a smaller batch means a smaller
 /// input vector to index into - that lookup is harness overhead
 /// rather than the benchmark, so measuring less of it is a gain, but it is
@@ -223,6 +223,10 @@ impl Config {
     ///
     /// See [`bench`](fn@bench) for the default-accuracy version, and
     /// [`Config::bench_gen_input`] for the algorithm.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where
         F: FnMut() -> O,
@@ -239,18 +243,12 @@ impl Config {
     /// Nb: it's very possible that we will end up allocating many (>10,000)
     /// copies of `input` at the same time. Probably best to keep it small.
     ///
-    /// See [`Config::bench_gen_input`] and the module docs for more.
-    ///
-    /// ## Overhead
-    ///
-    /// Every iteration, `bench_input` performs a lookup into a big vector in
-    /// order to get the input for that iteration. If your benchmark
-    /// is memory-intensive then this could, in the worst case, amount to a
-    /// systematic cache-miss (ie. this vector would have to be fetched from
-    /// DRAM at the start of every iteration). In this case the results could
-    /// be affected by a hundred nanoseconds. This is a worst-case scenario
-    /// however, and I haven't actually been able to trigger it in
-    /// practice... but it's good to be aware of the possibility.
+    /// See [`Config::bench_gen_input`] and the module docs for more, and its
+    /// "Overhead" section for what this costs beyond the function itself.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_input<F, I, O>(&self, input: I, f: F) -> Stats
     where
         F: FnMut(&mut I) -> O,
@@ -310,6 +308,10 @@ impl Config {
     /// benchmark has `var(batch) ∝ unit` while a deterministic one has
     /// roughly constant per-sample jitter, and this estimator is right for
     /// both.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_gen_input<G, F, I, O>(&self, gen_input: G, f: F) -> Stats
     where
         G: FnMut() -> I,
@@ -439,12 +441,7 @@ impl Config {
 /// one benchmark call can leave enough of a mark on process-wide allocator
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
-pub(crate) fn time_batch<G, F, I, O>(
-    gen_input: &mut G,
-    f: &mut F,
-    xs: &mut Vec<I>,
-    iters: usize,
-) -> (f64, f64)
+fn time_batch<G, F, I, O>(gen_input: &mut G, f: &mut F, xs: &mut Vec<I>, iters: usize) -> (f64, f64)
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,

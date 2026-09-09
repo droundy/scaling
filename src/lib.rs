@@ -15,36 +15,43 @@ analysis (no outlier detection, no HTML output).
 [easybench]: https://crates.io/crates/easybench
 [criterion]: https://crates.io/crates/criterion
 
-```
-use scaling::{bench,bench_input,bench_scaling};
+Put an attribute on a function and it is a benchmark. They can live anywhere
+in your crate, next to the code they measure:
 
+```
 # fn fib(_: usize) -> usize { 0 }
-#
-// Simple benchmarks are performed with `bench` or `bench_scaling`.
-println!("fib 200: {}", bench(|| fib(200) ));
-println!("fib 500: {}", bench(|| fib(500) ));
-println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
 
-// If a function needs to mutate some state, use `bench_input`.
-println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse() ));
-println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()    ));
+// A benchmark that mutates state says where the state comes from.
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
+
+// And one can measure how the cost grows with `N`.
+#[scaling::bench_scaling(nmin = 0)]
+fn fib_scaling(n: usize) -> usize { fib(n) }
 ```
 
-Running the above yields the following results:
+The binary that runs them is one line, and [`main!`] is the whole of it:
+
+```ignore
+// benches/bench.rs
+scaling::main!();
+```
+
+`cargo bench` then yields:
 
 ```none
-fib 200:    71.716ns ± 0.057ns
-fib 500:    262.75ns ± 0.14ns
-fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
-reverse:     51.80ns ± 0.62ns
-sort:        111.3ns ± 1.1ns
+fib_200:      71.716ns ± 0.057ns
+reverse:       51.80ns ± 0.62ns
+fib_scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
 
 # Benchmarking algorithm
 
-## Flat benchmarks: `bench`, `bench_input`, `bench_gen_input`
+## Flat benchmarks: `#[bench]`
 
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
@@ -78,7 +85,7 @@ Those are marked `(limit)` and `(untrusted)` in the output.
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
 
-## Scaling benchmarks: `bench_scaling`, `bench_scaling_gen`
+## Scaling benchmarks: `#[bench_scaling]`
 
 These work in two stages, and the split is the point of the design.
 
@@ -128,7 +135,7 @@ separately because they fail independently:
   and it is what the `±` in the output shows. Measuring continues until it
   meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
-  for [`bench`](fn@bench).
+  for a flat one.
 
 The two are deliberately not merged into one number, and measured error bars
 are what keeps them apart. Where errors are only assumed, the usual move is
@@ -153,34 +160,72 @@ that nothing described it exactly. Naming those shapes needs a different
 kind of fit and would be a different feature; measuring a power well is the
 thing this does.
 
-# Suites: measuring many benchmarks together
+# A benchmark suite: declare, don't assemble
+
+Everything above measures one thing, where you called it. A *suite* is the
+other half of this crate: many benchmarks measured together, declared
+wherever they belong rather than gathered into a list.
+
+Put an attribute on a function and it is part of the suite:
+
+```
+# fn fib(_: usize) -> usize { 0 }
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
+
+#[scaling::bench(gen_input = || vec![5i32, 3, 1, 4, 2])]
+fn sorting(v: &mut Vec<i32>) { v.sort() }
+```
+
+They can live anywhere in the crate, next to what they measure. The whole of
+the binary that runs them is:
+
+```ignore
+// benches/bench.rs
+scaling::main!();
+```
+
+which discovers every registered benchmark, measures them together, and
+prints them. What used to be written out - an accuracy, a budget, which
+benchmarks to run, how to print them - is asked for on the command line
+instead:
+
+```none
+cargo bench --bench bench -- --list
+cargo bench --bench bench -- --filter sort --max-time 30s
+cargo bench --bench bench -- --format json > today.json
+cargo bench --bench bench -- --fail-on-regression
+```
+
+See [`main!`] for the whole of it, [`runner`] for what the flags do, and
+[`runner::measure`] for reading the numbers in a script rather than printing
+them.
+
+Comparisons are declared the same way. `group = "..."` makes a function one
+alternative of a comparison, and `#[scaling::candidate]` with
+`#[scaling::input]` builds a matrix of implementations against inputs -
+paired by type, with no list of the pairings anywhere. `REGISTRATION.md` in
+the repository has the design.
+
+## Why they are measured together
 
 Benchmarks run one after another are measured in different machines. The
 first runs on a cold package and the fiftieth on a warm one, so their
 numbers are not comparable with each other, and neither is either of them
 with the same suite run tomorrow.
 
-[`Config::suite`] measures them interleaved instead, one sample each in
-rotation, so every benchmark's samples spread across the whole session and
-all of them average the same drift. Each `add` returns a token to read that
-benchmark's answer from once [`Suite::run`] has finished:
+A suite measures them interleaved instead, one sample each in rotation, so
+every benchmark's samples spread across the whole session and all of them
+average the same drift. A comparison counts as *one* participant in that
+rotation, because its round must stay whole for the paired error bar to mean
+anything - which is also fair, since one of its turns runs `k` batches and
+produces `k` [`Stats`].
 
-```
-let cfg = scaling::Config::default();
-let mut suite = cfg.suite();
-let sort = suite.add_input("sort", vec![5, 3, 1, 4, 2], |v: &mut Vec<i32>| v.sort());
-let sum = suite.add("sum", || (0..100u64).sum::<u64>());
-println!("{}", suite.run());
-# let _ = (sort.get().unwrap(), sum.get().unwrap());
-```
-
-A suite is not restricted to one kind or one input type: [`Suite::add_scaling`]
-takes a scaling benchmark and [`Suite::add_comparison`] takes a whole
-[`ComparisonSet`], and the token remembers which, so each answer keeps its
-own type. A comparison counts as *one* participant in the rotation, because
-its round must stay whole for the paired error bar to mean anything - which
-is also fair, since one of its turns runs `k` batches and produces `k`
-[`Stats`].
+Measuring them together is also what lets the multiple-comparison correction
+be right: the threshold each comparison is judged at comes from how many
+comparisons the run actually holds, which is knowable only once they have
+all been collected. Filter a run down to one comparison and it is judged
+more leniently, correctly so.
 
 What this buys is a *bound*, not an improvement. Reversing the declaration
 order of eight identical workloads moves an interleaved benchmark by
@@ -193,12 +238,13 @@ the suite has been using - in exchange for a ceiling on drift.
 
 So it does *not* make any single benchmark more precise - it averages drift
 in rather than out - and it does not make a suite's numbers comparable with
-a lone [`bench`](fn@bench) call. What it gives you is that the numbers within one
-suite, and across runs of it, were measured in the same machine.
+the same benchmark measured on its own. What it gives you is that the
+numbers within one suite, and across runs of it, were measured in the same
+machine.
 
 Each benchmark still gets [`Config::max_time`] of its own running time, so a
-suite of `n` may take `n` times as long as one - the same arithmetic
-[`Config::compare`] uses for two.
+suite of `n` may take `n` times as long as one, and a comparison of `k`
+alternatives costs `k` times a single benchmark.
 
 # Caveats
 
@@ -214,10 +260,10 @@ benchmarks size each batch so that a sample takes far longer than the two
 sizes large enough that a single call dwarfs them. However, work which is
 done once-per-iteration *will* be counted in the final times.
 
-* In the case of [`bench()`] this amounts to incrementing the loop counter and
-  passing the return value through `std::hint::black_box`.
-* In the case of [`bench_input`] and [`bench_gen_input`], we also do a lookup into a big vector in
-  order to get the input for that iteration.
+* For a benchmark taking no input this amounts to incrementing the loop
+  counter and passing the return value through `std::hint::black_box`.
+* For one taking an input, we also do a lookup into a big vector in order to
+  get the input for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
 
 The cost of the above operations depend on the details of your benchmark;
@@ -234,14 +280,15 @@ Benchmarking pure functions involves a nasty gotcha which users should be
 aware of. Consider the following benchmarks:
 
 ```
-# use scaling::{bench,bench_input};
-#
 # fn fib(_: usize) -> usize { 0 }
-#
-let fib_1 = bench(|| fib(500) );                     // fine
-let fib_2 = bench(|| { fib(500); } );                // spoiler: NOT fine
-let fib_3 = bench_input(0, |x| { *x = fib(500); } );   // also fine, but ugly
-# let _ = (fib_1, fib_2, fib_3);
+#[scaling::bench]
+fn fib_1() -> usize { fib(500) }                      // fine
+
+#[scaling::bench]
+fn fib_2() { fib(500); }                              // spoiler: NOT fine
+
+#[scaling::bench(gen_input = || 0usize)]
+fn fib_3(x: &mut usize) { *x = fib(500); }            // also fine, but ugly
 ```
 
 The results are a little surprising:
@@ -287,7 +334,6 @@ effect.
 */
 
 /// Assembling registered benchmarks into a suite. See `REGISTRATION.md`.
-#[cfg(feature = "registry")]
 #[doc(hidden)]
 pub mod assemble;
 mod bench;
@@ -301,9 +347,12 @@ pub mod quiet;
 /// code rather than written by hand, and their shapes are not yet stable.
 #[doc(hidden)]
 pub mod registry;
+/// The whole of a benchmark binary: discover, measure, print. See
+/// [`main!`](crate::main).
+pub mod runner;
 mod scaling;
 mod suite;
-pub(crate) use bench::{time_batch, time_loop};
+pub(crate) use bench::time_loop;
 pub(crate) use suite::{block_on, Clock, Machine};
 pub(crate) mod significant;
 
@@ -313,27 +362,103 @@ pub(crate) mod significant;
 // whole crate. Rust 1.66 calls that ambiguity an error; later compilers
 // quietly pick one, so this only ever failed on the oldest supported
 // toolchain, and only when building doctests rather than the library.
-pub use self::bench::{bench, bench_gen_input, bench_input, Stats};
+pub use self::bench::Stats;
+
+/// Measure one closure, once, where you call it.
+///
+/// Hidden rather than deleted, and reachable only because one thing needs
+/// it: `benches/harness-cost.rs` measures what it costs to take a benchmark
+/// by calling [`bench`](fn@bench) in a loop timed with a plain `Instant`.
+/// That cannot be written against the registry - measuring the harness with
+/// the harness would hide a regression in exactly the case where it matters,
+/// since if `bench` went wrong the numbers reporting on it would go wrong
+/// the same way and still look right.
+///
+/// They are not how a benchmark is written. `#[scaling::bench]` and
+/// [`main!`] are, and unlike these they get an interleaved measurement, a
+/// name in the report, and a share of the multiple-comparison correction.
+#[doc(hidden)]
+pub use self::bench::{bench, bench_gen_input, bench_input};
 pub use self::compare::Comparison;
 pub use self::filter::Filter;
-pub use self::kway::{ComparisonSet, Comparisons};
-pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
-#[cfg(feature = "registry")]
-pub use self::suite::RegisteredTokens;
-pub use self::suite::{Report, Suite, Token};
+pub use self::kway::Comparisons;
+pub use self::scaling::{Scaling, ScalingStats};
+
+/// Measure one closure's scaling, once, where you call it. Hidden for the
+/// same reason as [`bench`](fn@bench); see there.
+#[doc(hidden)]
+pub use self::scaling::{bench_scaling, bench_scaling_gen};
+pub use self::suite::Report;
+
+/// The machinery a registration is written against.
+///
+/// Reachable but not documented, for the same reason [`registry`] and
+/// [`assemble`] are: an attribute macro expands to a shim that names
+/// `scaling::Suite` and `scaling::Token` in the *calling* crate, so these
+/// have to be public for generated code to compile. They are not how a
+/// benchmark is written - `#[scaling::bench]` and [`main!`] are - and their
+/// shapes are not stable.
+///
+/// Before stage 8 these were the documented way to assemble a suite by hand.
+/// That path is gone; what is left is the contract between the macros and
+/// the runner, which happens to be spelled in public types.
+#[doc(hidden)]
+pub use self::kway::ComparisonSet;
+#[doc(hidden)]
+pub use self::suite::{RegisteredTokens, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.
-#[cfg(feature = "registry")]
 #[doc(hidden)]
 pub use inventory;
 
 /// Attribute macros that register a benchmark where it is written, rather
 /// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
-#[cfg(feature = "registry")]
 pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 
-use std::f64;
+/// A whole benchmark binary, in one line.
+///
+/// ```ignore
+/// // benches/bench.rs, in its entirety
+/// scaling::main!();
+/// ```
+///
+/// Every benchmark registered anywhere in this binary is discovered,
+/// measured together, and printed. What used to be written out - a
+/// [`Config`], a [`Suite`], the `add` calls, the printing - is either
+/// decided by the attributes on the benchmarks themselves or asked for on
+/// the command line:
+///
+/// ```none
+/// cargo bench --bench bench -- --list
+/// cargo bench --bench bench -- --filter sort
+/// cargo bench --bench bench -- --max-time 30s --rel-error 0.002
+/// cargo bench --bench bench -- --format json > today.json
+/// cargo bench --bench bench -- --fail-on-regression
+/// ```
+///
+/// This is sugar, not machinery: it expands to a `main` calling
+/// [`runner::main`], which is public and can be called from a `main` of your
+/// own. [`runner::run`] takes [`runner::Options`] built however you like,
+/// for a crate that wants one thing different.
+///
+/// # Its exit status means something
+///
+/// Zero unless asked otherwise. `2` if the run never started - a command
+/// line that did not parse, or registrations that contradict each other -
+/// and `1` with `--fail-on-regression` if a comparison's alternative
+/// measured slower than its baseline by more than this run's own threshold.
+/// The distinction is deliberate: `2` means the question was not asked, `1`
+/// means it was asked and answered badly.
+#[macro_export]
+macro_rules! main {
+    () => {
+        fn main() -> ::std::process::ExitCode {
+            $crate::runner::main()
+        }
+    };
+}
+
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::*;
@@ -350,8 +475,9 @@ use std::time::*;
 /// A comparison gets twice this, since a round there buys evidence about
 /// two functions and is only as good as its weaker half.
 ///
-/// All three sampling loops used to stop on a count - six samples in [`bench`],
-/// six rounds in [`bench_scaling`] - and a count is the wrong unit. Six
+/// All three sampling loops used to stop on a count - six samples for a flat
+/// benchmark, six rounds for a scaling one - and a count is the wrong unit.
+/// Six
 /// samples of a nanosecond-scale function is barely a millisecond of
 /// evidence, and the accuracy target is then met by whichever six happened
 /// to agree. Measured across seven workloads, 95% of `bench` runs stopped
@@ -392,12 +518,13 @@ const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
 /// A backstop rather than a target: both kinds of benchmark stop as soon as
 /// they have the accuracy asked for, and neither sizes any of its work
 /// against the time available.
-const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
+const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`](fn@bench), [`bench_input`] and [`bench_gen_input`] use [`Config::default`];
-/// call the same-named methods on a `Config` to choose your own.
+/// A benchmark uses [`Config::default`] unless the run says otherwise;
+/// [`crate::runner`] builds one from `--rel-error`, `--abs-error` and
+/// `--max-time`, and the methods below build one directly.
 ///
 /// ```
 /// use scaling::Config;
@@ -415,10 +542,10 @@ pub struct Config {
     /// Stop once the standard error falls below this fraction of the
     /// measurement (`0.01` = 1%).
     ///
-    /// The `compare_*` functions read this as a *sensitivity* rather than a
-    /// precision: the smallest difference worth detecting, as a fraction of
-    /// the baseline. See [`Config::compare_gen_input`], which spells out what
-    /// that floor is and is not worth.
+    /// A comparison reads this as a *sensitivity* rather than a precision:
+    /// the smallest difference worth detecting, as a fraction of the
+    /// baseline. See [`Comparison::min_detectable_difference`], which is what
+    /// that floor came to on a result that reported no change.
     pub target_rel_error: f64,
     /// Stop once the standard error falls below this duration.
     ///
@@ -441,9 +568,9 @@ pub struct Config {
     ///
     /// Wall clock rather than measured time, because this is a promise about
     /// how long the caller waits - a benchmark whose input is slow to build
-    /// has still taken that long. The `compare_*` functions allow twice
-    /// this, since they produce two [`Stats`] and would otherwise give each
-    /// side half the budget a lone [`bench`](fn@bench) gets for the same target.
+    /// has still taken that long. A comparison allows this much per
+    /// alternative, since each produces its own [`Stats`] and would otherwise
+    /// get a fraction of the budget one benchmark gets for the same target.
     pub max_time: Duration,
 }
 
@@ -452,7 +579,7 @@ impl Default for Config {
         Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
-            max_time: BENCH_TIME_MAX,
+            max_time: MAX_BENCH_TIME,
         }
     }
 }
@@ -577,8 +704,7 @@ impl Config {
         if std_error == 0.0 {
             return true;
         }
-        std_error < self.target_rel_error * ns_per_iter
-            || std_error < self.target_abs_error.as_secs_f64() * 1e9
+        std_error < self.comparison_goal_ns(ns_per_iter)
     }
 }
 

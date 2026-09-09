@@ -8,10 +8,17 @@
 //! Run it with `cargo bench`, ideally under `quiet-bench run` so that the
 //! wall-clock figures mean something.
 //!
+//! It is a plain `main` rather than a registered suite, and that is not an
+//! oversight: it calls `bench` in a loop and times each call with an
+//! `Instant`, which is the only arrangement that can catch the harness
+//! getting slower. This is also the reason the one-shot measuring functions
+//! survived stage 8 - measuring the harness needs a way to measure that is
+//! not the harness.
+//!
 //! # Reading the output
 //!
 //! **wall** is the headline: real time from calling `bench` to getting a
-//! `Stats` back. It is what you actually pay per line of a benchmark suite.
+//! `Stats` back. It is what you pay for each benchmark in a suite.
 //!
 //! **spread** is the accuracy that bought. Each benchmark is run several
 //! times over, from scratch, and the spread is the standard deviation of

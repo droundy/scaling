@@ -13,8 +13,6 @@
 //! since it depends on `scaling` and has no reason to depend on `inventory`
 //! as well. Generated registration code will name the same path.
 
-#![cfg(feature = "registry")]
-
 use scaling::registry::{ErasedInput, GenInputRegistration, Kind, Registered};
 use scaling::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
 use std::any::TypeId;

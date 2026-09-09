@@ -4,25 +4,49 @@ A lightweight benchmarking library which:
   accuracy it achieved;
 * can measure how a benchmark scales, as a power of its input size;
 * handles benchmarks which must mutate some state;
+* tells you whether two implementations really differ, correcting for how
+  many such questions you asked;
+* lets a whole benchmark suite be declared where it belongs and run from a
+  one-line binary;
 * has a very simple API!
 
+Put an attribute on a function and it is a benchmark. These can live
+anywhere in your crate, next to the code they measure:
+
 ```rust
-use scaling::{bench, bench_input};
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
 
-// Simple benchmarks are performed with `bench`.
-println!("fib 200: {}", bench(|| fib(200) ));
-println!("fib 500: {}", bench(|| fib(500) ));
+#[scaling::bench]
+fn fib_500() -> usize { fib(500) }
 
-// If a function needs to mutate some state, use `bench_input`.
-println!("reverse: {}", bench_input(vec![0;100], |xs| xs.reverse()));
-println!("sort:    {}", bench_input(vec![0;100], |xs| xs.sort()));
+// A benchmark that mutates state says where the state comes from.
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
+
+#[scaling::bench(gen_input = || vec![0i32; 100])]
+fn sort(xs: &mut Vec<i32>) { xs.sort() }
 ```
 
-Running the above yields the following:
+The binary that runs them is one line:
+
+```rust
+// benches/bench.rs, in its entirety
+scaling::main!();
+```
+
+```toml
+# Cargo.toml
+[[bench]]
+name = "bench"
+harness = false
+```
+
+`cargo bench` then yields:
 
 ```none
-fib 200:    71.716ns ± 0.057ns
-fib 500:    262.75ns ± 0.14ns
+fib_200:    71.716ns ± 0.057ns
+fib_500:    262.75ns ± 0.14ns
 reverse:     51.80ns ± 0.62ns
 sort:        111.3ns ± 1.1ns
 ```
@@ -39,8 +63,13 @@ everything is in the same unit.
 
 ## Scaling behaviour
 
-`bench_scaling` measures how the cost grows with `N` and reports the
-constant in front of the law it found, with the same kind of error bar:
+`#[scaling::bench_scaling]` measures how the cost grows with `N` and reports
+the constant in front of the law it found, with the same kind of error bar:
+
+```rust
+#[scaling::bench_scaling(nmin = 0)]
+fn fib_scaling(n: usize) -> usize { fib(n) }
+```
 
 ```none
 fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
@@ -78,7 +107,80 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 range measured, with `R²=0.000` and `(limit)` to say that nothing described
 it exactly.
 
-## Measuring many benchmarks together
+## Running them
+
+Every benchmark declared anywhere in the crate is discovered, measured
+together, and printed. There is no `Config` to build, no list to add to and
+no printing to write: all of that is asked for on the command line.
+
+```none
+cargo bench --bench bench -- --list
+cargo bench --bench bench -- --filter sort --max-time 30s
+cargo bench --bench bench -- --format json > today.json
+cargo bench --bench bench -- --fail-on-regression
+```
+
+`--fail-on-regression` exits non-zero when an alternative measured slower
+than its baseline, which is what makes this usable as a CI gate.
+`runner::measure` hands back the results instead of printing them, for a
+script that wants to look at the numbers rather than show them - reached by
+name, since nobody wrote those names down: they come from the module and
+function each benchmark was declared in. `--list` prints them.
+
+## Comparisons and matrices
+
+A comparison is declared the same way — `group` makes a function one
+alternative of one, and exactly one of them is the `baseline` the others are
+reported against:
+
+```rust
+#[scaling::gen_input(group = "sorting")]
+fn sorting_data() -> Vec<u64> { (0..400).rev().collect() }
+
+#[scaling::bench(group = "sorting", baseline)]
+fn stable(v: &mut Vec<u64>) { v.sort() }
+
+#[scaling::bench(group = "sorting")]
+fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
+```
+
+All the alternatives are measured in one interleaved round on the *same*
+generated input, which is what lets the difference between them be reported
+with its own error bar rather than by subtracting two independent numbers.
+
+A **matrix** goes further: implementations and inputs are declared
+separately, and every pairing is measured, with no list of the pairings
+anywhere.
+
+```rust
+#[scaling::candidate(matrix = "sorting", baseline)]
+fn stable(v: &mut Vec<u64>) { v.sort() }
+
+#[scaling::candidate(matrix = "sorting")]
+fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
+
+#[scaling::input(matrix = "sorting", name = "sorted")]
+fn already_sorted() -> Vec<u64> { (0..400).collect() }
+
+#[scaling::input(matrix = "sorting", name = "reversed")]
+fn reversed() -> Vec<u64> { (0..400).rev().collect() }
+```
+
+Five declarations, four cells; a fifth input would make six without touching
+anything already written. Candidates are paired with inputs by *type*, so
+one matrix can hold several unrelated type families and a `String` candidate
+is never handed a `Vec<u8>`. Each input's cells are a comparison, printed as
+a grid:
+
+```none
+sorting  (Vec<u64>)  baseline: stable
+             reversed    sorted
+  stable    423.716ns  303.207ns
+  unstable  393.989ns  291.241ns
+                -7.0%     -3.9%
+```
+
+## Why measuring them together matters
 
 Benchmarks run one after another are measured in different machines: the
 first on a cold package, the fiftieth on a warm one. Their numbers are not
@@ -86,24 +188,14 @@ comparable with each other, nor with the same suite run tomorrow.
 
 A suite measures them interleaved instead — one sample each, in rotation —
 so every benchmark's samples spread across the whole session and all of them
-average the same drift. Each `add` hands back a token holding that
-benchmark's answer once the suite has run.
+average the same drift.
 
-```rust
-let cfg = scaling::Config::default();
-let mut suite = cfg.suite();
-let sort  = suite.add_input("sort", vec![0; 100], |xs: &mut Vec<i32>| xs.sort());
-let fib   = suite.add("fib 500", || fib(500));
-let growth = suite.add_scaling("fib scaling", |n| fib(n), 0);
-println!("{}", suite.run());
-
-// Each token keeps its own type.
-let sort: scaling::Stats = sort.get().unwrap();
-let growth: scaling::ScalingStats = growth.get().unwrap();
-```
-
-One suite can hold flat benchmarks, scaling benchmarks and whole
-comparisons, and they need not share an input type.
+It is also what makes the multiple-comparison correction right. Run five
+comparisons and you have five chances at a false positive; the threshold
+each one is judged at comes from how many the run actually holds, which is
+knowable only once they have all been collected. (So a run filtered down to
+one comparison judges it more leniently — correctly, but it does mean a
+filtered run and a full one are not quite asking the same question.)
 
 What this buys is a **bound**, not an improvement. Reversing the declaration
 order of eight identical workloads moves an interleaved benchmark by
@@ -120,8 +212,9 @@ the floor shows.
 
 So it will not make any single benchmark more reproducible — it averages
 drift in rather than out — and a suite's numbers are not comparable with a
-lone `bench` call. What it gives you is that the numbers within one suite,
-and across runs of it, were measured in the same machine.
+the same benchmark measured on its own. What it gives you is that the
+numbers within one suite, and across runs of it, were measured in the same
+machine.
 
 Each benchmark still gets the full time budget of its own, so a suite of `n`
 may take `n` times as long as one benchmark.

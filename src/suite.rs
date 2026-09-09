@@ -53,13 +53,10 @@
 //!   nothing at all.
 
 use super::*;
-#[cfg(feature = "registry")]
 use crate::assemble::RegistryOptions;
-#[cfg(feature = "registry")]
 use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
 use std::any::Any;
 use std::cell::Cell;
-#[cfg(feature = "registry")]
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
@@ -437,8 +434,7 @@ impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
 ///
 /// Every benchmark here gets [`Config::max_time`] of its *own* running time,
 /// so a suite of `n` may take `n` times as long as one benchmark - the same
-/// arithmetic [`Config::compare`] uses for two and [`ComparisonSet`] uses for
-/// `k`. What interleaving changes is not how long it takes but *when* each
+/// arithmetic [`ComparisonSet`] uses for its `k` alternatives. What interleaving changes is not how long it takes but *when* each
 /// benchmark's samples are drawn: across the whole session rather than in one
 /// stretch of it, so that no benchmark is measured in a machine state its
 /// neighbours never saw.
@@ -468,7 +464,9 @@ pub struct Suite<'a> {
 impl Config {
     /// Begin a suite of benchmarks to be measured together.
     ///
-    /// See [`Suite`].
+    /// See [`Suite`], and note that it is hidden: this is what
+    /// [`crate::runner`] calls, not what a benchmark is written against.
+    #[doc(hidden)]
     pub fn suite(&self) -> Suite<'_> {
         Suite {
             cfg: self,
@@ -559,6 +557,27 @@ impl<'a> Suite<'a> {
     ) {
         self.entries.push((name.to_string(), token.0.clone()));
         self.scheduler.push(clock, future);
+    }
+
+    /// The filter check, clock, token and [`Suite::push`] shared by every
+    /// `add_*_with` method: only the future `body` builds differs between
+    /// them.
+    fn add_task<T: Display + 'static>(
+        &mut self,
+        name: &str,
+        max_time: Duration,
+        body: impl FnOnce(Rc<Clock>, Token<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
+    ) -> Token<T> {
+        // Filtered out: build nothing. The token is still handed back and
+        // simply never fills, which is what happens to any token when a
+        // suite is not run.
+        if !self.filter.matches(name) {
+            return Token::new();
+        }
+        let clock = Rc::new(Clock::new(max_time));
+        let token = Token::new();
+        self.push(name, &token, clock.clone(), body(clock, token.clone()));
+        token
     }
 
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
@@ -666,26 +685,12 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                let stats = cfg.bench_gen_input_async(&mine, gen_input, f).await;
-                *cell.cell() = Some(stats);
-            }),
-        );
-        token
+                let stats = cfg.bench_gen_input_async(&clock, gen_input, f).await;
+                *token.cell() = Some(stats);
+            })
+        })
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
@@ -710,25 +715,11 @@ impl<'a> Suite<'a> {
         F: Fn(usize) -> O + 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                *cell.cell() = Some(cfg.bench_scaling_async(&mine, f, nmin).await);
-            }),
-        );
-        token
+                *token.cell() = Some(cfg.bench_scaling_async(&clock, f, nmin).await);
+            })
+        })
     }
 
     /// Add a scaling benchmark over generated inputs, as
@@ -765,25 +756,14 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-        let clock = Rc::new(Clock::new(cfg.max_time));
-        let token = Token::new();
-        let cell = token.clone();
-        let mine = clock.clone();
-        self.push(
-            name,
-            &token,
-            clock,
+        self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                *cell.cell() = Some(cfg.bench_scaling_gen_async(&mine, gen_input, f, nmin).await);
-            }),
-        );
-        token
+                *token.cell() = Some(
+                    cfg.bench_scaling_gen_async(&clock, gen_input, f, nmin)
+                        .await,
+                );
+            })
+        })
     }
 
     /// Add a whole k-way comparison, built with [`Config::comparison`].
@@ -845,7 +825,7 @@ impl<'a> Suite<'a> {
         // would otherwise chase one target on the other's clock.
         let clock = Rc::new(Clock::new(set.cfg().max_time * k as u32));
         let token = Token::new();
-        let cell = token.clone();
+        let answer = token.clone();
         let mine = clock.clone();
         self.push(
             name,
@@ -853,7 +833,7 @@ impl<'a> Suite<'a> {
             clock,
             Box::pin(async move {
                 let results = set.run_async(&mine, z_alpha.get(), seed).await;
-                *cell.cell() = Some(results);
+                *answer.cell() = Some(results);
             }),
         );
         token
@@ -893,7 +873,6 @@ impl<'a> Suite<'a> {
 /// Keyed by the name the benchmark registered under. Split by kind rather
 /// than mixed, because the three answers are different types and a token
 /// remembers which: that is exactly what stops a caller having to downcast.
-#[cfg(feature = "registry")]
 #[derive(Debug, Default)]
 pub struct RegisteredTokens {
     /// Flat benchmarks, by name.
@@ -908,9 +887,24 @@ pub struct RegisteredTokens {
     /// [`Suite::try_add_registered`] instead; these are the complaints that
     /// leave the rest of the run perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
+    /// The comparison groups as they were assembled, in the order they were
+    /// added.
+    ///
+    /// Here because a comparison reaches the report under one name while
+    /// holding several alternatives, and nothing else can say what they
+    /// were. A caller listing what would run - which is the only way to find
+    /// out what a binary registered - would otherwise print the group and
+    /// leave the reader guessing what is in it.
+    pub groups: Vec<crate::assemble::Group>,
+    /// The matrix lanes as they were assembled.
+    ///
+    /// Same reason as [`RegisteredTokens::groups`], plus one more: a matrix
+    /// is a grid, and the grid is only recoverable from the lane. The report
+    /// holds one comparison per input under a flattened `matrix@input` name,
+    /// which is the right thing to *measure* and the wrong shape to read.
+    pub lanes: Vec<crate::assemble::Lane>,
 }
 
-#[cfg(feature = "registry")]
 impl<'a> Suite<'a> {
     /// Add every benchmark registered anywhere in this binary.
     ///
@@ -1008,7 +1002,7 @@ impl<'a> Suite<'a> {
             }
         }
 
-        for group in plan.groups {
+        for group in &plan.groups {
             // One generator for the whole group, cloned per alternative, which
             // is what makes the differences paired - see `ErasedInput`.
             let make = group.make_input();
@@ -1024,6 +1018,7 @@ impl<'a> Suite<'a> {
                 .comparisons
                 .insert(group.name.to_string(), self.add_comparison(group.name, set));
         }
+        tokens.groups = plan.groups;
 
         // Matrices: candidates and inputs registered apart from each other,
         // paired by type into lanes, every pairing measured.
@@ -1042,7 +1037,7 @@ impl<'a> Suite<'a> {
         }
         tokens.warnings = warnings;
 
-        for lane in lanes {
+        for lane in &lanes {
             for input in &lane.inputs {
                 if lane.candidates.len() < 2 {
                     // Nothing to compare against, so this is a plain
@@ -1063,6 +1058,7 @@ impl<'a> Suite<'a> {
                 tokens.comparisons.insert(name, token);
             }
         }
+        tokens.lanes = lanes;
 
         Ok(tokens)
     }

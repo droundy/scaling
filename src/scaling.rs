@@ -24,6 +24,10 @@ impl Config {
     /// `target_rel_error` is the one that makes sense here.
     /// `target_abs_error` is accepted and well defined, but its units are
     /// nanoseconds per `Nᴾ`, which makes it confusing.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
         F: Fn(usize) -> O,
@@ -61,6 +65,10 @@ impl Config {
     ///
     /// See [`bench_scaling_gen`] for the default-accuracy version, and
     /// [`Config::bench_scaling`] for what the accuracy applies to.
+    /// Hidden alongside the free function of the same name: it is the
+    /// same one-shot measurement with an accuracy chosen. See
+    /// [`crate::bench`] for why they are still reachable.
+    #[doc(hidden)]
     pub fn bench_scaling_gen<G, F, I, O>(&self, gen_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
@@ -420,11 +428,6 @@ where
     Config::default().bench_scaling_gen(gen_input, f, nmin)
 }
 
-// The polynomial fit below is validated against synthetic data in
-// `tests::fitting`, but does not yet drive `compute_scaling_gen`: wiring it
-// in changes what gets reported for real workloads (notably `N log N`, which
-// is not a polynomial at all), so it lands separately from the machinery.
-
 /// A polynomial fit against sizes whose error bars were *measured* rather
 /// than inferred.
 #[derive(Debug, Clone, PartialEq)]
@@ -717,6 +720,7 @@ async fn discover_sizes(
     let step = nmin.max(1);
     let budget_ns = budget.as_secs_f64() * 1e9;
     let floor_ns = MIN_MEASURABLE.as_secs_f64() * 1e9;
+    let time_left = |spent: f64| Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
 
     let mut last_n = step;
     let mut last_t = measure(step);
@@ -752,10 +756,9 @@ async fn discover_sizes(
         }
         // Measurable, and affordable: done climbing.
         if last_t >= floor_ns {
-            lo = (last_n, last_t);
             break;
         }
-        let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
+        let left = time_left(spent);
         // Aim each step at the floor we are trying to clear; `next_size`
         // caps the growth and keeps the step affordable. 1.0 is a fine
         // assumption to plan a *discovery* step with when nothing better is
@@ -821,7 +824,7 @@ async fn discover_sizes(
     // took a step, and one whose steps were all too fast to time until the
     // last, leaving a single usable point among several taken.
     if exponent.is_none() {
-        let left = Duration::from_secs_f64((budget_ns - spent).max(0.0) / 1e9);
+        let left = time_left(spent);
         // Aim at where the ladder's top will be - `TIME_SPAN` times the
         // cost we are at. The floor is behind us, so aiming there would ask
         // for a step backwards and get none; aiming at the top measures the
@@ -932,6 +935,15 @@ fn choose_sizes(range: SizeRange, nmin: usize) -> Vec<usize> {
 /// improves it where it matters.
 const INITIAL_REPEATS: usize = 6;
 
+/// The fit [`measure_scaling`] found, and whether the budget ran out first;
+/// a fit that ran out of budget is still the best available answer, just
+/// not a precise one.
+struct Measured {
+    fit: Option<ScalingFit>,
+    /// The budget ran out before the accuracy target was reached.
+    hit_limit: bool,
+}
+
 /// Measure the scaling of `measure` across `sizes`, refining until the
 /// dominant coefficient is known to the configured relative accuracy.
 ///
@@ -947,15 +959,6 @@ const INITIAL_REPEATS: usize = 6;
 /// nanoseconds per `N^power`, whose units change with the power that was
 /// found. Comparing it against a time would be a units error that happens
 /// to typecheck.
-///
-/// Returns the fit and whether the budget ran out first; a fit that ran out
-/// of budget is still the best available answer, just not a precise one.
-struct Measured {
-    fit: Option<ScalingFit>,
-    /// The budget ran out before the accuracy target was reached.
-    hit_limit: bool,
-}
-
 async fn measure_scaling(
     sizes: &[usize],
     cfg: &Config,
@@ -2458,7 +2461,7 @@ mod tests {
     ///
     /// The caller's remedy is `nmin`: start above the size where the
     /// workload changes character and it becomes a power law again, with an
-    /// honest error bar. See [`bench_scaling`] for the measurements.
+    /// honest error bar. See `bench_scaling` for the measurements.
     #[test]
     fn a_flagged_fit_does_not_pretend_to_a_trustworthy_error_bar() {
         println!();
