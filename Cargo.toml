@@ -9,14 +9,39 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
-# Set by `std::hint::black_box`, stabilised in 1.66. (`libc`, which we
-# depend on only to pin benchmarks to a reserved CPU on Linux, wants 1.65.)
-rust-version = "1.66"
+# One floor for the whole crate, rather than one per feature - cargo cannot
+# express the latter anyway, and a single number is a promise people can
+# hold in their heads.
+#
+# Nothing in the default build needs this much: it compiles on 1.66, where
+# `std::hint::black_box` was stabilised. What sets it is the `registry`
+# feature, whose proc-macro dependencies - `syn`, `quote`, `proc-macro2`,
+# `unicode-ident` - all want 1.71. (`inventory` wants 1.68.)
+rust-version = "1.71"
 
-# Only used to set CPU affinity, which only exists on Linux. Elsewhere this
-# crate still has no dependencies at all.
+# Only used to set CPU affinity, which only exists on Linux. Elsewhere the
+# default build of this crate still has no dependencies at all - `inventory`
+# below is optional and off unless `registry` is enabled.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# Collects benchmarks registered anywhere in a crate. Optional, so that a
+# crate not using `registry` pays neither the dependency nor the linker
+# machinery behind it. See REGISTRATION.md.
+#
+# It wants Rust 1.68 where this crate wants 1.66, so `registry` raises the
+# floor for anyone who turns it on; the default build is unaffected and
+# still compiles on 1.66.
+[dependencies]
+# Parses the command line for `Filter::from_args`. Optional: filtering by
+# name is useful, but a crate that does not want an argument parser in its
+# dependency tree should not get one.
+auto-args = { version = "0.3.2", optional = true }
+inventory = { version = "0.3.21", optional = true }
+# The attribute macros. Optional for the same reason `inventory` is: a crate
+# not using `registry` should pay for neither, and this one brings `syn` with
+# it.
+scaling-macros = { version = "0.9.0", path = "macros", optional = true }
 
 # Measures the library itself: what it costs to take a benchmark, and how
 # reproducible the answer is. Not a `#[bench]` harness - it is a plain
@@ -24,4 +49,21 @@ libc = "0.2"
 # harness with the harness would hide a regression in the harness.
 [[bench]]
 name = "harness-cost"
+harness = false
+
+[features]
+# Discover benchmarks registered anywhere in a crate, rather than assembling
+# them by hand into one `Suite`. See REGISTRATION.md.
+registry = ["dep:inventory", "dep:scaling-macros"]
+# Build a `Filter` from the command line. The matching itself needs no
+# dependency and is always available; this is only the parsing.
+cli = ["dep:auto-args"]
+
+[workspace]
+members = [".", "macros"]
+
+# Shows a benchmark binary shaped the way one using this crate would be,
+# with a filter read from the command line and the environment.
+[[bench]]
+name = "filtered"
 harness = false

@@ -3,6 +3,23 @@ on: [push, pull_request]
 name: Continuous integration
 
 jobs:
+  # One floor for the whole workspace, tested with the feature on, since
+  # that is what sets it.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.71.0
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --features registry
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -10,7 +27,6 @@ jobs:
       matrix:
         rust:
           - stable
-          - 1.66.0
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -21,7 +37,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --all
+          args: --all --features registry
 
   test:
     name: Test Suite
@@ -30,7 +46,6 @@ jobs:
       matrix:
         rust:
           - stable
-          - 1.66.0
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -38,7 +53,15 @@ jobs:
           profile: minimal
           toolchain: ${{ matrix.rust }}
           override: true
+      # Both ways round. With the feature off the crate must still build
+      # with no dependencies at all, which is the thing easiest to break by
+      # accident and hardest to notice - nothing fails, the dependency tree
+      # just quietly grows.
       - uses: actions-rs/cargo@v1
         with:
           command: test
           args: --all
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --features registry

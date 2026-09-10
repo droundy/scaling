@@ -59,7 +59,7 @@ that drive them are deferred together to stage 6.
 | 3 | `Suite::add_registered()` — this completes **Design B** | yes |
 | 4 | `scaling-macros`: the attribute proc macros | yes |
 | 5 | matrices: candidates × inputs | yes |
-| 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | no |
+| 6 | internal simplification: remove `Plan`/`Drop`; `Suite::add_*_with` | **done** |
 | 7 | runner, CLI, output formats — this completes **Design A** | mostly |
 | 8 | migrate docs, README, `benches/` | no |
 
@@ -99,10 +99,11 @@ pub struct Registered {
 }
 
 pub enum Kind {
-    /// Calls suite.add / add_input / add_gen_input with the real closure.
-    Flat(fn(&mut Suite<'_>, &Config, &str)),
+    /// Calls suite.add / add_input / add_gen_input with the real closure,
+    /// handing back the token so results stay reachable by name.
+    Flat(fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>),
     /// Calls suite.add_scaling / add_scaling_gen; nmin baked into the fn.
-    Scaling(fn(&mut Suite<'_>, &Config, &str)),
+    Scaling(fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>),
     /// One alternative in a comparison group. `ComparisonSet` is a consuming
     /// builder, so this takes and returns it.
     Alt(for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>),
@@ -183,14 +184,19 @@ a backstop, not the error path.
 ```rust
 pub struct GenInputRegistration {
     pub group: &'static str,
-    pub type_id: TypeId,
+    /// A function returning the id, not the id itself: a registration is a
+    /// `static`, so it is built in a `const` context, and `TypeId::of` only
+    /// became usable in one in Rust 1.91. A `fn` pointer is
+    /// const-constructible on every version.
+    pub type_id: fn() -> TypeId,
+    pub type_name: &'static str,
     pub make: fn() -> ErasedInput,
 }
 
 pub struct MatrixCandidate {
     pub matrix: &'static str,
     pub name: &'static str,
-    pub input_type: TypeId,          // from the fn signature
+    pub input_type: fn() -> TypeId,  // from the fn signature; see above
     pub is_baseline: bool,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
@@ -402,13 +408,26 @@ silent overwrite.
 
 ### Compiling out of normal builds
 
-A `#[test]` fn is *not* erased by `#[test]` alone — it is `#[cfg(test)]`,
-evaluated by rustc, that removes it. An attribute proc macro can do better
-by construction, because it chooses its own expansion: wrap everything it
-emits, the original function included, in `#[cfg(feature = "scaling-bench")]`.
-With the feature off — the default — none of it is compiled, type-checked or
-linked, so annotated benchmarks can live in `src/` next to what they measure
-at zero cost to ordinary builds and to published-crate consumers.
+An earlier draft had the macro emit `#[cfg(feature = "scaling-bench")]`
+around its whole expansion. **Don't.** That invents a feature name the
+caller never chose, and compiles silently to nothing for anyone who has not
+defined that exact feature.
+
+It is also unnecessary. A `#[cfg]` written *above* the attribute strips the
+item before the macro ever runs — verified: a proc macro placed under a false
+`#[cfg]` never executes. So the caller picks their own name and nothing has
+to be built in:
+
+```rust
+#[cfg(feature = "my-benchmarks")]
+#[scaling::bench]
+fn something() { ... }
+```
+
+With that feature off, none of it is compiled, type-checked or linked, so
+annotated benchmarks can live in `src/` next to what they measure at zero
+cost to ordinary builds and to published-crate consumers. It also works with
+any `cfg`, not only features.
 
 Two consequences:
 
@@ -464,6 +483,19 @@ than being a type error.
 An **orphan** (a candidate whose lane has no inputs, or an input whose lane
 has no candidates) is almost always a typo or a type mismatch, so it is a
 startup warning naming the item and its type.
+
+Warnings and errors are separated deliberately, and reach the caller by
+different routes. A contradiction — two baselines, two candidates of a name,
+a lane whose types do not really match — makes that lane untrustworthy, so it
+is skipped, while an orphan leaves everything else perfectly good. Both come
+back in `RegisteredTokens::warnings` rather than stopping the run; only the
+whole-registry errors of stage 2 come back as `Err`.
+
+One subtlety worth knowing: a lane is keyed on the type's *spelled name*,
+since `TypeId` is not `Ord` and cannot bucket. The real `TypeId`s are then
+checked within each lane, so two different types that happen to spell
+themselves alike are caught rather than paired — which would otherwise be a
+downcast panic later.
 
 ### Generic candidates and sized inputs
 
@@ -531,7 +563,38 @@ a worst-case estimate before starting.
 Only now, with the registry working, do the internal changes become
 motivated rather than speculative.
 
-### Removing `Plan` / `Drop`
+### Prerequisite: results reachable by name — **done**
+
+**Before any of the direct API is removed**, a `Stats` or a `Comparison` has
+to be gettable out of a finished suite *by name* — looked up by its group or
+benchmark name — and not only through the `Token` returned when it was
+added.
+
+This is now in place: `Report::names`, `Report::contains`, `Report::stats`,
+`Report::scaling`, `Report::comparison`, the generic `Report::get`, and
+`Report::all_stats`/`all_comparisons` for iterating one kind out of a mixed
+report. Asking for the wrong type gives `None` rather than the wrong value,
+so a caller that does not know what a name refers to can simply ask.
+
+`Reportable` grew an `as_any` to make it possible. Rendering was once all it
+had to do, because anyone wanting the measurement rather than its text held
+a `Token`; that stops being true the moment the caller did not write the
+`add` call. The original design note — "neither an enum of result kinds nor
+any downcasting is needed" — was true of the problem as it stood then and is
+not true of this one.
+
+Benchmarks get driven by scripts, not only read by people: checking whether
+the best version of a function is really the one being used under some
+circumstance, say. A script like that discovers what it wants at runtime and
+cannot hold a token that was returned when the benchmark was registered —
+and under `Suite::add_registered` nobody holds those tokens at all, because
+nothing wrote the `add` call.
+
+That scenario is what the tests exercise, rather than only the mechanism:
+they throw the tokens away, find a benchmark by searching `names()`, and ask
+which alternative of a comparison actually measured fastest.
+
+### Removing `Plan` / `Drop` — **done**
 
 `Config` carries a `Plan` behind an `Arc` — promised count, cached
 `z_alpha`, count made — plus a `Drop` asserting the counts match, plus a
@@ -569,7 +632,7 @@ Two implementation notes found by building this once already:
   process-global seed counter. The tests that would catch this are gated on
   a quiesced machine and **skip silently on most**, reporting `ok` in 0.00s.
 
-### Per-benchmark `Config`
+### Per-benchmark `Config` — **done**
 
 Add `add_with`, `add_input_with`, `add_gen_input_with`, `add_scaling_with`,
 `add_scaling_gen_with`, each taking the `Config` that one benchmark is
@@ -616,6 +679,20 @@ often provoke.
 
 ---
 
+## Two constraints found while building this
+
+**A registration is a `static`, so everything in it must be const.** That
+rules out `TypeId::of::<I>()` as a field value: it only became usable in a
+`const` context in Rust 1.91, far above this crate's 1.66. Registrations
+therefore store `fn() -> TypeId` and assembly calls it. Worth knowing before
+adding any other field - `stringify!` output and `env!` are fine, most things
+that look like values are not. Clippy's `incompatible_msrv` lint catches
+this; a modern toolchain alone does not, since it compiles happily.
+
+**`inventory` wants Rust 1.68**, above this crate's 1.66. Being optional it
+only raises the floor for crates enabling `registry`; the default build is
+unaffected.
+
 ## `inventory` risk
 
 Collection is via linker sections and `ctor`-style registration. Known edge
@@ -660,6 +737,57 @@ process-wide registry. Three limits, worst first:
 
 Given (2), manual wrappers stay the recommended default.
 
+### Registrations from more than one crate or version
+
+Once an old copy of a crate, or a rival crate, registers alongside the
+current one, several registrations arrive under the same name — they *are*
+the same source, a version apart. Before this was handled, that was not
+merely unsupported: the duplicate-name check rejected the whole matrix, so
+the automatic-pickup path above produced zero lanes.
+
+Candidates and inputs need opposite treatment, which is the crux:
+
+- **Candidates are the point.** Two versions of one implementation are
+  exactly the comparison being asked for, so both are kept and told apart.
+- **Inputs are redundant.** Two versions of one generator are meant to build
+  the same data, so measuring on both doubles the work for nothing — and
+  worse, an old generator paired with new implementations quietly changes
+  what is being measured if the generator itself has changed since. One is
+  kept: the newest.
+
+**Names carry only what distinguishes them.** Two versions of one crate give
+`sort@0.8.0` and `sort@0.9.0`; two different crates give `sort@mine` and
+`sort@theirs`; both differing gives `sort@mine-2.0.0`. Asking merely whether
+crates *differ* is the wrong question — with one implementation per crate
+the versions differ too, and `sort@mine-2.0.0` says nothing `sort@mine`
+does not.
+
+**`VersionPolicy::LatestPerCrate` keeps the newest of *each crate*.** Per
+crate, not overall: when the point is measuring against other crates,
+dropping a rival's implementation because your own version number happens to
+be higher would be exactly wrong. `RegistryOptions::latest_per_crate()` is
+the way to ask for it, and it is what you want when several rivals are
+present and only their current releases are interesting.
+
+**Versions compare numerically.** `"0.10.0" < "0.9.0"` as text, which is
+backwards and silently so — a policy picking the newest would take 0.9.0
+over 0.10.0 and nothing would look wrong. A pre-release or build suffix is
+dropped rather than made to mean something, and an unparseable version reads
+as `0.0.0` rather than stopping a run. Three integers do not justify a
+`semver` dependency in a crate whose default build has none.
+
+**Several baseline claimants is expected here**, since every version of a
+declaration marked `baseline` says so. `BaselinePolicy` settles it, and
+defaults to `Oldest` — which makes a regression read the right way round,
+the new code measured *against* the old. Picking the newest would report
+every older version as a change *from* the code being written, which is
+backwards.
+
+That is only true across origins. Two *different* functions claiming the
+baseline within one crate at one version is a plain contradiction, not a
+version spread, and is still an error — resolving it by version would pick
+one silently and hide the mistake.
+
 ### `BaselinePolicy`
 
 `env!("CARGO_PKG_VERSION")` / `env!("CARGO_PKG_NAME")` evaluate in whichever
@@ -697,3 +825,153 @@ is a parameter to `add_registered`; under A, a CLI flag.
 startup check. The check is exhaustive and reported before measuring, but it
 is a check rather than a proof, and it is unavoidable if separately
 registered functions are to share one generated input.
+
+---
+
+# Running only some of the benchmarks
+
+Once benchmarks are registered rather than assembled, a binary holds every
+benchmark in the crate and a run measures all of them. That is the wrong
+default for iterating on one function, and it gets worse as a crate grows —
+`Suite` gives each entry its own `max_time`, so the cost of a run is linear
+in how many there are.
+
+## Command line *and* environment, not one or the other
+
+Both, with the command line taking precedence. They fail in different places
+and neither covers the other:
+
+- **The command line** is what someone types. It is discoverable, it can
+  have a `--help`, and `cargo bench -- <filter>` is the shape people already
+  know from `cargo test`.
+- **The environment** is what survives a wrapper. `make bench`, a CI step, a
+  `cargo bench --workspace` that fans out over several crates — none of
+  those thread arguments through without being taught to, and
+  `SCALING_FILTER=sort make bench` needs nobody's cooperation.
+
+## What cargo actually passes, measured
+
+This is the part worth knowing before writing a parser, because it is not
+what you would guess:
+
+| invocation | argv the binary sees |
+| --- | --- |
+| `cargo bench --bench b` | `["…/b-<hash>", "--bench"]` |
+| `cargo bench --bench b -- sort --exact` | `["…/b-<hash>", "sort", "--exact", "--bench"]` |
+| `cargo test --bench b` | `["…/b-<hash>"]` |
+
+Three consequences:
+
+1. **`--bench` arrives even with `harness = false`, and even when the user
+   passed no arguments at all.** A parser that rejects unknown flags fails on
+   the plainest possible invocation, `cargo bench`. It has to be swallowed.
+2. **Cargo appends it *after* the user's arguments**, so a parser cannot
+   assume its own flags come last.
+3. **`cargo test` passes nothing**, so the same binary must do something
+   sensible with no arguments — which for a bench target under `cargo test`
+   means "compile and exit quickly", not "measure everything". Worth a
+   `--test` style fast path later; out of scope here.
+
+## Surface — **built**
+
+```
+--filter PATTERN     keep entries whose name contains this; repeatable
+--skip PATTERN       drop entries matching this, after the filters
+--exact              match the whole name instead of a substring
+--list               print what would run, and measure nothing
+--bench, --test      ignored; cargo passes these whether or not you do
+```
+
+Parsed with [`auto-args`], behind the optional `cli` feature — the matching
+itself needs no dependency and is always available. `auto-args` has no
+positional arguments, so the filter is `--filter sort` where `cargo test`
+would take a bare `sort`.
+
+| variable | equivalent |
+| --- | --- |
+| `SCALING_FILTER` | space-separated `FILTER`s |
+| `SCALING_SKIP` | space-separated `--skip` patterns |
+| `SCALING_EXACT` | set to anything for `--exact` |
+
+Substring by default, following `cargo test`; several filters are an OR, and
+`--skip` is applied afterwards so `--skip` can carve a hole in a broad
+filter.
+
+`--list` earns its place here more than in most harnesses: with registered
+benchmarks nobody wrote the names down, so "what is there?" has no other
+answer. It should print the name and kind of each entry and exit 0 without
+claiming the machine.
+
+## What a filter matches, and the one thing it cannot do
+
+Names are what the report shows: `mymod::fib_200` for a benchmark,
+`sorting@reversed` for a matrix cell, the group name for a comparison.
+
+**A comparison is atomic.** Its alternatives are measured in one interleaved
+round precisely so their differences are paired, so "run only the
+`unstable` alternative of the `sorting` comparison" is not a smaller version
+of that comparison — it is a different measurement, and a worse one. So
+filtering works at *entry* granularity: a comparison is in or out as a
+whole, and a filter matching its name takes all of it.
+
+Whether a filter matching an *alternative's* name should pull in its whole
+comparison is a real choice. Pulling it in is surprising (you asked for one
+thing and got four); not pulling it in is surprising the other way (you named
+something real and got nothing). **Suggest: not matched, but `--list` shows
+alternatives indented under their comparison** so the name you would have to
+filter on is visible.
+
+## Where it lives
+
+A `Filter` on the `Suite`, not on `add_registered`, so that hand-added
+benchmarks obey it too — a run that honours `--filter` for registered
+benchmarks and silently ignores it for the two you added by hand is worse
+than not having it.
+
+```rust
+let mut suite = cfg.suite().with_filter(Filter::from_env_and_args());
+suite.add_registered();
+suite.add("by_hand", || work());   // filtered on the same terms
+println!("{}", suite.run());
+```
+
+`Filter::from_env_and_args()` is explicit rather than automatic: a library
+that reads `argv` because it was linked in, without being asked, is a
+library that surprises somebody. Under Design A the generated runner calls
+it, so this composes forward rather than being replaced.
+
+Filtered-out entries are **not added at all** — no `Clock`, no scheduler
+slot, no time. `add*` still returns a `Token`, which simply never fills;
+that matches what already happens when a suite is built and not run, and
+keeps the return type honest without an `Option` at every call site.
+
+### One consequence worth stating
+
+Filtering changes the Bonferroni count, and it should. Run five comparisons
+and you are exposed to five chances of a false positive; run one and you are
+exposed to one. `Suite::run` computes the limit from what the suite actually
+holds, so this already falls out — but it means **a comparison's verdict can
+differ between a filtered and an unfiltered run**, and the docs must say so
+rather than leaving someone to discover that a change was "significant"
+alone and not in the suite.
+
+## What was built
+
+`Filter` (matching, always available), `Filter::from_args` /
+`from_env` / `from_env_and_args` (behind `cli`), `Suite::with_filter`,
+`Suite::names`, and `benches/filtered.rs` as a worked example. Verified
+through real `cargo bench` invocations rather than only in tests: plain,
+`-- --list`, `-- --filter sorting`, `-- --filter sorting --skip large`, and
+`SCALING_FILTER=hashing` with no arguments passed at all.
+
+Still open:
+
+- **Registered benchmarks do not yet say what a filter skipped.** They
+  simply do not appear, which is right for a report and thin for someone
+  wondering whether their pattern matched anything.
+- **`--list` shows entries, not alternatives.** A comparison lists under its
+  own name, so the alternative names — the ones you would have to *stop*
+  filtering on — are not shown. Indenting them under their comparison is the
+  suggested fix.
+
+[`auto-args`]: https://crates.io/crates/auto-args
