@@ -210,7 +210,7 @@ fn calibrate(w: &mut Workload, seed: &mut u64) -> usize {
     // deleted would never reach `target`, and the batch would grow until
     // generating it exhausted memory.
     let prepare_ceiling = Duration::from_millis(50);
-    let mut n = 64usize;
+    let mut n = 1usize;
     loop {
         *seed = step(*seed);
         let p = Instant::now();
