@@ -868,6 +868,170 @@ It would also explain the `reported/true` gap in (19) directly, rather than
 leaving it as an observation, and it gives `quiet-bench status` the evidence
 (7) asks for.
 
+### [ ] 21. Two canaries, and report the ratio
+
+Interleave two workloads of *known constant* cost with the real samples.
+Because their true cost does not change, everything their timings do is the
+machine - measured in the same units, on the same core, through the same
+timing path, in the same round. This subsumes most of what (13), (14) and
+(20) were separately reaching for, and it is the largest effect measured so
+far by a wide margin.
+
+**The result.** Spread of the estimate across *eight independent process
+invocations*, per iteration:
+
+| payload | raw, battery | raw, AC | ratio, battery | ratio, AC |
+| --- | --- | --- | --- | --- |
+| L1-resident | 5.07% | 16.79% | **0.034%** | **0.026%** |
+| L2-resident | 5.02% | 16.95% | 0.827% | 0.317% |
+| DRAM-bound | 12.51% | 6.01% | **0.092%** | **0.097%** |
+
+Raw nanoseconds swing between 5% and 17% with the power source; the ratio
+sits between 0.03% and 0.83% everywhere, and the well-matched cases barely
+notice that the laptop was unplugged (0.026% against 0.034%). During the
+battery runs the clock was swinging 400MHz-1400MHz *while idle*.
+
+**The two canaries, and why two.**
+
+* **CPU**: a dependent integer chain in registers. Minimal ILP, so it is
+  close to a pure clock reading. Measured CV of **0.02%** quiesced - a
+  200ppm ruler.
+* **Memory**: a pointer chase from a *fresh start each call*, over an array
+  sized against L3. Latency bound.
+
+They are not redundant and cannot be merged: their cross-correlation is
+-0.005, because core clock and the memory subsystem scale independently. A
+frequency ramp moves the CPU canary and the CPU payloads and leaves the
+memory canary alone; whatever scales the uncore does the reverse.
+
+**Matching is not optional, and needs no user input.** Core-bound payload
+divided by the CPU canary gives 0.03%; divided by the memory canary, 23%.
+The DRAM payload is the exact mirror. Picking whichever canary yields the
+lower ratio spread chose correctly **9 times out of 9**, never closer than
+5x, so the choice can be made from the data and never exposed.
+
+**A mixed workload wants both canaries, added.** For a workload that is
+purely one thing, blending is strictly worse: sweeping `P / (C1^w *
+M1^(1-w))` gives a monotone curve with no interior optimum, so the best
+blend is always a pure canary. But a workload that spends part of its time
+CPU bound and part of it memory bound is a different case, and there the
+physical reading - `P = a*C1 + b*M1`, with `a` and `b` the amount of each
+kind of work - wins decisively. Leave-one-out prediction of a held-out run,
+against deliberately mixed payloads:
+
+| payload | `a*C1 + b*M1` | best single canary | fitted memory share |
+| --- | --- | --- | --- |
+| built ~10% memory | **0.207%** | 1.193% | 11.3% |
+| built ~50% memory | **0.505%** | 4.956% | 53.5% |
+| pure CPU | 0.170% | 0.185% | 1.1% |
+| pure memory | 0.116% | 0.107% | 99.7% |
+
+Ten times better on the even mixture, and the fitted share recovers the
+construction. Past about 90% of one kind the single canary is as good and
+the second parameter costs slightly. Note this *is* the cross-correlation
+idea done properly: the coefficient is built from `cov(y, C1)`, with two
+refinements worth knowing - the shared part of the two canaries has to be
+partialled out (barely matters here, their correlation is -0.005), and a
+correlation is normalised, so it gives the CPU-versus-memory *share* but not
+the scale. For `a` and `b` in real units you need the slope,
+`cov(y,C1)/var(C1)`.
+
+**But `a` and `b` cannot be fitted inside one run.** Round-to-round jitter
+is mostly each canary's own noise, so a within-run regression is attenuated
+- it returned an exponent of 0.64 where the truth was demonstrably 1 - and
+the attenuation differs per run, so every run then reports a slightly
+different quantity:
+
+| `a`, `b` fitted from | spread of the estimate |
+| --- | --- |
+| within one run, per-sample | 12.63% |
+| within one run, 100-round blocks | 32.69% |
+| within one run, 500-round blocks | 49.99% |
+| **across eight runs** | **0.505%** |
+
+Bigger blocks make it worse, trading noise per point for too few points. So
+the decomposition is a property of the *benchmark* that has to be learned
+from the machine visiting several different states - which is what the
+retry-and-combine loop produces anyway. Fit across the runs that were kept,
+not inside any one of them. It is also identifiable exactly when it is
+needed, since fitting requires machine-state variation and a machine with
+none needs no correcting.
+
+Generalising: **a fitted parameter must be fixed across the runs being
+compared, or the runs are not reporting the same quantity.** Choosing the
+weight per run by minimising its own within-run spread gave 86% where a
+fixed pure canary gave 0.32%. This is also why the discrete canary choice
+above is safe and a continuous weight is not: a 9-of-9 decision with a 5x
+margin never flips, while a fitted weight always wobbles.
+
+**Three ways a memory canary silently stops being one.** Each makes it
+report a machine quieter than it is, which is the dangerous direction:
+
+* *A fixed start.* A 100us canary touches only tens of KiB, so walking the
+  same path every call goes cache-resident: 23ns a read instead of 142ns.
+* *A fixed array size.* It must exceed L3, and L3 runs from ~4MiB on a
+  laptop to 384MiB on EPYC. Size it from `cache/index3/size`.
+* *Calibrating with a different access pattern than production.* Calibrating
+  the chase from a fixed start oversized the count ~6x and made every sample
+  three times too long.
+
+Sizing, measured: dependent DRAM latency here is **142ns**, so a 100us
+canary is ~700 reads touching ~44KiB - under L1, so it displaces almost
+nothing. Across plausible machines (70-250ns) that is 400-1400 reads and
+25-90KiB, never more than ~7% of a 1.25MiB L2. The design is insensitive to
+the 3.5x spread in memory latency, but the read count must be *calibrated*
+rather than hardcoded.
+
+**The per-iteration trap, which cost me a day.** Each member calibrates its
+iteration count once, at whatever clock prevails at that instant, so counts
+vary **10-25% between runs** (24.8% for the streaming workload). Comparing
+per-*sample* durations therefore inherits that noise and decorrelates two
+workloads that are physically near-identical - it made the across-run gain
+look like 1.1x when it is really 151x. Within a run the count is constant
+and cancels out of any spread, so this bites only between runs. Divide by
+the count before taking any ratio.
+
+**Throw-out granularity: blocks, not rounds.** Gating on a single anomalous
+canary sample scored *exactly the base rate* - no information - and under
+sustained load it was actively harmful, because a round whose canary was
+preempted is a round whose payload ran clean. A 64-round window median
+against the run's own baseline, tested against a real `cargo build` in
+another directory, found **94% of the contaminated rounds at 64%
+precision**. So the natural unit is a contiguous stretch, which is also
+exactly the unit a "wait for quiet and retry" loop discards.
+
+**The pair is diagnostic.** That `cargo build` raised every member's median
+~13%, but the CPU canary's tail went 0.10% -> 0.00% while the memory
+canary's went 1.07% -> 4.00%. Level shift with no tail is multi-core turbo
+budget; level plus tail is that *and* memory contention.
+
+*Caveats.* All eight runs used one binary, so code layout was constant -
+cross-build reproducibility is untested and is the open question in the
+alignment entry below. The canary ratio is a machine-relative unit:
+excellent for regression detection, and it needs a stored reference to
+become nanoseconds again.
+
+The one payload that resists all of this is the L2-resident one, at
+0.32-0.83% where the matched cases reach 0.03%. It is *not* an unresolved
+mixture: the additive fit attributes only 1-11% of it to memory, and the
+blend sweep finds its optimum at a pure CPU canary, so there is no
+combination left to find. Its within-run ratio spread is 0.13-0.38% against
+0.32-0.83% across runs, which points at something constant within a run and
+different between them - allocator placement deciding which L2 sets the
+working set lands in. Canaries measured in the same round cancel *temporal*
+variation and can do nothing about *configurational* variation. Closing that
+gap means either a third canary genuinely resident in L2, or the alignment
+question below; it is not a canary-combination problem.
+
+**This wants its own PR and a design session before any code.** What is
+described here is a different algorithm rather than an adjustment to the
+existing one - it changes what is measured, what is reported, and how many
+runs an answer takes - so it should be developed on a branch off `main`,
+very likely standing apart from the current sampling code until it earns its
+way in. Everything above is measurement, not design: the design question of
+how canaries, the retry loop, the accuracy contract and the reported units
+fit together has not been settled and should not be settled incrementally.
+
 ## Tried without success so far
 
 Read this section with suspicion. A negative result holds only over the
@@ -931,6 +1095,17 @@ the answer. None of these is closed.
   median's SE stops falling like 1/sqrt(n) above n≈30, which looks like it
   snapping to a grid.* Where robustness does pay is on per-round contrasts,
   which is (16) and (17), not on raw samples.
+- **Taking the minimum, for a ratio.** For a raw timing "the low ones are the
+  accurate ones" is sound: noise is additive and positive. For a *ratio* it
+  inverts, because noise in the denominator makes the ratio smaller - so the
+  minimum systematically selects the rounds where the canary was most
+  perturbed. Measured over per-round ratios it was the worst of five
+  statistics by a wide margin (13-28% spread, against 0.007-0.5% for median
+  and 10% trim). Median and trimmed mean are the ones that work there, which
+  is the same answer as (17) reached from the other direction. *Turbo makes
+  this worse even for raw timings: the minimum is "cost at the best clock
+  this run reached", which is a thermal and power-state dependent quantity
+  rather than a machine constant.*
 
 ### Decisions, not measurements
 
@@ -1014,3 +1189,30 @@ the answer. None of these is closed.
   model was synthetic, not measured; calibrating it needs two frequencies.*
   So the case for normalising is the coefficient and the per-rung error
   bars, not the power.
+- **Autocorrelation fixes only what is shorter than the window you look
+  through.** Correcting the standard error by the sample series' own
+  autocorrelation - equivalently, taking it from the spread of block means -
+  is right in principle and measurably insufficient in practice. On a
+  quiesced machine it matters: memory-bound samples have a lag-1 of +0.59
+  and a variance inflation of 5-8, so `sd/sqrt(n)` is ~2.6x too tight for
+  them while being about right for CPU-bound work. On an unquiesced machine
+  it recovers only a sixth of the gap (naive 0.01-0.07 of the truth,
+  corrected 0.06-0.26), because the dominant variation there is not
+  correlation at all - it is the frequency ramp, which is nonstationarity
+  and no within-run statistic sees it. Correlation wants the ACF; drift
+  wants (21).
+- **Mains power is less reproducible than battery.** Across eight runs the
+  CPU payloads spread 16.8% on AC against 5.1% on battery, because
+  `powersave` on AC has 400MHz to 4.4GHz to roam through while the battery
+  cap narrows the range. Plugging in is not the safe choice it looks like.
+- **Load stabilises the memory clock.** The memory canary's across-segment
+  spread fell from 21.4% on an idle battery machine to 4.3% during a
+  `cargo build`: a busy machine holds its uncore clock up instead of idling
+  down and back. Quiet is not the same as steady.
+- **The calibrated batch misses its target duration.** Calibration happens
+  once, at whatever clock prevails at that instant, so the samples it sizes
+  land at 74-144us against a 100us target - 8-22% spread per workload across
+  eight runs. Since per-sample spread depends strongly on sample duration
+  (19), and the tick moiré sits at a particular duration, two runs of the
+  same benchmark can end up in different noise regimes. An argument for
+  re-checking the batch size when the clock has moved.
