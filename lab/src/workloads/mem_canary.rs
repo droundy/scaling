@@ -63,5 +63,11 @@ fn run(i: &mut Input) -> u64 {
 }
 
 pub fn workload() -> Workload {
+    // Build the table now rather than on the first `gen`. It is a one-time
+    // ~50ms of sequential writes, and inside `gen` that lands in the very
+    // first `prepare` - where calibration reads it as this benchmark being
+    // ruinously expensive to generate, trips its ceiling, and gives up
+    // without ever growing the batch.
+    LazyLock::force(&CHASE);
     Workload::new("mem_canary", Kind::MemCanary, gen, run)
 }

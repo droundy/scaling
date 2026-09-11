@@ -139,6 +139,20 @@ within-run jitter is mostly each canary's own noise, so the fit is
 attenuated and differs per run. It needs several runs, so it belongs in
 `compare`.
 
+## Choosing payloads
+
+```sh
+LAB_PAYLOADS=sort_1k,parse_int cargo run --release -- run 4000 runs/a.csv
+```
+
+Empty or unset means all of them. The canaries are never optional - every
+ratio estimator divides by one of them.
+
+Worth using when a run is getting slow, because a round costs what its
+members cost: six workloads at 100 us each is a 600 us round, and a payload
+you are not studying is 100 us of drift between the two you are. `compare`
+warns if you hand it recordings that measured different sets.
+
 ## Replay
 
 ```sh

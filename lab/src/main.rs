@@ -142,6 +142,17 @@ fn compare(paths: &[String]) {
         std::process::exit(2);
     }
     let names = runs[0].names.clone();
+    // Selecting payloads per run is easy, so mixing recordings that measured
+    // different sets is easy too. Say so rather than quietly reporting NaN
+    // for whatever the first recording happened to contain.
+    for (path, r) in paths.iter().zip(&runs) {
+        if r.names != names {
+            eprintln!(
+                "warning: {path} measured a different set of workloads\n                          ({:?} against {:?})",
+                r.names, names
+            );
+        }
+    }
     let ests = estimate::all();
 
     println!(

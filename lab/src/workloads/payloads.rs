@@ -6,9 +6,16 @@
 //! [`super::cpu_canary`] instead of a line here.
 
 use super::{Input, Kind, Workload};
+use std::collections::HashMap;
 
-pub fn all() -> Vec<Workload> {
-    vec![
+/// Every payload, keyed by name, so a run can take any subset of them.
+///
+/// A map rather than a list because selection is by name: see
+/// [`super::selected`], which is what `LAB_PAYLOADS` drives. Nothing here
+/// depends on the order - the caller sorts - so adding a payload is still
+/// one line.
+pub fn all() -> HashMap<String, Workload> {
+    [
         // Shuffling belongs in the generator: sorting an already-sorted
         // vector measures something else entirely.
         Workload::new("sort_1k", Kind::Payload, gen_sort, run_sort),
@@ -16,6 +23,9 @@ pub fn all() -> Vec<Workload> {
         Workload::new("sum_64k", Kind::Payload, gen_sum, run_sum),
         Workload::new("parse_int", Kind::Payload, gen_parse, run_parse),
     ]
+    .into_iter()
+    .map(|w| (w.name.to_string(), w))
+    .collect()
 }
 
 fn gen_sort(seed: u64) -> Input {

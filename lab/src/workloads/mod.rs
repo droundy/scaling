@@ -176,7 +176,45 @@ impl Workload {
 /// earlier version of this program had a payload that literally called the
 /// memory canary, which is how that mistake looks from the inside.
 pub fn all() -> Vec<Workload> {
+    selected(&std::env::var("LAB_PAYLOADS").unwrap_or_default())
+}
+
+/// The canaries, plus the payloads named in `names` - a comma-separated
+/// list, or empty for all of them.
+///
+/// Selecting a subset is worth having because a round costs what its members
+/// cost: six workloads at 100 us each is a 600 us round, and a payload you
+/// are not studying is 100 us of drift between the two you are.
+///
+/// **The canaries are never optional.** Every ratio estimator divides by one
+/// of them, so a run without both has nothing to compare against.
+///
+/// Sorted by name before returning, because [`payloads::all`] is a `HashMap`
+/// and its iteration order varies between processes. Two runs that listed
+/// their workloads in different orders would still be *correct* - the
+/// recording is keyed by name and the round order is reshuffled anyway - but
+/// the reports would be gratuitously hard to read side by side.
+pub fn selected(names: &str) -> Vec<Workload> {
+    let mut pool = payloads::all();
+    let mut chosen: Vec<Workload> = if names.trim().is_empty() {
+        pool.into_values().collect()
+    } else {
+        names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| {
+                pool.remove(n).unwrap_or_else(|| {
+                    let mut known: Vec<String> = payloads::all().into_keys().collect();
+                    known.sort();
+                    panic!("no payload named {n:?}; known payloads are {known:?}")
+                })
+            })
+            .collect()
+    };
+    chosen.sort_by_key(|w| w.name);
+
     let mut ws = vec![cpu_canary::workload(), mem_canary::workload()];
-    ws.extend(payloads::all());
+    ws.extend(chosen);
     ws
 }
