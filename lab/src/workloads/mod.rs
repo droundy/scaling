@@ -14,7 +14,7 @@
 //! test, and a `workload()` that names them.
 //!
 //! ```ignore
-//! fn gen(seed: u64) -> Input { Input::Ints(crate::workloads::shuffled(1024, seed)) }
+//! fn gen(seed: u64) -> Input { Input::shuffled(1024, seed) }
 //!
 //! fn run(i: &mut Input) -> u64 {
 //!     let v = i.ints();

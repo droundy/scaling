@@ -37,7 +37,7 @@ or a line in `workloads/payloads.rs` if it is small. A module needs three
 things:
 
 ```rust
-fn gen(seed: u64) -> Input { Input::Ints(shuffled(1024, seed)) }
+fn gen(seed: u64) -> Input { Input::shuffled(1024, seed) }
 
 fn run(i: &mut Input) -> u64 {
     let v = i.ints();
