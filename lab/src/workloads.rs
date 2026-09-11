@@ -9,15 +9,25 @@
 //! One line in [`all`]:
 //!
 //! ```ignore
-//! generated("sort_1k", |seed| shuffled(1024, seed), |v| { v.sort_unstable(); v[0] })
+//! payload("sort_1k", |s| Input::Ints(shuffled(1024, s)), |_, i| {
+//!     let v = ints(i);
+//!     v.sort_unstable();
+//!     v[0]
+//! }),
 //! ```
 //!
 //! The first closure makes one input and runs **before the timer starts**;
 //! the second is the thing being measured. Keep everything you do not want
 //! in the number - allocation, filling a buffer, restoring order a previous
 //! iteration destroyed - in the generator.
-
-use std::rc::Rc;
+//!
+//! Both are plain `fn` pointers. Non-capturing closures coerce to those, so
+//! the one-liner above works, but a closure that captures a variable will
+//! not compile. Put the constant in the closure body, as `1024` is here.
+//!
+//! If your benchmark needs an input shape [`Input`] does not have, add a
+//! variant and an accessor beside [`ints`]. That is the only place in this
+//! program where adding a benchmark costs more than one line.
 
 /// What a workload is mostly limited by. Used to pick which canary a
 /// payload should be divided by; see `estimate::ratio_auto`.
@@ -31,70 +41,82 @@ pub enum Kind {
     Payload,
 }
 
-/// One thing to time, in two phases.
+/// One prepared input, in whatever shape the benchmark wants.
 ///
-/// The split is the point: [`Bench::prepare`] is called outside the timed
-/// region and [`Bench::run`] inside it, so a benchmark measures the work and
-/// not the scaffolding around it.
-pub trait Bench {
-    fn name(&self) -> &'static str;
-    fn kind(&self) -> Kind;
-    /// Build `iters` inputs. Not timed.
-    fn prepare(&mut self, iters: u64, seed: u64);
-    /// Run over what `prepare` built. Timed.
-    fn run(&mut self) -> u64;
+/// An enum rather than a generic or a trait object, so that a heterogeneous
+/// list of benchmarks stays a plain `Vec` of a concrete type.
+pub enum Input {
+    Ints(Vec<u64>),
+    Text(String),
+    /// Canaries generate nothing - their input is the machine - so they
+    /// carry the batch size instead, and run the whole batch in one call.
+    Batch { iters: u64, seed: u64 },
 }
 
-// ------------------------------------------------------------------ payloads
-
-/// A payload: a generator, and the function under test.
-struct Generated<I, G, F> {
-    name: &'static str,
-    gen: G,
-    f: F,
-    inputs: Vec<I>,
+/// Get at an `Ints` input. Panics loudly on a mismatch, which in a table
+/// this small is a typo you want to hear about immediately.
+pub fn ints(i: &mut Input) -> &mut Vec<u64> {
+    match i {
+        Input::Ints(v) => v,
+        _ => panic!("this benchmark's generator does not make Input::Ints"),
+    }
 }
 
-impl<I, G, F> Bench for Generated<I, G, F>
-where
-    G: FnMut(u64) -> I,
-    F: FnMut(&mut I) -> u64,
-{
-    fn name(&self) -> &'static str {
-        self.name
+/// Get at a `Text` input.
+pub fn text(i: &mut Input) -> &mut String {
+    match i {
+        Input::Text(s) => s,
+        _ => panic!("this benchmark's generator does not make Input::Text"),
     }
-    fn kind(&self) -> Kind {
-        Kind::Payload
-    }
-    fn prepare(&mut self, iters: u64, seed: u64) {
+}
+
+pub struct Workload {
+    pub name: &'static str,
+    pub kind: Kind,
+    /// Build one input. Runs before the timer starts.
+    gen: fn(u64) -> Input,
+    /// The thing being measured. `Ctx` is here for the canaries; payloads
+    /// ignore it.
+    f: fn(&Ctx, &mut Input) -> u64,
+    inputs: Vec<Input>,
+}
+
+impl Workload {
+    /// Build this batch's inputs. Not timed.
+    pub fn prepare(&mut self, iters: u64, seed: u64) {
         // Clearing here rather than after `run` is deliberate: dropping the
         // previous batch's inputs is real work, and it happens outside the
         // timed region on this side of the call instead of inside it on the
         // other.
         self.inputs.clear();
-        self.inputs.reserve(iters as usize);
-        for i in 0..iters {
-            self.inputs.push((self.gen)(seed.wrapping_add(i)));
+        match self.kind {
+            Kind::Payload => {
+                self.inputs.reserve(iters as usize);
+                for i in 0..iters {
+                    self.inputs.push((self.gen)(seed.wrapping_add(i)));
+                }
+            }
+            // One input describing the whole batch: a canary loops
+            // internally rather than being called `iters` times, because
+            // the call overhead would be a large part of what it measures.
+            _ => self.inputs.push(Input::Batch { iters, seed }),
         }
     }
-    fn run(&mut self) -> u64 {
+
+    /// Run over what `prepare` built. Timed.
+    pub fn run(&mut self, ctx: &Ctx) -> u64 {
         let mut acc = 0u64;
         // Iterate rather than drain: the inputs must outlive the timed
         // region, or their destructors land inside it.
         for x in self.inputs.iter_mut() {
-            acc ^= (self.f)(x);
+            acc ^= (self.f)(ctx, x);
         }
         acc
     }
 }
 
-/// Build a payload. This is what you call from [`all`].
-pub fn generated<I: 'static>(
-    name: &'static str,
-    gen: impl FnMut(u64) -> I + 'static,
-    f: impl FnMut(&mut I) -> u64 + 'static,
-) -> Box<dyn Bench> {
-    Box::new(Generated { name, gen, f, inputs: Vec::new() })
+fn payload(name: &'static str, gen: fn(u64) -> Input, f: fn(&Ctx, &mut Input) -> u64) -> Workload {
+    Workload { name, kind: Kind::Payload, gen, f, inputs: Vec::new() }
 }
 
 // ------------------------------------------------------------------ canaries
@@ -137,29 +159,16 @@ impl Ctx {
     }
 }
 
-/// A canary has nothing to generate: its input is the machine.
-struct CanaryBench {
-    name: &'static str,
-    kind: Kind,
-    ctx: Rc<Ctx>,
-    f: fn(&Ctx, u64, u64) -> u64,
-    iters: u64,
-    seed: u64,
+/// A canary generates nothing, so this is never called for one. It exists
+/// only to fill the field.
+fn no_input(_seed: u64) -> Input {
+    Input::Batch { iters: 0, seed: 0 }
 }
 
-impl Bench for CanaryBench {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-    fn kind(&self) -> Kind {
-        self.kind
-    }
-    fn prepare(&mut self, iters: u64, seed: u64) {
-        self.iters = iters;
-        self.seed = seed;
-    }
-    fn run(&mut self) -> u64 {
-        (self.f)(&self.ctx, self.iters, self.seed)
+fn batch(i: &Input) -> (u64, u64) {
+    match i {
+        Input::Batch { iters, seed } => (*iters, *seed),
+        _ => panic!("a canary was given a generated input"),
     }
 }
 
@@ -168,7 +177,8 @@ impl Bench for CanaryBench {
 /// Minimal instruction-level parallelism on purpose, so its cost tracks the
 /// core clock and almost nothing else. Measured at 0.02% coefficient of
 /// variation on a quiesced machine - a 200 ppm ruler.
-fn cpu_canary(_c: &Ctx, iters: u64, _seed: u64) -> u64 {
+fn cpu_canary(_c: &Ctx, i: &mut Input) -> u64 {
+    let (iters, _) = batch(i);
     let mut x = 0x243F6A8885A308D3u64;
     for _ in 0..iters {
         x = x
@@ -184,7 +194,8 @@ fn cpu_canary(_c: &Ctx, iters: u64, _seed: u64) -> u64 {
 /// KiB, so walking the *same* path every call leaves it cache resident and
 /// it reads 23 ns per access instead of 142 ns - still perfectly steady,
 /// and measuring the wrong thing.
-fn mem_canary(c: &Ctx, iters: u64, seed: u64) -> u64 {
+fn mem_canary(c: &Ctx, i: &mut Input) -> u64 {
+    let (iters, seed) = batch(i);
     let mut p = (seed as usize) & (c.chase.len() - 1);
     for _ in 0..iters {
         p = c.chase[p] as usize;
@@ -205,34 +216,47 @@ fn mem_canary(c: &Ctx, iters: u64, seed: u64) -> u64 {
 /// `mem_canary`, which is how that mistake looks from the inside.
 ///
 /// The payloads below are examples of the shape, not a considered selection.
-pub fn all(ctx: Rc<Ctx>) -> Vec<Box<dyn Bench>> {
-    let canary = |name, kind, f: fn(&Ctx, u64, u64) -> u64| -> Box<dyn Bench> {
-        Box::new(CanaryBench { name, kind, ctx: Rc::clone(&ctx), f, iters: 0, seed: 0 })
-    };
+pub fn all() -> Vec<Workload> {
     vec![
-        canary("cpu_canary", Kind::CpuCanary, cpu_canary),
-        canary("mem_canary", Kind::MemCanary, mem_canary),
+        Workload {
+            name: "cpu_canary",
+            kind: Kind::CpuCanary,
+            gen: no_input,
+            f: cpu_canary,
+            inputs: Vec::new(),
+        },
+        Workload {
+            name: "mem_canary",
+            kind: Kind::MemCanary,
+            gen: no_input,
+            f: mem_canary,
+            inputs: Vec::new(),
+        },
         // Shuffling belongs in the generator: sorting an already-sorted
         // vector measures something else entirely.
-        generated("sort_1k", |seed| shuffled(1024, seed), |v| {
+        payload("sort_1k", |s| Input::Ints(shuffled(1024, s)), |_, i| {
+            let v = ints(i);
             v.sort_unstable();
             v[0] ^ v[v.len() - 1]
         }),
-        generated("hashmap_1k", |seed| shuffled(256, seed), |keys| {
+        payload("hashmap_256", |s| Input::Ints(shuffled(256, s)), |_, i| {
             use std::collections::HashMap;
+            let keys = ints(i);
             let m: HashMap<u64, u64> = keys.iter().map(|&k| (k, k ^ 1)).collect();
             *m.get(&keys[0]).unwrap_or(&0)
         }),
-        generated("format_int", |seed| seed, |n| format!("{n}").len() as u64),
-        generated("sum_64k", |seed| shuffled(8192, seed), |v| {
-            v.iter().fold(0u64, |a, &b| a.wrapping_add(b))
+        payload("sum_64k", |s| Input::Ints(shuffled(8192, s)), |_, i| {
+            ints(i).iter().fold(0u64, |a, &b| a.wrapping_add(b))
+        }),
+        payload("parse_int", |s| Input::Text(format!("{s}")), |_, i| {
+            text(i).parse::<u64>().unwrap_or(0)
         }),
     ]
 }
 
 /// A vector of `n` scrambled values. Cheap, deterministic in `seed`, and
 /// deliberately not sorted.
-fn shuffled(n: usize, seed: u64) -> Vec<u64> {
+pub fn shuffled(n: usize, seed: u64) -> Vec<u64> {
     let mut x = seed | 1;
     (0..n)
         .map(|_| {

@@ -35,7 +35,11 @@ long run are far more optimistic and will flatter a bad estimator.
 **Adding a payload**: one line in `workloads::all()`.
 
 ```rust
-generated("sort_1k", |seed| shuffled(1024, seed), |v| { v.sort_unstable(); v[0] })
+payload("sort_1k", |s| Input::Ints(shuffled(1024, s)), |_, i| {
+    let v = ints(i);
+    v.sort_unstable();
+    v[0]
+}),
 ```
 
 The first closure builds one input and runs **before the timer starts**; the
@@ -47,6 +51,14 @@ already-sorted vector measures something else entirely.
 A batch of `n` iterations generates all `n` inputs first, then times `n`
 calls over them. The previous batch's inputs are dropped at the *start* of
 the next `prepare`, so their destructors land outside the timed region too.
+
+Both halves are plain `fn` pointers - there is no `dyn` anywhere in this
+program - so a non-capturing closure works and a capturing one will not
+compile. Put constants in the body, as `1024` is above.
+
+If you need an input shape `Input` does not have, add a variant and an
+accessor beside `ints`. That is the only place where adding a benchmark
+costs more than one line.
 
 `Ctx` is for the canaries only. A payload that reaches into it is sharing
 state with the instrument that is supposed to be measuring it independently.

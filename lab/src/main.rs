@@ -15,9 +15,8 @@ mod timing;
 mod workloads;
 
 use estimate::Run;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
-use workloads::{Bench, Ctx, Kind};
+use workloads::{Ctx, Kind, Workload};
 
 /// What one sample of one workload should cost. Everything is calibrated to
 /// this, so the members of a round are comparable and share a noise regime.
@@ -42,8 +41,8 @@ fn main() {
 
 /// Measure, and write a recording.
 fn run(rounds: usize, out: &str) {
-    let ctx = Rc::new(Ctx::new());
-    let mut ws = workloads::all(Rc::clone(&ctx));
+    let ctx = Ctx::new();
+    let mut ws = workloads::all();
     let mut t = timing::Timing::from_env();
     eprintln!("chase array {} MiB", ctx.chase.len() * 8 / (1 << 20));
 
@@ -61,11 +60,11 @@ fn run(rounds: usize, out: &str) {
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut counts = Vec::with_capacity(ws.len());
     for w in ws.iter_mut() {
-        let name = w.name();
+        let name = w.name;
         let n = if t.replaying() {
             *t.iters.get(name).unwrap_or(&1)
         } else {
-            calibrate(w.as_mut(), &mut seed)
+            calibrate(w, &ctx, &mut seed)
         };
         t.iters.insert(name.to_string(), n);
         counts.push(n);
@@ -89,12 +88,12 @@ fn run(rounds: usize, out: &str) {
         for &i in &order {
             seed = step(seed);
             let (w, n) = (&mut ws[i], counts[i]);
-            let name = w.name();
+            let name = w.name;
             // Generate this batch's inputs first, with the clock stopped.
             if !t.replaying() {
                 w.prepare(n, seed);
             }
-            t.time(r, name, || w.run());
+            t.time(r, name, || w.run(&ctx));
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
@@ -106,15 +105,15 @@ fn run(rounds: usize, out: &str) {
     let run = Run::load(out);
     println!("\n{:>16} {:>8} {:>12} {:>12}", "workload", "kind", "ns/iter", "within-run");
     for w in &ws {
-        let v = run.get(w.name());
-        let kind = match w.kind() {
+        let v = run.get(w.name);
+        let kind = match w.kind {
             Kind::CpuCanary => "cpu*",
             Kind::MemCanary => "mem*",
             Kind::Payload => "",
         };
         println!(
             "{:>16} {kind:>8} {:>12.4} {:>11.2}%",
-            w.name(),
+            w.name,
             estimate::trim_of(v, 0.10),
             100.0 * estimate::rel_spread(v)
         );
@@ -170,7 +169,7 @@ fn compare(paths: &[String]) {
 /// too would aim at the size of the work plus its setup, so a payload with
 /// an expensive generator - and a generator can easily cost more than the
 /// thing it feeds - would end up with a batch far too small.
-fn calibrate(w: &mut dyn Bench, seed: &mut u64) -> u64 {
+fn calibrate(w: &mut Workload, ctx: &Ctx, seed: &mut u64) -> u64 {
     let target = SAMPLE.as_secs_f64() * 1e9;
     // A ceiling on generation, because `prepare` allocates one input per
     // iteration. Without it a benchmark whose timed part the optimiser
@@ -185,7 +184,7 @@ fn calibrate(w: &mut dyn Bench, seed: &mut u64) -> u64 {
         let prepared = p.elapsed();
 
         let t = Instant::now();
-        let sink = w.run();
+        let sink = w.run(ctx);
         let ns = t.elapsed().as_nanos() as f64;
         std::hint::black_box(sink);
 
@@ -193,7 +192,7 @@ fn calibrate(w: &mut dyn Bench, seed: &mut u64) -> u64 {
             if ns < target * 0.9 {
                 eprintln!(
                     "  note: {} stopped growing at {n} iters ({:.0}us timed, {:.0}ms to generate)",
-                    w.name(),
+                    w.name,
                     ns / 1000.0,
                     prepared.as_secs_f64() * 1e3
                 );
