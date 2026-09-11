@@ -17,7 +17,7 @@
 //! fn gen(seed: u64) -> Input { Input::Ints(crate::workloads::shuffled(1024, seed)) }
 //!
 //! fn run(i: &mut Input) -> u64 {
-//!     let v = ints(i);
+//!     let v = i.ints();
 //!     v.sort_unstable();
 //!     v[0]
 //! }
@@ -31,9 +31,9 @@
 //!
 //! Then add `module::workload()` to [`all`].
 
-pub mod cpu_canary;
-pub mod mem_canary;
-pub mod payloads;
+mod cpu_canary;
+mod mem_canary;
+mod payloads;
 
 /// What a workload is mostly limited by. Used to label the report and to
 /// pick which canary a payload should be divided by; see
@@ -52,7 +52,7 @@ pub enum Kind {
 ///
 /// An enum rather than a generic or a trait object, so that a heterogeneous
 /// list of benchmarks stays a plain `Vec` of a concrete type. If you need a
-/// shape that is not here, add a variant and an accessor beside [`ints`].
+/// shape that is not here, add a variant and an accessor beside [`Input::ints`].
 pub enum Input {
     Ints(Vec<u64>),
     Text(String),
@@ -62,36 +62,56 @@ pub enum Input {
     Seed(u64),
 }
 
-/// Get at an `Ints` input. Panics loudly on a mismatch, which in a table
-/// this small is a typo you want to hear about immediately.
-pub fn ints(i: &mut Input) -> &mut Vec<u64> {
-    match i {
-        Input::Ints(v) => v,
-        _ => panic!("this benchmark's generator does not make Input::Ints"),
+impl Input {
+    /// Get at an `Ints` input. Panics loudly on a mismatch, which is a typo
+    /// you want to hear about immediately rather than a case to handle: a
+    /// benchmark's generator and its function are written together and
+    /// always agree, or neither is doing what its author meant.
+    pub fn ints(&mut self) -> &mut Vec<u64> {
+        match self {
+            Input::Ints(v) => v,
+            _ => panic!("this benchmark's generator does not make Input::Ints"),
+        }
     }
-}
 
-/// Get at a `Text` input.
-pub fn text(i: &mut Input) -> &mut String {
-    match i {
-        Input::Text(s) => s,
-        _ => panic!("this benchmark's generator does not make Input::Text"),
+    /// Get at a `Text` input.
+    pub fn text(&mut self) -> &mut String {
+        match self {
+            Input::Text(s) => s,
+            _ => panic!("this benchmark's generator does not make Input::Text"),
+        }
     }
-}
 
-/// Get at an `Index` input.
-pub fn index(i: &Input) -> usize {
-    match i {
-        Input::Index(n) => *n,
-        _ => panic!("this benchmark's generator does not make Input::Index"),
+    /// Get at an `Index` input.
+    pub fn index(&self) -> usize {
+        match self {
+            Input::Index(n) => *n,
+            _ => panic!("this benchmark's generator does not make Input::Index"),
+        }
     }
-}
 
-/// Get at a `Seed` input.
-pub fn seed(i: &Input) -> u64 {
-    match i {
-        Input::Seed(n) => *n,
-        _ => panic!("this benchmark's generator does not make Input::Seed"),
+    /// Get at a `Seed` input.
+    pub fn seed(&self) -> u64 {
+        match self {
+            Input::Seed(n) => *n,
+            _ => panic!("this benchmark's generator does not make Input::Seed"),
+        }
+    }
+
+    /// A vector of `n` scrambled values. Cheap, deterministic in `seed`, and
+    /// deliberately not sorted.
+    fn shuffled(n: usize, seed: u64) -> Self {
+        let mut x = seed | 1;
+        Input::Ints(
+            (0..n)
+                .map(|_| {
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    x >> 11
+                })
+                .collect(),
+        )
     }
 }
 
@@ -112,7 +132,13 @@ impl Workload {
         gen: fn(u64) -> Input,
         f: fn(&mut Input) -> u64,
     ) -> Workload {
-        Workload { name, kind, gen, f, inputs: Vec::new() }
+        Workload {
+            name,
+            kind,
+            gen,
+            f,
+            inputs: Vec::new(),
+        }
     }
 
     /// Build this batch's inputs. Not timed.
@@ -153,18 +179,4 @@ pub fn all() -> Vec<Workload> {
     let mut ws = vec![cpu_canary::workload(), mem_canary::workload()];
     ws.extend(payloads::all());
     ws
-}
-
-/// A vector of `n` scrambled values. Cheap, deterministic in `seed`, and
-/// deliberately not sorted.
-pub fn shuffled(n: usize, seed: u64) -> Vec<u64> {
-    let mut x = seed | 1;
-    (0..n)
-        .map(|_| {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            x >> 11
-        })
-        .collect()
 }

@@ -63,9 +63,17 @@ impl Timing {
                     .iter()
                     .map(|s| ((s.round, s.workload.clone()), s.ns))
                     .collect();
-                Timing { replay: Some(map), iters: rec.iters, log: Vec::new() }
+                Timing {
+                    replay: Some(map),
+                    iters: rec.iters,
+                    log: Vec::new(),
+                }
             }
-            Err(_) => Timing { replay: None, iters: HashMap::new(), log: Vec::new() },
+            Err(_) => Timing {
+                replay: None,
+                iters: HashMap::new(),
+                log: Vec::new(),
+            },
         }
     }
 
@@ -81,13 +89,7 @@ impl Timing {
     /// In replay mode `f` is *not* run. That is the point - replay is meant
     /// to be fast and deterministic - but it does mean a workload's side
     /// effects do not happen, so do not put anything load-bearing in one.
-    pub fn time(
-        &mut self,
-        round: usize,
-        slot: usize,
-        name: &str,
-        f: impl FnOnce() -> u64,
-    ) -> f64 {
+    pub fn time(&mut self, round: usize, slot: usize, name: &str, f: impl FnOnce() -> u64) -> f64 {
         let t_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -108,7 +110,13 @@ impl Timing {
                 ns
             }
         };
-        self.log.push(Sample { round, slot, workload: name.to_string(), t_ms, ns });
+        self.log.push(Sample {
+            round,
+            slot,
+            workload: name.to_string(),
+            t_ms,
+            ns,
+        });
         ns
     }
 
@@ -147,8 +155,8 @@ pub struct Recording {
 
 /// Parse a recording: `# iters <name> <n>` lines, then the sample rows.
 pub fn read(path: &str) -> Recording {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
     let mut iters = HashMap::new();
     let mut samples = Vec::new();
     for line in text.lines() {
@@ -171,7 +179,13 @@ pub fn read(path: &str) -> Recording {
         if let (Ok(round), Ok(slot), Ok(t_ms), Ok(ns)) =
             (f[1].parse(), f[2].parse(), f[4].parse(), f[5].parse())
         {
-            samples.push(Sample { round, slot, workload: f[3].to_string(), t_ms, ns });
+            samples.push(Sample {
+                round,
+                slot,
+                workload: f[3].to_string(),
+                t_ms,
+                ns,
+            });
         }
     }
     Recording { iters, samples }

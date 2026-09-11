@@ -60,7 +60,11 @@ impl Run {
         }
         let mut names: Vec<String> = by_name.keys().cloned().collect();
         names.sort();
-        Run { names, samples, by_name }
+        Run {
+            names,
+            samples,
+            by_name,
+        }
     }
 
     pub fn get(&self, name: &str) -> &[f64] {
@@ -88,7 +92,11 @@ impl Run {
                 den.insert(s.round, s.ns);
             }
         }
-        let mut rounds: Vec<usize> = num.keys().copied().filter(|r| den.contains_key(r)).collect();
+        let mut rounds: Vec<usize> = num
+            .keys()
+            .copied()
+            .filter(|r| den.contains_key(r))
+            .collect();
         rounds.sort_unstable();
         rounds.iter().map(|r| num[r] / den[r]).collect()
     }
@@ -109,12 +117,16 @@ impl Run {
 pub type Estimator = fn(&Run, &str) -> f64;
 
 pub fn mean_of(v: &[f64]) -> f64 {
-    if v.is_empty() { return f64::NAN; }
+    if v.is_empty() {
+        return f64::NAN;
+    }
     v.iter().sum::<f64>() / v.len() as f64
 }
 
 pub fn median_of(v: &[f64]) -> f64 {
-    if v.is_empty() { return f64::NAN; }
+    if v.is_empty() {
+        return f64::NAN;
+    }
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
     s[s.len() / 2]
@@ -122,7 +134,9 @@ pub fn median_of(v: &[f64]) -> f64 {
 
 /// Trimmed mean, dropping `frac` from each end.
 pub fn trim_of(v: &[f64], frac: f64) -> f64 {
-    if v.is_empty() { return f64::NAN; }
+    if v.is_empty() {
+        return f64::NAN;
+    }
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let k = (s.len() as f64 * frac) as usize;
@@ -132,7 +146,9 @@ pub fn trim_of(v: &[f64], frac: f64) -> f64 {
 /// Relative spread, used both for reporting and for choosing a canary.
 pub fn rel_spread(v: &[f64]) -> f64 {
     let m = mean_of(v);
-    if v.len() < 2 || m == 0.0 { return f64::NAN; }
+    if v.len() < 2 || m == 0.0 {
+        return f64::NAN;
+    }
     let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / v.len() as f64;
     var.sqrt() / m
 }
@@ -161,21 +177,37 @@ pub fn slot_effect(r: &Run, w: &str) -> f64 {
     rel_spread(&means)
 }
 
-fn raw_mean(r: &Run, w: &str) -> f64 { mean_of(r.get(w)) }
-fn raw_median(r: &Run, w: &str) -> f64 { median_of(r.get(w)) }
-fn raw_trim(r: &Run, w: &str) -> f64 { trim_of(r.get(w), 0.10) }
+fn raw_mean(r: &Run, w: &str) -> f64 {
+    mean_of(r.get(w))
+}
+fn raw_median(r: &Run, w: &str) -> f64 {
+    median_of(r.get(w))
+}
+fn raw_trim(r: &Run, w: &str) -> f64 {
+    trim_of(r.get(w), 0.10)
+}
 
-fn ratio_cpu(r: &Run, w: &str) -> f64 { trim_of(&r.ratio(w, CPU), 0.10) }
-fn ratio_mem(r: &Run, w: &str) -> f64 { trim_of(&r.ratio(w, MEM), 0.10) }
+fn ratio_cpu(r: &Run, w: &str) -> f64 {
+    trim_of(&r.ratio(w, CPU), 0.10)
+}
+fn ratio_mem(r: &Run, w: &str) -> f64 {
+    trim_of(&r.ratio(w, MEM), 0.10)
+}
 
 /// Pearson correlation, used to ask which canary a workload moves with.
 pub fn corr(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() < 2 || a.len() != b.len() { return 0.0; }
+    if a.len() < 2 || a.len() != b.len() {
+        return 0.0;
+    }
     let (ma, mb) = (mean_of(a), mean_of(b));
     let num: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
     let da: f64 = a.iter().map(|x| (x - ma) * (x - ma)).sum::<f64>().sqrt();
     let db: f64 = b.iter().map(|y| (y - mb) * (y - mb)).sum::<f64>().sqrt();
-    if da * db == 0.0 { 0.0 } else { num / (da * db) }
+    if da * db == 0.0 {
+        0.0
+    } else {
+        num / (da * db)
+    }
 }
 
 /// Works for a clear-cut workload, fails for a borderline one.
@@ -196,7 +228,11 @@ pub fn corr(a: &[f64], b: &[f64]) -> f64 {
 /// somebody reads the MIXED column.
 fn ratio_auto(r: &Run, w: &str) -> f64 {
     let (c, m) = (r.ratio(w, CPU), r.ratio(w, MEM));
-    if rel_spread(&c) <= rel_spread(&m) { trim_of(&c, 0.10) } else { trim_of(&m, 0.10) }
+    if rel_spread(&c) <= rel_spread(&m) {
+        trim_of(&c, 0.10)
+    } else {
+        trim_of(&m, 0.10)
+    }
 }
 
 /// Pick the canary this workload actually moves *with*, by correlation.
@@ -212,18 +248,30 @@ fn ratio_corr(r: &Run, w: &str) -> f64 {
 
 pub fn pick_by_corr(r: &Run, w: &str) -> &'static str {
     let v = r.get(w);
-    if corr(v, r.get(CPU)).abs() >= corr(v, r.get(MEM)).abs() { CPU } else { MEM }
+    if corr(v, r.get(CPU)).abs() >= corr(v, r.get(MEM)).abs() {
+        CPU
+    } else {
+        MEM
+    }
 }
 
 /// Which canary each selector picked, so a surprising row can be explained
 /// rather than just noticed.
 pub fn chosen_canary(r: &Run, w: &str) -> &'static str {
     let (c, m) = (r.ratio(w, CPU), r.ratio(w, MEM));
-    if rel_spread(&c) <= rel_spread(&m) { "cpu" } else { "mem" }
+    if rel_spread(&c) <= rel_spread(&m) {
+        "cpu"
+    } else {
+        "mem"
+    }
 }
 
 pub fn chosen_by_corr(r: &Run, w: &str) -> &'static str {
-    if pick_by_corr(r, w) == CPU { "cpu" } else { "mem" }
+    if pick_by_corr(r, w) == CPU {
+        "cpu"
+    } else {
+        "mem"
+    }
 }
 
 /// Every variant, in one place. Add yours here.

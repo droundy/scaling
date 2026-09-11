@@ -11,7 +11,7 @@
 //! with the instrument meant to measure it independently is the same mistake
 //! as a payload that calls the canary outright, one level down.
 
-use super::{index, Input, Kind, Workload};
+use super::{Input, Kind, Workload};
 use std::sync::LazyLock;
 
 /// Chase steps per call. Each is a dependent load that misses, so at ~142 ns
@@ -55,7 +55,7 @@ fn gen(seed: u64) -> Input {
 }
 
 fn run(i: &mut Input) -> u64 {
-    let mut p = index(i);
+    let mut p = i.index();
     for _ in 0..STEPS {
         p = CHASE[p] as usize;
     }

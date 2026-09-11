@@ -7,7 +7,7 @@
 //! It holds no state and allocates nothing, so it goes through the same
 //! generate-then-run path as any payload with nothing in the generator.
 
-use super::{seed, Input, Kind, Workload};
+use super::{Input, Kind, Workload};
 
 /// Links of chain per call.
 ///
@@ -22,7 +22,7 @@ fn gen(seed: u64) -> Input {
 }
 
 fn run(i: &mut Input) -> u64 {
-    let mut x = seed(i) | 1;
+    let mut x = i.seed() | 1;
     for _ in 0..CHUNK {
         x = x
             .wrapping_mul(6364136223846793005)

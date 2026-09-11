@@ -27,13 +27,18 @@ fn main() {
     match args.get(1).map(|s| s.as_str()) {
         Some("run") => {
             let rounds: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
-            let out = args.get(3).cloned().unwrap_or_else(|| "run.csv".to_string());
+            let out = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| "run.csv".to_string());
             run(rounds, &out);
         }
         Some("compare") if args.len() > 2 => compare(&args[2..]),
         _ => {
             eprintln!("usage:\n  lab run [rounds] [out.csv]\n  lab compare <run.csv>...");
-            eprintln!("\nenv:\n  LAB_REPLAY=<run.csv>  serve recorded timings instead of measuring");
+            eprintln!(
+                "\nenv:\n  LAB_REPLAY=<run.csv>  serve recorded timings instead of measuring"
+            );
             std::process::exit(2);
         }
     }
@@ -101,7 +106,10 @@ fn run(rounds: usize, out: &str) {
     // A quick look, so a single run is useful on its own. The real question
     // needs several runs and `compare`.
     let run = Run::load(out);
-    println!("\n{:>16} {:>8} {:>12} {:>12}", "workload", "kind", "ns/iter", "within-run");
+    println!(
+        "\n{:>16} {:>8} {:>12} {:>12}",
+        "workload", "kind", "ns/iter", "within-run"
+    );
     for w in &ws {
         let v = run.get(w.name);
         let kind = match w.kind {
@@ -136,7 +144,10 @@ fn compare(paths: &[String]) {
     let names = runs[0].names.clone();
     let ests = estimate::all();
 
-    println!("across {} runs: spread of the estimate between runs, lower is better\n", runs.len());
+    println!(
+        "across {} runs: spread of the estimate between runs, lower is better\n",
+        runs.len()
+    );
     print!("{:>16}", "workload");
     for (n, _) in &ests {
         print!("{n:>12}");
@@ -152,7 +163,11 @@ fn compare(paths: &[String]) {
         // Which canary ratio_auto chose, and whether it agreed across runs.
         let show = |f: fn(&Run, &str) -> &'static str| {
             let picks: Vec<&str> = runs.iter().map(|r| f(r, w)).collect();
-            if picks.iter().all(|p| *p == picks[0]) { picks[0] } else { "MIXED" }
+            if picks.iter().all(|p| *p == picks[0]) {
+                picks[0]
+            } else {
+                "MIXED"
+            }
         };
         let slot: Vec<f64> = runs.iter().map(|r| estimate::slot_effect(r, w)).collect();
         println!(

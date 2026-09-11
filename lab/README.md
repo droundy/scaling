@@ -40,7 +40,7 @@ things:
 fn gen(seed: u64) -> Input { Input::Ints(shuffled(1024, seed)) }
 
 fn run(i: &mut Input) -> u64 {
-    let v = ints(i);
+    let v = i.ints();
     v.sort_unstable();
     v[0]
 }
@@ -62,7 +62,7 @@ the next `prepare`, so their destructors land outside the timed region too.
 Both halves are plain `fn` pointers - there is no `dyn` anywhere in this
 program - so they cannot capture. Put constants in the body, as `1024` is
 above. If you need an input shape `Input` does not have, add a variant and an
-accessor beside `ints`; that is the only place where a benchmark costs more
+accessor beside `Input::ints`; that is the only place where a benchmark costs more
 than its module.
 
 **The canaries are not special to the runner.** Each is a `Workload` like any
