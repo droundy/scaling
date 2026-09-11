@@ -1,0 +1,16 @@
+[package]
+name = "lab"
+version = "0.1.0"
+edition = "2021"
+
+# Its own workspace, so this stands entirely apart from the `scaling` crate
+# beside it: no shared lockfile, no shared features, and `cargo test` in the
+# parent never builds it.
+[workspace]
+
+[dependencies]
+
+rand = "0.10.2"
+
+[profile.release]
+debug = true
