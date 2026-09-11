@@ -368,6 +368,30 @@ workload N times, report the between-run spread - would gate the honesty
 tests on a measured number, and would give `quiet-bench status` something
 better to say than "CPU 2 is reserved".
 
+That probe is now (21): a canary *is* a fixed workload measured many times,
+so this item is largely absorbed by it.
+
+**Nothing in the crate looks at load at all**, before a run or during one -
+no read of `/proc/loadavg`, `/proc/stat`, `CLOCK_THREAD_CPUTIME_ID` or
+`getrusage` anywhere in `src/`. A runaway process that pegged a core for
+hours during this investigation demonstrates the gap: `status()` would have
+answered `Pinned`, and with the governor pinned (14) never fires either,
+because a competitor at a *fixed* frequency moves no clock. And `reserve`
+uses deliberately advisory per-task affinity rather than a cpuset, so it
+sweeps what exists when it runs and cannot stop a later process landing on a
+reserved CPU.
+
+If a cheap screen is wanted before the canaries are built, the fourth field
+of `/proc/loadavg` is `runnable/total` and is *instantaneous*, unlike the
+three decaying averages in front of it. Held open and `pread`, it costs
+**1.5us** against **29us** for `procs_running` in `/proc/stat`, which has to
+generate a line per CPU before reaching the number. Both track created load
+identically (0 spinners reads 1, one reads 3, four reads 6). It is
+machine-wide, though, which bounds it badly: on a quiesced box it reads 6 on
+an idle laptop because the housekeeping CPUs are busy by design. Screening
+only, and (21) is better. *A working `LoadProbe` for this was prototyped and
+then superseded; it is in a git stash rather than a branch.*
+
 ### [x] 8. Pin automatically when a reservation exists
 
 *Done.* `pin_if_requested` became `pin_if_reserved` and now pins whenever
@@ -624,6 +648,20 @@ should start from:
   the findings below. But a failed `open` needs recording too: retrying it
   per sample costs a failed syscall and a path allocation on every read
   forever, on exactly the machines that have no cpufreq to read.
+
+Three smaller things in the same implementation, none of them measured
+because they are plain defects:
+
+* The public doc on `Stats::clock_moved` links to `crate::machine`, which is
+  a private module, so `cargo doc` gains a warning and the reference renders
+  as inert text on docs.rs.
+* `clock_gettime`'s return value is discarded, leaving the zeroed `timespec`
+  in place. A rejected clock id therefore turns every interval into 0ns and
+  the run reports `0.0000ns` with a tight `±` and no flag, rather than
+  failing. `Instant` could not do this; `CLOCK_MONOTONIC_RAW` is exactly the
+  id an emulated or seccomp-filtered kernel is most likely to refuse.
+* `Running`'s docs call `sample_time` "a public knob". It is a private
+  `const`. Stale since whenever that changed.
 
 And one thing the clock swap costs, which the paragraph above under-rates:
 `CLOCK_MONOTONIC_RAW` runs slower than `CLOCK_MONOTONIC` by a *measured*
@@ -1005,6 +1043,20 @@ exactly the unit a "wait for quiet and retry" loop discards.
 canary's went 1.07% -> 4.00%. Level shift with no tail is multi-core turbo
 budget; level plus tail is that *and* memory contention.
 
+*Four canaries were built for the experiments and two are for shipping.* The
+two spares are an issue-width CPU canary (eight independent chains rather
+than one dependent one, so an SMT partner eating execution ports shows there
+and not in the latency chain) and a bandwidth memory canary (a sequential
+stream, where the chase is latency bound). Their value is separating causes
+the shipping pair confounds: SMT contention looks exactly like a clock drop
+to the latency chain, and a neighbour streaming memory hurts the bandwidth
+canary far more than the chase. Neither is worth its cost by default - the
+streaming one moves ~1.5MB per 100us sample and is the only genuinely
+polluting member - but both are worth keeping for a diagnostic mode, and the
+first is the one to reach for if SMT ever needs distinguishing. The
+frequency reading from (14) resolves the same ambiguity from the other side:
+clock steady *and* the latency chain slow means the partner.
+
 *Caveats.* All eight runs used one binary, so code layout was constant -
 cross-build reproducibility is untested and is the open question in the
 alignment entry below. The canary ratio is a machine-relative unit:
@@ -1031,6 +1083,98 @@ very likely standing apart from the current sampling code until it earns its
 way in. Everything above is measurement, not design: the design question of
 how canaries, the retry loop, the accuracy contract and the reported units
 fit together has not been settled and should not be settled incrementally.
+
+### [ ] 22. Make the accuracy target a contract, not a wish
+
+Design notes only - nothing here is measured, and it belongs with (21) in
+the separate design session, because the two answer different halves of the
+same question. (21) can tell you whether the machine let you hit your
+target; this is about what to *do* about it.
+
+**The users worth designing for.** Five situations, which collapse to fewer
+than they look:
+
+1. Rough numbers on a machine nobody controls - shared CI, a laptop with a
+   browser open. It will never be quiet; refusing means never answering.
+2. Measure, but make a spoiled answer impossible to miss - including
+   programmatically, not only by eye.
+3. Wait until it is quiet, and start over if it stops being quiet.
+4. Never hand back a number that cannot be trusted: a CI gate, or a figure
+   going into a document.
+5. "I have taken over this machine - verify that." The value is catching a
+   violated assumption early, before spending the whole budget.
+
+4 and 5 differ only in *when* the check happens, so one policy does both. 3
+pairs naturally with strictness, since nobody wants to wait and then accept
+a bad number.
+
+**The accuracy target already says how much the caller cares.** This is the
+simplification that makes the rest small. Interference matters exactly when
+it could move the answer by more than the caller asked to be accurate to, so
+every threshold becomes a comparison against `target_rel_error` rather than
+a constant somebody picked. `KHZ_TOLERANCE` in (14) is already this by
+coincidence - its doc justifies 1% as "where a frequency change starts to
+matter against the accuracy this crate asks for by default" - so make it
+literal. The consequence is that situation (1) needs no API at all: ask for
+5% and nothing the machine does crosses it; ask for 0.1% on an unquiesced
+laptop and you are told constantly, which is correct.
+
+**So the only question left is whether a number you do not believe may be
+returned.** Which argues for a contract rather than a flag: if the target
+cannot be met, refuse loudly, and let callers who want rough numbers ask for
+rough numbers. That is a real change - `hit_limit` today returns a flagged
+answer for "ran out of time", and under a contract that is equally a
+failure. What makes it tolerable is (21): the canaries distinguish *needed
+longer* from *this machine cannot do it*, so the error can say which.
+Without them the message would be useless. An explicit "no target, just run
+until `max_time`" mode is the escape hatch, and there `hit_limit` has no
+meaning.
+
+Three rules that fall out, one of them not obvious:
+
+* **Refusing must fail closed.** Off Linux, or without the probes, we cannot
+  verify anything. The strict setting must then refuse rather than pass, or
+  it silently becomes the weakest setting exactly where we cannot look -
+  which contradicts the doctrine (14) already states.
+* **Waiting must not deadlock on a benchmark that is itself the load.** A
+  multi-threaded benchmark makes the machine busy by existing, so any
+  machine-wide definition of quiet waits forever. Evidence has to be thread-
+  or canary-relative, never `/proc/loadavg`.
+* **Discarding on machine evidence is not the selection hazard it
+  resembles.** Throwing a stretch away because the canaries were bad selects
+  on a covariate measured independently of the timings - the same exogeneity
+  that makes (17)'s round-total trimming safe and difference-trimming
+  unsafe. Worth writing where (17) can see it.
+
+**Throw-out is one principle at several granularities**, and the progression
+is the design:
+
+| granularity | status |
+| --- | --- |
+| one round, on one bad canary sample | measured, fails - see below |
+| a contiguous stretch, on a window of bad canaries | measured, works - 94% recall in (21) |
+| the whole run, retried | this is "wait for it to quiet" |
+| everything, no answer | this is "fail loudly" |
+
+The last two are the same mechanism with a retry loop around it, and
+repeating that loop and combining the stretches that survived is also what
+produces the several runs (21) needs to fit its coefficients. So the retry
+loop is not only a policy, it is the thing that makes the correction
+identifiable.
+
+**Actionability is the point.** Four quality fields that a caller must read
+and weigh correctly is a design failure - the crate knows more about how to
+weigh them than any caller. One predicate, folding everything, with the
+detail underneath for whoever wants it. Machine interference makes the `±`
+wrong rather than wide, which is what `untrustworthy` already means, so it
+should feed that rather than become a fifth field.
+
+Unsettled, and needing the design session: what "no number" *is*
+mechanically. `bench()` returns `Stats`, and the house style is to report
+rather than fail. A panic reads fine in test-shaped code and badly in a
+library; a `Result` is affordable while 0.9.0 is unreleased but taxes every
+call site; a poisoned `Stats` is least invasive and easiest to ignore, which
+is the failure mode being fixed. That choice drives every signature.
 
 ## Tried without success so far
 
@@ -1095,6 +1239,18 @@ the answer. None of these is closed.
   median's SE stops falling like 1/sqrt(n) above n≈30, which looks like it
   snapping to a grid.* Where robustness does pay is on per-round contrasts,
   which is (16) and (17), not on raw samples.
+- **Discarding single rounds on a single bad canary sample.** Scored exactly
+  the base rate - 26% precision against 26.1% contamination, i.e. no
+  information - and under sustained load it was *worse than doing nothing*:
+  payload error +117.9% after discarding against +100.7% before, while a
+  random control sat at +102.9%. The rounds where a canary was slow were the
+  rounds where the payload ran clean, which is mechanically sensible - if a
+  preemption lands on the canary, the interference has had its turn and the
+  rest of the round runs unmolested. *The fix is granularity, not
+  abandonment: the same signal over a 64-round window finds 94% of a real
+  `cargo build` (21).* An experiment that wanted to test the sporadic middle
+  case failed to produce any measurable harm to test against, so that regime
+  is still open.
 - **Taking the minimum, for a ratio.** For a raw timing "the low ones are the
   accurate ones" is sound: noise is additive and positive. For a *ratio* it
   inverts, because noise in the denominator makes the ratio smaller - so the
@@ -1160,6 +1316,22 @@ the answer. None of these is closed.
   every time. Three results that looked clean under sequential measurement
   evaporated under interleaving. It is why `compare` beats two `bench` runs,
   and it is the reason for items 2, 3 and 4.
+- **How to build an interference rig that tests anything.** Four mistakes,
+  each made and each costing a round of measurement. Do not let the
+  interference and the ground-truth signal share a cache line - spinning on
+  a shared atomic that the measured thread also reads makes the "load" into
+  cache-line ping-pong and couples it to the measurement; spin on purely
+  local state and timestamp both sides independently. Label *samples*, not
+  rounds: a 770us round straddling one preemption has one ruined sample and
+  six clean ones, and a per-round label makes a detector look useless when
+  it is only being asked the wrong question. Vary the position of each
+  member within a round by a fresh *permutation*, not by flipping the sweep
+  direction - flipping removes the position bias and substitutes a period-2
+  oscillation, which showed up as a lag-1 autocorrelation of -0.69 and
+  corrupted every variance estimate. And use a real workload for
+  interference where possible: `cargo build --release` in another directory
+  produced clean, blocky contamination that synthetic spinners at 20% duty
+  cycle entirely failed to produce.
 - **The drift is multiplicative, and that is why ratios survive it.** A
   frequency ramp scales every size and every alternative by the same factor,
   so a ratio taken within a round is invariant to it and a difference is
@@ -1209,6 +1381,16 @@ the answer. None of these is closed.
   spread fell from 21.4% on an idle battery machine to 4.3% during a
   `cargo build`: a busy machine holds its uncore clock up instead of idling
   down and back. Quiet is not the same as steady.
+- **The memory hierarchy, measured, and what to expect elsewhere.**
+  Dependent load-to-use on this laptop (i5-1240P, capped at 1.7GHz): L1
+  2.95ns, 256KiB 7.88ns, 1MiB 12.99ns, 8MiB 42.86ns, and a genuine
+  full-traversal DRAM read **141.62ns**. Across machines expect L1 4-5
+  cycles, L2 12-16, L3 40-50 on a desktop and 60-90 on a server mesh, and
+  DRAM 70-130ns with huge pages, 120-250ns paying page walks, and 150-350ns
+  across a NUMA hop. DDR5 is *higher* latency than DDR4 in nanoseconds
+  despite the bandwidth, and LPDDR5 higher again, so newer is not faster
+  here. The 3.5x spread across machines is why anything sized in reads has
+  to be calibrated rather than hardcoded.
 - **The calibrated batch misses its target duration.** Calibration happens
   once, at whatever clock prevails at that instant, so the samples it sizes
   land at 74-144us against a 100us target - 8-22% spread per workload across
