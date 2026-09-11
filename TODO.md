@@ -368,6 +368,30 @@ workload N times, report the between-run spread - would gate the honesty
 tests on a measured number, and would give `quiet-bench status` something
 better to say than "CPU 2 is reserved".
 
+That probe is now (21): a canary *is* a fixed workload measured many times,
+so this item is largely absorbed by it.
+
+**Nothing in the crate looks at load at all**, before a run or during one -
+no read of `/proc/loadavg`, `/proc/stat`, `CLOCK_THREAD_CPUTIME_ID` or
+`getrusage` anywhere in `src/`. A runaway process that pegged a core for
+hours during this investigation demonstrates the gap: `status()` would have
+answered `Pinned`, and with the governor pinned (14) never fires either,
+because a competitor at a *fixed* frequency moves no clock. And `reserve`
+uses deliberately advisory per-task affinity rather than a cpuset, so it
+sweeps what exists when it runs and cannot stop a later process landing on a
+reserved CPU.
+
+If a cheap screen is wanted before the canaries are built, the fourth field
+of `/proc/loadavg` is `runnable/total` and is *instantaneous*, unlike the
+three decaying averages in front of it. Held open and `pread`, it costs
+**1.5us** against **29us** for `procs_running` in `/proc/stat`, which has to
+generate a line per CPU before reaching the number. Both track created load
+identically (0 spinners reads 1, one reads 3, four reads 6). It is
+machine-wide, though, which bounds it badly: on a quiesced box it reads 6 on
+an idle laptop because the housekeeping CPUs are busy by design. Screening
+only, and (21) is better. *A working `LoadProbe` for this was prototyped and
+then superseded; it is in a git stash rather than a branch.*
+
 ### [x] 8. Pin automatically when a reservation exists
 
 *Done.* `pin_if_requested` became `pin_if_reserved` and now pins whenever
@@ -598,6 +622,55 @@ system whether a sample is trustworthy, rather than inferring it from the
 sample's own size. They likely want one shared place to record what was true
 around a batch.
 
+**Measured against a first implementation.** Four things a second attempt
+should start from:
+
+* **`scaling_cur_freq` is an *effective* frequency, not a P-state.** Under
+  `intel_pstate` it is an APERF/MPERF average, so it falls whenever the core
+  halts briefly - an interrupt, or the read syscall itself. On a machine
+  quiesced with the governor pinned and turbo off, three of four long runs
+  still read 1.64GHz against a pinned max of 1.700GHz and flagged movement.
+  Whatever tolerance is chosen, idle time reads as a lower clock.
+* **Migration never fired.** Across every run measured - unquiesced,
+  `taskset` to a pair, and a two-CPU reservation - `sched_getcpu()` changing
+  was never what set the flag; the frequency term always was, and always
+  fired first. On an unquiesced machine migration is redundant, and on a
+  quiesced one it is the only term that *can* fire spuriously. Worth
+  dropping from the flag and keeping only to know when to reopen the fd.
+* **A short run cannot see anything.** `scaling_cur_freq` refreshes about
+  once per millisecond here, so every reading in a run shorter than that is
+  the same cached value. Before (1) landed, a fast benchmark stopped at six
+  samples, i.e. 0.6ms - structurally blind. `MIN_SAMPLE_TIME` of 3ms mostly
+  fixes this, which is worth noting as a dependency rather than a
+  coincidence.
+* **Hold the descriptor, and remember when you could not open it.** The
+  `open`+`read`+`close` against held-open `pread` gap is the 7.7us/0.5us in
+  the findings below. But a failed `open` needs recording too: retrying it
+  per sample costs a failed syscall and a path allocation on every read
+  forever, on exactly the machines that have no cpufreq to read.
+
+Three smaller things in the same implementation, none of them measured
+because they are plain defects:
+
+* The public doc on `Stats::clock_moved` links to `crate::machine`, which is
+  a private module, so `cargo doc` gains a warning and the reference renders
+  as inert text on docs.rs.
+* `clock_gettime`'s return value is discarded, leaving the zeroed `timespec`
+  in place. A rejected clock id therefore turns every interval into 0ns and
+  the run reports `0.0000ns` with a tight `±` and no flag, rather than
+  failing. `Instant` could not do this; `CLOCK_MONOTONIC_RAW` is exactly the
+  id an emulated or seccomp-filtered kernel is most likely to refuse.
+* `Running`'s docs call `sample_time` "a public knob". It is a private
+  `const`. Stale since whenever that changed.
+
+And one thing the clock swap costs, which the paragraph above under-rates:
+`CLOCK_MONOTONIC_RAW` runs slower than `CLOCK_MONOTONIC` by a *measured*
+5.36ppm here - steady, not noise. That is -59us over the 11-second sleep in
+`painfully_slow`, whose assertion has only a ~120us margin, so the test
+became flaky. NTP is permitted 500ppm, which would be 5.5ms and would fail
+it outright. Timing a `thread::sleep` with a clock other than the one sleeps
+are scheduled against needs the margin to be checked, not assumed.
+
 ### [ ] 15. Count cycles as well as nanoseconds
 
 Open a `perf_event_open` counter for `PERF_COUNT_HW_CPU_CYCLES` and read it
@@ -674,6 +747,435 @@ wall time, which is why it is 8.34ns (13.00ns behind an `lfence`) against
 cheaper clock, not a counter. Worth remembering if (6) ever wants batches
 small enough for 26.8ns to matter.
 
+### [ ] 16. Report a ratio, not only a difference, from `compare`
+
+`Comparison::std_error` reasons that whatever the machine does slowly
+"moves both together and cancels out of each round's difference". That is
+true of *additive* drift. The drift this machine actually has is
+multiplicative - a frequency ramp scales everything - and under
+`a_r = A·s_r` the round difference is `(A-B)·s_r`, which still carries
+`s_r`.
+
+Measured on interleaved rounds with known ground truth (two workloads, one
+doing twice the work of the other; 8 runs per condition, 8000 rounds each):
+
+| statistic | quiesced | unquiesced |
+| --- | --- | --- |
+| difference | 11791.7ns ± 0.1 | 12541.5ns ± 1077.0 |
+| ratio | 1.99757 ± 0.00028 | 1.99713 ± 0.00185 |
+
+The unquiesced runs drifted 1.6-2.1x within a run. The ratio survives it;
+the difference is biased +6.4% and its run-to-run spread grows by three
+orders of magnitude. So interleaving makes the *sign and existence* of a
+change robust to drift, and does not make its *magnitude* robust.
+
+Aggregating per-round log-ratios with a median is what recovers it - the
+only statistic tried whose unquiesced performance matched its quiesced
+performance:
+
+| aggregation | null (truth 1.0), unquiesced | 2x config, unquiesced |
+| --- | --- | --- |
+| ratio of means | 0.99965 ± 0.00156 | 1.99713 ± 0.00185 |
+| median of log-ratios | 1.00000 ± 0.00000 | 1.99785 ± 0.00009 |
+
+*The median works here because the drift is concentrated in a minority of
+rounds - the opening ramp.* A run that was uniformly slow throughout would
+still bias the difference; only the ratio is safe there. That is the same
+failure (14) exists to flag.
+
+Note this also makes `is_changed()` perverse under drift: the spread of
+round differences picks up a `|A-B|·sd(s)` term, so a *larger* true
+difference becomes harder to call significant. The log-ratio has no such
+term.
+
+### [ ] 17. Trim whole rounds, on the round total
+
+If (16) or any robust aggregation lands, the unit of trimming has to be the
+round, not the sample. `paired_std_error` exists only because round *r*
+contributed to both halves; trimming per function deletes `a_r` without
+`b_r` and silently reverts the paired estimator to the combined form that
+(5) measured as a third too wide.
+
+**Select on the round total, never on the difference.** In a paired design
+the sum and the difference are orthogonal contrasts - `Cov(a+b, a-b) =
+Var(a) - Var(b)`, zero when the alternatives have similar spread - so
+trimming on the sum does not bias the difference, while trimming on the
+difference is selecting on the outcome. Measured against a true ratio of
+exactly 1.0:
+
+| selector | quiesced | unquiesced |
+| --- | --- | --- |
+| round total | 1.00000 | 0.99999 |
+| round difference | 0.99451 (-0.55%) | 0.99079 (-0.92%) |
+
+Selecting on the difference manufactures a half-percent difference where
+there is none, and does so *even quiesced*, so it is selection bias and not
+drift. Round-total trimming also beat per-function trimming 1.7x on the
+config where the alternatives differ (sd 0.00057 against 0.00096) and was a
+wash where they are identical - i.e. it matters exactly in the case worth
+caring about.
+
+Two limits: the orthogonality is exact only when the alternatives have
+comparable spread, and the sum contains each function's own time, so
+exogeneity is roughly `1/k` contaminated - solid for a `ComparisonSet`,
+weakest at k=2, meaningless at k=1.
+
+### [ ] 18. Fit out the fixed per-measurement cost in `bench`
+
+`bench` times a batch and divides by its length, which is the move
+`bench_scaling` deliberately rejects: dividing turns the fixed per-batch
+overhead into a `c/N` term no polynomial represents, so it smears into the
+answer. Measured, that overhead is **58ns** - two `Instant::now()` calls -
+and it biases a 2x comparison by 0.115%, always toward 1. It is recoverable
+from the same ladder-of-sizes machinery `bench_scaling` already has:
+`weighted_poly_fit(ns, means, ses, 1)` returns `coefficients[0]` as the
+overhead and `coefficients[1]` as the per-iteration cost with it removed.
+
+Three things make that fit the right primitive rather than a coincidence of
+shape: it already carries the constant term; its weights are *measured*
+error bars with no residual rescaling, so `ses[1]` is a real standard error
+for the slope; and `chi2_per_dof` at degree 1 is exactly a test of whether
+per-iteration cost depends on batch size. `measure_scaling`'s loop shape
+transfers too - a `Running` per rung, refit each round, stop on the
+coefficient of interest. What does not transfer is everything about
+locating an unknown power: `discover_sizes`, `choose_sizes`, `next_size`,
+`power_fit`.
+
+For `compare` this threatens to multiply the round by the number of rungs,
+which would be self-defeating - a round only works while everything in it
+sees the same machine state. Two things stop it:
+
+* **The intercept is a property of the harness, not of the function.** Two
+  clock reads cost the same whatever sits between them.
+* **It drifts, so it wants measuring continuously rather than once.** The
+  clock reads are themselves CPU work, so `c₀` at 850MHz is twice `c₀` at
+  1.7GHz; a one-off calibration goes stale.
+
+Which suggests: **the baseline carries the ladder and everyone else uses a
+fixed batch.** Round cost becomes `m + (k-1)` rather than `k·m`, `c₀` is
+re-measured every round by the function that deserves the most measurement
+anyway, and the per-function fit demotes to an occasional diagnostic. The
+one thing to carry: an error in `c₀` propagates as a *common* bias into
+every candidate's slope and does not cancel in a ratio - it pushes ratios
+away from 1 - so `ses[0]` is worth reporting rather than discarding.
+
+### [ ] 19. Sample sizes below 100us
+
+The "larger batches" null in the section below was measured from 100us
+upward. Downward there is something: sweeping `SAMPLE_TIME` quiesced and
+scoring by precision per second of budget (consecutive windows, so
+correlation is preserved) rather than by sample count,
+
+| nominal | wall/sample | CV/sample | true SE in 300ms | reported/true |
+| --- | --- | --- | --- | --- |
+| 10us | 23.1us | 5.888% | 0.000733 | 0.37 |
+| **30us** | **63.3us** | **2.298%** | **0.000124** | 1.46 |
+| 100us | 203.0us | 1.262% | 0.000520 | 0.37 |
+| 300us | 582.5us | 2.630% | 0.000776 | 0.57 |
+| 1ms | 1199.5us | 14.579% | 0.015817 | 0.11 |
+
+30us is ~4x better than the current 100us, and 10us is *worse* than either -
+per-sample CV rises faster than the extra samples repay. Note this is not
+the overhead (18) removes: the fit takes out a bias, and what limits small
+batches is variance. *One pool per size, 10-30 windows each, so each SE
+carries ±13-22%. Wants three replicates before a constant moves.*
+
+Two things fell out of the same sweep and are worth more than the sweep:
+
+* **Every batch carries ~100% wall overhead** - 203us of wall time per
+  nominal 100us sample. That is the untimed `xs.extend` setup loop; for
+  plain `bench` the environment is `()`, so it is building a `Vec<()>` of
+  ~169,000 elements at a cost comparable to the timed region. Removing it
+  for the no-environment case roughly doubles samples per second at *any*
+  batch size, and needs no statistical argument at all.
+* **`reported/true` is 0.37-0.57 nearly everywhere**, on a quiesced machine,
+  with lag-1 autocorrelation at ~0. So the `±` is 2-3x optimistic about a
+  repeat run at the same budget, and the correlation responsible is
+  long-range - the 1/f floor below, not sample-to-sample.
+
+### [ ] 20. Measure the drift time, and set the sample time from it
+
+(7) wants a machine-fitness check; this is the same probe with a number
+attached. Take a long run of fixed batches and plot the variance of the mean
+against block size - an Allan-deviation curve. Where it stops falling like
+`1/n` *is* the correlation time of the machine's drift, and that is the
+right criterion for both `MIN_SAMPLE_TIME` and the length of a round, both
+of which are currently constants chosen on one laptop.
+
+It would also explain the `reported/true` gap in (19) directly, rather than
+leaving it as an observation, and it gives `quiet-bench status` the evidence
+(7) asks for.
+
+### [ ] 21. Two canaries, and report the ratio
+
+Interleave two workloads of *known constant* cost with the real samples.
+Because their true cost does not change, everything their timings do is the
+machine - measured in the same units, on the same core, through the same
+timing path, in the same round. This subsumes most of what (13), (14) and
+(20) were separately reaching for, and it is the largest effect measured so
+far by a wide margin.
+
+**The result.** Spread of the estimate across *eight independent process
+invocations*, per iteration:
+
+| payload | raw, battery | raw, AC | ratio, battery | ratio, AC |
+| --- | --- | --- | --- | --- |
+| L1-resident | 5.07% | 16.79% | **0.034%** | **0.026%** |
+| L2-resident | 5.02% | 16.95% | 0.827% | 0.317% |
+| DRAM-bound | 12.51% | 6.01% | **0.092%** | **0.097%** |
+
+Raw nanoseconds swing between 5% and 17% with the power source; the ratio
+sits between 0.03% and 0.83% everywhere, and the well-matched cases barely
+notice that the laptop was unplugged (0.026% against 0.034%). During the
+battery runs the clock was swinging 400MHz-1400MHz *while idle*.
+
+**The two canaries, and why two.**
+
+* **CPU**: a dependent integer chain in registers. Minimal ILP, so it is
+  close to a pure clock reading. Measured CV of **0.02%** quiesced - a
+  200ppm ruler.
+* **Memory**: a pointer chase from a *fresh start each call*, over an array
+  sized against L3. Latency bound.
+
+They are not redundant and cannot be merged: their cross-correlation is
+-0.005, because core clock and the memory subsystem scale independently. A
+frequency ramp moves the CPU canary and the CPU payloads and leaves the
+memory canary alone; whatever scales the uncore does the reverse.
+
+**Matching is not optional, and needs no user input.** Core-bound payload
+divided by the CPU canary gives 0.03%; divided by the memory canary, 23%.
+The DRAM payload is the exact mirror. Picking whichever canary yields the
+lower ratio spread chose correctly **9 times out of 9**, never closer than
+5x, so the choice can be made from the data and never exposed.
+
+**A mixed workload wants both canaries, added.** For a workload that is
+purely one thing, blending is strictly worse: sweeping `P / (C1^w *
+M1^(1-w))` gives a monotone curve with no interior optimum, so the best
+blend is always a pure canary. But a workload that spends part of its time
+CPU bound and part of it memory bound is a different case, and there the
+physical reading - `P = a*C1 + b*M1`, with `a` and `b` the amount of each
+kind of work - wins decisively. Leave-one-out prediction of a held-out run,
+against deliberately mixed payloads:
+
+| payload | `a*C1 + b*M1` | best single canary | fitted memory share |
+| --- | --- | --- | --- |
+| built ~10% memory | **0.207%** | 1.193% | 11.3% |
+| built ~50% memory | **0.505%** | 4.956% | 53.5% |
+| pure CPU | 0.170% | 0.185% | 1.1% |
+| pure memory | 0.116% | 0.107% | 99.7% |
+
+Ten times better on the even mixture, and the fitted share recovers the
+construction. Past about 90% of one kind the single canary is as good and
+the second parameter costs slightly. Note this *is* the cross-correlation
+idea done properly: the coefficient is built from `cov(y, C1)`, with two
+refinements worth knowing - the shared part of the two canaries has to be
+partialled out (barely matters here, their correlation is -0.005), and a
+correlation is normalised, so it gives the CPU-versus-memory *share* but not
+the scale. For `a` and `b` in real units you need the slope,
+`cov(y,C1)/var(C1)`.
+
+**But `a` and `b` cannot be fitted inside one run.** Round-to-round jitter
+is mostly each canary's own noise, so a within-run regression is attenuated
+- it returned an exponent of 0.64 where the truth was demonstrably 1 - and
+the attenuation differs per run, so every run then reports a slightly
+different quantity:
+
+| `a`, `b` fitted from | spread of the estimate |
+| --- | --- |
+| within one run, per-sample | 12.63% |
+| within one run, 100-round blocks | 32.69% |
+| within one run, 500-round blocks | 49.99% |
+| **across eight runs** | **0.505%** |
+
+Bigger blocks make it worse, trading noise per point for too few points. So
+the decomposition is a property of the *benchmark* that has to be learned
+from the machine visiting several different states - which is what the
+retry-and-combine loop produces anyway. Fit across the runs that were kept,
+not inside any one of them. It is also identifiable exactly when it is
+needed, since fitting requires machine-state variation and a machine with
+none needs no correcting.
+
+Generalising: **a fitted parameter must be fixed across the runs being
+compared, or the runs are not reporting the same quantity.** Choosing the
+weight per run by minimising its own within-run spread gave 86% where a
+fixed pure canary gave 0.32%. This is also why the discrete canary choice
+above is safe and a continuous weight is not: a 9-of-9 decision with a 5x
+margin never flips, while a fitted weight always wobbles.
+
+**Three ways a memory canary silently stops being one.** Each makes it
+report a machine quieter than it is, which is the dangerous direction:
+
+* *A fixed start.* A 100us canary touches only tens of KiB, so walking the
+  same path every call goes cache-resident: 23ns a read instead of 142ns.
+* *A fixed array size.* It must exceed L3, and L3 runs from ~4MiB on a
+  laptop to 384MiB on EPYC. Size it from `cache/index3/size`.
+* *Calibrating with a different access pattern than production.* Calibrating
+  the chase from a fixed start oversized the count ~6x and made every sample
+  three times too long.
+
+Sizing, measured: dependent DRAM latency here is **142ns**, so a 100us
+canary is ~700 reads touching ~44KiB - under L1, so it displaces almost
+nothing. Across plausible machines (70-250ns) that is 400-1400 reads and
+25-90KiB, never more than ~7% of a 1.25MiB L2. The design is insensitive to
+the 3.5x spread in memory latency, but the read count must be *calibrated*
+rather than hardcoded.
+
+**The per-iteration trap, which cost me a day.** Each member calibrates its
+iteration count once, at whatever clock prevails at that instant, so counts
+vary **10-25% between runs** (24.8% for the streaming workload). Comparing
+per-*sample* durations therefore inherits that noise and decorrelates two
+workloads that are physically near-identical - it made the across-run gain
+look like 1.1x when it is really 151x. Within a run the count is constant
+and cancels out of any spread, so this bites only between runs. Divide by
+the count before taking any ratio.
+
+**Throw-out granularity: blocks, not rounds.** Gating on a single anomalous
+canary sample scored *exactly the base rate* - no information - and under
+sustained load it was actively harmful, because a round whose canary was
+preempted is a round whose payload ran clean. A 64-round window median
+against the run's own baseline, tested against a real `cargo build` in
+another directory, found **94% of the contaminated rounds at 64%
+precision**. So the natural unit is a contiguous stretch, which is also
+exactly the unit a "wait for quiet and retry" loop discards.
+
+**The pair is diagnostic.** That `cargo build` raised every member's median
+~13%, but the CPU canary's tail went 0.10% -> 0.00% while the memory
+canary's went 1.07% -> 4.00%. Level shift with no tail is multi-core turbo
+budget; level plus tail is that *and* memory contention.
+
+*Four canaries were built for the experiments and two are for shipping.* The
+two spares are an issue-width CPU canary (eight independent chains rather
+than one dependent one, so an SMT partner eating execution ports shows there
+and not in the latency chain) and a bandwidth memory canary (a sequential
+stream, where the chase is latency bound). Their value is separating causes
+the shipping pair confounds: SMT contention looks exactly like a clock drop
+to the latency chain, and a neighbour streaming memory hurts the bandwidth
+canary far more than the chase. Neither is worth its cost by default - the
+streaming one moves ~1.5MB per 100us sample and is the only genuinely
+polluting member - but both are worth keeping for a diagnostic mode, and the
+first is the one to reach for if SMT ever needs distinguishing. The
+frequency reading from (14) resolves the same ambiguity from the other side:
+clock steady *and* the latency chain slow means the partner.
+
+*Caveats.* All eight runs used one binary, so code layout was constant -
+cross-build reproducibility is untested and is the open question in the
+alignment entry below. The canary ratio is a machine-relative unit:
+excellent for regression detection, and it needs a stored reference to
+become nanoseconds again.
+
+The one payload that resists all of this is the L2-resident one, at
+0.32-0.83% where the matched cases reach 0.03%. It is *not* an unresolved
+mixture: the additive fit attributes only 1-11% of it to memory, and the
+blend sweep finds its optimum at a pure CPU canary, so there is no
+combination left to find. Its within-run ratio spread is 0.13-0.38% against
+0.32-0.83% across runs, which points at something constant within a run and
+different between them - allocator placement deciding which L2 sets the
+working set lands in. Canaries measured in the same round cancel *temporal*
+variation and can do nothing about *configurational* variation. Closing that
+gap means either a third canary genuinely resident in L2, or the alignment
+question below; it is not a canary-combination problem.
+
+**This wants its own PR and a design session before any code.** What is
+described here is a different algorithm rather than an adjustment to the
+existing one - it changes what is measured, what is reported, and how many
+runs an answer takes - so it should be developed on a branch off `main`,
+very likely standing apart from the current sampling code until it earns its
+way in. Everything above is measurement, not design: the design question of
+how canaries, the retry loop, the accuracy contract and the reported units
+fit together has not been settled and should not be settled incrementally.
+
+### [ ] 22. Make the accuracy target a contract, not a wish
+
+Design notes only - nothing here is measured, and it belongs with (21) in
+the separate design session, because the two answer different halves of the
+same question. (21) can tell you whether the machine let you hit your
+target; this is about what to *do* about it.
+
+**The users worth designing for.** Five situations, which collapse to fewer
+than they look:
+
+1. Rough numbers on a machine nobody controls - shared CI, a laptop with a
+   browser open. It will never be quiet; refusing means never answering.
+2. Measure, but make a spoiled answer impossible to miss - including
+   programmatically, not only by eye.
+3. Wait until it is quiet, and start over if it stops being quiet.
+4. Never hand back a number that cannot be trusted: a CI gate, or a figure
+   going into a document.
+5. "I have taken over this machine - verify that." The value is catching a
+   violated assumption early, before spending the whole budget.
+
+4 and 5 differ only in *when* the check happens, so one policy does both. 3
+pairs naturally with strictness, since nobody wants to wait and then accept
+a bad number.
+
+**The accuracy target already says how much the caller cares.** This is the
+simplification that makes the rest small. Interference matters exactly when
+it could move the answer by more than the caller asked to be accurate to, so
+every threshold becomes a comparison against `target_rel_error` rather than
+a constant somebody picked. `KHZ_TOLERANCE` in (14) is already this by
+coincidence - its doc justifies 1% as "where a frequency change starts to
+matter against the accuracy this crate asks for by default" - so make it
+literal. The consequence is that situation (1) needs no API at all: ask for
+5% and nothing the machine does crosses it; ask for 0.1% on an unquiesced
+laptop and you are told constantly, which is correct.
+
+**So the only question left is whether a number you do not believe may be
+returned.** Which argues for a contract rather than a flag: if the target
+cannot be met, refuse loudly, and let callers who want rough numbers ask for
+rough numbers. That is a real change - `hit_limit` today returns a flagged
+answer for "ran out of time", and under a contract that is equally a
+failure. What makes it tolerable is (21): the canaries distinguish *needed
+longer* from *this machine cannot do it*, so the error can say which.
+Without them the message would be useless. An explicit "no target, just run
+until `max_time`" mode is the escape hatch, and there `hit_limit` has no
+meaning.
+
+Three rules that fall out, one of them not obvious:
+
+* **Refusing must fail closed.** Off Linux, or without the probes, we cannot
+  verify anything. The strict setting must then refuse rather than pass, or
+  it silently becomes the weakest setting exactly where we cannot look -
+  which contradicts the doctrine (14) already states.
+* **Waiting must not deadlock on a benchmark that is itself the load.** A
+  multi-threaded benchmark makes the machine busy by existing, so any
+  machine-wide definition of quiet waits forever. Evidence has to be thread-
+  or canary-relative, never `/proc/loadavg`.
+* **Discarding on machine evidence is not the selection hazard it
+  resembles.** Throwing a stretch away because the canaries were bad selects
+  on a covariate measured independently of the timings - the same exogeneity
+  that makes (17)'s round-total trimming safe and difference-trimming
+  unsafe. Worth writing where (17) can see it.
+
+**Throw-out is one principle at several granularities**, and the progression
+is the design:
+
+| granularity | status |
+| --- | --- |
+| one round, on one bad canary sample | measured, fails - see below |
+| a contiguous stretch, on a window of bad canaries | measured, works - 94% recall in (21) |
+| the whole run, retried | this is "wait for it to quiet" |
+| everything, no answer | this is "fail loudly" |
+
+The last two are the same mechanism with a retry loop around it, and
+repeating that loop and combining the stretches that survived is also what
+produces the several runs (21) needs to fit its coefficients. So the retry
+loop is not only a policy, it is the thing that makes the correction
+identifiable.
+
+**Actionability is the point.** Four quality fields that a caller must read
+and weigh correctly is a design failure - the crate knows more about how to
+weigh them than any caller. One predicate, folding everything, with the
+detail underneath for whoever wants it. Machine interference makes the `±`
+wrong rather than wide, which is what `untrustworthy` already means, so it
+should feed that rather than become a fifth field.
+
+Unsettled, and needing the design session: what "no number" *is*
+mechanically. `bench()` returns `Stats`, and the house style is to report
+rather than fail. A panic reads fine in test-shaped code and badly in a
+library; a `Result` is affordable while 0.9.0 is unreleased but taxes every
+call site; a poisoned `Stats` is least invasive and easiest to ignore, which
+is the failure mode being fixed. That choice drives every signature.
+
 ## Tried without success so far
 
 Read this section with suspicion. A negative result holds only over the
@@ -714,7 +1216,52 @@ the answer. None of these is closed.
   2ms. *Tested at one workload, with 100ms blocks - which straddles the
   crossover found in (1) - and only up to 5ms batches.* The aliasing it was
   meant to fix is real (lag-1 of -0.58 at half a tick), so the null may be
-  regime-specific rather than general. Related to item (6).
+  regime-specific rather than general. Related to item (6). See (19) for
+  what happens *below* 100us, which this did not cover.
+- **A robust estimator (median or trimmed mean) instead of the mean.** The
+  sign flips with the machine, which is why it is not a default. Applied to
+  identical timings, relative to the mean's standard error:
+
+  | | n=10 | n=30 | n=100 |
+  | --- | --- | --- | --- |
+  | quiesced, median | 0.53x | 0.27x | 0.33x |
+  | quiesced, 10% trim | 0.84x | 0.93x | 0.87x |
+  | unquiesced, median | 1.43x | 1.75x | 1.71x |
+  | unquiesced, 10% trim | 1.05x | 1.09x | 1.11x |
+
+  Quiesced, the residual noise really is a sparse right tail and the median
+  is worth ~14x the samples. Unquiesced, the spread is *drift* - the whole
+  distribution translating - which no robust estimator touches, while the
+  widened pooled distribution makes them less efficient. Confirmed directly:
+  under sustained contention every estimator shifted by ~70% (mean +69.4%,
+  median +70.7%, trimmed +66.8%), so there is no clean subpopulation to
+  recover. *Also: part of the quiesced gain may be quantisation - the
+  median's SE stops falling like 1/sqrt(n) above n≈30, which looks like it
+  snapping to a grid.* Where robustness does pay is on per-round contrasts,
+  which is (16) and (17), not on raw samples.
+- **Discarding single rounds on a single bad canary sample.** Scored exactly
+  the base rate - 26% precision against 26.1% contamination, i.e. no
+  information - and under sustained load it was *worse than doing nothing*:
+  payload error +117.9% after discarding against +100.7% before, while a
+  random control sat at +102.9%. The rounds where a canary was slow were the
+  rounds where the payload ran clean, which is mechanically sensible - if a
+  preemption lands on the canary, the interference has had its turn and the
+  rest of the round runs unmolested. *The fix is granularity, not
+  abandonment: the same signal over a 64-round window finds 94% of a real
+  `cargo build` (21).* An experiment that wanted to test the sporadic middle
+  case failed to produce any measurable harm to test against, so that regime
+  is still open.
+- **Taking the minimum, for a ratio.** For a raw timing "the low ones are the
+  accurate ones" is sound: noise is additive and positive. For a *ratio* it
+  inverts, because noise in the denominator makes the ratio smaller - so the
+  minimum systematically selects the rounds where the canary was most
+  perturbed. Measured over per-round ratios it was the worst of five
+  statistics by a wide margin (13-28% spread, against 0.007-0.5% for median
+  and 10% trim). Median and trimmed mean are the ones that work there, which
+  is the same answer as (17) reached from the other direction. *Turbo makes
+  this worse even for raw timings: the minimum is "cost at the best clock
+  this run reached", which is a thermal and power-state dependent quantity
+  rather than a machine constant.*
 
 ### Decisions, not measurements
 
@@ -769,3 +1316,85 @@ the answer. None of these is closed.
   every time. Three results that looked clean under sequential measurement
   evaporated under interleaving. It is why `compare` beats two `bench` runs,
   and it is the reason for items 2, 3 and 4.
+- **How to build an interference rig that tests anything.** Four mistakes,
+  each made and each costing a round of measurement. Do not let the
+  interference and the ground-truth signal share a cache line - spinning on
+  a shared atomic that the measured thread also reads makes the "load" into
+  cache-line ping-pong and couples it to the measurement; spin on purely
+  local state and timestamp both sides independently. Label *samples*, not
+  rounds: a 770us round straddling one preemption has one ruined sample and
+  six clean ones, and a per-round label makes a detector look useless when
+  it is only being asked the wrong question. Vary the position of each
+  member within a round by a fresh *permutation*, not by flipping the sweep
+  direction - flipping removes the position bias and substitutes a period-2
+  oscillation, which showed up as a lag-1 autocorrelation of -0.69 and
+  corrupted every variance estimate. And use a real workload for
+  interference where possible: `cargo build --release` in another directory
+  produced clean, blocky contamination that synthetic spinners at 20% duty
+  cycle entirely failed to produce.
+- **The drift is multiplicative, and that is why ratios survive it.** A
+  frequency ramp scales every size and every alternative by the same factor,
+  so a ratio taken within a round is invariant to it and a difference is
+  not. Measured across a 1.6-2.1x within-run drift, a ratio held to 0.005%
+  while the difference of the same rounds moved 6.4%. This is the single
+  fact behind items (16) and (17), and it is also why a *fitted power* is
+  already safe - a common multiplier moves the log-log intercept, not the
+  slope - while a fitted *coefficient* is not.
+- **The opening of an unquiesced run is a different machine.** Timing the
+  same benchmark for three seconds unquiesced, the first hundred samples run
+  1.76-1.77x slower than the steady state, and the transient lasts ~200ms -
+  hundreds of samples. It is *entirely* frequency: quiesced, the same
+  measurement gives 1.000-1.004x, and three runs then agree to 0.045%
+  against a claimed 0.009%. Two consequences. Where the governor is pinned,
+  warm-up buys nothing and the "warm-up before measuring" entry above stays
+  shut. Where it is not - anywhere `quiet-bench` has not been run, which is
+  most places - a benchmark that finishes inside the transient reports a
+  number wrong by nearly 2x with a tight `±` on it, which is exactly the
+  failure (14) is for and the strongest argument that (14) is worth having.
+- **Round-total normalisation is safe, and smaller than hoped.** Dividing
+  each round by its own total before pooling, then rescaling by the median
+  round total, leaves a fitted power unchanged to four decimals with no
+  drift (0.8987 -> 0.8988 in L1, 1.0146 -> 1.0147 in DRAM) and under uniform
+  drift. Under an *N-dependent* drift - the case where clock scaling reaches
+  core-bound rungs more than memory-bound ones - it recovers only ~17% of a
+  0.036 power bias, which integer rounding absorbs anyway. *The N-dependent
+  model was synthetic, not measured; calibrating it needs two frequencies.*
+  So the case for normalising is the coefficient and the per-rung error
+  bars, not the power.
+- **Autocorrelation fixes only what is shorter than the window you look
+  through.** Correcting the standard error by the sample series' own
+  autocorrelation - equivalently, taking it from the spread of block means -
+  is right in principle and measurably insufficient in practice. On a
+  quiesced machine it matters: memory-bound samples have a lag-1 of +0.59
+  and a variance inflation of 5-8, so `sd/sqrt(n)` is ~2.6x too tight for
+  them while being about right for CPU-bound work. On an unquiesced machine
+  it recovers only a sixth of the gap (naive 0.01-0.07 of the truth,
+  corrected 0.06-0.26), because the dominant variation there is not
+  correlation at all - it is the frequency ramp, which is nonstationarity
+  and no within-run statistic sees it. Correlation wants the ACF; drift
+  wants (21).
+- **Mains power is less reproducible than battery.** Across eight runs the
+  CPU payloads spread 16.8% on AC against 5.1% on battery, because
+  `powersave` on AC has 400MHz to 4.4GHz to roam through while the battery
+  cap narrows the range. Plugging in is not the safe choice it looks like.
+- **Load stabilises the memory clock.** The memory canary's across-segment
+  spread fell from 21.4% on an idle battery machine to 4.3% during a
+  `cargo build`: a busy machine holds its uncore clock up instead of idling
+  down and back. Quiet is not the same as steady.
+- **The memory hierarchy, measured, and what to expect elsewhere.**
+  Dependent load-to-use on this laptop (i5-1240P, capped at 1.7GHz): L1
+  2.95ns, 256KiB 7.88ns, 1MiB 12.99ns, 8MiB 42.86ns, and a genuine
+  full-traversal DRAM read **141.62ns**. Across machines expect L1 4-5
+  cycles, L2 12-16, L3 40-50 on a desktop and 60-90 on a server mesh, and
+  DRAM 70-130ns with huge pages, 120-250ns paying page walks, and 150-350ns
+  across a NUMA hop. DDR5 is *higher* latency than DDR4 in nanoseconds
+  despite the bandwidth, and LPDDR5 higher again, so newer is not faster
+  here. The 3.5x spread across machines is why anything sized in reads has
+  to be calibrated rather than hardcoded.
+- **The calibrated batch misses its target duration.** Calibration happens
+  once, at whatever clock prevails at that instant, so the samples it sizes
+  land at 74-144us against a 100us target - 8-22% spread per workload across
+  eight runs. Since per-sample spread depends strongly on sample duration
+  (19), and the tick moiré sits at a particular duration, two runs of the
+  same benchmark can end up in different noise regimes. An argument for
+  re-checking the batch size when the clock has moved.
