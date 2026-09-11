@@ -10,5 +10,7 @@ edition = "2021"
 
 [dependencies]
 
+rand = "0.10.2"
+
 [profile.release]
 debug = true

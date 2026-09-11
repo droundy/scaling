@@ -4,33 +4,30 @@
 //! core clock and almost nothing else. Measured at 0.02% coefficient of
 //! variation on a quiesced machine - a 200 ppm ruler.
 //!
-//! It holds no state and allocates nothing, so it goes through the same
-//! generate-then-run path as any payload with nothing in the generator.
+//! It has no input to generate and no state to keep, so it is a
+//! [`Workload::simple`]: the batch size is the number of links, and the
+//! whole batch is one loop with nothing between the iterations. That makes
+//! its `ns/iter` a genuine per-link figure rather than per chunk of some
+//! arbitrary size.
 
-use super::{Input, Kind, Workload};
+use super::{Kind, Workload};
+use std::cell::Cell;
 
-/// Links of chain per call.
-///
-/// Large enough that the call and the loop around it are a rounding error -
-/// at roughly 0.3 ns a link this is some 300 ns of work against a couple of
-/// nanoseconds of overhead - and small enough that calibration can still
-/// land near its target batch duration rather than overshooting it.
-const CHUNK: u64 = 1024;
-
-fn gen(seed: u64) -> Input {
-    Input::Seed(seed)
-}
-
-fn run(i: &mut Input) -> u64 {
-    let mut x = i.seed() | 1;
-    for _ in 0..CHUNK {
-        x = x
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+impl Workload {
+    /// 1. CPU Canary: dependent multiply-add chain
+    pub fn cpu_canary() -> Self {
+        // The chain has to survive between calls, so it lives in a `Cell`
+        // rather than a local. Started from a constant, never from anything
+        // varying: every batch must do identical work or this stops being a
+        // ruler.
+        let x = Cell::new(0x243F6A8885A308D3u64);
+        Workload::simple("cpu_canary", Kind::CpuCanary, move || {
+            let v = x
+                .get()
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            x.set(v);
+            v
+        })
     }
-    x
-}
-
-pub fn workload() -> Workload {
-    Workload::new("cpu_canary", Kind::CpuCanary, gen, run)
 }

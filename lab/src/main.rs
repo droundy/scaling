@@ -90,13 +90,10 @@ fn run(rounds: usize, out: &str) {
         }
         for (slot, &i) in order.iter().enumerate() {
             seed = step(seed);
-            let (w, n) = (&mut ws[i], counts[i]);
+            let w = &ws[i];
             let name = w.name;
-            // Generate this batch's inputs first, with the clock stopped.
-            if !t.replaying() {
-                w.prepare(n, seed);
-            }
-            t.time(r, slot, name, || w.run());
+            let time_me = w.time_batch(counts[i]);
+            t.time(r, slot, name, time_me);
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
@@ -206,24 +203,21 @@ fn compare(paths: &[String]) {
 /// too would aim at the size of the work plus its setup, so a payload with
 /// an expensive generator - and a generator can easily cost more than the
 /// thing it feeds - would end up with a batch far too small.
-fn calibrate(w: &mut Workload, seed: &mut u64) -> u64 {
+fn calibrate(w: &mut Workload, seed: &mut u64) -> usize {
     let target = SAMPLE.as_secs_f64() * 1e9;
     // A ceiling on generation, because `prepare` allocates one input per
     // iteration. Without it a benchmark whose timed part the optimiser
     // deleted would never reach `target`, and the batch would grow until
     // generating it exhausted memory.
     let prepare_ceiling = Duration::from_millis(50);
-    let mut n = 64u64;
+    let mut n = 64usize;
     loop {
         *seed = step(*seed);
         let p = Instant::now();
-        w.prepare(n, *seed);
+        let job = w.time_batch(n);
         let prepared = p.elapsed();
 
-        let t = Instant::now();
-        let sink = w.run();
-        let ns = t.elapsed().as_nanos() as f64;
-        std::hint::black_box(sink);
+        let ns = job();
 
         if ns >= target * 0.9 || prepared > prepare_ceiling || n >= 1 << 32 {
             if ns < target * 0.9 {
@@ -237,7 +231,7 @@ fn calibrate(w: &mut Workload, seed: &mut u64) -> u64 {
             return n;
         }
         let factor = (target / ns.max(1.0)).clamp(1.5, 50.0);
-        n = ((n as f64 * factor) as u64).max(n + 1);
+        n = ((n as f64 * factor) as usize).max(n + 1);
     }
 }
 

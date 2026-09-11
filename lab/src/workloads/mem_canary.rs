@@ -1,28 +1,26 @@
-//! Memory canary: a pointer chase starting somewhere new every call.
+//! Memory canary: a pointer chase over a table far larger than L3.
 //!
-//! The moving start is load-bearing. A 100 us chase touches only tens of
-//! KiB, so walking the *same* path every call leaves it cache resident and
-//! it reads 23 ns per access instead of 142 ns - still perfectly steady, and
-//! measuring the wrong thing. A fresh start per call sweeps a window through
-//! the table, so every access genuinely misses.
+//! Like the CPU canary it has no input to generate, so it is a
+//! [`Workload::simple`] and the batch size is the number of chase steps. But
+//! unlike the CPU canary it must *not* do identical work every batch: the
+//! start moves, and that is load-bearing.
 //!
-//! The table lives here, privately, behind a `LazyLock`. Nothing outside
-//! this module can reach it, which is the point: a payload sharing state
-//! with the instrument meant to measure it independently is the same mistake
-//! as a payload that calls the canary outright, one level down.
+//! A 100 us chase is only some 700 dependent loads, touching ~45 KiB of
+//! cache lines. Start from the same place every batch and that window is
+//! resident in L2 by the second one, so it reads ~23 ns a step instead of
+//! ~142 ns - perfectly steady, and measuring the wrong level of the
+//! hierarchy. Moving the start sweeps the window through the table so every
+//! access genuinely misses. This has been got wrong twice; the failure is
+//! silent and looks like a quieter machine.
+//!
+//! The table and the cursor are captured by the closure, so they are
+//! unreachable from anywhere else. That is the point: a payload sharing
+//! state with the instrument meant to measure it independently is the same
+//! mistake as a payload that calls the canary outright, one level down.
 
-use super::{Input, Kind, Workload};
-use std::sync::LazyLock;
+use super::{Kind, Workload};
+use std::cell::Cell;
 
-/// Chase steps per call. Each is a dependent load that misses, so at ~142 ns
-/// apiece this is a couple of microseconds of work - call overhead is
-/// nothing against it, and calibration still has room to aim.
-const STEPS: u64 = 16;
-
-static CHASE: LazyLock<Vec<u64>> = LazyLock::new(build);
-
-/// Built on first use, which is inside `prepare` and therefore never inside
-/// a timed region.
 fn build() -> Vec<u64> {
     // Size against this machine's L3 rather than to a constant: L3 runs from
     // ~4 MiB on a laptop to hundreds of MiB on a server, and a table that
@@ -50,24 +48,24 @@ fn build() -> Vec<u64> {
     chase
 }
 
-fn gen(seed: u64) -> Input {
-    Input::Index(seed as usize & (CHASE.len() - 1))
-}
-
-fn run(i: &mut Input) -> u64 {
-    let mut p = i.index();
-    for _ in 0..STEPS {
-        p = CHASE[p] as usize;
+impl Workload {
+    /// 2. Memory canary: pointer chase, table far beyond L3
+    pub fn mem_canary() -> Self {
+        // Built here rather than lazily. `Workload::simple` runs its function
+        // wholly inside the timed region, so a table first touched in there
+        // would put ~50 ms of one-time sequential writes into a sample.
+        let table = build();
+        let mask = table.len() - 1;
+        // The chase simply continues where the last batch left it, which is
+        // better than restarting anywhere: the whole run walks one long path
+        // through the table, so nothing is revisited until it has wrapped
+        // millions of steps later and been evicted many times over. No
+        // cursor to scatter, and no way to accidentally sit still.
+        let p = Cell::new(0usize);
+        Workload::simple("mem_canary", Kind::MemCanary, move || {
+            let next = table[p.get() & mask] as usize;
+            p.set(next);
+            next
+        })
     }
-    p as u64
-}
-
-pub fn workload() -> Workload {
-    // Build the table now rather than on the first `gen`. It is a one-time
-    // ~50ms of sequential writes, and inside `gen` that lands in the very
-    // first `prepare` - where calibration reads it as this benchmark being
-    // ruinously expensive to generate, trips its ceiling, and gives up
-    // without ever growing the batch.
-    LazyLock::force(&CHASE);
-    Workload::new("mem_canary", Kind::MemCanary, gen, run)
 }

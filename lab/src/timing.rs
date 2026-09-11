@@ -16,7 +16,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One timing, with everything needed to put it back where it happened.
 ///
@@ -46,7 +46,7 @@ pub struct Sample {
 pub struct Timing {
     replay: Option<HashMap<(usize, String), f64>>,
     /// Calibrated iteration counts, from the replayed file when replaying.
-    pub iters: HashMap<String, u64>,
+    pub iters: HashMap<String, usize>,
     /// Every timing taken, in the order taken.
     pub log: Vec<Sample>,
 }
@@ -89,7 +89,7 @@ impl Timing {
     /// In replay mode `f` is *not* run. That is the point - replay is meant
     /// to be fast and deterministic - but it does mean a workload's side
     /// effects do not happen, so do not put anything load-bearing in one.
-    pub fn time(&mut self, round: usize, slot: usize, name: &str, f: impl FnOnce() -> u64) -> f64 {
+    pub fn time(&mut self, round: usize, slot: usize, name: &str, f: impl FnOnce() -> f64) -> f64 {
         let t_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -101,14 +101,7 @@ impl Timing {
                      is shorter than this run, or the workload was renamed"
                 )
             }),
-            None => {
-                let t = Instant::now();
-                let sink = f();
-                let ns = t.elapsed().as_nanos() as f64;
-                // Consume the result so the optimiser cannot delete the work.
-                std::hint::black_box(sink);
-                ns
-            }
+            None => f(),
         };
         self.log.push(Sample {
             round,
@@ -148,7 +141,7 @@ impl Timing {
 
 /// A recording, as read back.
 pub struct Recording {
-    pub iters: HashMap<String, u64>,
+    pub iters: HashMap<String, usize>,
     /// In the order they were taken.
     pub samples: Vec<Sample>,
 }

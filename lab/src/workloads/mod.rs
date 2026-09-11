@@ -31,6 +31,13 @@
 //!
 //! Then add `module::workload()` to [`all`].
 
+use std::{
+    hint::black_box,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
 mod cpu_canary;
 mod mem_canary;
 mod payloads;
@@ -48,121 +55,81 @@ pub enum Kind {
     Payload,
 }
 
-/// One prepared input, in whatever shape the benchmark wants.
-///
-/// An enum rather than a generic or a trait object, so that a heterogeneous
-/// list of benchmarks stays a plain `Vec` of a concrete type. If you need a
-/// shape that is not here, add a variant and an accessor beside [`Input::ints`].
-pub enum Input {
-    Ints(Vec<u64>),
-    Text(String),
-    /// An index into a table the benchmark keeps privately.
-    Index(usize),
-    /// A seed, for a benchmark that allocates nothing.
-    Seed(u64),
-}
-
-impl Input {
-    /// Get at an `Ints` input. Panics loudly on a mismatch, which is a typo
-    /// you want to hear about immediately rather than a case to handle: a
-    /// benchmark's generator and its function are written together and
-    /// always agree, or neither is doing what its author meant.
-    pub fn ints(&mut self) -> &mut Vec<u64> {
-        match self {
-            Input::Ints(v) => v,
-            _ => panic!("this benchmark's generator does not make Input::Ints"),
-        }
-    }
-
-    /// Get at a `Text` input.
-    pub fn text(&mut self) -> &mut String {
-        match self {
-            Input::Text(s) => s,
-            _ => panic!("this benchmark's generator does not make Input::Text"),
-        }
-    }
-
-    /// Get at an `Index` input.
-    pub fn index(&self) -> usize {
-        match self {
-            Input::Index(n) => *n,
-            _ => panic!("this benchmark's generator does not make Input::Index"),
-        }
-    }
-
-    /// Get at a `Seed` input.
-    pub fn seed(&self) -> u64 {
-        match self {
-            Input::Seed(n) => *n,
-            _ => panic!("this benchmark's generator does not make Input::Seed"),
-        }
-    }
-
-    /// A vector of `n` scrambled values. Cheap, deterministic in `seed`, and
-    /// deliberately not sorted.
-    fn shuffled(n: usize, seed: u64) -> Self {
-        let mut x = seed | 1;
-        Input::Ints(
-            (0..n)
-                .map(|_| {
-                    x = x
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    x >> 11
-                })
-                .collect(),
-        )
-    }
-}
-
 pub struct Workload {
     pub name: &'static str,
     pub kind: Kind,
-    /// Build one input. Runs before the timer starts.
-    gen: fn(u64) -> Input,
-    /// The thing being measured.
-    f: fn(&mut Input) -> u64,
-    inputs: Vec<Input>,
+    /// Prepare to time a batch of the workload with batch size `usize`.
+    f: Box<dyn Fn(usize) -> Box<dyn FnOnce() -> f64>>,
 }
 
 impl Workload {
-    pub fn new(
+    pub fn new<T: 'static, O: 'static>(
         name: &'static str,
         kind: Kind,
-        gen: fn(u64) -> Input,
-        f: fn(&mut Input) -> u64,
+        gen: fn() -> T,
+        f: fn(&mut T) -> O,
     ) -> Workload {
+        let data = Arc::new(Mutex::new(Vec::new()));
         Workload {
             name,
             kind,
-            gen,
-            f,
-            inputs: Vec::new(),
+            f: Box::new(move |count| {
+                {
+                    let mut data = data.lock().unwrap();
+                    data.clear();
+                    data.extend(std::iter::repeat_with(gen).take(count));
+                }
+                let data = data.clone();
+                Box::new(move || {
+                    let mut data = data.lock().unwrap();
+                    let start = Instant::now();
+                    for x in data.iter_mut() {
+                        black_box(f(x));
+                    }
+                    start.elapsed().as_secs_f64() * 1e9
+                })
+            }),
         }
     }
 
-    /// Build this batch's inputs. Not timed.
-    pub fn prepare(&mut self, iters: u64, seed: u64) {
-        // Clearing here rather than after `run` is deliberate: dropping the
-        // previous batch's inputs is real work, and it happens outside the
-        // timed region on this side of the call instead of inside it on the
-        // other.
-        self.inputs.clear();
-        self.inputs.reserve(iters as usize);
-        for i in 0..iters {
-            self.inputs.push((self.gen)(seed.wrapping_add(i)));
+    /// A workload with no input to generate: one call is one iteration, and
+    /// the batch is a loop around it.
+    ///
+    /// Takes an `impl Fn` rather than a `fn` pointer so a workload can carry
+    /// its own state - a table, a counter - by capturing it. A plain `fn`
+    /// still coerces, so the stateless case is unchanged.
+    ///
+    /// The `Rc` is what lets a `Fn` outer closure hand a fresh `FnOnce` to
+    /// each batch: the inner closure has to *own* what it calls, and you
+    /// cannot move out of a captured variable more than once. One refcount
+    /// bump per batch, and it happens before the clock starts.
+    pub fn simple<O: 'static>(
+        name: &'static str,
+        kind: Kind,
+        f: impl Fn() -> O + 'static,
+    ) -> Workload {
+        let f = Rc::new(f);
+        Workload {
+            name,
+            kind,
+            f: Box::new(move |count| {
+                let f = Rc::clone(&f);
+                Box::new(move || {
+                    let start = Instant::now();
+                    // Monomorphic: `f` is a concrete type here, so this call
+                    // inlines. The only `dyn` is the box around this closure,
+                    // entered once per batch.
+                    for _ in 0..count {
+                        black_box(f());
+                    }
+                    start.elapsed().as_secs_f64() * 1e9
+                })
+            }),
         }
     }
 
-    /// Run over what `prepare` built. Timed.
-    pub fn run(&mut self) -> u64 {
-        let mut acc = 0u64;
-        // Iterate rather than drain: the inputs must outlive the timed
-        // region, or their destructors land inside it.
-        for x in self.inputs.iter_mut() {
-            acc ^= (self.f)(x);
-        }
-        acc
+    pub fn time_batch(&self, count: usize) -> Box<dyn FnOnce() -> f64> {
+        (self.f)(count)
     }
 }
 
@@ -214,7 +181,7 @@ pub fn selected(names: &str) -> Vec<Workload> {
     };
     chosen.sort_by_key(|w| w.name);
 
-    let mut ws = vec![cpu_canary::workload(), mem_canary::workload()];
+    let mut ws = vec![Workload::cpu_canary(), Workload::mem_canary()];
     ws.extend(chosen);
     ws
 }
