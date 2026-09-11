@@ -32,10 +32,24 @@ long run are far more optimistic and will flatter a bad estimator.
 | `main.rs` | calibrate, round-robin, report | rarely |
 | `timing.rs` | measure, or replay from a file | almost never |
 
-**Adding a workload**: write a `fn(&Ctx, u64, u64) -> u64` that performs
-`iters` iterations and returns something derived from the work, then add a
-line to `workloads::all()`. The third argument is a fresh pseudo-random seed
-each call; ignore it unless the workload needs to move through memory.
+**Adding a payload**: one line in `workloads::all()`.
+
+```rust
+generated("sort_1k", |seed| shuffled(1024, seed), |v| { v.sort_unstable(); v[0] })
+```
+
+The first closure builds one input and runs **before the timer starts**; the
+second is the thing being measured. Everything you do not want in the number
+goes in the generator - allocating, filling a buffer, and in particular
+restoring any order the previous iteration destroyed, since sorting an
+already-sorted vector measures something else entirely.
+
+A batch of `n` iterations generates all `n` inputs first, then times `n`
+calls over them. The previous batch's inputs are dropped at the *start* of
+the next `prepare`, so their destructors land outside the timed region too.
+
+`Ctx` is for the canaries only. A payload that reaches into it is sharing
+state with the instrument that is supposed to be measuring it independently.
 
 **Adding an estimator**: write a `fn(&Run, &str) -> f64` and add a line to
 `estimate::all()`. `Run::get` gives the per-iteration timings and

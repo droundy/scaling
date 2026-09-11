@@ -15,8 +15,9 @@ mod timing;
 mod workloads;
 
 use estimate::Run;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
-use workloads::{Ctx, Kind};
+use workloads::{Bench, Ctx, Kind};
 
 /// What one sample of one workload should cost. Everything is calibrated to
 /// this, so the members of a round are comparable and share a noise regime.
@@ -41,8 +42,8 @@ fn main() {
 
 /// Measure, and write a recording.
 fn run(rounds: usize, out: &str) {
-    let ctx = Ctx::new();
-    let ws = workloads::all();
+    let ctx = Rc::new(Ctx::new());
+    let mut ws = workloads::all(Rc::clone(&ctx));
     let mut t = timing::Timing::from_env();
     eprintln!("chase array {} MiB", ctx.chase.len() * 8 / (1 << 20));
 
@@ -52,20 +53,23 @@ fn run(rounds: usize, out: &str) {
     // measurement loop below. Calibrating a moving-window workload from a
     // *fixed* start lets it go cache resident, which oversizes its count by
     // about six and makes every later sample three times too long.
+    //
+    // `prepare` is outside the timing here for the same reason it is below:
+    // calibration should aim at the size of the work, not of the work plus
+    // its setup, or a payload with an expensive generator gets a batch far
+    // too small.
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut counts = Vec::with_capacity(ws.len());
-    for w in &ws {
+    for w in ws.iter_mut() {
+        let name = w.name();
         let n = if t.replaying() {
-            *t.iters.get(w.name).unwrap_or(&1)
+            *t.iters.get(name).unwrap_or(&1)
         } else {
-            calibrate(|n| {
-                seed = step(seed);
-                (w.run)(&ctx, n, seed)
-            })
+            calibrate(w.as_mut(), &mut seed)
         };
-        t.iters.insert(w.name.to_string(), n);
+        t.iters.insert(name.to_string(), n);
         counts.push(n);
-        eprintln!("  {:>16} {:>12} iters", w.name, n);
+        eprintln!("  {:>16} {:>12} iters", name, n);
     }
 
     // Round-robin, in a fresh random order each round.
@@ -84,8 +88,13 @@ fn run(rounds: usize, out: &str) {
         }
         for &i in &order {
             seed = step(seed);
-            let (w, n, s) = (&ws[i], counts[i], seed);
-            t.time(r, w.name, || (w.run)(&ctx, n, s));
+            let (w, n) = (&mut ws[i], counts[i]);
+            let name = w.name();
+            // Generate this batch's inputs first, with the clock stopped.
+            if !t.replaying() {
+                w.prepare(n, seed);
+            }
+            t.time(r, name, || w.run());
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
@@ -97,15 +106,15 @@ fn run(rounds: usize, out: &str) {
     let run = Run::load(out);
     println!("\n{:>16} {:>8} {:>12} {:>12}", "workload", "kind", "ns/iter", "within-run");
     for w in &ws {
-        let v = run.get(w.name);
-        let kind = match w.kind {
+        let v = run.get(w.name());
+        let kind = match w.kind() {
             Kind::CpuCanary => "cpu*",
             Kind::MemCanary => "mem*",
             Kind::Payload => "",
         };
         println!(
             "{:>16} {kind:>8} {:>12.4} {:>11.2}%",
-            w.name,
+            w.name(),
             estimate::trim_of(v, 0.10),
             100.0 * estimate::rel_spread(v)
         );
@@ -155,15 +164,40 @@ fn compare(paths: &[String]) {
     );
 }
 
-/// Grow the iteration count until one call takes about [`SAMPLE`].
-fn calibrate(mut f: impl FnMut(u64) -> u64) -> u64 {
+/// Grow the batch until the *timed* part takes about [`SAMPLE`].
+///
+/// Only `run` is timed, exactly as in the measurement loop. Timing `prepare`
+/// too would aim at the size of the work plus its setup, so a payload with
+/// an expensive generator - and a generator can easily cost more than the
+/// thing it feeds - would end up with a batch far too small.
+fn calibrate(w: &mut dyn Bench, seed: &mut u64) -> u64 {
     let target = SAMPLE.as_secs_f64() * 1e9;
+    // A ceiling on generation, because `prepare` allocates one input per
+    // iteration. Without it a benchmark whose timed part the optimiser
+    // deleted would never reach `target`, and the batch would grow until
+    // generating it exhausted memory.
+    let prepare_ceiling = Duration::from_millis(50);
     let mut n = 64u64;
     loop {
+        *seed = step(*seed);
+        let p = Instant::now();
+        w.prepare(n, *seed);
+        let prepared = p.elapsed();
+
         let t = Instant::now();
-        std::hint::black_box(f(n));
+        let sink = w.run();
         let ns = t.elapsed().as_nanos() as f64;
-        if ns >= target * 0.9 || n > 1 << 34 {
+        std::hint::black_box(sink);
+
+        if ns >= target * 0.9 || prepared > prepare_ceiling || n >= 1 << 32 {
+            if ns < target * 0.9 {
+                eprintln!(
+                    "  note: {} stopped growing at {n} iters ({:.0}us timed, {:.0}ms to generate)",
+                    w.name(),
+                    ns / 1000.0,
+                    prepared.as_secs_f64() * 1e3
+                );
+            }
             return n;
         }
         let factor = (target / ns.max(1.0)).clamp(1.5, 50.0);
