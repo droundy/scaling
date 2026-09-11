@@ -16,7 +16,7 @@ mod workloads;
 
 use estimate::Run;
 use std::time::{Duration, Instant};
-use workloads::{Ctx, Kind, Workload};
+use workloads::{Kind, Workload};
 
 /// What one sample of one workload should cost. Everything is calibrated to
 /// this, so the members of a round are comparable and share a noise regime.
@@ -41,10 +41,8 @@ fn main() {
 
 /// Measure, and write a recording.
 fn run(rounds: usize, out: &str) {
-    let ctx = Ctx::new();
     let mut ws = workloads::all();
     let mut t = timing::Timing::from_env();
-    eprintln!("chase array {} MiB", ctx.chase.len() * 8 / (1 << 20));
 
     // Calibrate each workload to SAMPLE.
     //
@@ -64,7 +62,7 @@ fn run(rounds: usize, out: &str) {
         let n = if t.replaying() {
             *t.iters.get(name).unwrap_or(&1)
         } else {
-            calibrate(w, &ctx, &mut seed)
+            calibrate(w, &mut seed)
         };
         t.iters.insert(name.to_string(), n);
         counts.push(n);
@@ -93,7 +91,7 @@ fn run(rounds: usize, out: &str) {
             if !t.replaying() {
                 w.prepare(n, seed);
             }
-            t.time(r, slot, name, || w.run(&ctx));
+            t.time(r, slot, name, || w.run());
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
@@ -118,7 +116,11 @@ fn run(rounds: usize, out: &str) {
             100.0 * estimate::rel_spread(v)
         );
     }
-    println!("\n* canary: constant true cost, so its spread is the machine's");
+    println!(
+        "\n* canary: constant true cost, so its spread is the machine's. Its\n\
+         ns/iter is per chunk of work - a canary loops internally, so the\n\
+         absolute figure is not per operation and is not meant to be read."
+    );
 }
 
 /// Score every estimator on every workload, across several recordings.
@@ -178,7 +180,7 @@ fn compare(paths: &[String]) {
 /// too would aim at the size of the work plus its setup, so a payload with
 /// an expensive generator - and a generator can easily cost more than the
 /// thing it feeds - would end up with a batch far too small.
-fn calibrate(w: &mut Workload, ctx: &Ctx, seed: &mut u64) -> u64 {
+fn calibrate(w: &mut Workload, seed: &mut u64) -> u64 {
     let target = SAMPLE.as_secs_f64() * 1e9;
     // A ceiling on generation, because `prepare` allocates one input per
     // iteration. Without it a benchmark whose timed part the optimiser
@@ -193,7 +195,7 @@ fn calibrate(w: &mut Workload, ctx: &Ctx, seed: &mut u64) -> u64 {
         let prepared = p.elapsed();
 
         let t = Instant::now();
-        let sink = w.run(ctx);
+        let sink = w.run();
         let ns = t.elapsed().as_nanos() as f64;
         std::hint::black_box(sink);
 

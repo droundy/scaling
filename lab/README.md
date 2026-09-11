@@ -28,40 +28,49 @@ long run are far more optimistic and will flatter a bad estimator.
 | file | what it holds | how often you will touch it |
 | --- | --- | --- |
 | `estimate.rs` | the estimator variants | constantly |
-| `workloads.rs` | the things being timed | when adding a benchmark |
+| `workloads/` | the things being timed, one module each | when adding a benchmark |
 | `main.rs` | calibrate, round-robin, report | rarely |
 | `timing.rs` | measure, or replay from a file | almost never |
 
-**Adding a payload**: one line in `workloads::all()`.
+**Adding a benchmark**: give it a module beside `workloads/cpu_canary.rs`,
+or a line in `workloads/payloads.rs` if it is small. A module needs three
+things:
 
 ```rust
-payload("sort_1k", |s| Input::Ints(shuffled(1024, s)), |_, i| {
+fn gen(seed: u64) -> Input { Input::Ints(shuffled(1024, seed)) }
+
+fn run(i: &mut Input) -> u64 {
     let v = ints(i);
     v.sort_unstable();
     v[0]
-}),
+}
+
+pub fn workload() -> Workload { Workload::new("sort_1k", Kind::Payload, gen, run) }
 ```
 
-The first closure builds one input and runs **before the timer starts**; the
-second is the thing being measured. Everything you do not want in the number
-goes in the generator - allocating, filling a buffer, and in particular
-restoring any order the previous iteration destroyed, since sorting an
-already-sorted vector measures something else entirely.
+Then add `module::workload()` to `workloads::all()`.
+
+`gen` runs **before the timer starts** and `run` inside it, so everything you
+do not want in the number goes in `gen` - allocating, filling a buffer, and
+in particular restoring any order the previous iteration destroyed, since
+sorting an already-sorted vector measures something else entirely.
 
 A batch of `n` iterations generates all `n` inputs first, then times `n`
 calls over them. The previous batch's inputs are dropped at the *start* of
 the next `prepare`, so their destructors land outside the timed region too.
 
 Both halves are plain `fn` pointers - there is no `dyn` anywhere in this
-program - so a non-capturing closure works and a capturing one will not
-compile. Put constants in the body, as `1024` is above.
+program - so they cannot capture. Put constants in the body, as `1024` is
+above. If you need an input shape `Input` does not have, add a variant and an
+accessor beside `ints`; that is the only place where a benchmark costs more
+than its module.
 
-If you need an input shape `Input` does not have, add a variant and an
-accessor beside `ints`. That is the only place where adding a benchmark
-costs more than one line.
-
-`Ctx` is for the canaries only. A payload that reaches into it is sharing
-state with the instrument that is supposed to be measuring it independently.
+**The canaries are not special to the runner.** Each is a `Workload` like any
+other, keeps its own table privately behind a `LazyLock`, and goes through
+the same prepare-then-run path. `Kind` labels the report; it is not a branch
+in the machinery. A canary does loop internally, so its `ns/iter` is per
+chunk of work rather than per operation - the absolute figure is not meant
+to be read, only its ratios.
 
 **Adding an estimator**: write a `fn(&Run, &str) -> f64` and add a line to
 `estimate::all()`. `Run::get` gives the per-iteration timings and
