@@ -16,14 +16,39 @@
 //! ```
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// One timing, with everything needed to put it back where it happened.
+///
+/// A raw dump that keeps only "these are the timings for this workload" has
+/// thrown away most of what makes it raw. Three things are worth the
+/// columns:
+///
+/// * **`slot`**, the position within the round. The order is reshuffled
+///   every round on purpose, because position matters - a memory canary
+///   immediately before a payload leaves that payload's cache cold. Without
+///   `slot` you cannot ask whether it did.
+/// * **`round`**, kept explicitly rather than inferred from position, so a
+///   gap is visible as a gap.
+/// * **`t_ms`**, wall clock, so a run can be lined up against something that
+///   happened outside it - a build starting, a laptop being unplugged.
+#[derive(Clone, Debug)]
+pub struct Sample {
+    pub round: usize,
+    pub slot: usize,
+    pub workload: String,
+    pub t_ms: u128,
+    /// Raw, for the whole batch. Divide by the iteration count to compare
+    /// anything across runs.
+    pub ns: f64,
+}
 
 pub struct Timing {
     replay: Option<HashMap<(usize, String), f64>>,
     /// Calibrated iteration counts, from the replayed file when replaying.
     pub iters: HashMap<String, u64>,
-    /// Every timing taken, in the order taken: `(round, workload, ns)`.
-    pub log: Vec<(usize, String, f64)>,
+    /// Every timing taken, in the order taken.
+    pub log: Vec<Sample>,
 }
 
 impl Timing {
@@ -31,9 +56,14 @@ impl Timing {
     pub fn from_env() -> Timing {
         match std::env::var("LAB_REPLAY") {
             Ok(path) => {
-                let (iters, times) = read(&path);
-                eprintln!("replaying {} timings from {path}", times.len());
-                Timing { replay: Some(times), iters, log: Vec::new() }
+                let rec = read(&path);
+                eprintln!("replaying {} timings from {path}", rec.samples.len());
+                let map = rec
+                    .samples
+                    .iter()
+                    .map(|s| ((s.round, s.workload.clone()), s.ns))
+                    .collect();
+                Timing { replay: Some(map), iters: rec.iters, log: Vec::new() }
             }
             Err(_) => Timing { replay: None, iters: HashMap::new(), log: Vec::new() },
         }
@@ -43,16 +73,31 @@ impl Timing {
         self.replay.is_some()
     }
 
-    /// Time one call, or look up what it cost last time.
+    /// Time one batch, or look up what it cost last time.
+    ///
+    /// Keyed for replay by round and workload rather than by `slot`, so a
+    /// driver change that reshuffles the order can still replay old data.
     ///
     /// In replay mode `f` is *not* run. That is the point - replay is meant
     /// to be fast and deterministic - but it does mean a workload's side
     /// effects do not happen, so do not put anything load-bearing in one.
-    pub fn time(&mut self, round: usize, name: &str, f: impl FnOnce() -> u64) -> f64 {
+    pub fn time(
+        &mut self,
+        round: usize,
+        slot: usize,
+        name: &str,
+        f: impl FnOnce() -> u64,
+    ) -> f64 {
+        let t_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         let ns = match &self.replay {
             Some(m) => *m.get(&(round, name.to_string())).unwrap_or_else(|| {
-                panic!("no recorded timing for round {round} of {name}; \
-                        the recording is shorter than this run, or the workload was renamed")
+                panic!(
+                    "no recorded timing for round {round} of {name}; the recording \
+                     is shorter than this run, or the workload was renamed"
+                )
             }),
             None => {
                 let t = Instant::now();
@@ -63,22 +108,29 @@ impl Timing {
                 ns
             }
         };
-        self.log.push((round, name.to_string(), ns));
+        self.log.push(Sample { round, slot, workload: name.to_string(), t_ms, ns });
         ns
     }
 
     /// Write everything taken so far, plus the calibration, as CSV.
     pub fn write(&self, path: &str) {
         use std::fmt::Write as _;
-        let mut s = String::with_capacity(self.log.len() * 32);
+        let mut s = String::with_capacity(self.log.len() * 48);
         let mut names: Vec<_> = self.iters.iter().collect();
         names.sort();
         for (name, n) in names {
             let _ = writeln!(s, "# iters {name} {n}");
         }
-        s.push_str("round,workload,ns\n");
-        for (r, name, ns) in &self.log {
-            let _ = writeln!(s, "{r},{name},{ns:.0}");
+        // `seq` is the line's own index. Redundant with file order, and
+        // written anyway so the order survives being sorted or filtered by
+        // something else later.
+        s.push_str("seq,round,slot,workload,t_ms,ns\n");
+        for (seq, x) in self.log.iter().enumerate() {
+            let _ = writeln!(
+                s,
+                "{seq},{},{},{},{},{:.0}",
+                x.round, x.slot, x.workload, x.t_ms, x.ns
+            );
         }
         if let Err(e) = std::fs::write(path, s) {
             eprintln!("could not write {path}: {e}");
@@ -86,12 +138,19 @@ impl Timing {
     }
 }
 
-/// Parse a recording: `# iters <name> <n>` lines, then `round,workload,ns`.
-pub fn read(path: &str) -> (HashMap<String, u64>, HashMap<(usize, String), f64>) {
+/// A recording, as read back.
+pub struct Recording {
+    pub iters: HashMap<String, u64>,
+    /// In the order they were taken.
+    pub samples: Vec<Sample>,
+}
+
+/// Parse a recording: `# iters <name> <n>` lines, then the sample rows.
+pub fn read(path: &str) -> Recording {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("could not read {path}: {e}"));
     let mut iters = HashMap::new();
-    let mut times = HashMap::new();
+    let mut samples = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("# iters ") {
             let mut f = rest.split_whitespace();
@@ -100,14 +159,20 @@ pub fn read(path: &str) -> (HashMap<String, u64>, HashMap<(usize, String), f64>)
                     iters.insert(name.to_string(), n);
                 }
             }
-        } else if !line.starts_with('#') && !line.starts_with("round,") {
-            let mut f = line.split(',');
-            if let (Some(r), Some(w), Some(ns)) = (f.next(), f.next(), f.next()) {
-                if let (Ok(r), Ok(ns)) = (r.parse(), ns.parse()) {
-                    times.insert((r, w.to_string()), ns);
-                }
-            }
+            continue;
+        }
+        if line.starts_with('#') || line.starts_with("seq,") || line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(',').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        if let (Ok(round), Ok(slot), Ok(t_ms), Ok(ns)) =
+            (f[1].parse(), f[2].parse(), f[4].parse(), f[5].parse())
+        {
+            samples.push(Sample { round, slot, workload: f[3].to_string(), t_ms, ns });
         }
     }
-    (iters, times)
+    Recording { iters, samples }
 }

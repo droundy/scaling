@@ -67,6 +67,31 @@ state with the instrument that is supposed to be measuring it independently.
 `estimate::all()`. `Run::get` gives the per-iteration timings and
 `Run::ratio` gives the per-round ratio to a canary.
 
+## The recording
+
+```none
+# iters cpu_canary 339205
+# iters mem_canary 483
+seq,round,slot,workload,t_ms,ns
+0,0,0,parse_int,1789145466930,135186
+1,0,1,hashmap_256,1789145466931,363568
+```
+
+`ns` is raw, for the whole batch; divide by that workload's `iters` to get
+anything comparable between runs. The other columns exist because a dump
+that keeps only "these timings belong to this workload" has thrown away most
+of what made it raw:
+
+* **`slot`** is the position within the round, which is reshuffled every
+  round on purpose. Position matters - a memory canary immediately before a
+  payload leaves that payload's cache cold - and `compare`'s `slot` column
+  reports how much, per workload.
+* **`round`** is explicit rather than inferred, so a gap shows up as a gap.
+* **`t_ms`** is wall clock, so a run can be lined up against something that
+  happened outside it: a build starting, a laptop being unplugged.
+* **`seq`** is the line's own index, redundant with file order and written
+  anyway so the order survives being sorted or filtered by something else.
+
 ## What is already known
 
 Three results are baked into the code as comments, because each was found

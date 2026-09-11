@@ -9,6 +9,7 @@
 //! moves between independent runs of the same code. Lower is better, and
 //! the number that matters is a fraction of a percent, not a percent.
 
+use crate::timing::Sample;
 use std::collections::HashMap;
 
 /// The canaries, by name. If you rename them in `workloads.rs`, rename them
@@ -26,40 +27,80 @@ pub const MEM: &str = "mem_canary";
 /// identical workloads look uncorrelated.
 pub struct Run {
     pub names: Vec<String>,
-    pub ns: HashMap<String, Vec<f64>>,
+    /// Every sample, **in the order it was taken**, per iteration.
+    ///
+    /// Kept as a sequence rather than collapsed into one vector per
+    /// workload, because the order is data. The position within a round is
+    /// reshuffled deliberately - a memory canary immediately before a
+    /// payload leaves that payload's cache cold - so an estimator that wants
+    /// to ask about position, or about wall-clock time, still can.
+    pub samples: Vec<Sample>,
+    /// Per-iteration timings in round order, by workload. A convenience
+    /// built from `samples` for the estimators that do not care about order.
+    by_name: HashMap<String, Vec<f64>>,
 }
 
 impl Run {
     pub fn load(path: &str) -> Run {
-        let (iters, times) = crate::timing::read(path);
-        let mut ns: HashMap<String, Vec<(usize, f64)>> = HashMap::new();
-        for ((round, name), t) in times {
-            ns.entry(name).or_default().push((round, t));
-        }
-        let mut names: Vec<String> = ns.keys().cloned().collect();
-        names.sort();
-        let ns = ns
+        let rec = crate::timing::read(path);
+        let samples: Vec<Sample> = rec
+            .samples
             .into_iter()
-            .map(|(name, mut v)| {
-                v.sort_by_key(|(r, _)| *r);
-                let n = *iters.get(&name).unwrap_or(&1) as f64;
-                (name, v.into_iter().map(|(_, t)| t / n).collect())
+            .map(|s| {
+                let n = *rec.iters.get(&s.workload).unwrap_or(&1) as f64;
+                Sample { ns: s.ns / n, ..s }
             })
             .collect();
-        Run { names, ns }
+
+        // Round order per workload. `samples` is already in execution order,
+        // and rounds only ever increase, so a plain scan preserves it.
+        let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
+        for s in &samples {
+            by_name.entry(s.workload.clone()).or_default().push(s.ns);
+        }
+        let mut names: Vec<String> = by_name.keys().cloned().collect();
+        names.sort();
+        Run { names, samples, by_name }
     }
 
     pub fn get(&self, name: &str) -> &[f64] {
-        self.ns.get(name).map(|v| v.as_slice()).unwrap_or(&[])
+        self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// The per-round ratio of a workload to a canary. Both were measured
     /// microseconds apart in the same round, so they shared a clock, and
     /// dividing cancels whatever the clock was doing.
+    ///
+    /// Paired by round explicitly rather than by zipping two sequences: if a
+    /// workload is ever absent from a round, zipping would silently divide
+    /// by the wrong round's canary from there on.
     pub fn ratio(&self, name: &str, canary: &str) -> Vec<f64> {
-        let a = self.get(name);
-        let b = self.get(canary);
-        a.iter().zip(b).map(|(x, y)| x / y).collect()
+        let mut num: HashMap<usize, f64> = HashMap::new();
+        let mut den: HashMap<usize, f64> = HashMap::new();
+        for s in &self.samples {
+            // Two independent tests, not `else if`: a canary divided by
+            // itself must come out as a column of exact ones, which is the
+            // sanity check that the pairing works at all.
+            if s.workload == name {
+                num.insert(s.round, s.ns);
+            }
+            if s.workload == canary {
+                den.insert(s.round, s.ns);
+            }
+        }
+        let mut rounds: Vec<usize> = num.keys().copied().filter(|r| den.contains_key(r)).collect();
+        rounds.sort_unstable();
+        rounds.iter().map(|r| num[r] / den[r]).collect()
+    }
+
+    /// Samples of one workload, in order, with their slot within the round.
+    /// For asking whether position matters.
+    pub fn with_slot(&self, name: &str) -> Vec<(usize, f64)> {
+        self.samples
+            .iter()
+            .filter(|s| s.workload == name)
+            .map(|s| (s.slot, s.ns))
+            .collect()
     }
 }
 
@@ -94,6 +135,30 @@ pub fn rel_spread(v: &[f64]) -> f64 {
     if v.len() < 2 || m == 0.0 { return f64::NAN; }
     let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / v.len() as f64;
     var.sqrt() / m
+}
+
+/// Does it matter *where* in the round this workload ran?
+///
+/// Groups the samples by slot, takes a trimmed mean of each, and returns the
+/// relative spread between slots. Near zero means position is irrelevant and
+/// the reshuffling is costing nothing. A large value means it is not: the
+/// usual cause is the workload immediately before, and the memory canary is
+/// the obvious suspect, since it leaves whatever follows it with a cold
+/// cache.
+///
+/// This is a diagnostic rather than an estimator - it says something about
+/// the experiment, not about the answer - which is why it gets its own
+/// column in `compare` instead of a line in [`all`].
+pub fn slot_effect(r: &Run, w: &str) -> f64 {
+    let mut by_slot: HashMap<usize, Vec<f64>> = HashMap::new();
+    for (slot, ns) in r.with_slot(w) {
+        by_slot.entry(slot).or_default().push(ns);
+    }
+    if by_slot.len() < 2 {
+        return f64::NAN;
+    }
+    let means: Vec<f64> = by_slot.values().map(|v| trim_of(v, 0.10)).collect();
+    rel_spread(&means)
 }
 
 fn raw_mean(r: &Run, w: &str) -> f64 { mean_of(r.get(w)) }

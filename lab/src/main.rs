@@ -85,7 +85,7 @@ fn run(rounds: usize, out: &str) {
             perm = step(perm);
             order.swap(i, (perm >> 33) as usize % (i + 1));
         }
-        for &i in &order {
+        for (slot, &i) in order.iter().enumerate() {
             seed = step(seed);
             let (w, n) = (&mut ws[i], counts[i]);
             let name = w.name;
@@ -93,7 +93,7 @@ fn run(rounds: usize, out: &str) {
             if !t.replaying() {
                 w.prepare(n, seed);
             }
-            t.time(r, name, || w.run(&ctx));
+            t.time(r, slot, name, || w.run(&ctx));
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
@@ -139,7 +139,7 @@ fn compare(paths: &[String]) {
     for (n, _) in &ests {
         print!("{n:>12}");
     }
-    println!("{:>8}{:>8}", "auto", "corr");
+    println!("{:>8}{:>8}{:>10}", "auto", "corr", "slot");
 
     for w in &names {
         print!("{w:>16}");
@@ -152,14 +152,23 @@ fn compare(paths: &[String]) {
             let picks: Vec<&str> = runs.iter().map(|r| f(r, w)).collect();
             if picks.iter().all(|p| *p == picks[0]) { picks[0] } else { "MIXED" }
         };
-        println!("{:>8}{:>8}", show(estimate::chosen_canary), show(estimate::chosen_by_corr));
+        let slot: Vec<f64> = runs.iter().map(|r| estimate::slot_effect(r, w)).collect();
+        println!(
+            "{:>8}{:>8}{:>9.2}%",
+            show(estimate::chosen_canary),
+            show(estimate::chosen_by_corr),
+            100.0 * estimate::mean_of(&slot)
+        );
     }
     println!(
         "\nThe last two columns are which canary each selector chose. MIXED means\n\
          the runs disagreed, and an estimator that picked a different denominator\n\
          in different runs is not reporting the same quantity in each, so its\n\
          percentage on that row means nothing. Compare it against naming the right\n\
-         canary by hand (ratio_cpu / ratio_mem) to see what the flipping cost."
+         canary by hand (ratio_cpu / ratio_mem) to see what the flipping cost.\n\
+         `slot` is how much this workload's timing depends on where in the round\n\
+         it ran. Near zero means position does not matter; a large value usually\n\
+         means whatever ran before it left the cache in a different state."
     );
 }
 
