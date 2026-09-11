@@ -56,13 +56,28 @@ the expensive way:
 * **A random permutation each round, not an alternating sweep.** Alternating
   removes position bias and substitutes a period-2 oscillation.
 
-And one the lab itself surfaced on its first run: `ratio_auto` picks a
-canary from within-run data, flips between runs, and is much worse than
-naming the canary by hand. It is kept, and labelled, as the cautionary
-variant. `ratio_corr` picks differently and flips too. Selecting a
-denominator appears to need several runs - like the additive `a*cpu + b*mem`
-fit, which is the obvious next estimator and does not fit the single-run
-signature at all.
+And a fourth, which the lab surfaced on its own first run: **a synthetic
+payload built from the same primitives as a canary is not a payload.** It
+tracks that canary perfectly by construction, so every ratio estimator
+scores far better on it than on real code and the table stops meaning what
+it says. The first version of `workloads.rs` had one that literally called
+`mem_canary`. Keep exactly two canaries and let the payloads be things you
+would actually ship.
+
+That mistake also produced the one interesting failure so far. On payloads
+sitting *between* the two canaries, `ratio_auto` - which picks a denominator
+from within-run data - chooses differently in different runs, so each run
+reports a different quantity: 122% where naming the canary by hand gave
+0.145%. On the real `std` payloads here it is stable and free. So automatic
+selection is not broken, but it **fails silently** unless someone reads the
+MIXED column, and making it fail safely is an open design question.
+
+The obvious next estimator is the additive `a*cpu + b*mem`, which beats
+either canary alone by ~10x on a genuinely mixed workload. It does not fit
+the single-run signature: `a` and `b` cannot be fitted from one run, because
+within-run jitter is mostly each canary's own noise, so the fit is
+attenuated and differs per run. It needs several runs, so it belongs in
+`compare`.
 
 ## Replay
 

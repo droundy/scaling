@@ -113,16 +113,22 @@ pub fn corr(a: &[f64], b: &[f64]) -> f64 {
     if da * db == 0.0 { 0.0 } else { num / (da * db) }
 }
 
-/// KNOWN BROKEN, kept as the cautionary variant.
+/// Works for a clear-cut workload, fails for a borderline one.
 ///
 /// Picks the canary whose per-round ratio has the smaller spread *within
-/// this run*. That sounds like the rule that was validated nine times out of
-/// nine, and is not: the validated rule compared spread *across* runs. Within
-/// a run the ratio's spread is dominated by each sample's own noise, which
-/// barely distinguishes the canaries, so the choice flips between runs - and
-/// then each run reports a different quantity. `compare` flags that as
-/// MIXED, and the spread column goes to tens of percent against a fraction
-/// of one for just naming the right canary by hand.
+/// this run*. Note that is not the rule that was validated nine times out of
+/// nine - that one compared spread *across* runs, which one run cannot do.
+///
+/// On workloads clearly dominated by one bottleneck it agrees with itself
+/// run after run and costs nothing. On one sitting between the two canaries
+/// it flips, and then each run has divided by a different denominator and is
+/// reporting a different quantity: measured at 122% where naming the canary
+/// by hand gave 0.145%. `compare` prints MIXED when that has happened, which
+/// is the column to check before believing this estimator's number.
+///
+/// So the open question is not whether automatic selection works but whether
+/// it fails *safely*, and right now it does not - it fails silently unless
+/// somebody reads the MIXED column.
 fn ratio_auto(r: &Run, w: &str) -> f64 {
     let (c, m) = (r.ratio(w, CPU), r.ratio(w, MEM));
     if rel_spread(&c) <= rel_spread(&m) { trim_of(&c, 0.10) } else { trim_of(&m, 0.10) }

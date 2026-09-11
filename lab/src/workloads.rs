@@ -106,73 +106,79 @@ pub fn mem_canary(c: &Ctx, iters: u64, seed: u64) -> u64 {
 
 // ---------------------------------------------------------------- payloads
 
-/// L1-resident walk: should track the CPU canary almost exactly.
-pub fn walk_l1(c: &Ctx, iters: u64, _seed: u64) -> u64 {
-    walk(&c.small, iters)
-}
+// These are examples of the shape, not a considered selection. Replace them
+// with whatever you actually want to measure.
+//
+// Note that each one rebuilds its input every iteration, because sorting an
+// already-sorted vector measures something else entirely. That allocation is
+// part of what gets timed. For a lab that is fine and honest - it is what
+// the caller would pay too - but it does mean these say as much about the
+// allocator as about the algorithm.
 
-/// L2-resident walk: tracks neither canary especially well, which is the
-/// known weak spot rather than a bug.
-pub fn walk_l2(c: &Ctx, iters: u64, _seed: u64) -> u64 {
-    walk(&c.medium, iters)
-}
-
-/// DRAM-bound walk: should track the memory canary almost exactly.
-pub fn walk_dram(c: &Ctx, iters: u64, seed: u64) -> u64 {
-    mem_canary(c, iters, seed.rotate_left(17))
-}
-
-/// Deliberately part CPU bound and part memory bound, in a ratio set by
-/// `cpu_per`. Useful for checking that a two-canary estimator recovers the
-/// mixture it was built with.
-fn mixed(c: &Ctx, iters: u64, seed: u64, cpu_per: u64) -> u64 {
-    let mut p = (seed as usize) & (c.chase.len() - 1);
-    let mut x = 0x243F6A8885A308D3u64;
+/// `sort` on a kilobyte of already-shuffled `u64`.
+pub fn sort_1k(c: &Ctx, iters: u64, _seed: u64) -> u64 {
+    let mut acc = 0u64;
     for _ in 0..iters {
-        for _ in 0..cpu_per {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+        let mut v: Vec<u64> = c.small[..128].to_vec();
+        v.sort_unstable();
+        acc ^= v[0] ^ v[127];
+    }
+    acc
+}
+
+/// Building a `HashMap` and reading it back: hashing, plus scattered access
+/// over a table too small to escape cache.
+pub fn hashmap_1k(_c: &Ctx, iters: u64, _seed: u64) -> u64 {
+    use std::collections::HashMap;
+    let mut acc = 0u64;
+    for _ in 0..iters {
+        let mut m: HashMap<u64, u64> = HashMap::with_capacity(256);
+        for i in 0..256u64 {
+            m.insert(i.wrapping_mul(2654435761), i);
         }
-        p = c.chase[p ^ (x as usize & 1)] as usize;
+        acc ^= *m.get(&(7u64.wrapping_mul(2654435761))).unwrap_or(&0);
     }
-    p as u64 ^ x
+    acc
 }
 
-pub fn mix_mostly_cpu(c: &Ctx, iters: u64, seed: u64) -> u64 {
-    mixed(c, iters, seed, 4200)
-}
-
-pub fn mix_even(c: &Ctx, iters: u64, seed: u64) -> u64 {
-    mixed(c, iters, seed, 470)
-}
-
-fn walk(buf: &[u64], iters: u64) -> u64 {
-    let mask = buf.len() - 1;
-    let mut s = 0u64;
-    let mut i = 0usize;
-    for k in 0..iters {
-        s = s.wrapping_add(buf[i]);
-        i = (i + 9 + (k as usize & 7)) & mask;
+/// Formatting an integer into a fresh `String`.
+pub fn format_int(_c: &Ctx, iters: u64, seed: u64) -> u64 {
+    let mut acc = 0u64;
+    for i in 0..iters {
+        let s = format!("{}", seed.wrapping_add(i));
+        acc ^= s.len() as u64;
     }
-    s
+    acc
+}
+
+/// Summing a 512 KiB slice: streaming, prefetch-friendly, L2 resident.
+pub fn sum_512k(c: &Ctx, iters: u64, _seed: u64) -> u64 {
+    let mut acc = 0u64;
+    for _ in 0..iters {
+        acc = acc.wrapping_add(c.medium.iter().fold(0u64, |a, &b| a.wrapping_add(b)));
+    }
+    acc
 }
 
 // ------------------------------------------------------------------- table
 
 /// Every workload, in one place. Add yours here.
 ///
-/// The canaries must come first: nothing depends on the order, but a reader
-/// scanning the output wants them together at the top.
+/// **Exactly two canaries, and they come first.** Everything else is a
+/// payload. Resist adding a third canary-shaped thing as a "payload": a
+/// synthetic workload built out of the same primitives as a canary tracks it
+/// perfectly by construction, so the estimators score far better on it than
+/// on anything real, and the table quietly stops meaning what it says. An
+/// earlier version of this file had a payload that literally called
+/// `mem_canary`, which is how that mistake looks from the inside.
 pub fn all() -> Vec<Workload> {
     use Kind::*;
     vec![
         Workload { name: "cpu_canary", kind: CpuCanary, run: cpu_canary },
         Workload { name: "mem_canary", kind: MemCanary, run: mem_canary },
-        Workload { name: "walk_l1", kind: Payload, run: walk_l1 },
-        Workload { name: "walk_l2", kind: Payload, run: walk_l2 },
-        Workload { name: "walk_dram", kind: Payload, run: walk_dram },
-        Workload { name: "mix_mostly_cpu", kind: Payload, run: mix_mostly_cpu },
-        Workload { name: "mix_even", kind: Payload, run: mix_even },
+        Workload { name: "sort_1k", kind: Payload, run: sort_1k },
+        Workload { name: "hashmap_1k", kind: Payload, run: hashmap_1k },
+        Workload { name: "format_int", kind: Payload, run: format_int },
+        Workload { name: "sum_512k", kind: Payload, run: sum_512k },
     ]
 }
