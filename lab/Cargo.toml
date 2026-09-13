@@ -11,6 +11,7 @@ edition = "2021"
 [dependencies]
 
 rand = "0.10.2"
+itertools = "0.15.0"
 
 [profile.release]
 debug = true

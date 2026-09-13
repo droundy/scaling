@@ -55,6 +55,9 @@ pub enum Kind {
     Payload,
 }
 
+// No derives: the closure field is a `Box<dyn Fn>`, which is none of
+// `Clone`, `PartialEq` or `Ord`. Order comes from `name` explicitly, which
+// is the only part of a workload with a meaningful order anyway.
 pub struct Workload {
     pub name: &'static str,
     pub kind: Kind,
@@ -135,6 +138,11 @@ impl Workload {
 
 /// Every workload, in one place. Add yours here.
 ///
+/// Unused since `main` began sweeping [`best`]'s powerset instead. Kept
+/// because it and [`selected`] are the `LAB_PAYLOADS` path, which is still
+/// the way to run one combination rather than all of them.
+#[allow(dead_code)]
+///
 /// **Exactly two canaries, and they come first.** Everything else is a
 /// payload. Resist adding a third canary-shaped thing as a "payload": a
 /// synthetic workload built out of the same primitives as a canary tracks it
@@ -161,6 +169,7 @@ pub fn all() -> Vec<Workload> {
 /// their workloads in different orders would still be *correct* - the
 /// recording is keyed by name and the round order is reshuffled anyway - but
 /// the reports would be gratuitously hard to read side by side.
+#[allow(dead_code)]
 pub fn selected(names: &str) -> Vec<Workload> {
     let mut pool = payloads::all();
     let mut chosen: Vec<Workload> = if names.trim().is_empty() {

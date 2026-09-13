@@ -10,11 +10,15 @@
 //! without measuring anything again - which is the whole point of splitting
 //! them. Collect a handful of runs once, then iterate on `estimate.rs`.
 
+use itertools::Itertools;
+
 mod estimate;
 mod timing;
 mod workloads;
 
 use estimate::Run;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use workloads::{Kind, Workload};
 
@@ -27,15 +31,39 @@ fn main() {
     match args.get(1).map(|s| s.as_str()) {
         Some("run") => {
             let rounds: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
-            let out = args
-                .get(3)
-                .cloned()
-                .unwrap_or_else(|| "run.csv".to_string());
-            run(rounds, &out);
+            let dir = args.get(3).cloned().unwrap_or_else(|| "out".to_string());
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("could not create {dir}: {e}");
+                std::process::exit(2);
+            }
+            // Every subset, so an estimator can be scored against the whole
+            // lattice rather than one hand-picked combination. The empty one
+            // is skipped: the canaries alone measure nothing.
+            // One instance of each canary for the whole sweep: the chase
+            // table is built once rather than thirty-one times, and its
+            // cursor walks forward across every subset instead of each one
+            // re-treading the same region of the table.
+            let canaries = [
+                Arc::new(Workload::cpu_canary()),
+                Arc::new(Workload::mem_canary()),
+            ];
+            for payloads in Workload::best().into_iter().powerset() {
+                if payloads.is_empty() {
+                    continue;
+                }
+                run(&canaries, payloads, rounds, &dir);
+            }
         }
         Some("compare") if args.len() > 2 => compare(&args[2..]),
         _ => {
-            eprintln!("usage:\n  lab run [rounds] [out.csv]\n  lab compare <run.csv>...");
+            eprintln!(
+                "usage:\n  lab run [rounds] [dir]      measure every subset of the best workloads\n\
+                 \x20 lab compare <run.csv>...   score the estimators\n\n\
+                 Each subset writes <dir>/<names joined by +>.csv (default dir `out`),\n\
+                 so repeating a\
+                 sweep into a second directory and comparing\n\
+                 `<dir1>/x+y.csv <dir2>/x+y.csv` scores the same subset across runs."
+            );
             eprintln!(
                 "\nenv:\n  LAB_REPLAY=<run.csv>  serve recorded timings instead of measuring"
             );
@@ -45,8 +73,22 @@ fn main() {
 }
 
 /// Measure, and write a recording.
-fn run(rounds: usize, out: &str) {
-    let mut ws = workloads::all();
+fn run(canaries: &[Arc<Workload>], mut payloads: Vec<Arc<Workload>>, rounds: usize, dir: &str) {
+    // Sorted, so a subset gets the same name however the powerset happened
+    // to order it - `compare out/*/a+b.csv` then lines up the same subset
+    // across repetitions. Taking the names from the built workloads rather
+    // than from a parallel list means the filename cannot drift out of step
+    // with what was actually measured.
+    payloads.sort_by_key(|w| w.name);
+    let out = csv_name(dir, &payloads);
+
+    // The canaries are never optional: every ratio estimator divides by one
+    // of them. They go first so the report reads with them at the top, and
+    // they are left out of the filename because they are in every run.
+    let mut ws: Vec<Arc<Workload>> = canaries.to_vec();
+    ws.extend(payloads);
+
+    eprintln!("\n=== {out} ===");
     let mut t = timing::Timing::from_env();
 
     // Calibrate each workload to SAMPLE.
@@ -62,7 +104,7 @@ fn run(rounds: usize, out: &str) {
     // too small.
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut counts = Vec::with_capacity(ws.len());
-    for w in ws.iter_mut() {
+    for w in ws.iter() {
         let name = w.name;
         let n = if t.replaying() {
             *t.iters.get(name).unwrap_or(&1)
@@ -97,12 +139,12 @@ fn run(rounds: usize, out: &str) {
         }
     }
     eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
-    t.write(out);
+    t.write(&out);
     eprintln!("wrote {out}");
 
     // A quick look, so a single run is useful on its own. The real question
     // needs several runs and `compare`.
-    let run = Run::load(out);
+    let run = Run::load(&out);
     println!(
         "\n{:>16} {:>8} {:>12} {:>12}",
         "workload", "kind", "ns/iter", "within-run"
@@ -117,7 +159,7 @@ fn run(rounds: usize, out: &str) {
         println!(
             "{:>16} {kind:>8} {:>12.4} {:>11.2}%",
             w.name,
-            estimate::trim_of(v, 0.10),
+            estimate::trimmed_mean(v, 0.10),
             100.0 * estimate::rel_spread(v)
         );
     }
@@ -133,23 +175,32 @@ fn run(rounds: usize, out: &str) {
 /// The number printed is the spread of the estimate *between* runs, as a
 /// percentage. That is reproducibility, and it is the thing to minimise.
 fn compare(paths: &[String]) {
-    let runs: Vec<Run> = paths.iter().map(|p| Run::load(p)).collect();
+    let runs: Vec<Run> = if paths.len() > 1 {
+        paths.iter().map(|p| Run::load(p)).collect()
+    } else if paths.len() == 1 {
+        std::fs::read_dir(&paths[0])
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    Some(Run::load(&entry.path().to_string_lossy().into_owned()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        eprintln!("compare wants at least two recordings; got {}", paths.len());
+        std::process::exit(2);
+    };
     if runs.len() < 2 {
         eprintln!("compare wants at least two recordings; got {}", runs.len());
         std::process::exit(2);
     }
-    let names = runs[0].names.clone();
-    // Selecting payloads per run is easy, so mixing recordings that measured
-    // different sets is easy too. Say so rather than quietly reporting NaN
-    // for whatever the first recording happened to contain.
-    for (path, r) in paths.iter().zip(&runs) {
-        if r.names != names {
-            eprintln!(
-                "warning: {path} measured a different set of workloads\n                          ({:?} against {:?})",
-                r.names, names
-            );
-        }
-    }
+    let names: BTreeSet<String> = runs
+        .iter()
+        .flat_map(|r| r.names.clone().into_iter())
+        .collect();
     let ests = estimate::all();
 
     println!(
@@ -164,6 +215,12 @@ fn compare(paths: &[String]) {
 
     for w in &names {
         print!("{w:>16}");
+        // Evaluate each workload with only those runs that measure it.
+        let runs = runs
+            .iter()
+            .filter(|r| r.names.contains(w))
+            .cloned()
+            .collect::<Vec<Run>>();
         for (_, f) in &ests {
             let per_run: Vec<f64> = runs.iter().map(|r| f(r, w)).collect();
             print!("{:>11.3}%", 100.0 * estimate::rel_spread(&per_run));
@@ -178,23 +235,24 @@ fn compare(paths: &[String]) {
             }
         };
         let slot: Vec<f64> = runs.iter().map(|r| estimate::slot_effect(r, w)).collect();
-        println!(
+        let all_times = runs
+            .iter()
+            .flat_map(|r| r.get(w))
+            .copied()
+            .collect::<Vec<f64>>();
+        print!(
             "{:>8}{:>8}{:>9.2}%",
             show(estimate::chosen_canary),
             show(estimate::chosen_by_corr),
-            100.0 * estimate::mean_of(&slot)
+            100.0 * estimate::mean(&slot)
+        );
+        let sample_mean: f64 = estimate::mean(&all_times);
+        let sample_stdev: f64 = estimate::variance(&all_times, sample_mean).sqrt();
+        println!(
+            "{sample_mean:>12.2} ± {:>6.2}%",
+            sample_stdev / sample_mean * 100.0
         );
     }
-    println!(
-        "\nThe last two columns are which canary each selector chose. MIXED means\n\
-         the runs disagreed, and an estimator that picked a different denominator\n\
-         in different runs is not reporting the same quantity in each, so its\n\
-         percentage on that row means nothing. Compare it against naming the right\n\
-         canary by hand (ratio_cpu / ratio_mem) to see what the flipping cost.\n\
-         `slot` is how much this workload's timing depends on where in the round\n\
-         it ran. Near zero means position does not matter; a large value usually\n\
-         means whatever ran before it left the cache in a different state."
-    );
 }
 
 /// Grow the batch until the *timed* part takes about [`SAMPLE`].
@@ -203,7 +261,7 @@ fn compare(paths: &[String]) {
 /// too would aim at the size of the work plus its setup, so a payload with
 /// an expensive generator - and a generator can easily cost more than the
 /// thing it feeds - would end up with a batch far too small.
-fn calibrate(w: &mut Workload, seed: &mut u64) -> usize {
+fn calibrate(w: &Workload, seed: &mut u64) -> usize {
     let target = SAMPLE.as_secs_f64() * 1e9;
     // A ceiling on generation, because `prepare` allocates one input per
     // iteration. Without it a benchmark whose timed part the optimiser
@@ -233,6 +291,15 @@ fn calibrate(w: &mut Workload, seed: &mut u64) -> usize {
         let factor = (target / ns.max(1.0)).clamp(1.5, 50.0);
         n = ((n as f64 * factor) as usize).max(n + 1);
     }
+}
+
+/// Where a subset's recording goes: its payload names, in order, joined.
+///
+/// Derived rather than passed so that the same subset always lands in the
+/// same file, which is what makes two sweeps comparable subset by subset.
+fn csv_name(dir: &str, payloads: &[Arc<Workload>]) -> String {
+    let names: Vec<&str> = payloads.iter().map(|w| w.name).collect();
+    format!("{dir}/{}.csv", names.join("+"))
 }
 
 fn step(x: u64) -> u64 {
