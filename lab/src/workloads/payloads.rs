@@ -29,6 +29,20 @@ use std::time::Instant;
 // here to be promoted into it. Not dead by accident.
 #[allow(dead_code)]
 impl Workload {
+    /// 0. The harness floor: a loop that does nothing.
+    ///
+    /// Here as a control, not as a benchmark. It has no working set, so
+    /// nothing about it can be cold; whatever fixed cost a measurement of
+    /// *this* carries is the harness itself - the two clock reads and the
+    /// boxed call - and nothing else. Any fixed cost a real workload shows
+    /// above this one has to come from the workload's own state.
+    ///
+    /// `black_box` inside [`Workload::simple`] is what stops the optimiser
+    /// deleting the loop outright.
+    pub fn nothing() -> Self {
+        Workload::simple("nothing", Kind::Payload, || 0u8)
+    }
+
     /// 1. The Meta-Test: `Instant::now`
     ///
     /// The clock timing itself. Whatever this reads is a floor under every
@@ -112,15 +126,22 @@ impl Workload {
         Workload::simple("btree_miss", Kind::Payload, move || map.get(&MISS).copied())
     }
 
-    /// 7. Macro-Memory Bandwidth: 256 MiB copy
-    ///
-    /// *Costs ~25 ms an iteration and half a gigabyte of resident memory.*
-    /// See the note on `all` about what that does to a round.
-    pub fn copy_256mb() -> Self {
-        let size = 256 << 20;
+    /// 7. Macro-Memory Bandwidth: 64 MiB copy
+    pub fn copy_64mb() -> Self {
+        let size = 64 << 20;
         let source: Vec<u8> = vec![0x42; size];
-        let dest = RefCell::new(vec![0u8; size]);
-        Workload::simple("copy_256mb", Kind::Payload, move || {
+        // Filled with something non-zero on purpose. `vec![0u8; n]` takes the
+        // `alloc_zeroed` path, which for 64 MiB hands back fresh mmap'd zero
+        // pages that are not faulted in until something writes to them - so
+        // the first copy would pay 64 MiB of page faults inside the timer.
+        // Measured once, that read as 47 ms against a true cost of 6.4 ms,
+        // and since calibration is the first thing to run it is exactly the
+        // measurement that got poisoned.
+        //
+        // Faulting the pages in here puts that cost where every other
+        // workload's setup lives: outside the timed region.
+        let dest = RefCell::new(vec![0xFFu8; size]);
+        Workload::simple("copy_64mb", Kind::Payload, move || {
             let mut d = dest.borrow_mut();
             d.copy_from_slice(&source);
             (d.last().copied(), d.first().copied())
@@ -184,13 +205,14 @@ impl Workload {
 #[allow(dead_code)]
 pub fn all() -> HashMap<String, Workload> {
     [
+        Workload::nothing(),
         Workload::instant_now(),
         Workload::f64_sin(),
         Workload::mpsc_send(),
         Workload::urandom_read(),
         Workload::thread_spawn(),
         Workload::btree_miss(),
-        Workload::copy_256mb(),
+        Workload::copy_64mb(),
         Workload::str_find(),
         Workload::slice_sort(),
         Workload::parse_u64(),
@@ -235,7 +257,7 @@ impl Workload {
             Workload::btree_miss(),
             Workload::mpsc_send(),
             Workload::slice_sort(),
-            Workload::copy_256mb(),
+            Workload::copy_64mb(),
             // Workload::thread_spawn(),  // the pathological-tail case
             // Workload::f64_sin(),
             // Workload::urandom_read(),

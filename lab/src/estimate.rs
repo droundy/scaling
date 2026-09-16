@@ -39,6 +39,9 @@ pub struct Run {
     /// Per-iteration timings in round order, by workload. A convenience
     /// built from `samples` for the estimators that do not care about order.
     by_name: HashMap<String, Vec<f64>>,
+    /// The calibrated batch size each name was measured at. Needed to undo
+    /// the per-iteration division for anything that works in batch times.
+    pub iters: HashMap<String, usize>,
 }
 
 impl Run {
@@ -65,11 +68,37 @@ impl Run {
             names,
             samples,
             by_name,
+            iters: rec.iters,
         }
     }
 
     pub fn get(&self, name: &str) -> &[f64] {
         self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Raw batch times by round, undoing the per-iteration division that
+    /// [`Run::load`] applies.
+    ///
+    /// The per-iteration number is the wrong currency for asking about a
+    /// *fixed* cost: dividing by the batch size spreads a constant across the
+    /// iterations and makes it look like a per-iteration cost that happens to
+    /// shrink as the batch grows. The fixed part only stands still in batch
+    /// times.
+    pub fn batches(&self, name: &str) -> HashMap<usize, f64> {
+        let n = *self.iters.get(name).unwrap_or(&1) as f64;
+        self.samples
+            .iter()
+            .filter(|s| s.workload == name)
+            .map(|s| (s.round, s.ns * n))
+            .collect()
+    }
+
+    pub fn timings(&self, name: &str) -> Vec<(f64, f64)> {
+        self.samples
+            .iter()
+            .filter(|s| s.workload == name)
+            .map(|s| (s.t_ns as f64 * 1e-9, s.ns))
+            .collect()
     }
 
     /// The per-round ratio of a workload to a canary. Both were measured
@@ -111,7 +140,123 @@ impl Run {
             .map(|s| (s.slot, s.ns))
             .collect()
     }
+
+    /// The timescale over which this workload's samples stay correlated, in
+    /// seconds. `NaN` when no correlation is resolvable.
+    ///
+    /// In seconds rather than in lags, because a lag is worth a different
+    /// amount of time in every subset - a round of five workloads is twenty
+    /// times longer than a round of one, so the same lag means twenty times
+    /// the wall clock.
+    ///
+    /// Works from the variogram: over pairs separated by `dt`, the mean of
+    /// `(x_i - x_j)^2` climbs from a floor at short separation to a plateau
+    /// once the samples are independent. [`Run::variogram_ratio`] compares
+    /// the near bin `[0, tau)` against the far bin `[tau, 2*tau)`, so it sits
+    /// below 1 while the variogram is still climbing and returns to 1 once
+    /// both bins are on the plateau. The `tau` where it dips lowest is where
+    /// the climb happens.
+    ///
+    /// **The grid is absolute, not derived from the recording.** An earlier
+    /// version swept from `4 * mean spacing` to `span / 8`, which made the
+    /// answer a function of how long a round happened to be: across the 31
+    /// subsets the same workload reported values 150x to 10000x apart, and
+    /// three different workloads in one subset all reported exactly
+    /// `0.10196s` - which was that subset's lower bound to five digits. A
+    /// fixed grid cannot do that. A subset whose sampling cannot resolve a
+    /// given `tau` now contributes nothing at that `tau` instead of being
+    /// silently rescaled.
+    pub fn autocorrelation_time(&self, name: &str) -> f64 {
+        let timings = self.timings(name);
+        if timings.len() < 32 {
+            return f64::NAN;
+        }
+        let span = timings[timings.len() - 1].0 - timings[0].0;
+        let spacing = span / (timings.len() - 1) as f64;
+
+        let (mut best_tau, mut best) = (f64::NAN, f64::INFINITY);
+        for k in 0..=GRID_STEPS {
+            let tau = GRID_LO * (GRID_HI / GRID_LO).powf(k as f64 / GRID_STEPS as f64);
+            // Below a few samples apart there is nothing to compare, and
+            // above a fraction of the run the far bin runs out of pairs.
+            if tau < 4.0 * spacing || 2.0 * tau > span / 4.0 {
+                continue;
+            }
+            let (c, rel_se) = self.variogram_ratio(&timings, tau, spacing);
+            // Require the dip to be deeper than the noise on the estimate of
+            // it. Without this the argmin of a flat, noisy curve gets
+            // reported as a timescale, which is how a search bound ended up
+            // being presented as a property of the machine.
+            if c.is_finite() && c < 1.0 - 2.0 * rel_se && c < best {
+                best = c;
+                best_tau = tau;
+            }
+        }
+        best_tau
+    }
+
+    /// Mean squared difference over `[0, tau)` against `[tau, 2*tau)`, and
+    /// the relative standard error of that ratio.
+    ///
+    /// Strides the outer loop so the pair count stays bounded: taken whole
+    /// this is O(n^2), which at forty thousand samples is a billion pairs
+    /// for every `tau`.
+    ///
+    /// The error is computed against the number of *samples* used, not the
+    /// number of pairs. Pairs drawn from the same samples are not
+    /// independent, so counting them would understate the error by orders of
+    /// magnitude - which is exactly the mistake that would let a flat curve
+    /// look significant.
+    fn variogram_ratio(&self, timings: &[(f64, f64)], tau: f64, spacing: f64) -> (f64, f64) {
+        const MAX_PAIRS: f64 = 200_000.0;
+        let per_i = 2.0 * tau / spacing;
+        let stride = ((timings.len() as f64 * per_i) / MAX_PAIRS).ceil().max(1.0) as usize;
+
+        let (mut s1, mut q1, mut n1) = (0.0, 0.0, 0usize);
+        let (mut s2, mut q2, mut n2) = (0.0, 0.0, 0usize);
+        let mut used = 0usize;
+        for i in (0..timings.len()).step_by(stride) {
+            used += 1;
+            for j in i + 1..timings.len() {
+                let dt = timings[j].0 - timings[i].0;
+                let d2 = (timings[i].1 - timings[j].1).powi(2);
+                if dt < tau {
+                    s1 += d2;
+                    q1 += d2 * d2;
+                    n1 += 1;
+                } else if dt < 2.0 * tau {
+                    s2 += d2;
+                    q2 += d2 * d2;
+                    n2 += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        if n1 == 0 || n2 == 0 || used < 2 {
+            return (f64::NAN, f64::INFINITY);
+        }
+        let (m1, m2) = (s1 / n1 as f64, s2 / n2 as f64);
+        let rel = |m: f64, q: f64, n: usize| {
+            let var = (q / n as f64 - m * m).max(0.0);
+            if m > 0.0 {
+                var.sqrt() / m / (used as f64).sqrt()
+            } else {
+                f64::INFINITY
+            }
+        };
+        let (r1, r2) = (rel(m1, q1, n1), rel(m2, q2, n2));
+        (m1 / m2, (r1 * r1 + r2 * r2).sqrt())
+    }
 }
+
+/// The absolute `tau` grid the variogram is probed on: 100us to 10s.
+///
+/// Fixed rather than derived from the recording, so a correlation time means
+/// the same thing in every subset and can be compared between them.
+const GRID_LO: f64 = 100e-6;
+const GRID_HI: f64 = 10.0;
+const GRID_STEPS: usize = 24;
 
 // ------------------------------------------------------------- estimators
 

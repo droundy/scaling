@@ -23,22 +23,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A raw dump that keeps only "these are the timings for this workload" has
 /// thrown away most of what makes it raw. Three things are worth the
 /// columns:
-///
-/// * **`slot`**, the position within the round. The order is reshuffled
-///   every round on purpose, because position matters - a memory canary
-///   immediately before a payload leaves that payload's cache cold. Without
-///   `slot` you cannot ask whether it did.
-/// * **`round`**, kept explicitly rather than inferred from position, so a
-///   gap is visible as a gap.
-/// * **`t_ms`**, wall clock, so a run can be lined up against something that
-///   happened outside it - a build starting, a laptop being unplugged.
 #[derive(Clone, Debug)]
 pub struct Sample {
+    /// Should equal the index of this Sample in the log, but kept explicitly so a gap is visible.
     pub round: usize,
+    /// Position within the round.
     pub slot: usize,
     pub workload: String,
-    pub t_ms: u128,
-    /// Raw, for the whole batch. Divide by the iteration count to compare
+    /// The wallclock time in ns.
+    pub t_ns: u128,
+    /// Raw time of the whole batch. Divide by the iteration count to compare
     /// anything across runs.
     pub ns: f64,
 }
@@ -90,9 +84,9 @@ impl Timing {
     /// to be fast and deterministic - but it does mean a workload's side
     /// effects do not happen, so do not put anything load-bearing in one.
     pub fn time(&mut self, round: usize, slot: usize, name: &str, f: impl FnOnce() -> f64) -> f64 {
-        let t_ms = SystemTime::now()
+        let t_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let ns = match &self.replay {
             Some(m) => *m.get(&(round, name.to_string())).unwrap_or_else(|| {
@@ -107,7 +101,7 @@ impl Timing {
             round,
             slot,
             workload: name.to_string(),
-            t_ms,
+            t_ns,
             ns,
         });
         ns
@@ -125,12 +119,12 @@ impl Timing {
         // `seq` is the line's own index. Redundant with file order, and
         // written anyway so the order survives being sorted or filtered by
         // something else later.
-        s.push_str("seq,round,slot,workload,t_ms,ns\n");
+        s.push_str("seq,round,slot,workload,t_ns,ns\n");
         for (seq, x) in self.log.iter().enumerate() {
             let _ = writeln!(
                 s,
                 "{seq},{},{},{},{},{:.0}",
-                x.round, x.slot, x.workload, x.t_ms, x.ns
+                x.round, x.slot, x.workload, x.t_ns, x.ns
             );
         }
         if let Err(e) = std::fs::write(path, s) {
@@ -169,14 +163,14 @@ pub fn read(path: &str) -> Recording {
         if f.len() < 6 {
             continue;
         }
-        if let (Ok(round), Ok(slot), Ok(t_ms), Ok(ns)) =
+        if let (Ok(round), Ok(slot), Ok(t_ns), Ok(ns)) =
             (f[1].parse(), f[2].parse(), f[4].parse(), f[5].parse())
         {
             samples.push(Sample {
                 round,
                 slot,
                 workload: f[3].to_string(),
-                t_ms,
+                t_ns,
                 ns,
             });
         }

@@ -154,6 +154,27 @@ pub fn all() -> Vec<Workload> {
     selected(&std::env::var("LAB_PAYLOADS").unwrap_or_default())
 }
 
+/// One workload by name, canaries included.
+///
+/// Unlike [`selected`] this adds nothing of its own: you get exactly what
+/// you asked for. That is what lets an experiment put a workload in a round
+/// *alone*, which is the control for anything that depends on what else
+/// shares the round.
+pub fn named(name: &str) -> Workload {
+    match name {
+        "cpu_canary" => Workload::cpu_canary(),
+        "mem_canary" => Workload::mem_canary(),
+        _ => {
+            let mut pool = payloads::all();
+            pool.remove(name).unwrap_or_else(|| {
+                let mut known: Vec<String> = payloads::all().into_keys().collect();
+                known.sort();
+                panic!("no workload named {name:?}; payloads are {known:?}, plus the two canaries")
+            })
+        }
+    }
+}
+
 /// The canaries, plus the payloads named in `names` - a comma-separated
 /// list, or empty for all of them.
 ///
