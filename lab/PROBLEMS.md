@@ -1,12 +1,24 @@
-# The four things that make a benchmark lie
+# The things that make a benchmark lie
 
-Four separate sources of error. They are listed separately because they have
-different causes, different fixes, and different tests - but they are not
-independent, and most of the trouble so far has come from mistaking one for
-another. All four need testing; none is settled.
+Five sources of error, listed separately because they have different causes,
+different fixes and different tests. They are not independent, and most of
+the trouble so far has come from mistaking one for another.
 
 The lab exists to tell them apart. Quieting the machine suppresses (1), which
-is what makes it possible to study (2), (3) and (4) without (1) drowning them.
+is what made it possible to study (2), (3) and (4) without (1) drowning them
+- and (5) only became visible once the rest were quiet.
+
+| | problem | status |
+| --- | --- | --- |
+| 1 | the clock moves | characterised; fix is quieting or the canary ratio, each with a cost |
+| 2 | a fixed cost per measurement | **solved**: it is a genuine constant, and two-point subtraction removes it |
+| 3 | the number moves with its neighbours | **mostly problem 2**; subtraction removes 100-370x of it |
+| 4 | the calibrated batch size wanders | held fixed, not yet measured |
+| 5 | outside events corrupt samples | **characterised**: the scheduler tick, and it is why long samples are bad |
+
+Evidence below is from quiet sweeps (`performance` governor, `no_turbo=1`,
+reserved CPU) unless it says otherwise. That distinction matters more than
+anything else here: several conclusions reverse between the two conditions.
 
 ---
 
@@ -15,64 +27,104 @@ is what makes it possible to study (2), (3) and (4) without (1) drowning them.
 The core frequency changes over time and with what the machine is doing, so
 the same work takes a different number of nanoseconds at different moments.
 
-**Evidence.** `cpu_canary` is a dependent multiply-add chain with no memory
-footprint at all, so its cost is essentially one over the clock. Measured
-alone it reads 0.9122 ns/iter; sharing a round with `mem_canary` it reads
-2.3661 - **2.6x slower**, with a monotone gradient in between tracking the
-neighbour's memory intensity (`nothing` 0.9125, `instant_now` 1.0276,
-`btree_miss` 1.1167). Nothing about caches can slow down a workload that
-does not touch memory. Unquiesced machine.
+**Unquiesced, this dominates everything.** `cpu_canary` is a dependent
+multiply-add chain with no memory footprint at all, so its cost is
+essentially one over the clock. Measured alone it read 0.9122 ns/iter;
+sharing a round with `mem_canary` it read 2.3661 - **2.6x slower** - with a
+monotone gradient in between tracking the neighbour's memory intensity
+(`nothing` 0.9125, `instant_now` 1.0276, `btree_miss` 1.1167). Nothing about
+caches can slow a workload that touches no memory. The governor sees the
+round's average stall fraction and picks a clock for it, and every
+measurement in the round inherits that choice.
 
-**Mitigations.** The canary ratio, which is the portable one: divide by a
-canary measured in the same round and a shared clock cancels. Quieting
-(`performance` governor plus `no_turbo`) pins the clock outright, but needs
-privilege and so cannot be what the shipped crate relies on.
+**Quieting removes it.** The same spread falls to 0.07% across compositions
+with the clock pinned, and to 0.37% (null 0.02%) in the large overnight
+sweep. That is a 200-fold reduction and it is the single most effective
+intervention found.
 
-**Still to test.** Whether the ratio actually cancels it across compositions;
-whether quieting flattens `cpu_canary` across subsets as predicted; whether
-there is a second, *uncore* clock that the `performance` governor does not
-pin (see 3).
+**But quieting is not free and not portable.** It needs privilege, so the
+shipped crate cannot rely on it. It also moves the operating point: a pinned
+core at base clock drives memory far more slowly, and `copy_64mb` costs 6.4
+ms quiet against 4.5 ms unquiet. A number measured on a quiesced machine does
+not describe the machine anyone actually runs on.
+
+**And on a quiet machine the canary ratio is a liability.** Dividing by a
+canary measured in the same round is the portable fix, and it works when
+there is shared drift to cancel. When there is not, it can only add the
+canary's own variance: the ratio columns scored 2.58-3.60% against 0.03% for
+raw nanoseconds on `instant_now` and `nothing`. The canary earns its keep
+exactly when the clock moves and costs when it does not, so whether to divide
+is a decision that needs making per run, not once.
+
+**Still open.** Whether there is a second, *uncore* clock that the
+`performance` governor does not pin. Unquiesced, `btree_miss` got *faster*
+next to `mem_canary` (14.05 -> 12.43 ns/iter), which a core-clock story
+cannot explain - a stall-heavy neighbour should have slowed it. The
+hypothesis is that sustained streaming drives a memory-side clock up and a
+latency-bound workload benefits. Untested.
 
 ---
 
 ## 2. A fixed cost per measurement
 
 Each timed batch carries a cost that does not scale with the iterations in
-it - the two clock reads, the boxed call, and whatever warm-up the first
-iterations pay. Divided by the batch size it appears as a per-iteration cost
-of `a/n`, which shrinks as the batch grows and so is invisible at any single
-batch size.
+it - the two clock reads, the boxed call, and whatever the first iterations
+pay to bring the working set back. Divided by the batch size it appears as
+`a/n` per iteration, invisible at any single batch size.
 
-**Evidence.** `Instant::now` measures 22 ns, so the two calls bracketing a
-batch are ~45 ns - real but below present resolution. Ladder fits found a
-far larger `~580 ns` in one 7-workload round (`btree_miss` 613 ±172,
-`slice_sort` 585 ±182, `instant_now` 554 ±205, and `cpu_canary` -195 ±194,
-the one workload with no working set to warm).
+**It is a genuine constant.** Seven rungs from 12 us to 986 us, per-iteration
+cost in ns:
 
-**But that number did not survive test 3**, so treat it as unconfirmed: see
-below.
+```
+btree_miss    28.2565  28.1321  28.0694  28.0470  28.0746  28.0862  28.0940
+cpu_canary     2.3904   2.3745   2.3669   2.3645   2.3654   2.3659   2.3655
+instant_now   32.3666  32.3106  32.3076  32.2963  32.2944  32.2926  32.2899
+mem_canary   135.9451 135.5053 134.0991 132.8573 132.4142 132.2840 132.0870
+```
 
-**Mitigations.** Subtract two batch sizes (`(T_4n - T_n)/3n`), which is what
-the `ladder` and `intercept` subcommands do. Or simply use a bigger batch,
-which shrinks `a/n` without costing a second measurement.
+`btree_miss`'s successive drops are 0.124, 0.063, 0.022 - halving with each
+doubling, which is the signature of `b + a/n` and not of anything else.
+`cpu_canary` does the same (0.0159, 0.0076, 0.0024). Both then flatten and
+tick slightly *upward* at the longest batches, which is problem 5 arriving.
 
-**Still to test.** Whether it is the timer or the warm-up - `LAB_WARMUP` runs
-untimed iterations before the timed batch, so whatever decays with the prefix
-is warm-up and whatever survives is harness. And whether the cost is a
-*constant* at all: `mem_canary` reads 179.3 / 165.6 / 151.4 ns/iter at n, 2n,
-4n, which is equal drops per doubling - logarithmic in batch length, not
-`a/n`. A constant intercept would have halved each drop. Nothing that shape
-can be removed by subtracting two points.
+**Size.** It depends on the round, but is constant within one. From the shape
+sweep: `instant_now` 27 ns, `btree_miss` 76 ns, `cpu_canary` 165 ns,
+`mem_canary` 277 ns. From the small-sample sweep, `cpu_canary` 27 ns alone
+and 127 ns with five neighbours - which is problem 3, below.
+
+**Subtraction removes it exactly.** `(T_last - T_first)/(n_last - n_first)`,
+which is what `wide` computes. Least squares over all rungs is a dead heat
+with it, within 0.05 percentage points on every workload: under
+multiplicative noise the extreme pair is very nearly the optimal design, and
+an unweighted fit slightly over-trusts the noisiest rung. Use two points; the
+middle rungs are worth keeping as a check that the line is a line, not as
+part of the estimate.
+
+**Where it comes from is still open.** An untimed warm-up prefix
+(`LAB_WARMUP`) removes only ~50 ns and saturates by 16 iterations. So the
+300-570 ns that neighbours add is *not* recovered by re-running the workload
+beforehand, which is strange - running it should restore exactly what the
+neighbours evicted. Either the prefix does not reproduce the state the real
+batch needs, or the cost lives in the measurement machinery rather than the
+workload.
+
+**Superseded.** An earlier reading of `~580 ns` shared across three workloads
+was real but was a property of *that one round composition*, not of the
+harness; the agreement that looked like confirmation is better explained by
+their having shared a round. And `mem_canary` read 179.3 / 165.6 / 151.4
+ns/iter at n, 2n, 4n unquiesced - equal drops per doubling, which is
+logarithmic and could never be subtracted away. Quiet, it is 135.9 -> 132.1
+over 64x, and the shape is noisy rather than logarithmic. That was the clock.
 
 ---
 
 ## 3. The number moves with the company it keeps
 
 A workload's measured cost depends on which *other* workloads share its
-round. This is the one that matters most for benchmarking several functions
-together, and it is the least understood.
+round. This matters most for benchmarking several functions together.
 
-**Evidence.** `btree_miss`, 150,000 rounds per composition:
+**Unquiesced it is huge and cannot be subtracted away.** `btree_miss` across
+six compositions, 150,000 rounds each:
 
 | round | ns/iter | intercept |
 | --- | --- | --- |
@@ -84,105 +136,108 @@ together, and it is the least understood.
 | `+copy_64mb` | 18.7941 | +501 ± 47 |
 | **spread** | **17.2%** | **-572 to +613** |
 
-Two things follow. The measured cost moves 17% on composition alone, which
-dwarfs the ~0.5% that (2) was worth. And **the intercept is not a property of
-the workload** - it is not even the same sign, at 10-20 sigma. So the ~580 ns
-of (2) was a property of that one round, and the agreement across three
-workloads that looked like confirmation is better explained by their having
-shared a round.
+17.2% raw, and 16.83% after subtracting - no help at all. The intercept is
+not even the same sign across compositions.
 
-Subtracting does not fix it: 17.23% raw against 16.83% subtracted.
+**Quiet, it is small and subtraction removes nearly all of it.** Same
+workload, 255 subsets, four passes, with the pass-to-pass null underneath:
 
-Note that neighbours can make a benchmark *faster* - `btree_miss` gains 17%
-next to `cpu_canary` - which rules out cache eviction as the whole story.
-Working hypothesis: two clocks. The core clock, which ALU-heavy neighbours
-drive up, and an uncore/memory clock, which sustained streaming drives up and
-which a latency-bound workload like `btree_miss` benefits from. `copy_64mb`
-is then the one genuine eviction effect. Untested.
+| | naive | subtracted | null |
+| --- | --- | --- | --- |
+| unquiet, ~100 us samples | 17.23% | 16.83% | not measured |
+| quiet, ~100 us samples | 0.84% | **0.10%** | 0.04% |
+| quiet, small samples | 3.25% | **0.03%** | 0.01% |
 
-**Still to test.** Whether quieting removes it (it pins the core clock, maybe
-not the uncore); whether the canary ratio removes it; how long a composition
-takes to *establish* its regime, which is measurable as the settling
-transient at the start of each subset's block.
+**Why subtraction reverses between the two conditions:** unquiet, the
+composition effect is multiplicative - the neighbours change the clock, and
+no subtraction can touch a multiplicative error. Quiet, what remains is an
+additive per-measurement cost, which is precisely what a subtraction removes.
+The two conditions were not disagreeing about the same quantity.
+
+**The mechanism, with a working control.** From the 255-subset sweep:
+
+```
+btree_miss                                    28.0382   fixed  -86 ns
+btree_miss+nothing                            28.0391   fixed  -85 ns
+btree_miss+cpu_canary+instant_now+slice_sort  28.2816   fixed +260 ns
+btree_miss+mem_canary+mpsc_send+slice_sort    28.4505   fixed +486 ns
+```
+
+`nothing` - a black-boxed empty loop - changes nothing at all, so it is the
+neighbours' footprint and not merely their presence in the round. Real
+neighbours add 300-570 ns per measurement, and `wide` stays at 28.08-28.19
+throughout.
+
+**At small samples this is the whole measurement.** `cpu_canary`, true cost
+2.36 ns/iter, bottom rung 126 ns:
+
+| round | naive | wide |
+| --- | --- | --- |
+| alone | 2.8668 | 2.3604 |
+| + 5 neighbours | 4.7674 | 2.3638 |
+
+Naive is wrong by 21-102% depending on company; `wide` returns 2.360-2.364
+in all 32 compositions. Composition spread 18.69% -> **0.05%** against a
+0.01% null.
+
+So problems 2 and 3 are largely one problem, and one subtraction answers
+both. That is also what makes small samples possible at all: the fixed cost
+stays *fixed* as batches shrink rather than growing.
+
+**Still open.** How long a composition takes to *establish* its regime. The
+settling transient at the start of each subset's block is recorded and has
+not been looked at.
 
 ---
 
 ## 4. The calibrated batch size wanders
 
-Batch sizes are calibrated per run to hit a target sample duration, and the
-calibration locks in whatever the clock happened to be doing at that instant.
-The parent crate found counts varying 10-25% between runs.
+Batch sizes are calibrated per run to hit a target duration, and calibration
+locks in whatever the machine happened to be doing at that instant. The
+parent crate found counts varying 10-25% between runs.
 
 That would be harmless if per-iteration cost were independent of batch size.
-It is not - that is precisely what (2) says - so comparing two runs compares
-them at two different points on a curve, and the difference reads as a
-difference in the thing being measured.
+It is not - that is exactly what (2) says - so comparing two runs compares
+two different points on a curve, and the difference reads as a difference in
+the thing being measured.
 
-**Evidence.** Indirect so far. The per-iteration trap has already been hit
-once in this lab: dividing a payload by the canary's *batch* time rather than
-its per-iteration time scored every ratio at ~20% between runs against ~1%
-for raw nanoseconds, purely because the canary recalibrated to a different
-`n` each run.
+**Two ways it has actually bitten, both silent:**
 
-**A second way calibration goes wrong: the first execution is the coldest.**
-`copy_64mb` allocated its destination with `vec![0u8; n]`, which takes the
-`alloc_zeroed` path and hands back untouched zero pages. The first copy
-faulted in 64 MiB and took **47 ms against a true cost of 6.4 ms** - and
-since calibration is the first thing that ever runs, that was the measurement
-calibration believed. It briefly went into this file as an eleven-fold
-slowdown from quieting the machine. It was nothing of the sort; quieting
-costs this workload about 1.4x.
+*The per-iteration trap.* Dividing a payload by the canary's **batch** time
+rather than its per-iteration time scored every ratio at ~20% between runs
+against ~1% for raw nanoseconds, purely because the canary had recalibrated
+to a different `n`.
 
-The wrong number was the small half of the problem. The growth loop uses each
-probe to decide how much to grow, so a first probe inflated sevenfold makes
-it stop growing almost immediately and settle on a batch far too small -
-silently, and looking exactly like a property of the workload. Any allocating
-workload is exposed.
+*The first execution is the coldest.* `copy_64mb` allocated its destination
+with `vec![0u8; n]`, which takes the `alloc_zeroed` path and returns
+untouched zero pages. The first copy faulted in 64 MiB: **47 ms against a
+true 6.4 ms**. Calibration is the first thing that runs, so that was the
+measurement it believed - and it briefly went into this file as an eleven-fold
+slowdown from quieting. It was nothing of the sort; quieting costs this
+workload about 1.4x. The wrong number was the smaller half: the growth loop
+uses each probe to decide how far to grow, so a first probe inflated
+sevenfold makes it stop almost immediately and settle on a batch far too
+small. Any allocating workload is exposed.
 
-Fixed in two places: `copy_64mb` fills its destination in the constructor so
-the faults are paid as setup, and `calibrate` runs one untimed batch before
-it measures anything and takes a median of three probes at the end rather
-than the single one that happened to end the loop.
+**Mitigations in place.** `copy_64mb` fills its destination in the
+constructor so the faults are paid as setup; `calibrate` runs one untimed
+batch before measuring anything and takes a median of three probes rather
+than the single one that ended the loop; sweeps calibrate once and share the
+counts, so a workload is measured at the same batch size in every subset.
 
-**Mitigations.** Calibrate once and share the count across everything being
-compared. Or fix the count outright and let the sample duration fall where it
-may.
-
-**Still to test.** How much the counts actually wander here, and how much of
-the apparent between-run and between-composition spread it accounts for. Until
-then, sweeps should calibrate once and reuse, so this is held fixed rather
-than left to vary alongside whatever is under study.
+**Still open.** How much the counts actually wander here, and how much of the
+between-run spread that accounts for. Currently held fixed rather than
+measured.
 
 ---
 
-## How they interact
+## 5. Outside events corrupt whole samples
 
-- (1) causes (3), at least partly: composition changes the clock, and the
-  clock changes everything in the round.
-- (2) and (4) multiply: a fixed cost `a` biases the per-iteration estimate by
-  `a/n`, so a wandering `n` makes even a perfectly constant `a` land
-  differently each time.
-- (3) swamps (2) at present, which is why measuring (2) requires either
-  holding composition fixed or varying it deliberately and modelling it.
-
-## A note on method
-
-Do not interleave subsets to defend against drift. The start of a round is
-the end of the one before it, so a subset needs a contiguous stretch to
-settle into its regime; interleaving keeps every subset in a permanent
-transient and drags them all toward the average, which masks (3) rather than
-measuring it. Defend against drift with **replication** instead - several
-complete passes over the subsets, each in a fresh random order - and record
-enough machine state that drift can be seen rather than inferred.
-
----
-
-# What the quiet sweeps settled (2026-09-16)
-
-## The tick is the reason long samples are bad
+Discovered rather than anticipated, and it is the most generally useful thing
+the lab has produced.
 
 The fraction of measurements corrupted by an outside event is **proportional
-to the batch duration**, measured four independent ways:
+to the batch duration**:
 
 | batch | corrupted | rate |
 | --- | --- | --- |
@@ -191,18 +246,27 @@ to the batch duration**, measured four independent ways:
 | 70.8 us | 7.38% | 0.104 %/us |
 | 141.6 us | 14.34% | 0.101 %/us |
 
-That is a Poisson process at ~1020 events/s costing ~5 us each. The kernel on
-this machine is `CONFIG_HZ=1000`: it is the scheduler tick, recovered from
-timing data alone.
+Four independent measurements agreeing to 3%: a Poisson process at ~1020
+events/s costing ~5 us each. The kernel here is `CONFIG_HZ=1000`. It is the
+scheduler tick, recovered from timing data alone.
 
-A sample's chance of being wrong is its exposure time. At 100 us one
-measurement in ten is hit; at 1 us, one in a thousand. This also decides what
-estimator is usable - trimming 0.1% costs nothing, trimming 10% is a serious
-intervention on a distribution we have already found trimming can distort.
+The distribution is a sharp spike at the median with a contaminated tail -
+`cpu_canary` at 128 us is +3407 ns at p90 and +5792 ns at p99 above its
+median - so this is not a widening, it is a fraction of samples being
+replaced by wrong ones.
 
-## Two noise regimes, wanting opposite sample sizes
+**A sample's chance of being wrong is its exposure time.** At 100 us roughly
+one measurement in ten is hit; at 1 us, one in a thousand. This also decides
+what estimator is usable: trimming 0.1% costs nothing, while trimming 10% is
+serious surgery on a distribution this project has already found trimming can
+distort. It is the reason long samples are bad that has nothing to do with
+noise scaling, and it applies to any machine with a timer tick.
 
-Absolute sd of one measurement, over a 100x range of batch sizes:
+---
+
+## Choosing a sample size
+
+Absolute standard deviation of one measurement, over a 100x range:
 
 | batch | cpu_canary | nothing | btree_miss | instant_now | mem_canary |
 | --- | --- | --- | --- | --- | --- |
@@ -210,62 +274,148 @@ Absolute sd of one measurement, over a 100x range of batch sizes:
 | 8.70 us | 158 ns | 8.8 ns | 36.0 ns | 167 ns | 1410 ns |
 | 68.9 us | 173 ns | 9.4 ns | 66.0 ns | 1560 ns | 12070 ns |
 
-**Additive** (flat absolute sd - `cpu_canary` carries a fixed ~160 ns per
-measurement whatever the batch): longer batches dilute the noise.
-**Multiplicative** (sd proportional to duration - `instant_now` ~2%,
-`mem_canary` ~18%): longer batches buy nothing and cost proportionally more.
+Two regimes, wanting opposite things:
 
-Best sample size by relative error per unit machine time: `mem_canary`
+- **Additive** - flat absolute sd. `cpu_canary` carries a fixed ~160 ns per
+  measurement whatever the batch length. Longer batches dilute it, so longer
+  is better until (5) takes over.
+- **Multiplicative** - sd proportional to duration. `instant_now` ~2%,
+  `mem_canary` ~18%. Longer batches buy nothing per sample while costing
+  proportionally more time, so shorter is better, steeply.
+
+Best sample size by relative error per unit of machine time: `mem_canary`
 0.20 us, `mpsc_send` 0.25 us, `instant_now` 0.34 us, `btree_miss` 34 us,
-`nothing` 35 us, `cpu_canary` 64 us. **Every optimum is at or below 70 us;
-none is at 100 us.** The spread between them is 300x, so this is a per-
-workload measurement, not a constant to hard-code.
+`nothing` 35 us, `cpu_canary` 64 us.
 
-## Subtraction works, and it is what makes small samples possible
+**Every optimum is at or below 70 us; none is at 100 us**, so the 100 us
+default is past optimal for all six workloads, by between 1.5x and 300x. The
+300x spread between them says this is a per-workload measurement, not a
+constant to hard-code. The recipe: ladder a workload, look at whether
+absolute or relative sd is the flat one, and pick accordingly - and never go
+far above ~50 us, because (5) is waiting there regardless of regime.
 
-At a 0.2 us bottom rung a fixed cost of 27-127 ns is most of the
-measurement, so the naive estimate is ruined and composition-dependent.
-`cpu_canary`, true cost 2.36 ns/iter:
+The catch is that the small end is only available with the intercept
+removed. At a 0.2 us batch a 27-127 ns fixed cost is most of the
+measurement. Subtraction is what unlocks the whole regime.
 
-| round | naive | wide | fixed |
-| --- | --- | --- | --- |
-| alone | 2.8668 | 2.3604 | 27 ns |
-| + 5 neighbours | 4.7674 | 2.3638 | 127 ns |
+---
 
-Naive is wrong by 21-102% depending on company. `wide` gives 2.360-2.364 in
-every one of 32 compositions. Composition spread against the pass-to-pass
-null:
+## How they interact
 
-| workload | naive | subtracted | null |
-| --- | --- | --- | --- |
-| `cpu_canary` | 18.69% | **0.05%** | 0.01% |
-| `btree_miss` | 3.25% | **0.03%** | 0.01% |
-| `instant_now` | 0.87% | **0.03%** | 0.03% |
-| `nothing` | 0.24% | **0.01%** | 0.01% |
+- (1) causes much of (3): composition changes the clock, and the clock
+  changes everything in the round. Removing (1) by quieting is what turned
+  (3) into something subtraction could fix.
+- (2) and (3) are largely the same problem once (1) is gone - a fixed cost
+  per measurement whose size depends on the neighbours but not on the batch.
+- (2) and (4) multiply: a fixed cost `a` biases the estimate by `a/n`, so a
+  wandering `n` makes even a perfectly constant `a` land differently.
+- (5) sets a ceiling on sample size that none of the others can argue with,
+  and (2) sets the floor.
 
-So the intercept stays *fixed* as batches shrink rather than growing, which
-is what makes the small-sample regime available at all. Problem 2 and
-problem 3 turn out to be mostly the same problem, and one subtraction
-answers both.
+---
 
-## On a quiet machine the canary ratio is a liability
+## Method notes
 
-The ratio columns score *worse* than raw nanoseconds - 2.58-3.60% against
-0.03% for `instant_now` and `nothing`. With the clock pinned there is no
-shared drift to cancel, so dividing by a second noisy measurement can only
-add its variance. The canary earns its keep when the clock moves (problem 1)
-and costs when it does not.
+**Do not interleave subsets to defend against drift.** The start of a round
+is the end of the one before it, so a subset needs a contiguous stretch to
+settle into its regime; interleaving keeps every subset in a permanent
+transient and drags them all toward the average, which masks (3) rather than
+measuring it. Defend against drift with **replication** - several complete
+passes over the subsets, each in a fresh random order.
 
-## Still not well behaved
+**Always report the null.** The spread of one composition *across passes* is
+what the spread *across compositions* has to beat. Without it, a night of
+thermal drift and a real composition effect are the same number. The 17.2%
+figure in (3) was reported before that line existed.
 
-`mem_canary` (composition spread 7.88%, null 4.60%, ~18% per-sample, ~20%
-process to process) and `mpsc_send` (11.02%, null 7.54%, chaotic above 16 us)
-fail every test here. `mem_canary` being one of the two instruments is the
-uncomfortable part.
+**Ladder in durations, not counts.** The fixed cost is paid per measurement,
+so what makes it visible is how long a batch runs. `counts_for` derives
+counts from target durations and gives a workload too slow for a target the
+tightest ladder that still has distinct rungs - `copy_64mb` gets 1,2,3,4
+iterations from the same spec that gives `cpu_canary` a geometric ladder,
+rather than a geometric blowup that would buy lever arm and pay for it in (5).
 
-## Not yet done
+**Record machine state, do not infer it.** An evening went into deducing the
+clock from `cpu_canary`'s timings before anything logged
+`scaling_cur_freq`.
 
-The head-to-head: current protocol (100 us samples, naive mean) against the
-proposed one (small samples plus subtraction) at **equal machine time**,
-scored on run-to-run reproducibility. Everything above says the proposed one
-should win; none of it is that experiment.
+**One measurement of a first execution is not a measurement.** See (4).
+
+---
+
+## Not yet done: the head-to-head
+
+Everything above predicts that small samples plus subtraction beats the
+current protocol. None of it is that experiment. Here is the one to run.
+
+**Claim under test.** At equal machine time, a protocol using small samples
+and a two-point subtraction produces a *more reproducible* per-iteration
+number than 100 us samples with a trimmed mean.
+
+**Reproducible across what.** Separate **processes**, separated in time -
+each recalibrating from scratch, rebuilding its own workloads. Not blocks
+within a run. Problem 4 only appears across processes, and so does
+`mem_canary`'s 20% process-to-process wander. Block-splitting would score the
+estimators while hiding two of the five problems.
+
+**A 2x2, not a duel.** Sample size and estimator are separate choices and
+cost the same to test together, so vary both:
+
+| cell | rungs (multiples of SAMPLE) | estimator |
+| --- | --- | --- |
+| A — current | 1.0 (~100 us) | naive trimmed mean |
+| B — proposed | 0.05, 0.4 (~5, 40 us) | two-point subtraction |
+| C | 0.05 (~5 us) | naive trimmed mean |
+| D | 1.0, 8.0 (~100, 800 us) | two-point subtraction |
+
+C and D are what make the result interpretable: if B beats A, C says whether
+that came from the small samples and D says whether it came from the
+subtraction. A duel between A and B could not tell those apart.
+
+**Equal machine time, not equal rounds.** B's ladder costs more per round
+than A's single batch, so fixing the round count would hand A the advantage
+and call it a result. Each cell gets the same **wall-clock budget** - this
+needs a `LAB_BUDGET=<seconds>` mode, since sweeps currently take a round
+count - and single-rung ladders need to be legal, which `ladder_from_env`
+currently rejects.
+
+**Shape.** All four workloads in one round together, which is both the
+realistic case and the harder one. Suggested: `btree_miss` (additive,
+optimum 34 us), `instant_now` (multiplicative, optimum 0.34 us),
+`cpu_canary` (additive, optimum 64 us) and `slice_sort` (cannot go below
+234 us for one iteration, so an honest limit case where the protocol should
+have nothing to offer). One process yields all four workloads' estimates at
+once.
+
+24 repeats per cell; 20 s per cell per repeat. At 20 s even the coarsest cell
+takes ~200,000 samples, so within-run statistical error is ~0.0005% - far
+below the run-to-run spread being measured, which is the point: what gets
+scored is systematic irreproducibility, not counting noise. Total 4 x 24 x
+20 s ~= 32 min plus process setup.
+
+**Order.** Cells shuffled within each repeat, so drift across the hour cannot
+load onto one cell - the same reason sweeps use passes in random order.
+
+**Second arm, and the more honest one.** Repeat with the round *composition
+varying* between repeats (drop a random neighbour each time). Nobody re-runs
+an identical suite; in practice the company a benchmark keeps changes between
+one invocation and the next, and that is exactly the condition subtraction is
+supposed to survive. Another ~32 min.
+
+**Report both spread and centre.** A protocol can be perfectly reproducible
+and wrong. The subtracted cells will read *lower* than the naive ones by the
+fixed cost, which is the bias we have independently shown is real - so the
+centres must be reported next to the spreads rather than only the spreads.
+
+**Decision rule, fixed in advance.** B must beat A by at least 2x in
+run-to-run spread to justify the extra machinery. If B wins by less than
+that, or if C alone accounts for the gain, the recommendation is simply
+"use smaller samples" and the ladder stays a diagnostic rather than becoming
+part of the measurement protocol.
+
+`mem_canary` and `mpsc_send` fail every reliability test here - `mem_canary`
+at 7.88% composition spread against a 4.60% null, ~18% per-sample, ~20%
+process to process; `mpsc_send` at 11.02% against 7.54%, and chaotic above
+16 us. `mem_canary` being one of the two instruments is the uncomfortable
+part, and a memory canary whose own reading moves 20% between processes
+cannot calibrate anything.
