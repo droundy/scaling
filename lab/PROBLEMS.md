@@ -174,3 +174,98 @@ transient and drags them all toward the average, which masks (3) rather than
 measuring it. Defend against drift with **replication** instead - several
 complete passes over the subsets, each in a fresh random order - and record
 enough machine state that drift can be seen rather than inferred.
+
+---
+
+# What the quiet sweeps settled (2026-09-16)
+
+## The tick is the reason long samples are bad
+
+The fraction of measurements corrupted by an outside event is **proportional
+to the batch duration**, measured four independent ways:
+
+| batch | corrupted | rate |
+| --- | --- | --- |
+| 64.1 us | 6.59% | 0.103 %/us |
+| 127.9 us | 12.96% | 0.101 %/us |
+| 70.8 us | 7.38% | 0.104 %/us |
+| 141.6 us | 14.34% | 0.101 %/us |
+
+That is a Poisson process at ~1020 events/s costing ~5 us each. The kernel on
+this machine is `CONFIG_HZ=1000`: it is the scheduler tick, recovered from
+timing data alone.
+
+A sample's chance of being wrong is its exposure time. At 100 us one
+measurement in ten is hit; at 1 us, one in a thousand. This also decides what
+estimator is usable - trimming 0.1% costs nothing, trimming 10% is a serious
+intervention on a distribution we have already found trimming can distort.
+
+## Two noise regimes, wanting opposite sample sizes
+
+Absolute sd of one measurement, over a 100x range of batch sizes:
+
+| batch | cpu_canary | nothing | btree_miss | instant_now | mem_canary |
+| --- | --- | --- | --- | --- | --- |
+| 0.63 us | 160 ns | 1.9 ns | 22.6 ns | 9.3 ns | 95 ns |
+| 8.70 us | 158 ns | 8.8 ns | 36.0 ns | 167 ns | 1410 ns |
+| 68.9 us | 173 ns | 9.4 ns | 66.0 ns | 1560 ns | 12070 ns |
+
+**Additive** (flat absolute sd - `cpu_canary` carries a fixed ~160 ns per
+measurement whatever the batch): longer batches dilute the noise.
+**Multiplicative** (sd proportional to duration - `instant_now` ~2%,
+`mem_canary` ~18%): longer batches buy nothing and cost proportionally more.
+
+Best sample size by relative error per unit machine time: `mem_canary`
+0.20 us, `mpsc_send` 0.25 us, `instant_now` 0.34 us, `btree_miss` 34 us,
+`nothing` 35 us, `cpu_canary` 64 us. **Every optimum is at or below 70 us;
+none is at 100 us.** The spread between them is 300x, so this is a per-
+workload measurement, not a constant to hard-code.
+
+## Subtraction works, and it is what makes small samples possible
+
+At a 0.2 us bottom rung a fixed cost of 27-127 ns is most of the
+measurement, so the naive estimate is ruined and composition-dependent.
+`cpu_canary`, true cost 2.36 ns/iter:
+
+| round | naive | wide | fixed |
+| --- | --- | --- | --- |
+| alone | 2.8668 | 2.3604 | 27 ns |
+| + 5 neighbours | 4.7674 | 2.3638 | 127 ns |
+
+Naive is wrong by 21-102% depending on company. `wide` gives 2.360-2.364 in
+every one of 32 compositions. Composition spread against the pass-to-pass
+null:
+
+| workload | naive | subtracted | null |
+| --- | --- | --- | --- |
+| `cpu_canary` | 18.69% | **0.05%** | 0.01% |
+| `btree_miss` | 3.25% | **0.03%** | 0.01% |
+| `instant_now` | 0.87% | **0.03%** | 0.03% |
+| `nothing` | 0.24% | **0.01%** | 0.01% |
+
+So the intercept stays *fixed* as batches shrink rather than growing, which
+is what makes the small-sample regime available at all. Problem 2 and
+problem 3 turn out to be mostly the same problem, and one subtraction
+answers both.
+
+## On a quiet machine the canary ratio is a liability
+
+The ratio columns score *worse* than raw nanoseconds - 2.58-3.60% against
+0.03% for `instant_now` and `nothing`. With the clock pinned there is no
+shared drift to cancel, so dividing by a second noisy measurement can only
+add its variance. The canary earns its keep when the clock moves (problem 1)
+and costs when it does not.
+
+## Still not well behaved
+
+`mem_canary` (composition spread 7.88%, null 4.60%, ~18% per-sample, ~20%
+process to process) and `mpsc_send` (11.02%, null 7.54%, chaotic above 16 us)
+fail every test here. `mem_canary` being one of the two instruments is the
+uncomfortable part.
+
+## Not yet done
+
+The head-to-head: current protocol (100 us samples, naive mean) against the
+proposed one (small samples plus subtraction) at **equal machine time**,
+scored on run-to-run reproducibility. Everything above says the proposed one
+should win; none of it is that experiment.

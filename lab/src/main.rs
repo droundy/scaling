@@ -273,7 +273,18 @@ fn sweep(ws: Vec<Arc<Workload>>, rounds: usize, dir: &str, ladder: &[f64], passe
         let (cal, per) = counts[w.name];
         let plan: Vec<String> = counts_for(cal, ladder)
             .iter()
-            .map(|&c| format!("{c}={:.0}us", c as f64 * per / 1e3))
+            .map(|&c| {
+                // Two decimals below ten microseconds. The bottom rungs of a
+                // small-sample ladder are hundreds of nanoseconds, and a plan
+                // that reports every one of them as "0us" hides exactly what
+                // it exists to show.
+                let us = c as f64 * per / 1e3;
+                if us < 10.0 {
+                    format!("{c}={us:.2}us")
+                } else {
+                    format!("{c}={us:.0}us")
+                }
+            })
             .collect();
         eprintln!("  {:>16}  {}", w.name, plan.join("  "));
     }
@@ -383,26 +394,34 @@ fn run(
             (false, Some(&(n, p))) => (n, p),
             (false, None) => calibrate(w, &mut seed),
         };
-        let this: Vec<(usize, String)> = counts_for(cal, ladder)
-            .into_iter()
-            .enumerate()
-            .map(|(k, n)| {
-                let name = rung_name(w.name, k);
-                t.iters.insert(name.clone(), n);
-                // Only when this call did its own calibrating. A sweep has
-                // already printed the plan once, and repeating it for every
-                // subset of every pass buries the log.
-                if counts.is_none() {
-                    eprintln!(
-                        "  {:>16} {:>12} iters  ~{:>8.0} us",
-                        name,
-                        n,
-                        n as f64 * per / 1e3
-                    );
-                }
-                (n, name)
-            })
-            .collect();
+        // Replaying takes the rung counts straight from the recording rather
+        // than deriving them again. Deriving them would re-apply the ladder
+        // to a number that already has it: `t.iters[name]` is *rung zero's*
+        // count, which equalled the calibration count only while ladders
+        // were integer multiples starting at one. With a rung at half a
+        // sample it silently halved every count, so replayed timings came
+        // back attached to the wrong batch sizes and every per-iteration
+        // cost doubled.
+        let derived = counts_for(cal, ladder);
+        let mut this: Vec<(usize, String)> = Vec::with_capacity(ladder.len());
+        for k in 0..ladder.len() {
+            let name = rung_name(w.name, k);
+            let n = if t.replaying() {
+                *t.iters
+                    .get(&name)
+                    .unwrap_or_else(|| panic!("replay recording has no rung {name}"))
+            } else {
+                derived[k]
+            };
+            t.iters.insert(name.clone(), n);
+            // Only when this call did its own calibrating. A sweep has
+            // already printed the plan once, and repeating it for every
+            // subset of every pass buries the log.
+            if counts.is_none() && !t.replaying() {
+                eprintln!("  {name:>16} {n:>12} iters  ~{:>8.0} us", n as f64 * per / 1e3);
+            }
+            this.push((n, name));
+        }
         rungs.push(this);
     }
 
@@ -1198,14 +1217,20 @@ fn calibrate(w: &Workload, seed: &mut u64) -> (usize, f64) {
 /// Derived rather than passed so that the same subset always lands in the
 /// same file, which is what makes two sweeps comparable subset by subset.
 fn csv_name(dir: &str, payloads: &[Arc<Workload>], pass: Option<usize>) -> String {
+    // Binary unless asked otherwise. `read` sniffs the magic rather than the
+    // extension, so old CSV recordings keep working either way.
+    let ext = match std::env::var("LAB_FORMAT").as_deref() {
+        Ok("csv") => "csv",
+        _ => "bin",
+    };
     let names: Vec<&str> = payloads.iter().map(|w| w.name).collect();
     match pass {
         // A suffix rather than a directory per pass, so one glob picks up
         // every pass of one composition and `shift` can tell them apart by
         // name. Passes must stay distinguishable: pooling them would throw
         // away the replication that makes the composition effect testable.
-        Some(p) => format!("{dir}/{}.p{p}.csv", names.join("+")),
-        None => format!("{dir}/{}.csv", names.join("+")),
+        Some(p) => format!("{dir}/{}.p{p}.{ext}", names.join("+")),
+        None => format!("{dir}/{}.{ext}", names.join("+")),
     }
 }
 
@@ -1215,7 +1240,7 @@ fn composition_of(path: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
-    let stem = stem.strip_suffix(".csv").unwrap_or(&stem);
+    let stem = stem.strip_suffix(".csv").or_else(|| stem.strip_suffix(".bin")).unwrap_or(&stem);
     match stem.rsplit_once(".p") {
         Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head.to_string(),
         _ => stem.to_string(),

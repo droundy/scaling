@@ -107,8 +107,79 @@ impl Timing {
         ns
     }
 
-    /// Write everything taken so far, plus the calibration, as CSV.
+    /// Write everything taken so far, plus the calibration.
+    ///
+    /// Binary when the path ends in `.bin`, CSV otherwise, so old recordings
+    /// and old habits keep working.
     pub fn write(&self, path: &str) {
+        if path.ends_with(".bin") {
+            self.write_bin(path)
+        } else {
+            self.write_csv(path)
+        }
+    }
+
+    /// Eighteen bytes a sample instead of about fifty-two.
+    ///
+    /// Worth doing only because of what a small sample size does to the row
+    /// count: every batch writes exactly one row, so rows per second is one
+    /// over the mean batch duration, whatever the workloads are. At the 200
+    /// us batches of the first sweeps that is 5000 rows a second; at the 46
+    /// us mean of a ladder reaching below a microsecond it is 21700, and a
+    /// day of measuring lands somewhere past half a billion rows.
+    ///
+    /// Disk is not really the problem - parsing is. The point of a recording
+    /// is that estimators can be re-scored against it without measuring
+    /// anything again, and that stops being true when a pass over the data
+    /// takes hours.
+    ///
+    /// The header stays text so `head` still tells you what a file holds.
+    fn write_bin(&self, path: &str) {
+        use std::fmt::Write as _;
+        let mut names: Vec<&String> = self.iters.keys().collect();
+        names.sort();
+        let idx: HashMap<&str, u8> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str(), i as u8))
+            .collect();
+        if names.len() > 256 {
+            eprintln!("{path}: more than 256 rung names; not writing");
+            return;
+        }
+        let epoch = self.log.first().map(|s| s.t_ns).unwrap_or(0);
+
+        let mut head = String::new();
+        head.push_str("LABBIN1\n");
+        for n in &names {
+            let _ = writeln!(head, "# iters {n} {}", self.iters[*n]);
+        }
+        let _ = writeln!(head, "# epoch {epoch}");
+        head.push_str("DATA\n");
+
+        let mut buf: Vec<u8> = Vec::with_capacity(head.len() + self.log.len() * 18);
+        buf.extend_from_slice(head.as_bytes());
+        for x in &self.log {
+            buf.extend_from_slice(&(x.round as u32).to_le_bytes());
+            buf.push(x.slot as u8);
+            buf.push(idx[x.workload.as_str()]);
+            // Offset from the file's own epoch, in ns, as u64. A u32 of
+            // microseconds would fit a 71 minute block and save four bytes,
+            // which is not worth having to reason about how long a block can
+            // get before it silently wraps.
+            buf.extend_from_slice(&((x.t_ns.saturating_sub(epoch)) as u64).to_le_bytes());
+            // Integer nanoseconds. u32 reaches 4.3 s, against a longest
+            // batch here of about 25 ms, and sub-nanosecond resolution on a
+            // batch of hundreds of nanoseconds is not information.
+            buf.extend_from_slice(&(x.ns.round().max(0.0).min(u32::MAX as f64) as u32).to_le_bytes());
+        }
+        if let Err(e) = std::fs::write(path, buf) {
+            eprintln!("could not write {path}: {e}");
+        }
+    }
+
+    /// Write everything taken so far, plus the calibration, as CSV.
+    fn write_csv(&self, path: &str) {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(self.log.len() * 48);
         let mut names: Vec<_> = self.iters.iter().collect();
@@ -140,10 +211,67 @@ pub struct Recording {
     pub samples: Vec<Sample>,
 }
 
-/// Parse a recording: `# iters <name> <n>` lines, then the sample rows.
+/// Parse a recording, binary or CSV, told apart by what is actually in the
+/// file rather than by its name.
 pub fn read(path: &str) -> Recording {
-    let text =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+    if bytes.starts_with(b"LABBIN1\n") {
+        return read_bin(path, &bytes);
+    }
+    read_csv(
+        path,
+        &String::from_utf8_lossy(&bytes),
+    )
+}
+
+fn read_bin(path: &str, bytes: &[u8]) -> Recording {
+    let split = bytes
+        .windows(5)
+        .position(|w| w == b"DATA\n")
+        .unwrap_or_else(|| panic!("{path}: binary recording has no DATA marker"));
+    let head = String::from_utf8_lossy(&bytes[..split]);
+    let mut iters = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut epoch: u128 = 0;
+    for line in head.lines() {
+        if let Some(rest) = line.strip_prefix("# iters ") {
+            let mut f = rest.split_whitespace();
+            if let (Some(name), Some(n)) = (f.next(), f.next()) {
+                if let Ok(n) = n.parse() {
+                    iters.insert(name.to_string(), n);
+                    order.push(name.to_string());
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("# epoch ") {
+            epoch = rest.trim().parse().unwrap_or(0);
+        }
+    }
+
+    let body = &bytes[split + 5..];
+    let mut samples = Vec::with_capacity(body.len() / 18);
+    for r in body.chunks_exact(18) {
+        let round = u32::from_le_bytes([r[0], r[1], r[2], r[3]]) as usize;
+        let slot = r[4] as usize;
+        let widx = r[5] as usize;
+        let off = u64::from_le_bytes([r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13]]);
+        let ns = u32::from_le_bytes([r[14], r[15], r[16], r[17]]) as f64;
+        let Some(workload) = order.get(widx) else {
+            panic!("{path}: sample names workload {widx}, but the header lists {}", order.len())
+        };
+        samples.push(Sample {
+            round,
+            slot,
+            workload: workload.clone(),
+            t_ns: epoch + off as u128,
+            ns,
+        });
+    }
+    Recording { iters, samples }
+}
+
+/// Parse a CSV recording: `# iters <name> <n>` lines, then the sample rows.
+fn read_csv(path: &str, text: &str) -> Recording {
+    let _ = path;
     let mut iters = HashMap::new();
     let mut samples = Vec::new();
     for line in text.lines() {
