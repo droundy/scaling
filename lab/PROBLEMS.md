@@ -404,6 +404,89 @@ clock from `cpu_canary`'s timings before anything logged
 
 ---
 
+## Parked ideas, and dead ends worth not re-exploring
+
+**Count page faults and context switches alongside the timing.**
+`PERF_COUNT_SW_PAGE_FAULTS` and `PERF_COUNT_SW_CONTEXT_SWITCHES` are software
+perf events, readable through the same mmap page as the cycle counter, and
+available at any `perf_event_paranoid` level for one's own process. They turn
+"this sample looks wrong" into "this sample took 412 page faults and 2
+context switches", which is the difference between a tripwire and a
+diagnosis. Cheap, and useful whatever instrument is chosen.
+
+**Measured: the hardware cycle counter is a far better instrument, where it
+applies.** `perf_event_open` with `PERF_COUNT_HW_CPU_CYCLES` and
+`exclude_kernel=1`, read via `rdpmc`, on a 200 us ALU batch:
+
+| instrument | rel sd | >1 us over median | p99 excess | read cost |
+| --- | --- | --- | --- | --- |
+| `CLOCK_MONOTONIC` | 0.412% | 20.16% | 4831 ns | 31.4 ns |
+| `CLOCK_THREAD_CPUTIME_ID` | 0.410% | 20.11% | 4773 ns | 340.4 ns |
+| cycles, `exclude_kernel` | **0.031%** | **0.00%** | 199 ns | **9.3 ns** |
+
+The tick disappears entirely, and it is cheaper to read than the clock we use
+now. Note the comparison is against the *current* protocol, not against small
+samples with a robust estimator - the incremental gain over that is unmeasured.
+
+**Dead end: `CLOCK_THREAD_CPUTIME_ID`.** Measured, and it removes nothing -
+20.11% contaminated against the wall clock's 20.16%. It excludes time the
+thread was *not running*, but a timer interrupt does not deschedule you: the
+handler runs in your context and its time is charged to your thread. It also
+costs 340 ns a read against 31 ns, eleven times the current clock, which
+would dominate any sample under ~30 us. Do not revisit.
+
+**Rejected: `nohz_full`.** Context tracking adds work to every syscall entry
+and exit, so syscall-heavy benchmarks would get measurably slower and we
+would be benchmarking our own mitigation. It also needs a reboot plus
+`isolcpus` and `rcu_nocbs` on the same CPUs, and only stops the tick when
+exactly one task is runnable there. The one thing it would still buy that the
+cycle counter does not is removing the tick's *indirect* cost - the handler
+pollutes cache and TLB, and our subsequent work runs slower even when the
+handler's own cycles are not charged to us. Negligible on an ALU workload
+(0.031% sd); unmeasured on a memory-bound one.
+
+**Dead end: detecting syscalls to decide whether cycles are valid.** seccomp
+answers "does this function make syscalls", but the question is "does the
+user-cycle count see this function's whole cost", and those diverge. Three
+ways to break the counter, and a syscall detector sees one:
+
+| | kernel time | syscall | seccomp sees it |
+| --- | --- | --- | --- |
+| syscalls | yes | yes | yes |
+| page faults | yes | **no** | no |
+| involuntary preemption | not running | **no** | no |
+
+Measured: touching 256 MiB of fresh anonymous pages takes 65,536 page faults
+and **zero syscalls**, and the cycle counter sees 21% of the cost. seccomp
+would have called it pure user-space. This is not contrived - it is exactly
+`copy_64mb`'s first touch, which already produced a phantom 47 ms in this
+project, and any allocating benchmark is exposed.
+
+The ratio of user cycles to wall time catches all three, because it measures
+the thing we care about instead of a proxy for it. Against a pure user-space
+reference - which is what a cpu canary already is:
+
+| workload | cyc/ns | vs reference |
+| --- | --- | --- |
+| spin (ALU) | 1.688 | 99.5% |
+| `getpid` | 0.551 | 32.5% |
+| read `/dev/urandom` | 0.112 | 6.6% |
+| `nanosleep` 20 us | 0.002 | 0.1% |
+
+Take the **median** ratio, never the mean: a pure user-space function that
+catches a tick reads ~97.6% at 200 us samples, which would fail a 0.98
+threshold on contaminated samples alone.
+
+**Still open for seccomp.** It gives a *hard* guarantee where the ratio gives
+a sample: a function that syscalls once in a million calls would slip past
+calibration but die at once under `SECCOMP_RET_KILL`. The strong version -
+measurement in a forked child under a filter, results returned through a
+buffer mmap'd before the filter goes on - is a real design. It hardens the
+one failure mode seccomp can see while leaving the two it cannot, so it is
+worth revisiting only if a rare-syscall workload actually bites.
+
+---
+
 ## Not yet done: the head-to-head
 
 Everything above predicts that small samples plus subtraction beats the
