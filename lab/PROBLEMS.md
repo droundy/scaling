@@ -14,7 +14,7 @@ is what made it possible to study (2), (3) and (4) without (1) drowning them
 | 2 | a fixed cost per measurement | **solved**: it is a genuine constant, and two-point subtraction removes it |
 | 3 | the number moves with its neighbours | **mostly problem 2**; subtraction removes 100-370x of it |
 | 4 | the calibrated batch size wanders | held fixed, not yet measured |
-| 5 | outside events corrupt samples | **characterised**: the scheduler tick, and it is why long samples are bad |
+| 5 | outside events corrupt samples | **characterised below ~1 ms** (the scheduler tick); above that it inverts, and is largely unmeasured |
 
 Evidence below is from quiet sweeps (`performance` governor, `no_turbo=1`,
 reserved CPU) unless it says otherwise. That distinction matters more than
@@ -255,12 +255,59 @@ The distribution is a sharp spike at the median with a contaminated tail -
 median - so this is not a widening, it is a fraction of samples being
 replaced by wrong ones.
 
-**A sample's chance of being wrong is its exposure time.** At 100 us roughly
-one measurement in ten is hit; at 1 us, one in a thousand. This also decides
-what estimator is usable: trimming 0.1% costs nothing, while trimming 10% is
-serious surgery on a distribution this project has already found trimming can
-distort. It is the reason long samples are bad that has nothing to do with
-noise scaling, and it applies to any machine with a timer tick.
+**But this is a regime, not a ceiling.** The numbers above all come from
+samples shorter than a millisecond, where the expected number of hits per
+sample is well below one: rare, and enormous relative to the sample. The
+crossover is at one expected hit, `T = 1/r` - about **1 ms** here - and
+above it the picture inverts. `copy_64mb`, the one genuinely slow workload
+measured:
+
+| batch | expected ticks | rel sd observed | tick model predicts |
+| --- | --- | --- | --- |
+| 6.2 ms | 6.3 | 1.242% | 0.203% |
+| 12.4 ms | 12.7 | 1.226% | 0.143% |
+| 18.6 ms | 19.0 | 1.252% | 0.117% |
+| 24.8 ms | 25.3 | 1.232% | 0.101% |
+
+Every sample is hit many times over, so the Poisson fluctuation averages
+down - the tick's *relative* contribution falls as `E*sqrt(r/T)`, one over
+root T. And it is not what limits this workload anyway: the observed 1.24% is
+flat across a 4x range, which is the multiplicative signature of memory
+bandwidth varying, and it is six to twelve times larger than the tick model
+predicts. **For a slow function the tick is a minor term.**
+
+So there are two regimes needing two different treatments:
+
+- **Below ~1 ms: rare and catastrophic.** A hit is 5 us on a 1 us sample.
+  A median or trimmed mean removes them almost losslessly, because the
+  contaminated fraction is `r*T` - 0.1% at 1 us - and they sit far from the
+  bulk. Robust estimator, and prefer short samples.
+- **Above ~1 ms: ubiquitous and nearly constant.** There is no clean
+  population to trim to, and no need: the variation averages. What is left
+  is a systematic tax of `r*E` - very roughly 0.5%, though `E` is an
+  order-of-magnitude estimate from the p99 excess on short samples, so call
+  it uncertain to a factor of two. Ordinary mean, and the tick is probably
+  not your problem.
+
+**The two regimes measure different quantities**, which is worth being
+deliberate about rather than discovering later. A trimmed short-sample
+estimate reports the *interrupt-free* cost; a long-sample mean reports the
+cost *including* its share of interrupt overhead. For predicting real-world
+throughput the taxed number is arguably the honest one.
+
+**For slow functions the fix is different in kind.** You cannot choose a
+short sample when one call takes 10 ms, so the lever has to be elsewhere:
+stop the tick rather than dodge it (`nohz_full` plus `isolcpus` - this kernel
+is already `CONFIG_NO_HZ_FULL=y`, which the quiet harness does not currently
+exploit), or measure `CLOCK_THREAD_CPUTIME_ID` rather than wall clock so
+preemption is excluded, or simply accept a known and roughly constant tax.
+None of those has been tried.
+
+**Unmeasured.** Everything about the slow regime rests on one workload.
+`copy_64mb` and `slice_sort` (234 us for a single iteration) are the only
+workloads here that cannot be made short, and both were excluded from the
+small-sample sweep precisely because they have no small end. The lab has
+essentially no data above 1 ms.
 
 ---
 
@@ -290,13 +337,27 @@ Best sample size by relative error per unit of machine time: `mem_canary`
 **Every optimum is at or below 70 us; none is at 100 us**, so the 100 us
 default is past optimal for all six workloads, by between 1.5x and 300x. The
 300x spread between them says this is a per-workload measurement, not a
-constant to hard-code. The recipe: ladder a workload, look at whether
-absolute or relative sd is the flat one, and pick accordingly - and never go
-far above ~50 us, because (5) is waiting there regardless of regime.
+constant to hard-code.
 
-The catch is that the small end is only available with the intercept
+The recipe: ladder a workload, see whether absolute or relative sd is the
+flat one, and pick accordingly.
+
+**Scope.** All six of those workloads run in under 160 us per sample at the
+top of their ladders, and most of them in under 10. **Sample size is only a
+free parameter for functions faster than the sample you want.** A function
+that takes 10 ms a call has exactly one choice, `n = 1`, and nothing in this
+section applies to it - there is no optimum to find, and the questions that
+matter become which clock to read and whether to stop the tick (see 5). An
+earlier version of this file turned the observation above into a general
+"never go far above ~50 us", which was an overreach from a set of workloads
+chosen for being short.
+
+The catch at the small end is that it is only available with the intercept
 removed. At a 0.2 us batch a 27-127 ns fixed cost is most of the
-measurement. Subtraction is what unlocks the whole regime.
+measurement. Subtraction is what unlocks that regime - and note that this
+cuts the other way too, since a slow function's single-iteration sample
+carries that same fixed cost as a negligible fraction and needs no
+subtraction at all.
 
 ---
 
@@ -382,10 +443,20 @@ currently rejects.
 **Shape.** All four workloads in one round together, which is both the
 realistic case and the harder one. Suggested: `btree_miss` (additive,
 optimum 34 us), `instant_now` (multiplicative, optimum 0.34 us),
-`cpu_canary` (additive, optimum 64 us) and `slice_sort` (cannot go below
-234 us for one iteration, so an honest limit case where the protocol should
-have nothing to offer). One process yields all four workloads' estimates at
-once.
+`cpu_canary` (additive, optimum 64 us) and `slice_sort` (234 us for a single
+iteration, so it sits in the crossover of (5) and cannot reach the small
+cells at all). One process yields all four workloads' estimates at once.
+
+**This 2x2 only tests fast functions, and needs a sibling.** Every cell above
+assumes sample size is a free parameter, which it is only for functions
+faster than the sample you want. For a function that takes milliseconds per
+call there is one sample size, `n = 1`, and the 2x2 collapses. The
+interesting comparison there is a different one entirely - wall clock against
+`CLOCK_THREAD_CPUTIME_ID`, and tick-on against `nohz_full` - scored the same
+way, on run-to-run reproducibility across separate processes. `copy_64mb`
+(6.2 ms) is the workload in hand; a synthetic sleep-free spin of a chosen
+duration would be better, since it would let the crossover at ~1 ms be
+swept rather than sampled at one point.
 
 24 repeats per cell; 20 s per cell per repeat. At 20 s even the coarsest cell
 takes ~200,000 samples, so within-run statistical error is ~0.0005% - far
