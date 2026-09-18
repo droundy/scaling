@@ -18,6 +18,7 @@
 use itertools::Itertools;
 
 mod estimate;
+mod protocol;
 mod timing;
 mod workloads;
 
@@ -150,6 +151,11 @@ fn main() {
                 .unwrap_or(3);
             sweep(ws, rounds, &dir, &ladder_from_env(), passes);
         }
+        Some("protocol") if args.len() > 4 => protocol::run(
+            &args[2],
+            args[3].parse().expect("budget in seconds"),
+            args[4].parse().expect("repeat number"),
+        ),
         Some("intercept") if args.len() > 2 => intercept(&args[2..]),
         Some("shift") if args.len() > 2 => shift(&args[2..]),
         Some("compare") if args.len() > 2 => compare(&args[2..]),
@@ -1285,7 +1291,7 @@ fn machine_state() -> String {
     )
 }
 
-fn step(x: u64) -> u64 {
+pub fn step(x: u64) -> u64 {
     x.wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407)
 }

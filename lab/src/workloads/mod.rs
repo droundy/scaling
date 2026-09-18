@@ -41,6 +41,7 @@ use std::{
 mod cpu_canary;
 mod mem_canary;
 mod payloads;
+mod slow_cpu;
 
 /// What a workload is mostly limited by. Used to label the report and to
 /// pick which canary a payload should be divided by; see
@@ -164,6 +165,7 @@ pub fn named(name: &str) -> Workload {
     match name {
         "cpu_canary" => Workload::cpu_canary(),
         "mem_canary" => Workload::mem_canary(),
+        "slow_cpu" => Workload::slow_cpu(),
         _ => {
             let mut pool = payloads::all();
             pool.remove(name).unwrap_or_else(|| {
