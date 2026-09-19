@@ -1,318 +1,244 @@
-//! Where a timing comes from: the machine, or a file.
+//! The recording format, and reading it back.
 //!
-//! Replay exists so that a change to the *algorithm* can be tested against
-//! byte-identical data. If two variants disagree on replayed timings, the
-//! difference is the variant. If they disagree on fresh timings, it might
-//! just have been a busy afternoon.
-//!
-//! This matters most for variants that change *how many* samples get taken -
-//! a stopping rule, say - because those cannot be evaluated by re-reading a
-//! finished CSV. A variant that only changes how the numbers are combined
-//! does not need this at all: use `lab compare` on recorded runs instead,
-//! which is simpler and needs no rebuild.
-//!
-//! ```none
-//! LAB_REPLAY=runs/a.csv cargo run --release -- run 2000 /dev/null
-//! ```
+//! A recording is the product of this lab: the runner measures, writes one of
+//! these, and every question about algorithms is then arithmetic over it. So
+//! the format has to be cheap to write at a million samples a second, cheap
+//! to read a hundred million rows of, and self-describing enough that `head`
+//! tells you what a file holds.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// One timing, with everything needed to put it back where it happened.
+/// One timing, as it is kept in memory while a slice runs.
 ///
-/// A raw dump that keeps only "these are the timings for this workload" has
-/// thrown away most of what makes it raw. Three things are worth the
-/// columns:
+/// Three fields, and the two that used to be here are gone. `round` was
+/// redundant with position - the runner takes exactly one sample per
+/// workload per round - and `t_offset` cost eight bytes a sample to support
+/// one measurement, the per-sample overhead, which the recorder now makes
+/// once per rung and writes in the header instead.
 #[derive(Clone, Debug)]
 pub struct Sample {
-    /// Should equal the index of this Sample in the log, but kept explicitly so a gap is visible.
-    pub round: usize,
-    /// Position within the round.
+    /// Position within the round. Kept because order is data: a memory-heavy
+    /// neighbour immediately before a payload leaves that payload's cache
+    /// cold, so anything that wants to ask about position still can.
     pub slot: usize,
     pub workload: String,
-    /// The wallclock time in ns.
-    pub t_ns: u128,
-    /// Raw time of the whole batch. Divide by the iteration count to compare
-    /// anything across runs.
+    /// Whole-batch time in ns.
     pub ns: f64,
 }
 
+/// What the header says about one rung.
+#[derive(Clone, Copy, Debug)]
+pub struct RungMeta {
+    /// Batch size, in iterations.
+    pub n: usize,
+    /// Nanoseconds per stored unit; see [`Timing::write`].
+    pub scale_ns: f64,
+    /// Wall-clock cost of taking one sample beyond the batch itself: the
+    /// harness loop, and whatever the workload does to prepare its inputs.
+    ///
+    /// Measured by the recorder, per rung, because it is not one number - a
+    /// workload that prepares an input per iteration pays that per iteration
+    /// too, so for those it grows with the batch.
+    pub overhead_ns: f64,
+}
+
 pub struct Timing {
-    replay: Option<HashMap<(usize, String), f64>>,
-    /// Calibrated iteration counts, from the replayed file when replaying.
-    pub iters: HashMap<String, usize>,
+    pub rungs: HashMap<String, RungMeta>,
     /// Every timing taken, in the order taken.
     pub log: Vec<Sample>,
 }
 
-impl Timing {
-    /// Read `LAB_REPLAY` and open a source of timings.
-    pub fn from_env() -> Timing {
-        match std::env::var("LAB_REPLAY") {
-            Ok(path) => {
-                let rec = read(&path);
-                eprintln!("replaying {} timings from {path}", rec.samples.len());
-                let map = rec
-                    .samples
-                    .iter()
-                    .map(|s| ((s.round, s.workload.clone()), s.ns))
-                    .collect();
-                Timing {
-                    replay: Some(map),
-                    iters: rec.iters,
-                    log: Vec::new(),
-                }
-            }
-            Err(_) => Timing {
-                replay: None,
-                iters: HashMap::new(),
-                log: Vec::new(),
-            },
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            rungs: HashMap::new(),
+            log: Vec::new(),
         }
     }
+}
 
-    pub fn replaying(&self) -> bool {
-        self.replay.is_some()
+impl Timing {
+    pub fn new() -> Timing {
+        Timing::default()
     }
 
-    /// Time one batch, or look up what it cost last time.
-    ///
-    /// Keyed for replay by round and workload rather than by `slot`, so a
-    /// driver change that reshuffles the order can still replay old data.
-    ///
-    /// In replay mode `f` is *not* run. That is the point - replay is meant
-    /// to be fast and deterministic - but it does mean a workload's side
-    /// effects do not happen, so do not put anything load-bearing in one.
-    pub fn time(&mut self, round: usize, slot: usize, name: &str, f: impl FnOnce() -> f64) -> f64 {
-        let t_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let ns = match &self.replay {
-            Some(m) => *m.get(&(round, name.to_string())).unwrap_or_else(|| {
-                panic!(
-                    "no recorded timing for round {round} of {name}; the recording \
-                     is shorter than this run, or the workload was renamed"
-                )
-            }),
-            None => f(),
-        };
+    /// Time one batch and record it.
+    pub fn time(&mut self, slot: usize, name: &str, f: impl FnOnce() -> f64) -> f64 {
+        let ns = f();
         self.log.push(Sample {
-            round,
             slot,
             workload: name.to_string(),
-            t_ns,
             ns,
         });
         ns
     }
 
-    /// Write everything taken so far, plus the calibration.
+    /// Write the recording.
     ///
-    /// Binary when the path ends in `.bin`, CSV otherwise, so old recordings
-    /// and old habits keep working.
-    pub fn write(&self, path: &str) {
-        if path.ends_with(".bin") {
-            self.write_bin(path)
-        } else {
-            self.write_csv(path)
-        }
-    }
-
-    /// Eighteen bytes a sample instead of about fifty-two.
+    /// Four bytes a sample: slot, workload index, and the batch time as a
+    /// `u16` count of a unit declared per rung in the header.
     ///
-    /// Worth doing only because of what a small sample size does to the row
-    /// count: every batch writes exactly one row, so rows per second is one
-    /// over the mean batch duration, whatever the workloads are. At the 200
-    /// us batches of the first sweeps that is 5000 rows a second; at the 46
-    /// us mean of a ladder reaching below a microsecond it is 21700, and a
-    /// day of measuring lands somewhere past half a billion rows.
+    /// A single file holds batches from 42ns to 12.5ms - a 300000-fold range
+    /// - so no one integer width works for all of them at a fixed
+    /// resolution: `u16` nanoseconds reaches 65us and `u24` reaches 16.7ms,
+    /// which barely covers the slowest rung and leaves nothing for an
+    /// outlier. But the rung's nominal size is known when it is written, so
+    /// the scale can be per rung, sized to cover `nominal + 20us` - room for
+    /// a few scheduler ticks on top of the expected batch.
     ///
-    /// Disk is not really the problem - parsing is. The point of a recording
-    /// is that estimators can be re-scored against it without measuring
-    /// anything again, and that stops being true when a pass over the data
-    /// takes hours.
+    /// That is finer than the 1ns integers it replaces, not coarser: 1ns is
+    /// 2.4% of a 42ns batch, where this gives 0.7% there and better than
+    /// 0.01% everywhere above a microsecond.
     ///
     /// The header stays text so `head` still tells you what a file holds.
-    fn write_bin(&self, path: &str) {
+    pub fn write(&self, path: &str) {
         use std::fmt::Write as _;
-        let mut names: Vec<&String> = self.iters.keys().collect();
+        let mut names: Vec<&String> = self.rungs.keys().collect();
         names.sort();
+        if names.len() > 256 {
+            eprintln!("{path}: more than 256 rung names; not writing");
+            return;
+        }
         let idx: HashMap<&str, u8> = names
             .iter()
             .enumerate()
             .map(|(i, n)| (n.as_str(), i as u8))
             .collect();
-        if names.len() > 256 {
-            eprintln!("{path}: more than 256 rung names; not writing");
-            return;
-        }
-        let epoch = self.log.first().map(|s| s.t_ns).unwrap_or(0);
 
         let mut head = String::new();
-        head.push_str("LABBIN1\n");
+        head.push_str("LABBIN2\n");
         for n in &names {
-            let _ = writeln!(head, "# iters {n} {}", self.iters[*n]);
+            let m = &self.rungs[*n];
+            let _ = writeln!(
+                head,
+                "# rung {n} {} {:e} {:e}",
+                m.n, m.scale_ns, m.overhead_ns
+            );
         }
-        let _ = writeln!(head, "# epoch {epoch}");
         head.push_str("DATA\n");
 
-        let mut buf: Vec<u8> = Vec::with_capacity(head.len() + self.log.len() * 18);
+        let mut buf: Vec<u8> = Vec::with_capacity(head.len() + self.log.len() * 4);
         buf.extend_from_slice(head.as_bytes());
+        let mut saturated = 0usize;
         for x in &self.log {
-            buf.extend_from_slice(&(x.round as u32).to_le_bytes());
+            let m = match self.rungs.get(&x.workload) {
+                Some(m) => m,
+                None => continue,
+            };
             buf.push(x.slot as u8);
             buf.push(idx[x.workload.as_str()]);
-            // Offset from the file's own epoch, in ns, as u64. A u32 of
-            // microseconds would fit a 71 minute block and save four bytes,
-            // which is not worth having to reason about how long a block can
-            // get before it silently wraps.
-            buf.extend_from_slice(&((x.t_ns.saturating_sub(epoch)) as u64).to_le_bytes());
-            // Integer nanoseconds. u32 reaches 4.3 s, against a longest
-            // batch here of about 25 ms, and sub-nanosecond resolution on a
-            // batch of hundreds of nanoseconds is not information.
-            buf.extend_from_slice(
-                &(x.ns.round().max(0.0).min(u32::MAX as f64) as u32).to_le_bytes(),
+            let units = (x.ns / m.scale_ns).round().max(0.0);
+            if units > u16::MAX as f64 {
+                saturated += 1;
+            }
+            buf.extend_from_slice(&(units.min(u16::MAX as f64) as u16).to_le_bytes());
+        }
+        // Saying so rather than letting it pass, because a saturated sample
+        // is an outlier whose size has been thrown away - fine for a trimmed
+        // estimate, not fine for anything studying the tail.
+        if saturated > 0 {
+            eprintln!(
+                "{path}: {saturated} of {} samples ran past their rung's scale and were clamped",
+                self.log.len()
             );
         }
         if let Err(e) = std::fs::write(path, buf) {
             eprintln!("could not write {path}: {e}");
         }
     }
-
-    /// Write everything taken so far, plus the calibration, as CSV.
-    fn write_csv(&self, path: &str) {
-        use std::fmt::Write as _;
-        let mut s = String::with_capacity(self.log.len() * 48);
-        let mut names: Vec<_> = self.iters.iter().collect();
-        names.sort();
-        for (name, n) in names {
-            let _ = writeln!(s, "# iters {name} {n}");
-        }
-        // `seq` is the line's own index. Redundant with file order, and
-        // written anyway so the order survives being sorted or filtered by
-        // something else later.
-        s.push_str("seq,round,slot,workload,t_ns,ns\n");
-        for (seq, x) in self.log.iter().enumerate() {
-            let _ = writeln!(
-                s,
-                "{seq},{},{},{},{},{:.0}",
-                x.round, x.slot, x.workload, x.t_ns, x.ns
-            );
-        }
-        if let Err(e) = std::fs::write(path, s) {
-            eprintln!("could not write {path}: {e}");
-        }
-    }
 }
 
 /// A recording, as read back.
-pub struct Recording {
-    pub iters: HashMap<String, usize>,
-    /// In the order they were taken.
-    pub samples: Vec<Sample>,
+///
+/// Per-iteration timings by rung, in the order taken.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub names: Vec<String>,
+    /// Per-rung timings in the order taken, per iteration.
+    ///
+    /// Only this, and not also a flat list of `Sample`. Keeping both meant
+    /// holding a `String` per sample alongside the numbers, which on a
+    /// recording of a few million samples is most of the memory and is
+    /// read by nothing.
+    by_name: HashMap<String, Vec<f64>>,
+    pub rungs: HashMap<String, RungMeta>,
 }
 
-/// Parse a recording, binary or CSV, told apart by what is actually in the
-/// file rather than by its name.
-pub fn read(path: &str) -> Recording {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
-    if bytes.starts_with(b"LABBIN1\n") {
-        return read_bin(path, &bytes);
-    }
-    read_csv(path, &String::from_utf8_lossy(&bytes))
-}
-
-fn read_bin(path: &str, bytes: &[u8]) -> Recording {
-    let split = bytes
-        .windows(5)
-        .position(|w| w == b"DATA\n")
-        .unwrap_or_else(|| panic!("{path}: binary recording has no DATA marker"));
-    let head = String::from_utf8_lossy(&bytes[..split]);
-    let mut iters = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-    let mut epoch: u128 = 0;
-    for line in head.lines() {
-        if let Some(rest) = line.strip_prefix("# iters ") {
-            let mut f = rest.split_whitespace();
-            if let (Some(name), Some(n)) = (f.next(), f.next()) {
-                if let Ok(n) = n.parse() {
-                    iters.insert(name.to_string(), n);
-                    order.push(name.to_string());
-                }
+impl Run {
+    pub fn load(path: &str) -> Run {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+        if !bytes.starts_with(b"LABBIN2\n") {
+            panic!("{path}: not a LABBIN2 recording");
+        }
+        let split = bytes
+            .windows(5)
+            .position(|w| w == b"DATA\n")
+            .unwrap_or_else(|| panic!("{path}: no DATA marker"));
+        let head = String::from_utf8_lossy(&bytes[..split]);
+        let mut rungs: HashMap<String, RungMeta> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for line in head.lines() {
+            let Some(rest) = line.strip_prefix("# rung ") else {
+                continue;
+            };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            if f.len() < 4 {
+                continue;
             }
-        } else if let Some(rest) = line.strip_prefix("# epoch ") {
-            epoch = rest.trim().parse().unwrap_or(0);
+            let (Ok(n), Ok(scale_ns), Ok(overhead_ns)) =
+                (f[1].parse(), f[2].parse(), f[3].parse())
+            else {
+                continue;
+            };
+            rungs.insert(
+                f[0].to_string(),
+                RungMeta {
+                    n,
+                    scale_ns,
+                    overhead_ns,
+                },
+            );
+            order.push(f[0].to_string());
+        }
+
+        let body = &bytes[split + 5..];
+        let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
+        for r in body.chunks_exact(4) {
+            let Some(workload) = order.get(r[1] as usize) else {
+                panic!(
+                    "{path}: a sample names rung {}, but the header lists {}",
+                    r[1],
+                    order.len()
+                )
+            };
+            let m = &rungs[workload];
+            let units = u16::from_le_bytes([r[2], r[3]]) as f64;
+            // Per iteration from here on. Calibration happens once, at
+            // whatever clock speed prevailed then, so batch sizes differ
+            // between runs; comparing batch durations across runs inherits
+            // all of that.
+            by_name
+                .entry(workload.clone())
+                .or_default()
+                .push(units * m.scale_ns / m.n as f64);
+        }
+
+        let mut names: Vec<String> = by_name.keys().cloned().collect();
+        names.sort();
+        Run {
+            names,
+            by_name,
+            rungs,
         }
     }
 
-    let body = &bytes[split + 5..];
-    let mut samples = Vec::with_capacity(body.len() / 18);
-    for r in body.chunks_exact(18) {
-        let round = u32::from_le_bytes([r[0], r[1], r[2], r[3]]) as usize;
-        let slot = r[4] as usize;
-        let widx = r[5] as usize;
-        let off = u64::from_le_bytes([r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13]]);
-        let ns = u32::from_le_bytes([r[14], r[15], r[16], r[17]]) as f64;
-        let Some(workload) = order.get(widx) else {
-            panic!(
-                "{path}: sample names workload {widx}, but the header lists {}",
-                order.len()
-            )
-        };
-        samples.push(Sample {
-            round,
-            slot,
-            workload: workload.clone(),
-            t_ns: epoch + off as u128,
-            ns,
-        });
+    pub fn get(&self, name: &str) -> &[f64] {
+        self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
-    Recording { iters, samples }
-}
-
-/// Parse a CSV recording: `# iters <name> <n>` lines, then the sample rows.
-fn read_csv(path: &str, text: &str) -> Recording {
-    let _ = path;
-    let mut iters = HashMap::new();
-    let mut samples = Vec::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# iters ") {
-            let mut f = rest.split_whitespace();
-            if let (Some(name), Some(n)) = (f.next(), f.next()) {
-                if let Ok(n) = n.parse() {
-                    iters.insert(name.to_string(), n);
-                }
-            }
-            continue;
-        }
-        if line.starts_with('#') || line.starts_with("seq,") || line.is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = line.split(',').collect();
-        if f.len() < 6 {
-            continue;
-        }
-        if let (Ok(round), Ok(slot), Ok(t_ns), Ok(ns)) =
-            (f[1].parse(), f[2].parse(), f[4].parse(), f[5].parse())
-        {
-            samples.push(Sample {
-                round,
-                slot,
-                workload: f[3].to_string(),
-                t_ns,
-                ns,
-            });
-        }
-    }
-    Recording { iters, samples }
 }
 
 /// How a rung is named in a recording: the workload for rung zero, and
 /// `workload@k` above it.
-///
-/// Rung zero keeps the bare name so that a recording made before ladders
-/// existed still reads, and so the common case is not cluttered.
 pub fn rung_name(name: &str, k: usize) -> String {
     if k == 0 {
         name.to_string()
@@ -321,56 +247,17 @@ pub fn rung_name(name: &str, k: usize) -> String {
     }
 }
 
-/// A recording, loaded and divided by the batch size each name was
-/// measured at.
+/// Nanoseconds of headroom above a rung's nominal batch, for choosing its
+/// scale.
 ///
-/// Per *iteration*, not per batch, and that is not a detail: calibration
-/// happens once, at whatever clock speed prevailed at that instant, so
-/// iteration counts differ between runs. Comparing batch durations across
-/// runs inherits all of that and can make two physically identical
-/// workloads look unrelated.
-#[derive(Debug, Clone)]
-pub struct Run {
-    pub names: Vec<String>,
-    /// Every sample, **in the order it was taken**, per iteration.
-    ///
-    /// A sequence rather than one vector per workload, because the order is
-    /// data: the position within a round is reshuffled deliberately - a
-    /// memory canary immediately before a payload leaves that payload's
-    /// cache cold - so anything that wants to ask about position, or about
-    /// wall-clock time, still can.
-    pub samples: Vec<Sample>,
-    /// Per-iteration timings in round order, by rung name.
-    by_name: HashMap<String, Vec<f64>>,
-    /// The batch size each name was measured at, needed to undo the
-    /// per-iteration division for anything working in batch times.
-    pub iters: HashMap<String, usize>,
-}
+/// A scheduler tick adds about 5us to whatever batch it lands in, and the
+/// headroom is absolute rather than proportional for that reason: the same
+/// 5us is a rounding error on a 12ms batch and a hundredfold excursion on a
+/// 42ns one, so a proportional margin would clamp exactly the outliers that
+/// matter most on the rungs where they matter most.
+pub const SCALE_HEADROOM_NS: f64 = 20_000.0;
 
-impl Run {
-    pub fn load(path: &str) -> Run {
-        let rec = read(path);
-        let samples: Vec<Sample> = rec
-            .samples
-            .into_iter()
-            .map(|s| {
-                let n = *rec.iters.get(&s.workload).unwrap_or(&1) as f64;
-                Sample { ns: s.ns / n, ..s }
-            })
-            .collect();
-
-        // Round order per rung. `samples` is already in execution order and
-        // rounds only ever increase, so a plain scan preserves it.
-        let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
-        for s in &samples {
-            by_name.entry(s.workload.clone()).or_default().push(s.ns);
-        }
-        let mut names: Vec<String> = by_name.keys().cloned().collect();
-        names.sort();
-        Run { names, samples, by_name, iters: rec.iters }
-    }
-
-    pub fn get(&self, name: &str) -> &[f64] {
-        self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
-    }
+/// The scale to record a rung at, given what one batch is expected to cost.
+pub fn scale_for(nominal_ns: f64) -> f64 {
+    ((nominal_ns + SCALE_HEADROOM_NS) / u16::MAX as f64).max(f64::MIN_POSITIVE)
 }

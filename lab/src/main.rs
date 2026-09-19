@@ -188,15 +188,14 @@ fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
     // 1.7 million, which buffered 166 million samples and ran the machine
     // out of memory before anything could be written. `round_cost` had the
     // overhead in all along; this is the half that disagreed.
-    let cost = |x: &(usize, String, f64)| x.2 + OVERHEAD_NS;
-    let total: f64 = r.iter().map(|x| 1.0 / cost(x)).sum();
+    let total: f64 = r.iter().map(|x| 1.0 / x.2).sum();
     if !total.is_finite() || total <= 0.0 {
         return (bits >> 33) as usize % r.len();
     }
     let u = (bits >> 11) as f64 / (1u64 << 53) as f64 * total;
     let mut acc = 0.0;
     for (k, x) in r.iter().enumerate() {
-        acc += 1.0 / cost(x);
+        acc += 1.0 / x.2;
         if u < acc {
             return k;
         }
@@ -631,7 +630,7 @@ fn run(
     ws.retain(|w| seen.insert(w.name));
 
     eprintln!("\n=== {out} ===");
-    let mut t = timing::Timing::from_env();
+    let mut t = timing::Timing::new();
 
     // Calibrate each workload to SAMPLE, unless the sweep already did it
     // once for everybody - which is the point of `counts`, so that a
@@ -665,53 +664,37 @@ fn run(
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut rungs: Vec<Vec<(usize, String, f64)>> = Vec::with_capacity(ws.len());
     for w in ws.iter() {
-        let (_cal, per) = match (t.replaying(), counts.and_then(|c| c.get(w.name))) {
-            (true, _) => (*t.iters.get(w.name).unwrap_or(&1), f64::NAN),
-            (false, Some(&(n, p))) => (n, p),
-            (false, None) => calibrate(w, &mut seed),
+        let (_cal, per) = match counts.and_then(|c| c.get(w.name)) {
+            Some(&(n, p)) => (n, p),
+            None => calibrate(w, &mut seed),
         };
-        // Replaying takes the rung counts straight from the recording rather
-        // than deriving them again. Deriving them would re-apply the ladder
-        // to a number that already has it: `t.iters[name]` is *rung zero's*
-        // count, which equalled the calibration count only while ladders
-        // were integer multiples starting at one. With a rung at half a
-        // sample it silently halved every count, so replayed timings came
-        // back attached to the wrong batch sizes and every per-iteration
-        // cost doubled.
-        let derived = rungs_for(per);
-        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(derived.len());
-        for k in 0..derived.len() {
+        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(8);
+        for (k, &n) in rungs_for(per).iter().enumerate() {
             let name = rung_name(w.name, k);
-            let n = if t.replaying() {
-                // A rung absent from the recording was dropped when it was
-                // made - see MAX_RUNG - so skip it rather than failing.
-                match t.iters.get(&name) {
-                    Some(&n) => n,
-                    None => continue,
-                }
-            } else {
-                derived[k]
-            };
             let dur = n as f64 * per;
             // A rung is only worth recording if some algorithm could pick
             // it, and nothing can pick a batch that overruns the whole
             // budget. `n == 1` is exempt: one iteration is the least a
             // workload can be measured in, so however long it takes, that
             // is the measurement.
-            if !t.replaying() && n > 1 && dur > MAX_RUNG.as_nanos() as f64 {
+            if n > 1 && dur > MAX_RUNG.as_nanos() as f64 {
                 continue;
             }
-            t.iters.insert(name.clone(), n);
-            // Only when this call did its own calibrating. A sweep has
-            // already printed the plan once, and repeating it for every
-            // subset of every pass buries the log.
-            if counts.is_none() && !t.replaying() {
-                eprintln!(
-                    "  {name:>16} {n:>12} iters  ~{:>8.0} us",
-                    n as f64 * per / 1e3
-                );
+            let overhead_ns = overhead_of(w, n);
+            t.rungs.insert(
+                name.clone(),
+                crate::timing::RungMeta {
+                    n,
+                    scale_ns: crate::timing::scale_for(dur),
+                    overhead_ns,
+                },
+            );
+            if counts.is_none() {
+                eprintln!("  {name:>16} {n:>12} iters  ~{:>8.0} us", dur / 1e3);
             }
-            this.push((n, name, dur));
+            // The *cost* of a sample, batch plus overhead, because that is
+            // what the draw is weighted by and what a slice is spent on.
+            this.push((n, name, dur + overhead_ns));
         }
         rungs.push(this);
     }
@@ -827,7 +810,7 @@ fn run(
                 ws[i].time_batch(warmup)();
             }
             let time_me = ws[i].time_batch(*count);
-            t.time(r, slot, name, time_me);
+            t.time(slot, name, time_me);
             taken[i][pick[i]] += 1;
         }
         done += 1;
@@ -848,6 +831,36 @@ fn run(
     t.write(&out);
     eprintln!("wrote {out}");
 
+}
+
+/// What a sample at this rung costs beyond its batch.
+///
+/// The difference between the wall time of the whole measuring call and the
+/// time it reports: building the closure, whatever the workload does to
+/// prepare its inputs, and the two clock reads.
+///
+/// This used to be derived at analysis time from the gaps between
+/// consecutive samples, which is why every sample carried an eight-byte
+/// timestamp. Measuring it here costs a handful of probes per rung and puts
+/// one number per rung in the header instead.
+///
+/// Median of a few, because a probe that catches a scheduler excursion would
+/// otherwise be multiplied by every sample a replay takes.
+fn overhead_of(w: &Workload, n: usize) -> f64 {
+    // Enough that the median is stable. Five gave cpu_canary 214ns at n=1
+    // against 106ns at n=64, which is not a real difference between two
+    // rungs of the same workload - it is a median of five.
+    const PROBES: usize = 25;
+    let mut v: Vec<f64> = (0..PROBES)
+        .map(|_| {
+            let start = Instant::now();
+            let job = w.time_batch(n);
+            let timed = job();
+            (start.elapsed().as_secs_f64() * 1e9 - timed).max(0.0)
+        })
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
 }
 
 /// Grow the batch until the *timed* part takes about [`SAMPLE`].

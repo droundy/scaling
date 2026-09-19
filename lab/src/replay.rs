@@ -88,56 +88,27 @@ impl Tape {
 /// re-derived from the ladder: re-deriving was the bug that halved every
 /// count when the ladder stopped starting at one.
 pub fn tapes(r: &Run) -> Vec<Tape> {
-    let over = overheads(r);
     let mut by_base: std::collections::BTreeMap<String, Vec<Rung>> = Default::default();
     for name in &r.names {
+        let Some(meta) = r.rungs.get(name) else {
+            continue;
+        };
         let base = name.split('@').next().unwrap_or(name).to_string();
-        let n = *r.iters.get(name).unwrap_or(&1);
-        let batch_ns: Vec<f64> = r.get(name).iter().map(|x| x * n as f64).collect();
+        let batch_ns: Vec<f64> = r.get(name).iter().map(|x| x * meta.n as f64).collect();
         if batch_ns.is_empty() {
             continue;
         }
-        let overhead_ns = over.get(name).copied().unwrap_or(DEFAULT_OVERHEAD_NS);
-        by_base.entry(base).or_default().push(Rung { n, batch_ns, overhead_ns });
+        by_base.entry(base).or_default().push(Rung {
+            n: meta.n,
+            batch_ns,
+            overhead_ns: meta.overhead_ns,
+        });
     }
     by_base
         .into_iter()
         .map(|(workload, mut rungs)| {
             rungs.sort_by_key(|x| x.n);
             Tape { workload, rungs }
-        })
-        .collect()
-}
-
-/// Used only when a recording carries no usable timestamps; see
-/// [`Rung::overhead_ns`] for where the number comes from.
-const DEFAULT_OVERHEAD_NS: f64 = 370.0;
-
-/// Per-rung overhead, read out of the gaps between consecutive samples.
-///
-/// The recording stores when each sample started and how long its batch
-/// ran, so whatever sits between the end of one batch and the start of the
-/// next is everything the harness did that was not the measurement. That is
-/// attributed to the sample being *set up*, not the one just finished,
-/// because preparing a batch happens before its clock starts.
-///
-/// Median rather than mean: these gaps carry the occasional scheduler
-/// excursion, and a mean would fold a rare millisecond into a number that
-/// then gets multiplied by every sample a policy takes.
-fn overheads(r: &Run) -> std::collections::HashMap<String, f64> {
-    let mut gaps: std::collections::HashMap<String, Vec<f64>> = Default::default();
-    for w in r.samples.windows(2) {
-        let n0 = *r.iters.get(&w[0].workload).unwrap_or(&1) as f64;
-        let gap = (w[1].t_ns as f64 - w[0].t_ns as f64) - w[0].ns * n0;
-        if gap.is_finite() && gap >= 0.0 {
-            gaps.entry(w[1].workload.clone()).or_default().push(gap);
-        }
-    }
-    gaps.into_iter()
-        .filter(|(_, v)| v.len() >= 20)
-        .map(|(k, mut v)| {
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            (k, v[v.len() / 2])
         })
         .collect()
 }
@@ -1012,14 +983,18 @@ pub fn selftest(dir: &str) {
         })
         .collect();
 
-    let mut t = crate::timing::Timing::from_env();
-    if t.replaying() {
-        eprintln!("LAB_REPLAY is set; refusing to generate");
-        std::process::exit(2);
-    }
+    let mut t = crate::timing::Timing::new();
     for tape in &tapes {
         for (k, r) in tape.rungs.iter().enumerate() {
-            t.iters.insert(rung_name(&tape.workload, k), r.n);
+            let nominal = r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64;
+            t.rungs.insert(
+                rung_name(&tape.workload, k),
+                crate::timing::RungMeta {
+                    n: r.n,
+                    scale_ns: crate::timing::scale_for(nominal),
+                    overhead_ns: r.overhead_ns,
+                },
+            );
         }
     }
 
@@ -1031,9 +1006,8 @@ pub fn selftest(dir: &str) {
     let mut cursor: Vec<Vec<usize>> = tapes.iter().map(|x| vec![0; x.rungs.len()]).collect();
     let mut queue: Vec<Vec<usize>> = vec![Vec::new(); tapes.len()];
     let mut rng = 0x9E3779B97F4A7C15u64;
-    let mut t_ns: u128 = 1;
     let mut short = 0usize;
-    for round in 0..SELFTEST_ROUNDS {
+    for _round in 0..SELFTEST_ROUNDS {
         let mut order: Vec<usize> = (0..tapes.len()).collect();
         for i in (1..order.len()).rev() {
             rng = crate::step(rng);
@@ -1057,13 +1031,10 @@ pub fn selftest(dir: &str) {
             let ns = rung.batch_ns[cursor[w][k]];
             cursor[w][k] += 1;
             t.log.push(crate::timing::Sample {
-                round,
                 slot,
                 workload: rung_name(&tapes[w].workload, k),
-                t_ns,
                 ns,
             });
-            t_ns += ns as u128 + rung.overhead_ns as u128;
         }
     }
     if short > 0 {
