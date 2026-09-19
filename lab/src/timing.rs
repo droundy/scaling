@@ -307,3 +307,70 @@ fn read_csv(path: &str, text: &str) -> Recording {
     }
     Recording { iters, samples }
 }
+
+/// How a rung is named in a recording: the workload for rung zero, and
+/// `workload@k` above it.
+///
+/// Rung zero keeps the bare name so that a recording made before ladders
+/// existed still reads, and so the common case is not cluttered.
+pub fn rung_name(name: &str, k: usize) -> String {
+    if k == 0 {
+        name.to_string()
+    } else {
+        format!("{name}@{k}")
+    }
+}
+
+/// A recording, loaded and divided by the batch size each name was
+/// measured at.
+///
+/// Per *iteration*, not per batch, and that is not a detail: calibration
+/// happens once, at whatever clock speed prevailed at that instant, so
+/// iteration counts differ between runs. Comparing batch durations across
+/// runs inherits all of that and can make two physically identical
+/// workloads look unrelated.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub names: Vec<String>,
+    /// Every sample, **in the order it was taken**, per iteration.
+    ///
+    /// A sequence rather than one vector per workload, because the order is
+    /// data: the position within a round is reshuffled deliberately - a
+    /// memory canary immediately before a payload leaves that payload's
+    /// cache cold - so anything that wants to ask about position, or about
+    /// wall-clock time, still can.
+    pub samples: Vec<Sample>,
+    /// Per-iteration timings in round order, by rung name.
+    by_name: HashMap<String, Vec<f64>>,
+    /// The batch size each name was measured at, needed to undo the
+    /// per-iteration division for anything working in batch times.
+    pub iters: HashMap<String, usize>,
+}
+
+impl Run {
+    pub fn load(path: &str) -> Run {
+        let rec = read(path);
+        let samples: Vec<Sample> = rec
+            .samples
+            .into_iter()
+            .map(|s| {
+                let n = *rec.iters.get(&s.workload).unwrap_or(&1) as f64;
+                Sample { ns: s.ns / n, ..s }
+            })
+            .collect();
+
+        // Round order per rung. `samples` is already in execution order and
+        // rounds only ever increase, so a plain scan preserves it.
+        let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
+        for s in &samples {
+            by_name.entry(s.workload.clone()).or_default().push(s.ns);
+        }
+        let mut names: Vec<String> = by_name.keys().cloned().collect();
+        names.sort();
+        Run { names, samples, by_name, iters: rec.iters }
+    }
+
+    pub fn get(&self, name: &str) -> &[f64] {
+        self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}

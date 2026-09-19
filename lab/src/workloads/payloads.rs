@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Read;
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
@@ -273,49 +273,4 @@ pub fn all() -> HashMap<String, Workload> {
 }
 
 impl Workload {
-    /// The payloads worth sweeping by default.
-    ///
-    /// Chosen to span the ways a benchmark can be hard rather than to be
-    /// representative, and deliberately without redundancy - each is here
-    /// for something none of the others tests:
-    ///
-    /// | workload | why it is here |
-    /// | --- | --- |
-    /// | `instant_now` | the floor: the cheapest thing here, so harness overhead is the largest fraction of it |
-    /// | `btree_miss` | the only memory-latency-bound payload, so the only one `mem_canary` can be right about |
-    /// | `mpsc_send` | its cost lives partly on another core, which neither canary can observe |
-    /// | `slice_sort` | branchy, allocating, input-sensitive: the closest thing to real code |
-    /// | `copy_256mb` | pure streaming bandwidth, and far larger than a sample is meant to be |
-    ///
-    /// Built once and shared, so every subset measures the *same* workload
-    /// rather than a fresh copy. `Arc` because a `Workload` holds a
-    /// `Box<dyn Fn>` and so cannot be `Clone`, which `powerset` needs.
-    ///
-    /// Sharing buys more than the construction cost. State that persists
-    /// inside a workload now carries across subsets instead of restarting,
-    /// and the memory canary is the one that cares: its cursor keeps walking
-    /// forward through the table, where thirty-one fresh copies would each
-    /// have restarted at index zero and re-walked the same few megabytes -
-    /// which by the third subset is L3-resident and no longer a memory
-    /// canary at all.
-    ///
-    /// The canaries are not here. They are not optional, so `main` shares
-    /// them separately and `run` puts them first.
-    pub fn best() -> Vec<Arc<Workload>> {
-        [
-            Workload::instant_now(),
-            Workload::btree_miss(),
-            Workload::mpsc_send(),
-            Workload::slice_sort(),
-            Workload::copy_64mb(),
-            // Workload::thread_spawn(),  // the pathological-tail case
-            // Workload::f64_sin(),
-            // Workload::urandom_read(),
-            // Workload::str_find(),
-            // Workload::parse_u64(),
-        ]
-        .into_iter()
-        .map(Arc::new)
-        .collect()
-    }
 }

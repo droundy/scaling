@@ -23,7 +23,7 @@
 //! exists: the simulator's answer for an algorithm we *also* measured
 //! directly has to match, or the simulation is not measuring that algorithm.
 
-use crate::estimate::Run;
+use crate::timing::{rung_name, Run};
 
 /// One workload's recorded ladder: every rung, with its batch times in the
 /// order they were taken.
@@ -189,12 +189,6 @@ impl<'a> Player<'a> {
         self.tape.rungs[k].n as f64
     }
 
-    /// What one sample at this rung costs in wall time: batch plus overhead.
-    pub fn cost(&self, k: usize) -> f64 {
-        let r = &self.tape.rungs[k];
-        r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64 + r.overhead_ns
-    }
-
     pub fn rungs(&self) -> usize {
         self.tape.rungs.len()
     }
@@ -203,8 +197,13 @@ impl<'a> Player<'a> {
 /// What an algorithm is, as far as replay is concerned.
 pub struct Policy {
     pub name: &'static str,
-    /// Rung durations as multiples of `SAMPLE`. Empty means "whatever
-    /// calibration lands on", which is the auto case.
+    /// Rung durations as fractions of the usable ceiling, `MAX_RUNG_NS`.
+    /// Empty means "whatever calibration lands on", the auto case.
+    ///
+    /// Fractions of the ceiling rather than multiples of `SAMPLE`, because
+    /// `SAMPLE` is 100us and the ladder now ends at 20us: every target
+    /// expressed against it clamped to the same top rung, and three
+    /// distinct policies reported one identical row three times.
     pub rungs: &'static [f64],
     /// Relative standard error to stop at.
     pub target: f64,
@@ -224,8 +223,7 @@ pub struct Outcome {
     /// slow, and it gets reported as `> budget` rather than as a failure.
     pub capped: bool,
     pub wrapped: bool,
-    /// Iteration counts actually used.
-    pub used: Vec<usize>,
+
 }
 
 /// Fewest samples before a standard error means anything.
@@ -653,12 +651,7 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
             break;
         }
     }
-    let used = match c {
-        Choice::One(k) => vec![p.n(k) as usize],
-        Choice::Pair(a, b) => vec![p.n(a) as usize, p.n(b) as usize],
-        Choice::All { .. } => ladder.iter().map(|&k| p.n(k) as usize).collect(),
-    };
-    Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped, used }
+    Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped }
 }
 
 /// Replay a calibration, then let it choose its own rungs and measure.
@@ -667,9 +660,8 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
 /// find the rung without being told, which is the situation any real
 /// algorithm is in.
 pub fn calibrated(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
-    let sample_ns = crate::SAMPLE.as_secs_f64() * 1e9;
     let mut p = Player::new(tape, start);
-    let (cal_n, per_iter) = calibrate(&mut p, sample_ns);
+    let (cal_n, per_iter) = calibrate(&mut p, MAX_RUNG_NS);
     let ok = reasonable(tape);
     let pick = |want: f64| -> usize {
         let k = tape.nearest(want);
@@ -679,10 +671,10 @@ pub fn calibrated(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
     let c = if pol.rungs.is_empty() {
         Choice::One(pick(cal_n))
     } else if pol.rungs.len() == 1 {
-        Choice::One(pick(pol.rungs[0] * sample_ns / per_iter.max(1e-9)))
+        Choice::One(pick(pol.rungs[0] * MAX_RUNG_NS / per_iter.max(1e-9)))
     } else {
-        let a = pick(pol.rungs[0] * sample_ns / per_iter.max(1e-9));
-        let b = pick(pol.rungs[1] * sample_ns / per_iter.max(1e-9));
+        let a = pick(pol.rungs[0] * MAX_RUNG_NS / per_iter.max(1e-9));
+        let b = pick(pol.rungs[1] * MAX_RUNG_NS / per_iter.max(1e-9));
         if a == b { Choice::One(a) } else { Choice::Pair(a.min(b), a.max(b)) }
     };
     run_choice(&mut p, c, pol.target, pol.budget_s)
@@ -721,10 +713,6 @@ pub fn truth(tape: &Tape) -> (f64, f64) {
 /// Accuracy targets to report against, as relative standard error.
 const TARGETS: [f64; 3] = [0.02, 0.01, 0.005];
 
-/// Starting points per cell for the oracle sweep, which runs a hundred-odd
-/// choices per workload per goal, and for the calibrated policies, of which
-/// there are three.
-const ORACLE_TRIALS: usize = 60;
 const CAL_TRIALS: usize = 200;
 
 /// An honest 1-sigma bar contains the truth about this often.
@@ -810,7 +798,7 @@ fn cal_policies(target: f64) -> Vec<Policy> {
     vec![
         Policy { name: "cal one-rung", rungs: &[1.0], target, budget_s: 10.0 },
         Policy { name: "cal auto", rungs: &[], target, budget_s: 10.0 },
-        Policy { name: "cal two-rung", rungs: &[0.25, 2.0], target, budget_s: 10.0 },
+        Policy { name: "cal two-rung", rungs: &[0.125, 1.0], target, budget_s: 10.0 },
     ]
 }
 
@@ -827,7 +815,7 @@ pub fn report(paths: &[String]) {
 
     println!(
         "Rung choice, calibration and stopping replayed from recordings.\n\
-         A rung is usable if one sample costs between {:.0}ns and {:.0}ms, or if n=1,\n\
+         A rung is usable if one sample costs between {:.0}ns and {:.0}us, or if n=1,\n\
          or if n=2 and it runs under a second.\n\n\
          all-rungs  = walk up from n=1 keeping every probe, then sample the ladder\n\
                       at random and fit; no rung choice, so no calibration to make one\n\
@@ -835,7 +823,7 @@ pub fn report(paths: &[String]) {
          within     = landed inside the accuracy goal (want >={})\n\
          cover      = landed inside the bar the run itself claimed (want ~{})\n\
          blow       = off by more than {BLOWUP}x the goal (want <={})\n",
-        MIN_RUNG_NS, MAX_RUNG_NS / 1e6, pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
+        MIN_RUNG_NS, MAX_RUNG_NS / 1e3, pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
     );
 
     for tape in &tapes {
@@ -1069,7 +1057,7 @@ pub fn selftest() {
             "    {:>22} {:>9} {:>9} {:>9} {:>9} {:>8} {:>7}",
             "algorithm", "time", "bias", "spread", "bar", "bar/sd", "cover"
         );
-        let mut run = |label: String, outs: Vec<Outcome>| {
+        let run = |label: String, outs: Vec<Outcome>| {
             let good: Vec<&Outcome> = outs.iter().filter(|o| o.est.is_finite()).collect();
             if good.len() < 10 {
                 println!("    {label:>22}   too few usable trials");
@@ -1141,238 +1129,6 @@ pub fn selftest() {
     }
 }
 
-/// Where the ladder should end, when scheduler ticks are the contaminant.
-///
-/// A tick adds ~5us to whatever batch it lands in, at a rate of about
-/// 1020/s - so the chance of a batch being hit is roughly `rate * length`:
-/// 1% at 10us, 10% at 100us, 64% at 1ms, 87% at 2ms. That is not a
-/// gradually worsening problem but two regimes. Below about a millisecond a
-/// hit is a rare outlier, so trimming the upper tail removes it and the
-/// estimate is clean. Above, nearly every batch is hit, the contamination is
-/// near-constant, and a tax proportional to batch length is exactly what a
-/// slower workload looks like - no estimator can tell them apart.
-///
-/// So the ceiling is not a matter of taste. This sweeps it against a known
-/// answer to find where the bias actually appears.
-pub fn tick_ceiling() {
-    let (a, b) = (370.0, 2.5);
-    let noise = Noise::MulTick(0.02, 1e6, 5000.0);
-    let target = 0.01;
-    let trials = SELFTEST_TRIALS;
-    println!(
-        "Tick contamination against ladder ceiling.\n\
-         True cost {b} ns/iter, fixed {a:.0}ns, 2% noise, 5us ticks every 1ms.\n\
-         P(hit) is the chance the longest batch on the ladder contains a tick.\n\n\
-         {:>10} {:>8} {:>16} {:>16}\n",
-        "ceiling", "P(hit)", "plain fit bias", "trimmed fit bias"
-    );
-    for ceiling in [1e6, 2e5, 1e5, 5e4, 2e4, 1e4, 5e3] {
-        let tape = synthetic("t", a, b, noise, SELFTEST_SAMPLES, 0x9E3779B97F4A7C15, ceiling);
-        let top = tape
-            .rungs
-            .last()
-            .map(|r| r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64)
-            .unwrap_or(0.0);
-        // With a periodic source the chance of a hit is just the batch
-        // length as a fraction of the tick period, capped at certainty.
-        let p_hit = (top / 1e6).min(1.0);
-        let bias = |trim: f64| -> String {
-            let mut es: Vec<f64> = (0..trials)
-                .filter_map(|i| {
-                    let o = measure(
-                        &tape,
-                        Choice::All { trim, floor: 0 },
-                        target,
-                        10.0,
-                        i as f64 / trials as f64,
-                    );
-                    o.est.is_finite().then_some(o.est)
-                })
-                .collect();
-            if es.len() < 10 {
-                return "  too few".to_string();
-            }
-            es.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            format!("{:>+14.3}%", 100.0 * (es[es.len() / 2] - b) / b)
-        };
-        println!(
-            "{:>9.0}us {:>7.0}% {:>16} {:>16}",
-            ceiling / 1e3,
-            100.0 * p_hit,
-            bias(0.0),
-            bias(TRIM)
-        );
-    }
-    println!();
-}
-
-/// Does batch means actually fix correlation, given enough samples?
-///
-/// The theory says yes: group consecutive measurements, take the spread of
-/// the group means, and whatever is correlated *within* a group divides out.
-/// The measured bar comes out three times too small anyway, and the reason
-/// is not that the theory is wrong but that the stopping rule never lets it
-/// apply. Two conditions have to hold, and early stopping breaks both:
-///
-///   - each block must be **longer than the correlation time**, or
-///     consecutive blocks are still correlated and their spread is too small;
-///   - there must be **enough blocks** for that spread to mean anything.
-///
-/// At the natural stopping point there are four blocks of two sweeps each,
-/// against an AR(1) correlation time of about five samples. So the bar is
-/// too small, which triggers stopping, which is why there are only four
-/// blocks. This sweeps a floor on the number of sweeps to break the loop and
-/// see whether the bar converges on the truth when the data is there.
-pub fn blocks() {
-    let (a, b) = (370.0, 2.5);
-    let target = 0.01;
-    let trials = SELFTEST_TRIALS;
-    println!(
-        "Batch means against how long the run is allowed to be.\n\
-         AR(1) noise: each sample pulls the next one with it, which is what\n\
-         makes sd/sqrt(n) a lie and what batch means is supposed to repair.\n\n\
-         bar/sd of 1 means the claimed error bar matches the actual spread.\n"
-    );
-    for phi in [0.0, 0.5, 0.8, 0.95] {
-        println!("  phi = {phi}  (correlation time ~{:.0} samples)", 1.0 / (1.0 - phi));
-        println!(
-            "    {:>10} {:>9} {:>9} {:>9} {:>8} {:>7}",
-            "min sweeps", "time", "spread", "bar", "bar/sd", "cover"
-        );
-        let tape = synthetic(
-            "x", a, b, Noise::Ar1(0.02, phi), SELFTEST_SAMPLES, 0x243F6A8885A308D3, MAX_RUNG_NS,
-        );
-        for floor in [8usize, 16, 32, 64, 128, 256] {
-            let outs: Vec<Outcome> = (0..trials)
-                .map(|i| {
-                    measure(
-                        &tape,
-                        Choice::All { trim: 0.0, floor },
-                        target,
-                        10.0,
-                        i as f64 / trials as f64,
-                    )
-                })
-                .collect();
-            let good: Vec<&Outcome> = outs
-                .iter()
-                .filter(|o| o.est.is_finite() && !o.wrapped)
-                .collect();
-            if good.len() < 10 {
-                println!("    {floor:>10}   too few trials without reusing the recording");
-                continue;
-            }
-            let k = good.len() as f64;
-            let m = good.iter().map(|o| o.est).sum::<f64>() / k;
-            let sd = (good.iter().map(|o| (o.est - m) * (o.est - m)).sum::<f64>()
-                / (k - 1.0))
-                .sqrt();
-            let mut bars: Vec<f64> = good.iter().map(|o| o.se).collect();
-            bars.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            let bar = bars[bars.len() / 2];
-            let cover = good.iter().filter(|o| (o.est - b).abs() <= o.se).count() as f64 / k;
-            let mut ts: Vec<f64> = good.iter().map(|o| o.seconds).collect();
-            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            println!(
-                "    {:>10} {:>9} {:>8.2}% {:>8.2}% {:>8.2} {:>7}",
-                floor,
-                fmt_time(ts[ts.len() / 2], false),
-                100.0 * sd / b,
-                100.0 * bar / b,
-                bar / sd.max(f64::MIN_POSITIVE),
-                pct(cover)
-            );
-        }
-        println!();
-    }
-}
-
-/// How correlated are consecutive measurements, and how far apart in *time*?
-///
-/// This is the question behind rounds. The correlation that makes `sd/sqrt(n)`
-/// a lie does not live in the sample index, it lives in wall-clock time: a
-/// clock frequency, a thermal state, a cache occupancy all persist for some
-/// span of time regardless of how many measurements are taken meanwhile. So
-/// the gap between one measurement of a workload and its next - which is the
-/// round duration - is the thing that decorrelates them, and a longer round
-/// is a real, if blunt, mitigation.
-///
-/// If the underlying process has a correlation time `tau`, consecutive
-/// samples of one workload should correlate as `exp(-gap/tau)`. That is
-/// checkable: the recordings carry timestamps, and a powerset sweep already
-/// varied the round length by varying how many workloads share the round.
-pub fn correlate(paths: &[String]) {
-    println!(
-        "Correlation between consecutive measurements of the same workload,\n\
-         against the wall-clock gap between them - which is the round length.\n\n\
-         rho1 = correlation at lag 1; tau = implied correlation time if rho ~ exp(-gap/tau)\n"
-    );
-    println!(
-        "{:>16} {:>9} {:>11} {:>7} {:>7} {:>7} {:>10}",
-        "workload", "in round", "gap", "rho1", "rho2", "rho4", "tau"
-    );
-    let mut rows: Vec<(String, usize, f64, f64, f64, f64)> = Vec::new();
-    for path in paths {
-        let r = Run::load(path);
-        let bases: std::collections::BTreeSet<String> = r
-            .names
-            .iter()
-            .map(|n| n.split('@').next().unwrap_or(n).to_string())
-            .collect();
-        let in_round = bases.len();
-        // One row per workload, not one per recording. Taking "whichever
-        // workload had the most samples" compares different workloads
-        // across recordings, and workloads differ in how correlated they
-        // are intrinsically - which is exactly what has to be held fixed
-        // when the round length is the variable.
-        let _ = &bases;
-        // Per *rung*, not per workload. Which rung happened to collect the
-        // most samples varies between recordings, so picking that one
-        // compares different batch sizes - and batch size changes both how
-        // long a sample takes and how much of the cache it disturbs, which
-        // is most of what the correlation is about.
-        for name in &r.names {
-            let base = name.clone();
-            let v = r.get(name);
-            if v.len() < 500 {
-                continue;
-            }
-            let times: Vec<f64> = r
-                .samples
-                .iter()
-                .filter(|s| &s.workload == name)
-                .map(|s| s.t_ns as f64)
-                .collect();
-            let mut gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
-            if gaps.is_empty() {
-                continue;
-            }
-            gaps.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            let gap = gaps[gaps.len() / 2];
-            let rho = |lag: usize| -> f64 {
-                if v.len() <= lag {
-                    return f64::NAN;
-                }
-                crate::estimate::corr(&v[..v.len() - lag], &v[lag..])
-            };
-            rows.push((base.clone(), in_round, gap, rho(1), rho(2), rho(4)));
-        }
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    for (base, in_round, gap, r1, r2, r4) in rows {
-        let tau = if r1 > 0.01 && r1 < 1.0 {
-            format!("{:.0}us", -gap / r1.ln() / 1e3)
-        } else {
-            "  -".to_string()
-        };
-        println!(
-            "{:>16} {:>9} {:>9.0}us {:>7.3} {:>7.3} {:>7.3} {:>10}",
-            base, in_round, gap / 1e3, r1, r2, r4, tau
-        );
-    }
-    println!();
-}
-
 /// Write a synthetic tape as a real recording, read it back, and check it
 /// survived.
 ///
@@ -1394,7 +1150,7 @@ fn round_trip(tape: &Tape, path: &str) -> Option<Tape> {
         return None;
     }
     for (k, r) in tape.rungs.iter().enumerate() {
-        t.iters.insert(crate::rung_name(&tape.workload, k), r.n);
+        t.iters.insert(rung_name(&tape.workload, k), r.n);
     }
     // Emitted round by round, one sample per rung per round, so the
     // per-rung sequences come back in the order they were written - which
@@ -1407,7 +1163,7 @@ fn round_trip(tape: &Tape, path: &str) -> Option<Tape> {
             t.log.push(crate::timing::Sample {
                 round: r,
                 slot: k,
-                workload: crate::rung_name(&tape.workload, k),
+                workload: rung_name(&tape.workload, k),
                 t_ns,
                 ns,
             });
