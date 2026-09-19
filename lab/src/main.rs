@@ -31,27 +31,13 @@ use workloads::{Kind, Workload};
 /// this, so the members of a round are comparable and share a noise regime.
 const SAMPLE: Duration = Duration::from_micros(100);
 
-/// The workloads whose powerset `ladder` sweeps by default.
+/// The workloads measured when none are named.
 ///
-/// Chosen to span *cache footprint*, because that is the axis a cold start
-/// should care about, and to stay cheap enough that 31 subsets are
-/// affordable - no `copy_64mb`, whose 4.5 ms iterations would dominate the
-/// sweep and appear in half of it.
-///
-/// | workload | footprint it leaves behind |
-/// | --- | --- |
-/// | `nothing` | none at all: the harness floor |
-/// | `cpu_canary` | none, but it does occupy time |
-/// | `instant_now` | a vDSO page |
-/// | `btree_miss` | a 1M-entry map, walked one path at a time |
-/// | `mem_canary` | tens of MiB, streamed, evicting everything |
-///
-/// `nothing` and `cpu_canary` are the pair that separates the two
-/// explanations: both occupy a slot and take time, and only one of them
-/// touches memory. If a neighbour's *time* is what matters they behave
-/// alike; if its *footprint* is what matters, neither should do much and
-/// `mem_canary` should do everything.
-const LADDER_SET: &str = "nothing,cpu_canary,instant_now,btree_miss,mem_canary";
+/// The three with real ladders - six to nine rungs each, and so actual
+/// choices about where to stand - plus the cheapest of the ones past the
+/// rung window, so a round holds something whose cost is dominated by a
+/// syscall rather than by user-space work.
+const LADDER_SET: &str = "instant_now,f64_sin,btree_miss,urandom_read";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -243,10 +229,16 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
-    let canaries = [
-        Arc::new(Workload::cpu_canary()),
-        Arc::new(Workload::mem_canary()),
-    ];
+    // One canary, not two.
+    //
+    // `mem_canary` was here to be the reference that moves with memory
+    // pressure, but it reads ~20% differently between processes because its
+    // chase table lands at a different address each time, and it allocates
+    // 64 MiB in every round it sits in. A reference whose own answer is not
+    // reproducible cannot referee anything, and it was excluded from every
+    // summary it appeared in. Still available by name for a workload that
+    // wants it.
+    let canaries = [Arc::new(Workload::cpu_canary())];
 
     // Calibrated once and shared, so a workload is measured at the same
     // batch sizes in every subset. Letting each subset calibrate for itself
@@ -289,7 +281,29 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
                 }
             })
             .collect();
-        eprintln!("  {:>14}  {}", w.name, plan.join("  "));
+        // What this workload adds to a round, which is what decides
+        // whether it can share one with the others: every workload gets a
+        // sample per round, so the slowest member sets everyone's sample
+        // rate.
+        let rungs = rungs_for(per);
+        let inv: f64 = rungs
+            .iter()
+            .map(|&n| 1.0 / (n as f64 * per + OVERHEAD_NS))
+            .sum();
+        let cost = rungs.len() as f64 / inv;
+        let cost_s = if cost >= 1e6 {
+            format!("{:.2}ms", cost / 1e6)
+        } else if cost >= 1e3 {
+            format!("{:.1}us", cost / 1e3)
+        } else {
+            format!("{cost:.0}ns")
+        };
+        eprintln!(
+            "  {:>14} {:>9}/round  {}",
+            w.name,
+            cost_s,
+            plan.join("  ")
+        );
     }
     eprintln!();
 
@@ -390,9 +404,34 @@ fn subsets_of(
     // moves with its company; developing an algorithm against recorded data
     // is a different question that wants depth in the composition a user
     // would actually get, not breadth across compositions they would not.
-    if std::env::var("LAB_SUBSETS").map(|v| v == "full").unwrap_or(false) {
-        eprintln!("one composition: the full set");
-        return vec![full];
+    match std::env::var("LAB_SUBSETS").unwrap_or_default().as_str() {
+        // One composition, sampled hard: how an algorithm behaves, in the
+        // round a user would actually get.
+        "full" => {
+            eprintln!("one composition: the full set");
+            return vec![full];
+        }
+        // Singletons, every pair, and the full set.
+        //
+        // For a workload too expensive to put in all 2^n subsets, this is
+        // most of what the powerset would have told us: alone is the
+        // control, each pair isolates one neighbour's effect on it, and the
+        // full set is the crowd. What it gives up is interaction between
+        // *three or more* specific neighbours, which is a second-order
+        // question we have no evidence matters.
+        "pairs" => {
+            let mut out: Vec<Vec<Arc<Workload>>> =
+                ws.iter().map(|w| vec![w.clone()]).collect();
+            for (i, a) in ws.iter().enumerate() {
+                for b in &ws[i + 1..] {
+                    out.push(vec![a.clone(), b.clone()]);
+                }
+            }
+            out.push(full);
+            eprintln!("singletons, pairs and the full set: {} subsets", out.len());
+            return out;
+        }
+        _ => {}
     }
     let n_subsets = (1usize << ws.len()) - 1;
     // The full set is the most expensive subset, and the most rungs any
