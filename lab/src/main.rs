@@ -21,6 +21,7 @@ mod accuracy;
 mod estimate;
 mod protocol;
 mod protocols;
+mod replay;
 mod timing;
 mod workloads;
 
@@ -117,6 +118,9 @@ fn main() {
                 run(&canaries, payloads, rounds, &dir, &[1.0], None, None, 0);
             }
         }
+        Some("simulate") => {
+            replay::report(&args[2..]);
+        }
         Some("ladder") => {
             let rounds: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
             let dir = args.get(3).cloned().unwrap_or_else(|| "ladder".to_string());
@@ -188,6 +192,9 @@ fn main() {
 /// The ladder from `LAB_LADDER`, as multiples of [`SAMPLE`].
 fn ladder_from_env() -> Vec<f64> {
     match std::env::var("LAB_LADDER") {
+        // Powers of two in count, resolved per workload once its calibrated
+        // size is known, so it cannot be written down as durations here.
+        Ok(s) if s.trim() == "pow2" => Vec::new(),
         Ok(s) => {
             let mut v: Vec<f64> = s
                 .split(',')
@@ -230,6 +237,17 @@ fn ladder_from_env() -> Vec<f64> {
 /// spends collection time on data no replay will ever read.
 const MAX_RUNG: Duration = Duration::from_secs(10);
 
+/// Top of a power-of-two ladder, as a multiple of [`SAMPLE`].
+///
+/// Ten samples is past anything an algorithm should want: a batch that long
+/// buys no precision that a shorter one plus more repetitions would not. The
+/// rungs near the top exist so the ladder is seen to turn over, rather than
+/// being cut off while still useful.
+const POW2_TOP: f64 = 10.0;
+
+/// How rung draws are weighted; see [`weighted_rung`].
+static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Draw a rung so that, over many rounds, every rung gets the same *wall
 /// time* rather than the same number of samples.
 ///
@@ -242,6 +260,24 @@ const MAX_RUNG: Duration = Duration::from_secs(10);
 /// Falls back to uniform when durations are unknown, which is the replay
 /// case: `per` is NaN there because nothing was calibrated.
 fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
+    // Equal samples per rung by default, and equal *time* per rung only if
+    // asked for.
+    //
+    // Equalising time is the obvious instinct and it is right for a narrow
+    // ladder. On a power-of-two ladder it is a disaster: the span from n=1
+    // to n=524288 is a factor of 500000 in cost, so inverse-duration
+    // weighting gives the top rung a probability near 1e-6 and a million
+    // rounds record about one sample there. The expensive rungs are not
+    // decoration - an algorithm that calibrates its way up the ladder stands
+    // on them - and a rung with one sample cannot be replayed at all.
+    //
+    // Equal counts cost little here because the ladder is capped: N samples
+    // at every rung costs N * sum(d), and a geometric ladder sums to about
+    // twice its top rung. Paying 2x the top rung to sample the whole ladder
+    // evenly is the cheaper mistake by far.
+    if !matches!(RUNG_WEIGHT.get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default()).as_str(), "time") {
+        return (bits >> 33) as usize % r.len();
+    }
     let total: f64 = r.iter().map(|x| 1.0 / x.2).sum();
     if !total.is_finite() || total <= 0.0 {
         return (bits >> 33) as usize % r.len();
@@ -258,6 +294,27 @@ fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
 }
 
 fn counts_for(cal: usize, ladder: &[f64]) -> Vec<usize> {
+    // An empty ladder means powers of two in *count*, from a single
+    // iteration up to about `POW2_TOP` samples' worth.
+    //
+    // Duration multiples are the right way to say where the rungs go when
+    // the rungs are the measurement. They are the wrong way when the
+    // recording has to support replaying a *calibration*, because the growth
+    // loop probes 1 and then doubles: a ladder of duration multiples lands
+    // on counts like 348 and 1740, so a replayed probe can never stand where
+    // it asked to, and the thing being simulated is not the thing that runs.
+    //
+    // Powers of two also reach n=1 for every workload by construction, which
+    // is where every growth loop starts - rather than by choosing a bottom
+    // rung small enough and hoping it was small enough.
+    if ladder.is_empty() {
+        let top = (POW2_TOP * cal as f64).max(1.0);
+        let mut out = vec![1usize];
+        while (*out.last().unwrap() as f64) < top {
+            out.push(out.last().unwrap() * 2);
+        }
+        return out;
+    }
     let mut out: Vec<usize> = Vec::with_capacity(ladder.len());
     for &t in ladder {
         let want = (t * cal as f64).round().max(1.0) as usize;
@@ -338,11 +395,23 @@ fn sweep(ws: Vec<Arc<Workload>>, rounds: usize, dir: &str, ladder: &[f64], passe
         eprintln!("  {:>16}  {}", w.name, plan.join("  "));
     }
 
-    let subsets: Vec<Vec<Arc<Workload>>> = ws
-        .into_iter()
-        .powerset()
-        .filter(|s| !s.is_empty())
-        .collect();
+    // One composition, when the question is about rungs rather than about
+    // neighbours.
+    //
+    // The powerset asks whether a workload's number moves with the company
+    // it keeps, and it is the only way to answer that. It is the wrong price
+    // to pay for a different question: a recording made so that calibration
+    // can be replayed at analysis time wants one fixed composition - the one
+    // the simulated algorithm would actually run in - measured deeply, not
+    // 2^n shallow compositions none of which has enough samples per rung.
+    let subsets: Vec<Vec<Arc<Workload>>> = if std::env::var("LAB_NO_POWERSET").is_ok() {
+        vec![ws]
+    } else {
+        ws.into_iter()
+            .powerset()
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
     let mut perm = 0xD1B54A32D192ED03u64;
     let started = Instant::now();
     for pass in 0..passes {
@@ -452,8 +521,8 @@ fn run(
         // back attached to the wrong batch sizes and every per-iteration
         // cost doubled.
         let derived = counts_for(cal, ladder);
-        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(ladder.len());
-        for k in 0..ladder.len() {
+        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(derived.len());
+        for k in 0..derived.len() {
             let name = rung_name(w.name, k);
             let n = if t.replaying() {
                 // A rung absent from the recording was dropped when it was
