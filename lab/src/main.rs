@@ -118,6 +118,9 @@ fn main() {
                 run(&canaries, payloads, rounds, &dir, &[1.0], None, None, 0);
             }
         }
+        Some("selftest") => {
+            replay::selftest();
+        }
         Some("simulate") => {
             replay::report(&args[2..]);
         }

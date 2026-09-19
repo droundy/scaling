@@ -231,6 +231,14 @@ pub struct Outcome {
 /// Fewest samples before a standard error means anything.
 const MIN_SAMPLES: usize = 5;
 
+/// Fewest whole sweeps of the ladder before a fitted slope has an error bar.
+///
+/// This is a floor on what a fit costs: it must pay for several visits to
+/// the top rung before it can say anything about its own uncertainty. That
+/// is the price of spanning the ladder, and it is why a fit cannot be as
+/// cheap as standing on one cheap rung.
+const MIN_SWEEPS: usize = 8;
+
 /// Standard error of a mean via batch means.
 ///
 /// `sd/sqrt(n)` assumes the samples are independent, and consecutive timings
@@ -243,7 +251,9 @@ pub fn batch_se(v: &[f64]) -> f64 {
     if v.len() < MIN_SAMPLES {
         return f64::INFINITY;
     }
-    let b = (v.len() / 4).clamp(4, 20);
+    // Square-root rule, for the reason given in `slope_se`: blocks have to
+    // lengthen as samples accumulate or they never outlast the correlation.
+    let b = ((v.len() as f64).sqrt() as usize).clamp(4, 20);
     let per = v.len() / b;
     if per == 0 {
         return f64::INFINITY;
@@ -308,11 +318,13 @@ pub enum Choice {
     /// the calibrated policies spend ten to twenty times the measurement on
     /// probes for a fast workload.
     ///
-    /// `time_weighted` draws cheap rungs more often, so each rung gets
-    /// roughly equal wall time rather than an equal count. Which is better
-    /// is not obvious - equal counts buy lever arm at the top of the
-    /// ladder, equal time buys samples at the bottom - so both are here.
-    All { time_weighted: bool },
+    /// There was a variant that drew cheap rungs more often, to give each
+    /// rung equal wall time rather than an equal count. It is gone: drawing
+    /// unevenly destroys the balanced design that the block-slope error
+    /// estimate depends on, and it showed - under additive noise it claimed
+    /// a bar eighty times too large and covered 100% of the time. An
+    /// estimator and its error bar are not separable choices.
+    All {},
 }
 
 /// Rungs an algorithm could sensibly stand on.
@@ -395,13 +407,44 @@ fn slope(pts: &[(f64, f64)]) -> f64 {
 /// separately and taking the spread of those slopes divides out whatever is
 /// correlated within a block - the batch-means argument, applied to a slope
 /// instead of to a mean.
+/// How many distinct batch sizes appear, which is one sweep of the ladder.
+fn ladder_len(pts: &[(f64, f64)]) -> Option<usize> {
+    let mut ns: Vec<u64> = pts.iter().map(|p| p.0 as u64).collect();
+    ns.sort_unstable();
+    ns.dedup();
+    Some(ns.len())
+}
+
 fn slope_se(pts: &[(f64, f64)]) -> f64 {
     if pts.len() < MIN_SAMPLES * 2 {
         return f64::INFINITY;
     }
-    let b = (pts.len() / 8).clamp(4, 20);
-    let per = pts.len() / b;
-    if per < 3 {
+    // Blocks must be whole sweeps of the ladder.
+    //
+    // A block cut mid-sweep is missing whichever rungs fell after the cut,
+    // so its fitted slope reflects the rungs it happened to get rather than
+    // the noise - which is the unbalanced-design problem the shuffled sweep
+    // exists to remove, reintroduced at the block boundary. Trimming to a
+    // multiple of the ladder length is not enough on its own: until there
+    // are several whole sweeps there is no balanced block to be had, and
+    // saying so is better than returning a number built from fragments.
+    let l = ladder_len(pts).unwrap_or(1).max(1);
+    let sweeps = pts.len() / l;
+    if sweeps < MIN_SWEEPS {
+        return f64::INFINITY;
+    }
+    // Block *length* has to grow with the data, not just block count.
+    //
+    // Batch means only divide out correlation when a block outlasts the
+    // correlation time. Taking more blocks as data arrives keeps them one
+    // sweep long forever, so adjacent blocks stay correlated and their
+    // spread understates the error - by about fourfold at phi=0.8. The
+    // square-root rule splits the difference: both the number of blocks and
+    // their length grow, so the estimate decorrelates as samples accumulate.
+    let b = (sweeps as f64).sqrt() as usize;
+    let b = b.clamp(4, 20);
+    let per = (sweeps / b) * l;
+    if per < l {
         return f64::INFINITY;
     }
     let mut sl: Vec<f64> = Vec::with_capacity(b);
@@ -438,6 +481,8 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
         }
     }
     let mut rng: u64 = 0x2545F4914F6CDD1D ^ (p.spent_ns.to_bits() | 1);
+    // Remaining rungs in the current sweep; see `Choice::All` below.
+    let mut queue: Vec<usize> = Vec::new();
     let mut est = f64::NAN;
     let mut se = f64::INFINITY;
     let mut capped = false;
@@ -463,24 +508,26 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
                 let hi = p.draw(b);
                 vals.push((hi - lo) / (p.n(b) - p.n(a)));
             }
-            Choice::All { time_weighted } => {
-                rng = crate::step(rng);
-                let k = if time_weighted {
-                    let w: Vec<f64> = ladder.iter().map(|&k| 1.0 / p.cost(k).max(1.0)).collect();
-                    let tot: f64 = w.iter().sum();
-                    let mut u = (rng >> 11) as f64 / (1u64 << 53) as f64 * tot;
-                    let mut pick = *ladder.last().unwrap();
-                    for (i, &k) in ladder.iter().enumerate() {
-                        u -= w[i];
-                        if u <= 0.0 {
-                            pick = k;
-                            break;
-                        }
+            Choice::All {} => {
+                // A shuffled sweep, not independent draws.
+                //
+                // Drawing each rung independently lets contiguous blocks end
+                // up with different mixes of rungs, and a block's fitted
+                // slope then depends on which rungs it happened to contain.
+                // The spread of block slopes stops being an estimate of the
+                // noise and becomes an estimate of how unevenly the rungs
+                // were dealt - which made the claimed bar 200x too large
+                // under additive noise and 2x too small under correlated
+                // noise. Cycling through a fresh random order gives every
+                // block the same design.
+                if queue.is_empty() {
+                    queue = ladder.clone();
+                    for i in (1..queue.len()).rev() {
+                        rng = crate::step(rng);
+                        queue.swap(i, (rng >> 33) as usize % (i + 1));
                     }
-                    pick
-                } else {
-                    ladder[(rng >> 33) as usize % ladder.len()]
-                };
+                }
+                let k = queue.pop().unwrap();
                 let ns = p.draw(k);
                 pts.push((p.n(k), ns));
             }
@@ -724,8 +771,7 @@ pub fn report(paths: &[String]) {
             );
             let mut rows: Vec<Score> = Vec::new();
             for (label, c) in [
-                ("all-rungs", Choice::All { time_weighted: false }),
-                ("all-rungs/time", Choice::All { time_weighted: true }),
+                ("all-rungs", Choice::All {}),
             ] {
                 let outs: Vec<Outcome> = (0..CAL_TRIALS)
                     .map(|i| measure(tape, c, target, 10.0, i as f64 / CAL_TRIALS as f64))
@@ -749,6 +795,231 @@ pub fn report(paths: &[String]) {
             rows.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
             for r in &rows {
                 println!("    {}  {}", line(r), if r.pass { "pass" } else { "FAIL" });
+            }
+        }
+        println!();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Testing the harness, rather than the algorithms.
+// ---------------------------------------------------------------------------
+
+/// A tape whose answer is known by construction.
+///
+/// Every number the report prints about real data depends on `truth`, and
+/// `truth` is itself an estimate - the widest rung pair, pooled. That is a
+/// *slope*, which is also what the fitting algorithm computes, so a fit
+/// agreeing with it may be agreeing about method rather than about the
+/// workload. A single-rung algorithm is meanwhile scored against a quantity
+/// it never set out to measure, and would look wrong even if it were
+/// perfect. There is no way to separate those from inside the real data.
+///
+/// So: synthesise a ladder from `a + b*n` plus a chosen noise, where `b` is
+/// known exactly. Any departure from `b` is the harness or the estimator,
+/// not a disagreement about what the truth is.
+fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64) -> Tape {
+    let mut rng = seed | 1;
+    let mut uni = {
+        let mut r = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+        move || {
+            r = crate::step(r);
+            (r >> 11) as f64 / (1u64 << 53) as f64
+        }
+    };
+    let mut g = move || {
+        // Box-Muller, which needs two uniforms and yields one normal here.
+        rng = crate::step(rng);
+        let u1 = ((rng >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
+        rng = crate::step(rng);
+        let u2 = (rng >> 11) as f64 / (1u64 << 53) as f64;
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    };
+    let mut rungs = Vec::new();
+    let mut n = 1usize;
+    loop {
+        let clean = a + b * n as f64;
+        let mut prev = 0.0;
+        let batch_ns: Vec<f64> = (0..samples)
+            .map(|_| {
+                let z = g();
+                let e = match noise {
+                    // A fixed jitter per measurement, whatever the batch.
+                    Noise::Additive(sd) => sd * z,
+                    // Jitter proportional to the batch, as a clock that
+                    // drifts in rate produces.
+                    Noise::Multiplicative(rel) => rel * clean * z,
+                    // Correlated in time, which is what breaks sd/sqrt(n)
+                    // and what batch means exist to survive.
+                    Noise::Ar1(rel, phi) => {
+                        prev = phi * prev + (1.0 - phi * phi).sqrt() * z;
+                        rel * clean * prev
+                    }
+                    // Rare, large, one-sided: a scheduler tick landing in
+                    // the batch. Probability grows with batch length.
+                    Noise::Tick(rate_per_us, hit_ns) => {
+                        // Probability that a tick lands in this batch grows
+                        // with how long the batch runs.
+                        let p = (clean / 1e3) * rate_per_us;
+                        if uni() < p {
+                            hit_ns
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                (clean + e).max(1.0)
+            })
+            .collect();
+        rungs.push(Rung { n, batch_ns, overhead_ns: 370.0 });
+        if clean > MAX_RUNG_NS || n > 1 << 30 {
+            break;
+        }
+        n *= 2;
+    }
+    Tape { workload: name.to_string(), rungs }
+}
+
+/// Kept small deliberately. This is a unit test of the arithmetic, not a
+/// measurement: a trial that cannot reach its goal runs until the budget or
+/// the end of the tape, so a generous tape makes the test cost minutes
+/// without making it more conclusive.
+const SELFTEST_SAMPLES: usize = 3000;
+const SELFTEST_TRIALS: usize = 80;
+
+#[derive(Clone, Copy)]
+enum Noise {
+    Additive(f64),
+    Multiplicative(f64),
+    Ar1(f64, f64),
+    Tick(f64, f64),
+}
+
+impl Noise {
+    fn label(&self) -> String {
+        match self {
+            Noise::Additive(sd) => format!("additive {sd:.0}ns"),
+            Noise::Multiplicative(r) => format!("multiplicative {:.1}%", 100.0 * r),
+            Noise::Ar1(r, phi) => format!("ar1 {:.1}% phi={phi}", 100.0 * r),
+            Noise::Tick(rate, hit) => format!("tick {rate}/us of {hit:.0}ns"),
+        }
+    }
+}
+
+/// Check the harness against data whose answer is not in dispute.
+///
+/// Two things are being asked, and they are different:
+///
+///   - **bias**: does the estimate land on `b`? An estimator that is off by
+///     a percent on data this clean is wrong in a way no amount of real
+///     machine time would reveal, because on real data the disagreement
+///     would be blamed on the machine.
+///   - **honesty**: does the claimed error bar match the actual spread of
+///     the estimates? This is the one real data cannot answer at all. If
+///     the bar is twice the spread, the stopping rule buys samples it does
+///     not need and every reported time is inflated; if it is half, the
+///     number is a lie. `spread` here is the standard deviation of the
+///     estimates across trials, which is what the bar is *claiming to be*.
+pub fn selftest() {
+    // A fixed cost of 370ns and a per-iteration cost of 2.5ns is roughly
+    // cpu_canary; 250ns per iteration is roughly slice_sort.
+    let cases = [
+        // With no noise every estimator must return b exactly, except a
+        // single rung, which by construction returns b + a/n. Anything else
+        // is an arithmetic bug and no amount of real data would show it.
+        ("fast", 370.0, 2.5, Noise::Additive(0.0)),
+        ("fast", 370.0, 2.5, Noise::Multiplicative(0.02)),
+        ("fast", 370.0, 2.5, Noise::Additive(150.0)),
+        ("fast", 370.0, 2.5, Noise::Ar1(0.02, 0.8)),
+        ("fast", 370.0, 2.5, Noise::Tick(0.001, 5000.0)),
+        ("slow", 370.0, 250.0, Noise::Multiplicative(0.02)),
+        ("slow", 370.0, 250.0, Noise::Ar1(0.02, 0.8)),
+    ];
+    let target = 0.01;
+    println!(
+        "Harness self-test: synthetic ladders where the per-iteration cost is known.\n\n\
+         bias   = median estimate against the true value (want ~0)\n\
+         spread = actual sd of the estimates across trials\n\
+         bar    = median error bar the algorithm claimed\n\
+         bar/sd = claimed over actual (want ~1; >1 buys samples it does not need)\n\
+         cover  = fraction inside the claimed bar (want ~{})\n",
+        pct(EXPECT_COVERAGE)
+    );
+    for (which, a, b, noise) in cases {
+        let tape = synthetic(which, a, b, noise, SELFTEST_SAMPLES, 0x243F6A8885A308D3);
+        println!(
+            "===== {which}: {b} ns/iter, fixed {a:.0}ns, {} =====",
+            noise.label()
+        );
+        println!(
+            "    {:>22} {:>9} {:>9} {:>9} {:>9} {:>8} {:>7}",
+            "algorithm", "time", "bias", "spread", "bar", "bar/sd", "cover"
+        );
+        let mut run = |label: String, outs: Vec<Outcome>| {
+            let good: Vec<&Outcome> = outs.iter().filter(|o| o.est.is_finite()).collect();
+            if good.len() < 10 {
+                println!("    {label:>22}   too few usable trials");
+                return;
+            }
+            let k = good.len() as f64;
+            let mut es: Vec<f64> = good.iter().map(|o| o.est).collect();
+            es.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let med = es[es.len() / 2];
+            let m = es.iter().sum::<f64>() / k;
+            let sd = (es.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (k - 1.0)).sqrt();
+            let mut bars: Vec<f64> = good.iter().map(|o| o.se).collect();
+            bars.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let bar = bars[bars.len() / 2];
+            let cover = good.iter().filter(|o| (o.est - b).abs() <= o.se).count() as f64 / k;
+            let mut ts: Vec<f64> = good.iter().map(|o| o.seconds).collect();
+            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            println!(
+                "    {:>22} {:>9} {:>8.2}% {:>8.2}% {:>8.2}% {:>8.2} {:>7}",
+                label,
+                fmt_time(ts[ts.len() / 2], false),
+                100.0 * (med - b) / b,
+                100.0 * sd / b,
+                100.0 * bar / b,
+                bar / sd.max(f64::MIN_POSITIVE),
+                pct(cover)
+            );
+        };
+        let trials = SELFTEST_TRIALS;
+        for (label, c) in [
+            ("all-rungs", Choice::All {}),
+        ] {
+            run(
+                label.to_string(),
+                (0..trials)
+                    .map(|i| measure(&tape, c, target, 10.0, i as f64 / trials as f64))
+                    .collect(),
+            );
+        }
+        // A mid rung and a wide pair, chosen here rather than calibrated,
+        // so that what is being tested is the estimator and not the search.
+        let ok = reasonable(&tape);
+        if !ok.is_empty() {
+            let mid = ok[ok.len() / 2];
+            let lo = ok[0];
+            let hi = *ok.last().unwrap();
+            run(
+                format!("one-rung n={}", tape.rungs[mid].n),
+                (0..trials)
+                    .map(|i| {
+                        measure(&tape, Choice::One(mid), target, 10.0, i as f64 / trials as f64)
+                    })
+                    .collect(),
+            );
+            if lo != hi {
+                run(
+                    format!("pair n={},{}", tape.rungs[lo].n, tape.rungs[hi].n),
+                    (0..trials)
+                        .map(|i| {
+                            measure(&tape, Choice::Pair(lo, hi), target, 10.0,
+                                    i as f64 / trials as f64)
+                        })
+                        .collect(),
+                );
             }
         }
         println!();
