@@ -21,7 +21,7 @@ mod replay;
 mod timing;
 mod workloads;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use timing::rung_name;
@@ -126,11 +126,14 @@ const MAX_RUNG: Duration = Duration::from_secs(10);
 
 /// Top of a power-of-two ladder, as a multiple of [`SAMPLE`].
 ///
-/// Ten samples is past anything an algorithm should want: a batch that long
-/// buys no precision that a shorter one plus more repetitions would not. The
-/// rungs near the top exist so the ladder is seen to turn over, rather than
-/// being cut off while still useful.
-const POW2_TOP: f64 = 10.0;
+/// `SAMPLE` is 100us, which is five times the longest batch the analyzer
+/// will stand on. The headroom is deliberate - it leaves room to revisit
+/// that ceiling against recorded data rather than having to measure again -
+/// but it should not be much more than that. This was ten samples, a 1ms
+/// top rung, back when the ceiling was 2ms; with rungs drawn uniformly that
+/// spends most of a collection on batches no replay will ever read, since
+/// the cost of a round is dominated by the largest rung in it.
+const POW2_TOP: f64 = 1.0;
 
 /// How rung draws are weighted; see [`weighted_rung`].
 static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -244,6 +247,29 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
         counts.insert(w.name, calibrate(w, &mut seed));
     }
 
+    // What is about to be measured, in durations as well as counts. A
+    // workload whose rungs come out 1,2 rather than geometric is one whose
+    // single iteration already outruns the top of the ladder, and that is
+    // worth seeing before committing hours to it.
+    eprintln!("\nladder plan:");
+    let mut seen = BTreeSet::new();
+    for w in ws.iter().chain(canaries.iter()).filter(|w| seen.insert(w.name)) {
+        let (cal, per) = counts[w.name];
+        let plan: Vec<String> = counts_for(cal, &[])
+            .iter()
+            .map(|&c| {
+                let ns = c as f64 * per;
+                if ns < 1e3 {
+                    format!("{c}={ns:.0}ns")
+                } else {
+                    format!("{c}={:.1}us", ns / 1e3)
+                }
+            })
+            .collect();
+        eprintln!("  {:>14}  {}", w.name, plan.join("  "));
+    }
+    eprintln!();
+
     let subsets = subsets_of(&ws);
     let slice = budget.div_f64((subsets.len() * passes) as f64);
     eprintln!(
@@ -324,7 +350,11 @@ fn counts_for(cal: usize, ladder: &[f64]) -> Vec<usize> {
     if ladder.is_empty() {
         let top = (POW2_TOP * cal as f64).max(1.0);
         let mut out = vec![1usize];
-        while (*out.last().unwrap() as f64) < top {
+        // At least two rungs, however slow the workload. A workload whose
+        // single iteration already outruns the top gets [1] from the loop
+        // alone, and one rung admits no subtraction at all - so the pair
+        // the analyzer needs for a slow workload would never be recorded.
+        while (*out.last().unwrap() as f64) < top || out.len() < 2 {
             out.push(out.last().unwrap() * 2);
         }
         return out;
@@ -364,6 +394,12 @@ fn run(
     // they are left out of the filename because they are in every run.
     let mut ws: Vec<Arc<Workload>> = canaries.to_vec();
     ws.extend(payloads);
+    // A canary named in the workload list as well as added structurally
+    // would be measured twice a round under one name, and the two series
+    // would be silently merged on load - a workload interleaved with
+    // itself, which is not what any of the estimates assume.
+    let mut seen = BTreeSet::new();
+    ws.retain(|w| seen.insert(w.name));
 
     eprintln!("\n=== {out} ===");
     let mut t = timing::Timing::from_env();
