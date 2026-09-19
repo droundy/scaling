@@ -307,7 +307,7 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
     eprintln!();
 
-    let subsets = subsets_of(&ws, budget, passes, &counts);
+    let subsets = subsets_of(&ws, budget, passes, &counts, canaries[0].clone());
     let slice = budget.div_f64((subsets.len() * passes) as f64);
     eprintln!(
         "{} subsets x {passes} passes, {:.1}s each, {:.1} min total",
@@ -398,6 +398,7 @@ fn subsets_of(
     budget: Duration,
     passes: usize,
     counts: &HashMap<&'static str, (usize, f64)>,
+    canary: Arc<Workload>,
 ) -> Vec<Vec<Arc<Workload>>> {
     let full: Vec<Arc<Workload>> = ws.to_vec();
     // One composition, sampled hard. The powerset answers whether a number
@@ -434,25 +435,53 @@ fn subsets_of(
         _ => {}
     }
     let n_subsets = (1usize << ws.len()) - 1;
-    // The full set is the most expensive subset, and the most rungs any
-    // workload has is what its samples get divided between.
-    let cost = round_cost(&full, counts);
-    let max_rungs = ws
-        .iter()
-        .map(|w| rungs_for(counts.get(w.name).map(|c| c.1).unwrap_or(0.0)).len())
-        .max()
-        .unwrap_or(1) as f64;
     let slice_ns = budget.as_secs_f64() * 1e9 / (n_subsets * passes) as f64;
-    let per_rung = slice_ns / cost / max_rungs;
-    if per_rung >= MIN_SAMPLES_PER_RUNG {
+    // The full set is the most expensive composition, so it is where every
+    // workload collects the least: one sample per round for everyone means
+    // the slowest member sets the sample rate for all of them.
+    let rounds = slice_ns / round_cost(&full, counts);
+
+    // The binding number is the *dearest* rung, not the average rung.
+    //
+    // Rungs are drawn weighted by inverse duration, so every rung of a
+    // workload gets the same wall time but wildly different sample counts -
+    // for instant_now the cheapest rung takes 28% of the draws and the
+    // dearest 0.68%. Reporting the mean described a distribution that is
+    // nowhere near it and overstated the dearest rung by about sixteenfold.
+    // A replayed algorithm that runs off the end of a rung yields nothing at
+    // all, so the thinnest rung is what decides whether a cell is usable.
+    let worst = ws
+        .iter()
+        .chain(std::iter::once(&canary))
+        .map(|w| {
+            let per = counts.get(w.name).map(|c| c.1).unwrap_or(0.0);
+            let d: Vec<f64> = rungs_for(per)
+                .iter()
+                .map(|&n| n as f64 * per + OVERHEAD_NS)
+                .collect();
+            let inv: f64 = d.iter().map(|x| 1.0 / x).sum();
+            // Equal time per rung: samples at rung k are t_per_rung / d_k,
+            // and t_per_rung is the same for every rung by construction.
+            let t_per_rung = rounds / inv;
+            let dearest = d.iter().cloned().fold(0.0, f64::max);
+            (w.name, t_per_rung / dearest, t_per_rung)
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(n, s, t)| (n, s, t))
+        .unwrap_or(("?", 0.0, 0.0));
+
+    if worst.1 >= MIN_SAMPLES_PER_RUNG {
         eprintln!(
-            "powerset: {n_subsets} subsets, worst case ~{per_rung:.0} samples per rung"
+            "powerset: {n_subsets} subsets; thinnest rung is {}'s dearest at \
+             ~{:.0} samples ({:.1}ms of it)",
+            worst.0, worst.1, worst.2 / 1e6
         );
         return ws.iter().cloned().powerset().filter(|s| !s.is_empty()).collect();
     }
     eprintln!(
-        "powerset would leave ~{per_rung:.0} samples per rung (want {MIN_SAMPLES_PER_RUNG:.0}); \
-         measuring singletons and the full set instead"
+        "powerset would leave {}'s dearest rung at ~{:.0} samples (want {MIN_SAMPLES_PER_RUNG:.0}); \
+         measuring singletons and the full set instead",
+        worst.0, worst.1
     );
     let mut out: Vec<Vec<Arc<Workload>>> = ws.iter().map(|w| vec![w.clone()]).collect();
     out.push(full);
