@@ -35,6 +35,23 @@ pub struct Tape {
 
 pub struct Rung {
     pub n: usize,
+    /// Wall-clock cost of taking one sample at this rung that is *not* the
+    /// batch itself: the harness loop, and whatever the workload does to
+    /// prepare its inputs.
+    ///
+    /// Charged for, because a policy that takes sixty million samples at a
+    /// 150ns rung pays this sixty million times, and a simulation that only
+    /// counted batch time would price tiny rungs at nearly free.
+    ///
+    /// Measured from the recording rather than assumed, because it is not
+    /// one number. Across five of seven workloads it is flat at ~370ns from
+    /// n=1 to n=524288 - genuinely a per-measurement constant - but
+    /// `f64_sin` prepares an input per iteration at 12.5ns each and
+    /// `parse_u64` at ~90ns each, so for those it grows with the batch. A
+    /// hard-coded constant would be right for most and wrong by a couple of
+    /// hundredfold for `parse_u64` at the top of its ladder, which is more
+    /// than enough to invert a ranking.
+    pub overhead_ns: f64,
     /// Whole-batch times in ns, in recorded order. Batch times rather than
     /// per-iteration, because a fixed cost per measurement only stands still
     /// in this currency - dividing by `n` smears it across the iterations
@@ -67,6 +84,7 @@ impl Tape {
 /// re-derived from the ladder: re-deriving was the bug that halved every
 /// count when the ladder stopped starting at one.
 pub fn tapes(r: &Run) -> Vec<Tape> {
+    let over = overheads(r);
     let mut by_base: std::collections::BTreeMap<String, Vec<Rung>> = Default::default();
     for name in &r.names {
         let base = name.split('@').next().unwrap_or(name).to_string();
@@ -75,13 +93,47 @@ pub fn tapes(r: &Run) -> Vec<Tape> {
         if batch_ns.is_empty() {
             continue;
         }
-        by_base.entry(base).or_default().push(Rung { n, batch_ns });
+        let overhead_ns = over.get(name).copied().unwrap_or(DEFAULT_OVERHEAD_NS);
+        by_base.entry(base).or_default().push(Rung { n, batch_ns, overhead_ns });
     }
     by_base
         .into_iter()
         .map(|(workload, mut rungs)| {
             rungs.sort_by_key(|x| x.n);
             Tape { workload, rungs }
+        })
+        .collect()
+}
+
+/// Used only when a recording carries no usable timestamps; see
+/// [`Rung::overhead_ns`] for where the number comes from.
+const DEFAULT_OVERHEAD_NS: f64 = 370.0;
+
+/// Per-rung overhead, read out of the gaps between consecutive samples.
+///
+/// The recording stores when each sample started and how long its batch
+/// ran, so whatever sits between the end of one batch and the start of the
+/// next is everything the harness did that was not the measurement. That is
+/// attributed to the sample being *set up*, not the one just finished,
+/// because preparing a batch happens before its clock starts.
+///
+/// Median rather than mean: these gaps carry the occasional scheduler
+/// excursion, and a mean would fold a rare millisecond into a number that
+/// then gets multiplied by every sample a policy takes.
+fn overheads(r: &Run) -> std::collections::HashMap<String, f64> {
+    let mut gaps: std::collections::HashMap<String, Vec<f64>> = Default::default();
+    for w in r.samples.windows(2) {
+        let n0 = *r.iters.get(&w[0].workload).unwrap_or(&1) as f64;
+        let gap = (w[1].t_ns as f64 - w[0].t_ns as f64) - w[0].ns * n0;
+        if gap.is_finite() && gap >= 0.0 {
+            gaps.entry(w[1].workload.clone()).or_default().push(gap);
+        }
+    }
+    gaps.into_iter()
+        .filter(|(_, v)| v.len() >= 20)
+        .map(|(k, mut v)| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (k, v[v.len() / 2])
         })
         .collect()
 }
@@ -128,7 +180,7 @@ impl<'a> Player<'a> {
             self.pos[k] = 0;
             self.wrapped = true;
         }
-        self.spent_ns += ns;
+        self.spent_ns += ns + r.overhead_ns;
         self.draws += 1;
         ns
     }
@@ -229,57 +281,100 @@ fn calibrate(p: &mut Player, target_ns: f64) -> (f64, f64) {
     }
 }
 
-/// Run one algorithm once, from one starting point in the recording.
-pub fn simulate(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
-    let sample_ns = crate::SAMPLE.as_secs_f64() * 1e9;
-    let budget_ns = pol.budget_s * 1e9;
+/// A rung choice: stand on one rung, or subtract a low from a high.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Choice {
+    One(usize),
+    Pair(usize, usize),
+}
+
+/// Rungs an algorithm could sensibly stand on.
+///
+/// The window has a floor because the fixed cost per measurement is about
+/// 160ns, so a 100ns batch is more overhead than measurement, and a ceiling
+/// because past about a millisecond every batch contains a scheduler tick -
+/// contamination stops being a rare catastrophe and becomes a near-constant
+/// tax, which is a different regime and a worse one to measure in.
+///
+/// `n == 1` is kept however long it takes: a workload slower than the
+/// ceiling cannot be measured in less than one iteration, so the window
+/// would otherwise be empty for it.
+///
+/// `n == 2` is kept up to a second, so that a moderately slow workload still
+/// has *some* pair to subtract. Without it the window admits exactly one
+/// rung for anything past the ceiling, and subtraction - the thing that
+/// removes the fixed cost per measurement - becomes unavailable precisely
+/// where the ladder is shortest. Two samples of 4ms is a cheap way to keep
+/// the option; two samples of a minute is not, hence the ceiling on it.
+pub fn reasonable(tape: &Tape) -> Vec<usize> {
+    tape.rungs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let d = r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64 + r.overhead_ns;
+            (d >= MIN_RUNG_NS && d <= MAX_RUNG_NS)
+                || (r.n == 1 && d > MAX_RUNG_NS)
+                || (r.n == 2 && d <= SLOW_PAIR_NS)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Shortest batch worth standing on: below this the per-measurement cost is
+/// most of what is being timed.
+const MIN_RUNG_NS: f64 = 100.0;
+/// Longest: past here every batch carries a scheduler tick.
+const MAX_RUNG_NS: f64 = 2e6;
+/// How long a second rung may run for a workload too slow for the window,
+/// so that subtraction stays possible there.
+const SLOW_PAIR_NS: f64 = 1e9;
+
+/// Measure at a fixed rung choice, charging nothing for calibration.
+///
+/// This is the oracle: how fast a choice *could* be if it already knew where
+/// to stand. Separating it from the calibrated path is the whole point -
+/// otherwise a policy that picks well and a policy that calibrates cheaply
+/// are scored as one number, and there is no way to tell which half is doing
+/// the work.
+pub fn measure(tape: &Tape, c: Choice, target: f64, budget_s: f64, start: f64) -> Outcome {
     let mut p = Player::new(tape, start);
+    run_choice(&mut p, c, target, budget_s)
+}
 
-    let (cal_n, per_iter) = calibrate(&mut p, sample_ns);
-
-    // Which rungs to stand on. An explicit ladder is in multiples of
-    // SAMPLE and has to be turned into counts through the calibrated
-    // per-iteration cost; the auto case just keeps what calibration found.
-    let ks: Vec<usize> = if pol.rungs.is_empty() {
-        vec![tape.nearest(cal_n)]
-    } else {
-        pol.rungs
-            .iter()
-            .map(|m| tape.nearest(m * sample_ns / per_iter.max(1e-9)))
-            .collect()
-    };
-    // A ladder that collapses onto one rung is a single-rung measurement,
-    // and has to be treated as one: subtracting a rung from itself is a
-    // division by zero that would otherwise surface as a plausible-looking
-    // infinity.
-    let mut ks = ks;
-    ks.dedup();
-
+fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome {
+    let budget_ns = budget_s * 1e9;
     let mut vals: Vec<f64> = Vec::new();
     let mut est = f64::NAN;
     let mut se = f64::INFINITY;
     let mut capped = false;
-
+    // Next sample count at which to test the stopping rule.
+    //
+    // Testing it on every draw makes the simulation quadratic: `batch_se`
+    // is linear in the samples so far, and a tight target at a small rung
+    // runs for tens of thousands of draws. Checking on a geometric schedule
+    // costs a constant factor of the draws instead, and is what a real
+    // implementation would do anyway - recomputing a standard error to
+    // decide whether to take one more 150ns sample is not free either.
+    let mut check = MIN_SAMPLES;
     loop {
-        if ks.len() >= 2 {
-            // Pair a low and a high draw and subtract, which removes
-            // whatever the measurement costs regardless of batch size. The
-            // two came from different rounds in the recording, but their
-            // cursors advance together, so they stay close in wall-clock
-            // time - the property the real alternation is buying.
-            let lo = p.draw(ks[0]);
-            let hi = p.draw(ks[1]);
-            let dn = p.n(ks[1]) - p.n(ks[0]);
-            vals.push((hi - lo) / dn);
-        } else {
-            let ns = p.draw(ks[0]);
-            vals.push(ns / p.n(ks[0]));
+        match c {
+            Choice::One(k) => {
+                let ns = p.draw(k);
+                vals.push(ns / p.n(k));
+            }
+            Choice::Pair(a, b) => {
+                // Low then high, paired and subtracted, which removes
+                // whatever a measurement costs regardless of its size.
+                let lo = p.draw(a);
+                let hi = p.draw(b);
+                vals.push((hi - lo) / (p.n(b) - p.n(a)));
+            }
         }
-
-        if vals.len() >= MIN_SAMPLES {
+        if vals.len() >= check {
+            check = ((vals.len() as f64 * 1.3) as usize).max(vals.len() + 1);
             est = vals.iter().sum::<f64>() / vals.len() as f64;
             se = batch_se(&vals);
-            if est > 0.0 && se / est <= pol.target {
+            if est > 0.0 && se / est <= target {
                 break;
             }
         }
@@ -287,16 +382,44 @@ pub fn simulate(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
             capped = true;
             break;
         }
+        // Off the end of the recording: from here on it would be re-reading
+        // noise it has already seen, which is not another trial.
+        if p.wrapped {
+            break;
+        }
     }
+    let used = match c {
+        Choice::One(k) => vec![p.n(k) as usize],
+        Choice::Pair(a, b) => vec![p.n(a) as usize, p.n(b) as usize],
+    };
+    Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped, used }
+}
 
-    Outcome {
-        est,
-        se,
-        seconds: p.spent_ns * 1e-9,
-        capped,
-        wrapped: p.wrapped,
-        used: ks.iter().map(|&k| tape.rungs[k].n).collect(),
-    }
+/// Replay a calibration, then let it choose its own rungs and measure.
+///
+/// The counterpart to [`measure`]: this one pays for calibration and has to
+/// find the rung without being told, which is the situation any real
+/// algorithm is in.
+pub fn calibrated(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
+    let sample_ns = crate::SAMPLE.as_secs_f64() * 1e9;
+    let mut p = Player::new(tape, start);
+    let (cal_n, per_iter) = calibrate(&mut p, sample_ns);
+    let ok = reasonable(tape);
+    let pick = |want: f64| -> usize {
+        let k = tape.nearest(want);
+        // Never stand outside the window, however calibration came out.
+        *ok.iter().min_by_key(|&&i| (i as i64 - k as i64).abs()).unwrap_or(&k)
+    };
+    let c = if pol.rungs.is_empty() {
+        Choice::One(pick(cal_n))
+    } else if pol.rungs.len() == 1 {
+        Choice::One(pick(pol.rungs[0] * sample_ns / per_iter.max(1e-9)))
+    } else {
+        let a = pick(pol.rungs[0] * sample_ns / per_iter.max(1e-9));
+        let b = pick(pol.rungs[1] * sample_ns / per_iter.max(1e-9));
+        if a == b { Choice::One(a) } else { Choice::Pair(a.min(b), a.max(b)) }
+    };
+    run_choice(&mut p, c, pol.target, pol.budget_s)
 }
 
 /// The best estimate of a workload's true per-iteration cost, from the whole
@@ -332,39 +455,97 @@ pub fn truth(tape: &Tape) -> (f64, f64) {
 /// Accuracy targets to report against, as relative standard error.
 const TARGETS: [f64; 3] = [0.02, 0.01, 0.005];
 
-/// The algorithms under test. All of them get every target and the same
-/// budget, so the only thing that differs is the algorithm.
-fn policies(target: f64) -> Vec<Policy> {
-    vec![
-        Policy { name: "one-rung", rungs: &[1.0], target, budget_s: 10.0 },
-        Policy { name: "auto", rungs: &[], target, budget_s: 10.0 },
-        Policy { name: "small", rungs: &[0.05], target, budget_s: 10.0 },
-        Policy { name: "sub-wide", rungs: &[1.0, 8.0], target, budget_s: 10.0 },
-        Policy { name: "sub-short", rungs: &[0.05, 0.4], target, budget_s: 10.0 },
-        Policy { name: "sub-quarter", rungs: &[0.25, 2.0], target, budget_s: 10.0 },
-    ]
-}
+/// Starting points per cell for the oracle sweep, which runs a hundred-odd
+/// choices per workload per goal, and for the calibrated policies, of which
+/// there are three.
+const ORACLE_TRIALS: usize = 60;
+const CAL_TRIALS: usize = 200;
 
-/// How many independent starting points to replay each policy from.
-const TRIALS: usize = 200;
-
-/// A run is judged against the bar *it reported*, and an honest 1-sigma bar
-/// is inside its own error about this often.
+/// An honest 1-sigma bar contains the truth about this often.
 const EXPECT_COVERAGE: f64 = 0.68;
-/// Below this, the reported uncertainty is not a standard error.
 const COVERAGE_FLOOR: f64 = 0.50;
 /// An error this many times the goal is not a wide tail, it is a wrong answer.
 const BLOWUP: f64 = 4.0;
 const BLOWUP_MAX: f64 = 0.01;
-/// Fraction of runs that must land inside the goal. Half, because the goal
-/// is a standard error and not a guarantee.
+/// Half, because the goal is a standard error and not a guarantee.
 const PASS_WITHIN: f64 = 0.50;
-/// Above this fraction of trials reusing the recording, a cell is not
-/// reporting statistics, it is reporting the same noise several times.
+/// Above this fraction of trials running off the end of the recording, a
+/// cell is reporting the same noise repeatedly rather than statistics.
 const WRAP_MAX: f64 = 0.10;
 
 fn pct(x: f64) -> String {
     format!("{:.0}%", 100.0 * x)
+}
+
+fn fmt_time(s: f64, capped: bool) -> String {
+    // The cap is not a failure. A run that spent its whole budget gave a
+    // fine answer and merely took a while, so it reads as a lower bound on
+    // time rather than as a wrong result.
+    let t = if s >= 1.0 {
+        format!("{s:.2}s")
+    } else if s >= 1e-3 {
+        format!("{:.1}ms", s * 1e3)
+    } else {
+        format!("{:.0}us", s * 1e6)
+    };
+    if capped {
+        format!("> {t}")
+    } else {
+        t
+    }
+}
+
+struct Score {
+    label: String,
+    time: f64,
+    capped: bool,
+    within: f64,
+    cover: f64,
+    blow: f64,
+    thin: bool,
+    pass: bool,
+}
+
+fn score(label: String, outs: &[Outcome], truth_ns: f64, target: f64) -> Score {
+    let n = outs.len() as f64;
+    let good: Vec<&Outcome> = outs.iter().filter(|o| o.est.is_finite() && o.est > 0.0).collect();
+    let thin = good.len() as f64 / n < 0.9
+        || good.iter().filter(|o| o.wrapped).count() as f64 / n > WRAP_MAX;
+    if good.is_empty() {
+        return Score { label, time: f64::INFINITY, capped: false, within: 0.0, cover: 0.0,
+                       blow: 1.0, thin: true, pass: false };
+    }
+    let rel = |o: &Outcome| (o.est - truth_ns).abs() / truth_ns;
+    let within = good.iter().filter(|o| rel(o) <= target).count() as f64 / n;
+    let cover = good.iter().filter(|o| (o.est - truth_ns).abs() <= o.se).count() as f64 / n;
+    let blow = good.iter().filter(|o| rel(o) > BLOWUP * target).count() as f64 / n;
+    let capped = good.iter().filter(|o| o.capped).count() as f64 / n > 0.5;
+    let mut times: Vec<f64> = good.iter().map(|o| o.seconds).collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let time = times[times.len() / 2];
+    let pass = !thin && within >= PASS_WITHIN && cover >= COVERAGE_FLOOR && blow <= BLOWUP_MAX;
+    Score { label, time, capped, within, cover, blow, thin, pass }
+}
+
+fn line(s: &Score) -> String {
+    format!(
+        "{:>22} {:>9} {:>8} {:>8} {:>8}",
+        s.label,
+        fmt_time(s.time, s.capped),
+        pct(s.within),
+        pct(s.cover),
+        pct(s.blow)
+    )
+}
+
+/// The calibrated algorithms: these pay for calibration and have to find
+/// their own rungs, which is the situation a real one is in.
+fn cal_policies(target: f64) -> Vec<Policy> {
+    vec![
+        Policy { name: "cal one-rung", rungs: &[1.0], target, budget_s: 10.0 },
+        Policy { name: "cal auto", rungs: &[], target, budget_s: 10.0 },
+        Policy { name: "cal two-rung", rungs: &[0.25, 2.0], target, budget_s: 10.0 },
+    ]
 }
 
 pub fn report(paths: &[String]) {
@@ -379,14 +560,14 @@ pub fn report(paths: &[String]) {
     }
 
     println!(
-        "calibration replayed at analysis time: {TRIALS} trials per cell, \
-         from different starting points in the same recording.\n\
-         within = fraction landing inside the accuracy goal (want >={})\n\
-         cover  = fraction inside the run's own reported error bar (want ~{})\n\
-         blow   = fraction off by more than {BLOWUP}x the goal (want <={})\n",
-        pct(PASS_WITHIN),
-        pct(EXPECT_COVERAGE),
-        pct(BLOWUP_MAX),
+        "Rung choice, calibration and stopping replayed from recordings.\n\
+         A rung is usable if one sample costs between {:.0}ns and {:.0}ms, or if n=1.\n\n\
+         oracle     = told which rung to stand on, and charged nothing for knowing\n\
+         calibrated = had to find the rung, and charged for the probes\n\
+         within     = landed inside the accuracy goal (want >={})\n\
+         cover      = landed inside the bar the run itself claimed (want ~{})\n\
+         blow       = off by more than {BLOWUP}x the goal (want <={})\n",
+        MIN_RUNG_NS, MAX_RUNG_NS / 1e6, pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
     );
 
     for tape in &tapes {
@@ -394,93 +575,89 @@ pub fn report(paths: &[String]) {
         if !(truth_ns.is_finite() && truth_ns > 0.0) {
             continue;
         }
+        let ok = reasonable(tape);
+        if ok.is_empty() {
+            continue;
+        }
         println!(
-            "===== {} =====  truth {:.4} ns/iter +- {:.2}%   ({} rungs, n={}..{})",
-            tape.workload,
-            truth_ns,
-            100.0 * truth_se / truth_ns,
-            tape.rungs.len(),
-            tape.rungs.first().map(|r| r.n).unwrap_or(0),
-            tape.rungs.last().map(|r| r.n).unwrap_or(0),
+            "===== {} =====  truth {:.4} ns/iter +- {:.2}%",
+            tape.workload, truth_ns, 100.0 * truth_se / truth_ns
         );
+        println!(
+            "  usable rungs: n={}..{} ({} of {}), overhead {:.0}ns/sample",
+            tape.rungs[ok[0]].n,
+            tape.rungs[*ok.last().unwrap()].n,
+            ok.len(),
+            tape.rungs.len(),
+            tape.rungs[ok[0]].overhead_ns,
+        );
+
+        // Every usable rung, and every usable pair.
+        let mut choices: Vec<Choice> = ok.iter().map(|&k| Choice::One(k)).collect();
+        for (x, &a) in ok.iter().enumerate() {
+            for &b in &ok[x + 1..] {
+                choices.push(Choice::Pair(a, b));
+            }
+        }
+
         for &target in &TARGETS {
             println!("  goal {:.1}%", 100.0 * target);
             println!(
-                "    {:>12} {:>10} {:>8} {:>8} {:>8} {:>8}  {}",
-                "policy", "time", "within", "cover", "blow", "capped", "verdict"
+                "    {:>22} {:>9} {:>8} {:>8} {:>8}",
+                "choice", "time", "within", "cover", "blow"
             );
-            for pol in policies(target) {
-                let outs: Vec<Outcome> = (0..TRIALS)
-                    .map(|i| simulate(tape, &pol, i as f64 / TRIALS as f64))
+            let mut scores: Vec<Score> = choices
+                .iter()
+                .map(|&c| {
+                    let label = match c {
+                        Choice::One(k) => format!("n={}", tape.rungs[k].n),
+                        Choice::Pair(a, b) => {
+                            format!("n={},{}", tape.rungs[a].n, tape.rungs[b].n)
+                        }
+                    };
+                    let outs: Vec<Outcome> = (0..ORACLE_TRIALS)
+                        .map(|i| {
+                            measure(tape, c, target, 10.0, i as f64 / ORACLE_TRIALS as f64)
+                        })
+                        .collect();
+                    score(label, &outs, truth_ns, target)
+                })
+                .collect();
+            scores.retain(|s| !s.thin);
+            let passing: Vec<&Score> = {
+                let mut v: Vec<&Score> = scores.iter().filter(|s| s.pass).collect();
+                v.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+                v
+            };
+            if passing.is_empty() {
+                // Nothing to rank, so nothing is printed in rank order. The
+                // useful fact is which choice came closest and how far short
+                // it fell, not a list of failures sorted by a time that was
+                // never earned.
+                let best = scores.iter().max_by(|a, b| {
+                    a.within.partial_cmp(&b.within).unwrap()
+                });
+                match best {
+                    Some(b) => println!(
+                        "      no usable choice; closest was {} at within {}",
+                        b.label, pct(b.within)
+                    ),
+                    None => println!("      recording too thin at this goal"),
+                }
+            } else {
+                for s in passing.iter().take(3) {
+                    println!("    {}  oracle", line(s));
+                }
+            }
+            for pol in cal_policies(target) {
+                let outs: Vec<Outcome> = (0..CAL_TRIALS)
+                    .map(|i| calibrated(tape, &pol, i as f64 / CAL_TRIALS as f64))
                     .collect();
-                let n = outs.len() as f64;
-                let good: Vec<&Outcome> = outs.iter().filter(|o| o.est.is_finite()).collect();
-                if good.is_empty() {
+                let s = score(pol.name.to_string(), &outs, truth_ns, target);
+                if s.thin {
                     continue;
                 }
-                let rel = |o: &Outcome| (o.est - truth_ns).abs() / truth_ns;
-                let within = good.iter().filter(|o| rel(o) <= target).count() as f64 / n;
-                let cover = good
-                    .iter()
-                    .filter(|o| (o.est - truth_ns).abs() <= o.se)
-                    .count() as f64
-                    / n;
-                let blow = good.iter().filter(|o| rel(o) > BLOWUP * target).count() as f64 / n;
-                let capped = good.iter().filter(|o| o.capped).count() as f64 / n;
-                // A trial that ran off the end of the recording wrapped
-                // around and re-consumed noise it had already seen, which
-                // makes independent-looking trials agree for a reason that
-                // has nothing to do with the algorithm. Where that is
-                // common the cell has no statistics in it, so the numbers
-                // are not printed: a row of figures with a caveat beside it
-                // is a row of figures I will read and the caveat I will skip.
-                let wrapped = good.iter().filter(|o| o.wrapped).count() as f64 / n;
-                if wrapped > WRAP_MAX {
-                    println!(
-                        "    {:>12} {:>10} {:>8} {:>8} {:>8} {:>8}  recording too thin ({} of trials wrapped)",
-                        pol.name, "-", "-", "-", "-", "-", pct(wrapped)
-                    );
-                    continue;
-                }
-                let mut times: Vec<f64> = good.iter().map(|o| o.seconds).collect();
-                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let med = times[times.len() / 2];
-                // The cap is not a failure. A run that used its whole
-                // budget gave a fine answer and merely took a while, so it
-                // is reported as a lower bound on time rather than as a
-                // wrong result.
-                let time = if capped > 0.5 {
-                    format!("> {:.2}s", med)
-                } else if med >= 1.0 {
-                    format!("{:.2}s", med)
-                } else {
-                    format!("{:.0}ms", med * 1e3)
-                };
-                let mut bad: Vec<&str> = Vec::new();
-                if within < PASS_WITHIN {
-                    bad.push("within");
-                }
-                if cover < COVERAGE_FLOOR {
-                    bad.push("cover");
-                }
-                if blow > BLOWUP_MAX {
-                    bad.push("blow");
-                }
-                let verdict = if bad.is_empty() {
-                    "pass".to_string()
-                } else {
-                    format!("FAIL: {}", bad.join(","))
-                };
-                println!(
-                    "    {:>12} {:>10} {:>8} {:>8} {:>8} {:>8}  {}",
-                    pol.name,
-                    time,
-                    pct(within),
-                    pct(cover),
-                    pct(blow),
-                    pct(capped),
-                    verdict
-                );
+                println!("    {}  {}", line(&s), if s.pass { "pass" } else { "FAIL" });
             }
         }
         println!();
