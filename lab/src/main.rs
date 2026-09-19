@@ -115,8 +115,11 @@ fn main() {
                 if payloads.is_empty() {
                     continue;
                 }
-                run(&canaries, payloads, rounds, &dir, &[1.0], None, None, 0);
+                run(&canaries, payloads, rounds, &dir, &[1.0], None, None, 0, None);
             }
+        }
+        Some("format") => {
+            replay::format_test();
         }
         Some("selftest") => {
             replay::selftest();
@@ -132,6 +135,27 @@ fn main() {
         }
         Some("simulate") => {
             replay::report(&args[2..]);
+        }
+        Some("collect") => {
+            let budget = args.get(2).and_then(|s| parse_duration(s)).unwrap_or_else(|| {
+                eprintln!("usage: lab collect <duration, e.g. 30m> <dir> [workloads]");
+                std::process::exit(2);
+            });
+            let dir = args.get(3).cloned().unwrap_or_else(|| "collect".to_string());
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("could not create {dir}: {e}");
+                std::process::exit(2);
+            }
+            let ws: Vec<Arc<Workload>> = args
+                .get(4)
+                .map(|s| s.as_str())
+                .unwrap_or(LADDER_SET)
+                .split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(|n| Arc::new(workloads::named(n)))
+                .collect();
+            collect(ws, budget, &dir);
         }
         Some("ladder") => {
             let rounds: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
@@ -305,6 +329,122 @@ fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
     r.len() - 1
 }
 
+/// `30s`, `45m`, `2h` - or a bare number, read as seconds.
+fn parse_duration(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last()? {
+        's' => (&s[..s.len() - 1], 1.0),
+        'm' => (&s[..s.len() - 1], 60.0),
+        'h' => (&s[..s.len() - 1], 3600.0),
+        _ => (s, 1.0),
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    (v > 0.0).then(|| Duration::from_secs_f64(v * mult))
+}
+
+/// Measure everything, decide nothing.
+///
+/// The runner has no algorithm in it. It does not choose a rung, it does not
+/// test for convergence, and no workload ever leaves the round early - which
+/// is the point, because a workload dropping out changes the composition for
+/// everyone still measuring, and composition moves a number by percent-scale
+/// amounts. Every workload appears in every round of its subset, so the
+/// recording holds one fixed composition per file and the samples in it are
+/// all comparable.
+///
+/// One parameter: how long to spend. Not a round count, because the cost of
+/// a round varies by orders of magnitude with what is in it - 2ms for the
+/// fast set, 40ms once `copy_64mb` joins - so the same round count means
+/// something different for every subset, while the same duration does not.
+///
+/// Calibration needs no separate recording. The ladder is powers of two from
+/// n=1, so the rounds already contain samples at every count a growth loop
+/// would probe; replaying calibration is then a question asked of the
+/// recording rather than a phase that had to be captured.
+fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
+    let passes: usize = std::env::var("LAB_PASSES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    let canaries = [
+        Arc::new(Workload::cpu_canary()),
+        Arc::new(Workload::mem_canary()),
+    ];
+
+    // Calibrated once and shared, so a workload is measured at the same
+    // batch sizes in every subset. Letting each subset calibrate for itself
+    // would mix the effect under study - whether a number moves with its
+    // company - into the comparison meant to measure it.
+    eprintln!("calibrating {} workloads once", ws.len());
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut counts: HashMap<&'static str, (usize, f64)> = HashMap::new();
+    for w in ws.iter().chain(canaries.iter()) {
+        counts.insert(w.name, calibrate(w, &mut seed));
+    }
+
+    let subsets = subsets_of(&ws);
+    let slice = budget.div_f64((subsets.len() * passes) as f64);
+    eprintln!(
+        "{} subsets x {passes} passes, {:.1}s each, {:.1} min total",
+        subsets.len(),
+        slice.as_secs_f64(),
+        budget.as_secs_f64() / 60.0,
+    );
+
+    let end = Instant::now() + budget;
+    let mut perm = 0xD1B54A32D192ED03u64;
+    for pass in 0..passes {
+        // Fresh order each pass, so a run cut short does not systematically
+        // starve whichever subsets sit at the end of a fixed order.
+        let mut order: Vec<usize> = (0..subsets.len()).collect();
+        for i in (1..order.len()).rev() {
+            perm = step(perm);
+            order.swap(i, (perm >> 33) as usize % (i + 1));
+        }
+        for &i in &order {
+            if Instant::now() >= end {
+                eprintln!("budget spent");
+                return;
+            }
+            let stop = (Instant::now() + slice).min(end);
+            run(
+                &canaries,
+                subsets[i].clone(),
+                usize::MAX,
+                dir,
+                &[],
+                Some(&counts),
+                Some(pass),
+                0,
+                Some(stop),
+            );
+        }
+    }
+}
+
+/// Which compositions to measure.
+///
+/// The powerset is what answers "does this number move with its company",
+/// and nothing else does - but it is 2^n, which is 31 subsets for five
+/// workloads and 2047 for eleven. Past a threshold the budget per subset
+/// gets too thin to say anything, so the choice becomes singletons (each
+/// workload alone, the control) plus the full set (what a user actually
+/// runs), which is where most of the composition signal lives.
+fn subsets_of(ws: &[Arc<Workload>]) -> Vec<Vec<Arc<Workload>>> {
+    const MAX_POWERSET: usize = 63;
+    if (1usize << ws.len()) - 1 <= MAX_POWERSET {
+        return ws
+            .iter()
+            .cloned()
+            .powerset()
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let mut out: Vec<Vec<Arc<Workload>>> = ws.iter().map(|w| vec![w.clone()]).collect();
+    out.push(ws.to_vec());
+    out
+}
+
 fn counts_for(cal: usize, ladder: &[f64]) -> Vec<usize> {
     // An empty ladder means powers of two in *count*, from a single
     // iteration up to about `POW2_TOP` samples' worth.
@@ -449,6 +589,7 @@ fn sweep(ws: Vec<Arc<Workload>>, rounds: usize, dir: &str, ladder: &[f64], passe
                 Some(&counts),
                 Some(pass),
                 warmup,
+                None,
             );
         }
     }
@@ -469,6 +610,7 @@ fn run(
     counts: Option<&HashMap<&'static str, (usize, f64)>>,
     pass: Option<usize>,
     warmup: usize,
+    deadline: Option<Instant>,
 ) {
     // Sorted, so a subset gets the same name however the powerset happened
     // to order it - `compare out/*/a+b.csv` then lines up the same subset
@@ -597,7 +739,24 @@ fn run(
     }
     let composition = composition_of(&out);
 
+    let mut done = 0usize;
     for r in 0..rounds {
+        // The budget running out - *not* a convergence test. Nothing here
+        // looks at the numbers it is collecting, and no workload ever
+        // leaves the round early, which is what keeps the composition
+        // fixed for every sample in the recording. Deciding when enough
+        // has been measured is an analysis-time question, asked of the
+        // recording afterwards.
+        //
+        // Checked once per round rather than once per sample, because a
+        // round is the unit that keeps every workload's sample count
+        // equal; cutting inside one would short whichever workloads sit
+        // late in the slot order.
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                break;
+            }
+        }
         if r % MACHINE_EVERY == 0 {
             if let Some(f) = mach.as_mut() {
                 use std::io::Write as _;
@@ -644,8 +803,11 @@ fn run(
             let time_me = ws[i].time_batch(*count);
             t.time(r, slot, name, time_me);
         }
+        done += 1;
     }
-    eprintln!("{rounds} rounds in {:.2}s", start.elapsed().as_secs_f64());
+    // What was actually run, not what was asked for: a deadline-driven run
+    // is handed `usize::MAX` and would otherwise report it.
+    eprintln!("{done} rounds in {:.2}s", start.elapsed().as_secs_f64());
     t.write(&out);
     eprintln!("wrote {out}");
 

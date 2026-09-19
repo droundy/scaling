@@ -1372,3 +1372,124 @@ pub fn correlate(paths: &[String]) {
     }
     println!();
 }
+
+/// Write a synthetic tape as a real recording, read it back, and check it
+/// survived.
+///
+/// Until now the self-test built `Tape` values in memory and handed them
+/// straight to the estimators, so it proved the arithmetic and nothing about
+/// the path the runner actually uses: `Timing::write` to LABBIN1, `Run::load`
+/// back, `tapes()` to regroup by rung. Every serious bug this lab has had
+/// lived in that stretch - a rung index that silently dropped rung zero, a
+/// replay that re-applied the ladder and halved every count - and none of
+/// them would change an in-memory number.
+///
+/// So: round-trip the synthetic data through disk and compare. The estimate
+/// from the reloaded recording has to match the estimate from the tape it
+/// was written from.
+fn round_trip(tape: &Tape, path: &str) -> Option<Tape> {
+    let mut t = crate::timing::Timing::from_env();
+    if t.replaying() {
+        eprintln!("LAB_REPLAY is set; not round-tripping");
+        return None;
+    }
+    for (k, r) in tape.rungs.iter().enumerate() {
+        t.iters.insert(crate::rung_name(&tape.workload, k), r.n);
+    }
+    // Emitted round by round, one sample per rung per round, so the
+    // per-rung sequences come back in the order they were written - which
+    // is what every block-based error estimate depends on.
+    let rounds = tape.rungs.iter().map(|r| r.batch_ns.len()).min()?;
+    let mut t_ns: u128 = 1;
+    for r in 0..rounds {
+        for (k, rung) in tape.rungs.iter().enumerate() {
+            let ns = rung.batch_ns[r];
+            t.log.push(crate::timing::Sample {
+                round: r,
+                slot: k,
+                workload: crate::rung_name(&tape.workload, k),
+                t_ns,
+                ns,
+            });
+            t_ns += ns as u128 + rung.overhead_ns as u128;
+        }
+    }
+    t.write(path);
+    let run = Run::load(path);
+    tapes(&run).into_iter().find(|x| x.workload == tape.workload)
+}
+
+/// How much the round trip may change an estimate.
+///
+/// The format stores batch times as integer nanoseconds, so a 2930.7ns batch
+/// reads back as 2931 and the recovered slope moves in the last few digits.
+/// Measured, that is about two parts per million - four orders of magnitude
+/// below the tightest accuracy goal anything here aims at (0.5%), and it
+/// averages down over samples rather than accumulating.
+///
+/// The tolerance is therefore set from what the measurement needs, not from
+/// how exact the arithmetic happens to be: 0.01%, a fiftieth of the tightest
+/// goal. Anything larger is not rounding and wants explaining.
+const FORMAT_TOLERANCE: f64 = 1e-4;
+
+/// Check the recording format preserves what the estimators need.
+pub fn format_test() {
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let cases = [
+        ("noiseless", Noise::Additive(0.0)),
+        ("additive", Noise::Additive(150.0)),
+        ("multiplicative", Noise::Multiplicative(0.02)),
+        ("ticks", Noise::MulTick(0.02, 1e6, 5000.0)),
+    ];
+    println!(
+        "Round-tripping synthetic data through the recording format the runner writes.\n\n\
+         Each case is written as LABBIN1, read back, and regrouped into rungs. The\n\
+         estimate from the reloaded file must match the one from the tape it came from.\n"
+    );
+    println!(
+        "{:>16} {:>8} {:>8} {:>14} {:>14} {:>12}",
+        "case", "rungs", "samples", "in memory", "from disk", "difference"
+    );
+    let (a, b) = (370.0, 2.5);
+    let mut bad = 0;
+    for (name, noise) in cases {
+        let tape = synthetic(name, a, b, noise, 600, 0x243F6A8885A308D3, MAX_RUNG_NS);
+        let path = format!("{dir}/lab-format-{name}.bin");
+        let Some(back) = round_trip(&tape, &path) else {
+            continue;
+        };
+        let est = |t: &Tape| -> f64 {
+            let mut p = Player::new(t, 0.0);
+            let mut pts = Vec::new();
+            for k in 0..p.rungs() {
+                for _ in 0..40 {
+                    let ns = p.draw(k);
+                    pts.push((p.n(k), ns));
+                }
+            }
+            slope(&pts)
+        };
+        let (x, y) = (est(&tape), est(&back));
+        let diff = if x != 0.0 { (y - x).abs() / x } else { 0.0 };
+        let samples: usize = back.rungs.iter().map(|r| r.batch_ns.len()).sum();
+        let ok = diff < FORMAT_TOLERANCE && back.rungs.len() == tape.rungs.len();
+        if !ok {
+            bad += 1;
+        }
+        println!(
+            "{:>16} {:>8} {:>8} {:>14.6} {:>14.6} {:>11.2e} {}",
+            name,
+            format!("{}/{}", back.rungs.len(), tape.rungs.len()),
+            samples,
+            x,
+            y,
+            diff,
+            if ok { "ok" } else { "MISMATCH" }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+    if bad > 0 {
+        println!("\n{bad} case(s) did not survive the round trip.");
+    }
+    println!();
+}
