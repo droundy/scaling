@@ -121,6 +121,9 @@ fn main() {
         Some("selftest") => {
             replay::selftest();
         }
+        Some("correlate") => {
+            replay::correlate(&args[2..]);
+        }
         Some("blocks") => {
             replay::blocks();
         }

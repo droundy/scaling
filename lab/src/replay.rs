@@ -1286,3 +1286,89 @@ pub fn blocks() {
         println!();
     }
 }
+
+/// How correlated are consecutive measurements, and how far apart in *time*?
+///
+/// This is the question behind rounds. The correlation that makes `sd/sqrt(n)`
+/// a lie does not live in the sample index, it lives in wall-clock time: a
+/// clock frequency, a thermal state, a cache occupancy all persist for some
+/// span of time regardless of how many measurements are taken meanwhile. So
+/// the gap between one measurement of a workload and its next - which is the
+/// round duration - is the thing that decorrelates them, and a longer round
+/// is a real, if blunt, mitigation.
+///
+/// If the underlying process has a correlation time `tau`, consecutive
+/// samples of one workload should correlate as `exp(-gap/tau)`. That is
+/// checkable: the recordings carry timestamps, and a powerset sweep already
+/// varied the round length by varying how many workloads share the round.
+pub fn correlate(paths: &[String]) {
+    println!(
+        "Correlation between consecutive measurements of the same workload,\n\
+         against the wall-clock gap between them - which is the round length.\n\n\
+         rho1 = correlation at lag 1; tau = implied correlation time if rho ~ exp(-gap/tau)\n"
+    );
+    println!(
+        "{:>16} {:>9} {:>11} {:>7} {:>7} {:>7} {:>10}",
+        "workload", "in round", "gap", "rho1", "rho2", "rho4", "tau"
+    );
+    let mut rows: Vec<(String, usize, f64, f64, f64, f64)> = Vec::new();
+    for path in paths {
+        let r = Run::load(path);
+        let bases: std::collections::BTreeSet<String> = r
+            .names
+            .iter()
+            .map(|n| n.split('@').next().unwrap_or(n).to_string())
+            .collect();
+        let in_round = bases.len();
+        // One row per workload, not one per recording. Taking "whichever
+        // workload had the most samples" compares different workloads
+        // across recordings, and workloads differ in how correlated they
+        // are intrinsically - which is exactly what has to be held fixed
+        // when the round length is the variable.
+        let _ = &bases;
+        // Per *rung*, not per workload. Which rung happened to collect the
+        // most samples varies between recordings, so picking that one
+        // compares different batch sizes - and batch size changes both how
+        // long a sample takes and how much of the cache it disturbs, which
+        // is most of what the correlation is about.
+        for name in &r.names {
+            let base = name.clone();
+            let v = r.get(name);
+            if v.len() < 500 {
+                continue;
+            }
+            let times: Vec<f64> = r
+                .samples
+                .iter()
+                .filter(|s| &s.workload == name)
+                .map(|s| s.t_ns as f64)
+                .collect();
+            let mut gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+            if gaps.is_empty() {
+                continue;
+            }
+            gaps.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let gap = gaps[gaps.len() / 2];
+            let rho = |lag: usize| -> f64 {
+                if v.len() <= lag {
+                    return f64::NAN;
+                }
+                crate::estimate::corr(&v[..v.len() - lag], &v[lag..])
+            };
+            rows.push((base.clone(), in_round, gap, rho(1), rho(2), rho(4)));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    for (base, in_round, gap, r1, r2, r4) in rows {
+        let tau = if r1 > 0.01 && r1 < 1.0 {
+            format!("{:.0}us", -gap / r1.ln() / 1e3)
+        } else {
+            "  -".to_string()
+        };
+        println!(
+            "{:>16} {:>9} {:>9.0}us {:>7.3} {:>7.3} {:>7.3} {:>10}",
+            base, in_round, gap / 1e3, r1, r2, r4, tau
+        );
+    }
+    println!();
+}
