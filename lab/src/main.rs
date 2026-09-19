@@ -33,11 +33,12 @@ const SAMPLE: Duration = Duration::from_micros(100);
 
 /// The workloads measured when none are named.
 ///
-/// The three with real ladders - six to nine rungs each, and so actual
-/// choices about where to stand - plus the cheapest of the ones past the
-/// rung window, so a round holds something whose cost is dominated by a
-/// syscall rather than by user-space work.
-const LADDER_SET: &str = "instant_now,f64_sin,btree_miss,urandom_read";
+/// Two with real ladders - nine rungs and six - where rung choice,
+/// subtraction and calibration all matter, and three past the rung window
+/// with two rungs each and no choice to make. The powerset is exponential
+/// in this list, so it is short on purpose: five payloads is 31 subsets,
+/// where seven would be 127.
+const LADDER_SET: &str = "f64_sin,btree_miss,urandom_read,str_find,copy_64mb";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -318,13 +319,38 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
 
     let end = Instant::now() + budget;
     let mut perm = 0xD1B54A32D192ED03u64;
+    // Cheapest compositions first, so a run cut short loses the expensive
+    // ones rather than a random half of everything.
+    //
+    // The cost of a subset is set almost entirely by whether the slowest
+    // workloads are in it - copy_64mb and str_find are 99.7% of a full
+    // round - so this sorts into a few natural tiers rather than a smooth
+    // gradient. Within a tier the order is still shuffled afresh each pass,
+    // which is what stops a subset's position in the pass from being
+    // confounded with when in the run it was measured. Across tiers that
+    // confound is accepted deliberately: the slow subsets do always sit
+    // late in a pass, and being able to stop the run at any point and still
+    // have whole cheap compositions is worth more.
+    let mut cost: Vec<f64> = subsets.iter().map(|s| round_cost(s, &counts)).collect();
+    let mut order_by_cost: Vec<usize> = (0..subsets.len()).collect();
+    order_by_cost.sort_by(|&a, &b| cost[a].partial_cmp(&cost[b]).unwrap());
+    cost.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
     for pass in 0..passes {
-        // Fresh order each pass, so a run cut short does not systematically
-        // starve whichever subsets sit at the end of a fixed order.
-        let mut order: Vec<usize> = (0..subsets.len()).collect();
-        for i in (1..order.len()).rev() {
-            perm = step(perm);
-            order.swap(i, (perm >> 33) as usize % (i + 1));
+        let mut order = order_by_cost.clone();
+        // Shuffle only within runs of near-equal cost.
+        let mut i = 0;
+        while i < order.len() {
+            let mut j = i + 1;
+            while j < order.len() && cost[j] <= cost[i] * 1.5 {
+                j += 1;
+            }
+            for k in (i + 1..j).rev() {
+                perm = step(perm);
+                let t = i + (perm >> 33) as usize % (k - i + 1);
+                order.swap(k, t);
+            }
+            i = j;
         }
         for &i in &order {
             if Instant::now() >= end {

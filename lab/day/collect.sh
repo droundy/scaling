@@ -22,26 +22,30 @@ cp target/release/lab "$BIN"
 # Payloads only: cpu_canary is in every round structurally, and naming it
 # here would measure it twice under one name.
 #
-#   instant_now   32ns    9 rungs
-#   f64_sin       34ns    9 rungs
-#   btree_miss   501ns    6 rungs
-#   urandom_read  19us    2 rungs
-#   thread_spawn 192us    2 rungs
-#   str_find     2.2ms    2 rungs
-#   copy_64mb    6.6ms    2 rungs
+#   f64_sin        34ns   9 rungs      1.0us/round
+#   btree_miss    517ns   6 rungs      2.3us/round
+#   urandom_read 19.1us   2 rungs     25.9us/round
+#   str_find      2.2ms   2 rungs      2.91ms/round
+#   copy_64mb     6.4ms   2 rungs      8.55ms/round
 #
-# The first three are where the measurement problem lives - a 370ns fixed
-# cost is a large fraction of a 32ns iteration, so rung choice, subtraction
-# and calibration all matter. The rest have no rung to choose and are here
-# to confirm nothing breaks on the easy case, and because copy_64mb is the
-# neighbour most likely to move someone else's number.
-ALL="instant_now,f64_sin,btree_miss,urandom_read,thread_spawn,str_find,copy_64mb"
+# The first two are where the measurement problem lives: a 370ns fixed cost
+# is a large fraction of a 34ns iteration, so rung choice, subtraction and
+# calibration all matter, and there are six to nine rungs to choose between.
+# The last three have one rung and no choice; they are here because a round
+# has to contain the neighbours a user would really have, and copy_64mb is
+# the one most likely to move someone else's number.
+#
+# Five payloads, not seven: the powerset is exponential, and the slow ones
+# compound it by setting the round period for everyone sharing the round.
+ALL="f64_sin,btree_miss,urandom_read,str_find,copy_64mb"
 
 # Every composition: does a workload's number move with the company it
-# keeps? 127 subsets, and nothing else answers it.
-quiet-bench run "$BIN" collect "${1:-8h}" day/collect/powerset "$ALL"
+# keeps? 31 subsets, and nothing else answers it. Cheapest compositions run
+# first, so stopping this early costs the expensive ones rather than a
+# random half of everything.
+quiet-bench run "$BIN" collect "${1:-20h}" day/collect/powerset "$ALL"
 
 # One composition, sampled hard: how an algorithm behaves in the round a
 # user would actually get.
-LAB_SUBSETS=full quiet-bench run "$BIN" collect "${2:-2h}" day/collect/deep "$ALL"
+LAB_SUBSETS=full quiet-bench run "$BIN" collect "${2:-3h}" day/collect/deep "$ALL"
 echo "collection done"
