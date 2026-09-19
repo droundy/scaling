@@ -121,6 +121,9 @@ fn main() {
         Some("selftest") => {
             replay::selftest();
         }
+        Some("ticks") => {
+            replay::tick_ceiling();
+        }
         Some("simulate") => {
             replay::report(&args[2..]);
         }

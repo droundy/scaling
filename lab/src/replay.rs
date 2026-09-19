@@ -324,7 +324,10 @@ pub enum Choice {
     /// estimate depends on, and it showed - under additive noise it claimed
     /// a bar eighty times too large and covered 100% of the time. An
     /// estimator and its error bar are not separable choices.
-    All {},
+    /// `trim` is the fraction discarded from each end of every rung before
+    /// fitting, which keeps the estimate centred on symmetric noise while
+    /// discarding the one-sided contamination that ticks add.
+    All { trim: f64 },
 }
 
 /// Rungs an algorithm could sensibly stand on.
@@ -362,8 +365,28 @@ pub fn reasonable(tape: &Tape) -> Vec<usize> {
 /// Shortest batch worth standing on: below this the per-measurement cost is
 /// most of what is being timed.
 const MIN_RUNG_NS: f64 = 100.0;
-/// Longest: past here every batch carries a scheduler tick.
-const MAX_RUNG_NS: f64 = 2e6;
+/// Longest batch worth standing on.
+///
+/// This was 2ms, chosen as "where every batch carries a scheduler tick" -
+/// which is an argument for staying well below it, not for putting the
+/// ceiling there. Ticks arrive every millisecond and add ~5us, so the chance
+/// of a batch being hit is its length over the tick period, and the bias
+/// that follows is ~0.5% of any batch long enough to be hit regularly.
+/// Sweeping the ceiling against a known answer:
+///
+/// | ceiling | P(hit) | plain fit | trimmed fit |
+/// | --- | --- | --- | --- |
+/// | 1ms | 100% | +0.545% | +0.549% |
+/// | 100us | 17% | +0.751% | +0.637% |
+/// | 50us | 8% | +0.403% | +0.161% |
+/// | 20us | 2% | +0.240% | -0.016% |
+///
+/// Nothing is lost by coming down here. A fit takes its lever arm from the
+/// *ratio* of iteration counts, not from absolute duration, so a ladder
+/// reaching 8192 iterations at 20us has the same lever as one reaching 2ms -
+/// at a hundredth of the cost, and in the regime where a tick is a rare
+/// outlier that trimming can remove rather than a tax on every sample.
+const MAX_RUNG_NS: f64 = 2e4;
 /// How long a second rung may run for a workload too slow for the window,
 /// so that subtraction stays possible there.
 const SLOW_PAIR_NS: f64 = 1e9;
@@ -385,6 +408,71 @@ pub fn measure(tape: &Tape, c: Choice, target: f64, budget_s: f64, start: f64) -
 /// The slope is the per-iteration cost and the intercept is the fixed cost
 /// per measurement, so a fit over the whole ladder yields both - where a
 /// single rung yields neither separately, and a pair yields the slope only.
+/// Fit through one robust point per rung, rather than through every sample.
+///
+/// A scheduler tick adds about 5us to whatever batch it lands in, and the
+/// chance of landing grows with batch length: ~1% at a 10us batch, ~10% at
+/// 100us, ~87% at 2ms. Where hits are rare they are outliers and can be
+/// trimmed away; where they are ubiquitous there is no clean batch left to
+/// find and the contamination is simply part of what the workload appears
+/// to cost. Trimming the upper tail of each rung therefore removes the bias
+/// at the short rungs and cannot remove it at the long ones - which is an
+/// argument about where the ladder should end, not only about how to average.
+///
+/// One-sided: a tick only ever makes a batch slower.
+fn fit_trimmed(pts: &[(f64, f64)], trim: f64) -> f64 {
+    if trim <= 0.0 {
+        return slope(pts);
+    }
+    let mut by: std::collections::BTreeMap<u64, Vec<f64>> = Default::default();
+    for &(n, ns) in pts {
+        by.entry(n as u64).or_default().push(ns);
+    }
+    let rows: Vec<(f64, f64)> = by
+        .into_iter()
+        .filter_map(|(n, mut v)| {
+            if v.len() < MIN_FOR_TRIM {
+                return None;
+            }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // Symmetric, not one-sided.
+            //
+            // Cutting only the upper tail looks right - a tick can only add
+            // time - but the tail it cuts is mostly ordinary noise. On a 2%
+            // symmetric distribution a 25% upper trim moves the mean down by
+            // about 0.4 sigma, which measured as a -0.8% bias: the tick bias
+            // traded for a trim bias of the same size. Trimming both ends
+            // leaves the centre where it was for symmetric noise, while
+            // still discarding one-sided contamination, so long as fewer
+            // than `trim` of the samples are contaminated.
+            let cut = ((v.len() as f64) * trim).floor() as usize;
+            let lo = cut.min(v.len() / 2);
+            let hi = v.len() - cut.min(v.len() / 2);
+            let w = &v[lo..hi.max(lo + 1)];
+            let m = w.iter().sum::<f64>() / w.len() as f64;
+            Some((n as f64, m))
+        })
+        .collect();
+    if rows.len() < 2 {
+        return slope(pts);
+    }
+    slope(&rows)
+}
+
+/// Fewest samples at a rung before trimming its tail means anything.
+const MIN_FOR_TRIM: usize = 4;
+
+/// How much of each rung to discard from *each* end.
+///
+/// Half of it is doing the work - the upper half, where ticks land - and the
+/// other half is there to keep the estimate centred on symmetric noise. The
+/// fraction has to exceed the chance of a tick landing in the longest batch
+/// on the ladder, which is the batch length over the tick period: ~2% at
+/// 20us, 17% at 100us, 50% at 500us, and certainty beyond a millisecond.
+/// Past 50% a median has nothing clean left to find, which is the real
+/// argument for where a ladder should end.
+const TRIM: f64 = 0.25;
+
 fn slope(pts: &[(f64, f64)]) -> f64 {
     let k = pts.len() as f64;
     let sx: f64 = pts.iter().map(|p| p.0).sum();
@@ -415,7 +503,7 @@ fn ladder_len(pts: &[(f64, f64)]) -> Option<usize> {
     Some(ns.len())
 }
 
-fn slope_se(pts: &[(f64, f64)]) -> f64 {
+fn slope_se(pts: &[(f64, f64)], trim: f64) -> f64 {
     if pts.len() < MIN_SAMPLES * 2 {
         return f64::INFINITY;
     }
@@ -449,7 +537,7 @@ fn slope_se(pts: &[(f64, f64)]) -> f64 {
     }
     let mut sl: Vec<f64> = Vec::with_capacity(b);
     for i in 0..b {
-        let v = slope(&pts[i * per..(i + 1) * per]);
+        let v = fit_trimmed(&pts[i * per..(i + 1) * per], trim);
         if !v.is_finite() {
             return f64::INFINITY;
         }
@@ -467,6 +555,10 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut ladder: Vec<usize> = Vec::new();
     let fitting = matches!(c, Choice::All { .. });
+    let trim = match c {
+        Choice::All { trim } => trim,
+        _ => 0.0,
+    };
     if fitting {
         // Discover the ladder by growing from one iteration, keeping every
         // probe. This is the growth loop, except that nothing it measures
@@ -508,7 +600,7 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
                 let hi = p.draw(b);
                 vals.push((hi - lo) / (p.n(b) - p.n(a)));
             }
-            Choice::All {} => {
+            Choice::All { .. } => {
                 // A shuffled sweep, not independent draws.
                 //
                 // Drawing each rung independently lets contiguous blocks end
@@ -536,8 +628,8 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
         if count >= check {
             check = ((count as f64 * 1.3) as usize).max(count + 1);
             if fitting {
-                est = slope(&pts);
-                se = slope_se(&pts);
+                est = fit_trimmed(&pts, trim);
+                se = slope_se(&pts, trim);
             } else {
                 est = vals.iter().sum::<f64>() / vals.len() as f64;
                 se = batch_se(&vals);
@@ -771,7 +863,8 @@ pub fn report(paths: &[String]) {
             );
             let mut rows: Vec<Score> = Vec::new();
             for (label, c) in [
-                ("all-rungs", Choice::All {}),
+                ("all-rungs", Choice::All { trim: 0.0 }),
+                ("all-rungs/trim", Choice::All { trim: TRIM }),
             ] {
                 let outs: Vec<Outcome> = (0..CAL_TRIALS)
                     .map(|i| measure(tape, c, target, 10.0, i as f64 / CAL_TRIALS as f64))
@@ -818,7 +911,7 @@ pub fn report(paths: &[String]) {
 /// So: synthesise a ladder from `a + b*n` plus a chosen noise, where `b` is
 /// known exactly. Any departure from `b` is the harness or the estimator,
 /// not a disagreement about what the truth is.
-fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64) -> Tape {
+fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64, ceiling_ns: f64) -> Tape {
     let mut rng = seed | 1;
     let mut uni = {
         let mut r = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
@@ -857,22 +950,31 @@ fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64
                     }
                     // Rare, large, one-sided: a scheduler tick landing in
                     // the batch. Probability grows with batch length.
-                    Noise::Tick(rate_per_us, hit_ns) => {
-                        // Probability that a tick lands in this batch grows
-                        // with how long the batch runs.
-                        let p = (clean / 1e3) * rate_per_us;
-                        if uni() < p {
-                            hit_ns
-                        } else {
-                            0.0
-                        }
+                    Noise::MulTick(rel, period_ns, hit_ns) => {
+                        // Ticks are a periodic timer interrupt, not a
+                        // Poisson process. With CONFIG_HZ=1000 they arrive
+                        // every millisecond, so a batch of length T with a
+                        // random phase contains floor(T/P + u) of them.
+                        //
+                        // The difference from Poisson is not cosmetic. The
+                        // count here varies by at most one however long the
+                        // batch, so the contamination's *variance* stays
+                        // bounded while its mean grows with T. A short batch
+                        // therefore gets a 0-or-1 outlier - visible, and
+                        // trimmable - and a long batch gets a near-constant
+                        // tax with no outlier to find. Poisson would have
+                        // the spread grow as sqrt(T) and would make long
+                        // batches look noisier and more detectable than
+                        // they really are.
+                        let hits = (clean / period_ns + uni()).floor();
+                        rel * clean * z + hits * hit_ns
                     }
                 };
                 (clean + e).max(1.0)
             })
             .collect();
         rungs.push(Rung { n, batch_ns, overhead_ns: 370.0 });
-        if clean > MAX_RUNG_NS || n > 1 << 30 {
+        if clean > ceiling_ns || n > 1 << 30 {
             break;
         }
         n *= 2;
@@ -892,7 +994,11 @@ enum Noise {
     Additive(f64),
     Multiplicative(f64),
     Ar1(f64, f64),
-    Tick(f64, f64),
+    /// Baseline multiplicative noise *plus* periodic ticks. The baseline
+    /// matters: without it the fit converges the moment its error estimate
+    /// hits zero, takes a handful of samples, and never meets a tick - which
+    /// looked like an unbiased estimator and was an untested one.
+    MulTick(f64, f64, f64),
 }
 
 impl Noise {
@@ -901,7 +1007,10 @@ impl Noise {
             Noise::Additive(sd) => format!("additive {sd:.0}ns"),
             Noise::Multiplicative(r) => format!("multiplicative {:.1}%", 100.0 * r),
             Noise::Ar1(r, phi) => format!("ar1 {:.1}% phi={phi}", 100.0 * r),
-            Noise::Tick(rate, hit) => format!("tick {rate}/us of {hit:.0}ns"),
+            Noise::MulTick(rel, p, hit) => format!(
+                "multiplicative {:.1}% + {:.0}ns ticks every {:.0}us",
+                100.0 * rel, hit, p / 1e3
+            ),
         }
     }
 }
@@ -931,7 +1040,7 @@ pub fn selftest() {
         ("fast", 370.0, 2.5, Noise::Multiplicative(0.02)),
         ("fast", 370.0, 2.5, Noise::Additive(150.0)),
         ("fast", 370.0, 2.5, Noise::Ar1(0.02, 0.8)),
-        ("fast", 370.0, 2.5, Noise::Tick(0.001, 5000.0)),
+        ("fast", 370.0, 2.5, Noise::MulTick(0.02, 1e6, 5000.0)),
         ("slow", 370.0, 250.0, Noise::Multiplicative(0.02)),
         ("slow", 370.0, 250.0, Noise::Ar1(0.02, 0.8)),
     ];
@@ -946,7 +1055,7 @@ pub fn selftest() {
         pct(EXPECT_COVERAGE)
     );
     for (which, a, b, noise) in cases {
-        let tape = synthetic(which, a, b, noise, SELFTEST_SAMPLES, 0x243F6A8885A308D3);
+        let tape = synthetic(which, a, b, noise, SELFTEST_SAMPLES, 0x243F6A8885A308D3, MAX_RUNG_NS);
         println!(
             "===== {which}: {b} ns/iter, fixed {a:.0}ns, {} =====",
             noise.label()
@@ -986,7 +1095,8 @@ pub fn selftest() {
         };
         let trials = SELFTEST_TRIALS;
         for (label, c) in [
-            ("all-rungs", Choice::All {}),
+            ("all-rungs", Choice::All { trim: 0.0 }),
+            ("all-rungs/trim", Choice::All { trim: TRIM }),
         ] {
             run(
                 label.to_string(),
@@ -1024,4 +1134,69 @@ pub fn selftest() {
         }
         println!();
     }
+}
+
+/// Where the ladder should end, when scheduler ticks are the contaminant.
+///
+/// A tick adds ~5us to whatever batch it lands in, at a rate of about
+/// 1020/s - so the chance of a batch being hit is roughly `rate * length`:
+/// 1% at 10us, 10% at 100us, 64% at 1ms, 87% at 2ms. That is not a
+/// gradually worsening problem but two regimes. Below about a millisecond a
+/// hit is a rare outlier, so trimming the upper tail removes it and the
+/// estimate is clean. Above, nearly every batch is hit, the contamination is
+/// near-constant, and a tax proportional to batch length is exactly what a
+/// slower workload looks like - no estimator can tell them apart.
+///
+/// So the ceiling is not a matter of taste. This sweeps it against a known
+/// answer to find where the bias actually appears.
+pub fn tick_ceiling() {
+    let (a, b) = (370.0, 2.5);
+    let noise = Noise::MulTick(0.02, 1e6, 5000.0);
+    let target = 0.01;
+    let trials = SELFTEST_TRIALS;
+    println!(
+        "Tick contamination against ladder ceiling.\n\
+         True cost {b} ns/iter, fixed {a:.0}ns, 2% noise, 5us ticks every 1ms.\n\
+         P(hit) is the chance the longest batch on the ladder contains a tick.\n\n\
+         {:>10} {:>8} {:>16} {:>16}\n",
+        "ceiling", "P(hit)", "plain fit bias", "trimmed fit bias"
+    );
+    for ceiling in [1e6, 2e5, 1e5, 5e4, 2e4, 1e4, 5e3] {
+        let tape = synthetic("t", a, b, noise, SELFTEST_SAMPLES, 0x9E3779B97F4A7C15, ceiling);
+        let top = tape
+            .rungs
+            .last()
+            .map(|r| r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64)
+            .unwrap_or(0.0);
+        // With a periodic source the chance of a hit is just the batch
+        // length as a fraction of the tick period, capped at certainty.
+        let p_hit = (top / 1e6).min(1.0);
+        let bias = |trim: f64| -> String {
+            let mut es: Vec<f64> = (0..trials)
+                .filter_map(|i| {
+                    let o = measure(
+                        &tape,
+                        Choice::All { trim },
+                        target,
+                        10.0,
+                        i as f64 / trials as f64,
+                    );
+                    o.est.is_finite().then_some(o.est)
+                })
+                .collect();
+            if es.len() < 10 {
+                return "  too few".to_string();
+            }
+            es.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            format!("{:>+14.3}%", 100.0 * (es[es.len() / 2] - b) / b)
+        };
+        println!(
+            "{:>9.0}us {:>7.0}% {:>16} {:>16}",
+            ceiling / 1e3,
+            100.0 * p_hit,
+            bias(0.0),
+            bias(TRIM)
+        );
+    }
+    println!();
 }
