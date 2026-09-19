@@ -14,14 +14,18 @@
 //! between two of them is attributable to the algorithm.
 //!
 //! **What this cannot do.** A replayed sample at rung k was taken in a round
-//! that also contained the other rungs. A real run that used only rung k
-//! would establish a different regime - different cache occupancy, different
-//! round period - and we have measured composition shifting costs by
-//! percent-scale amounts. So simulated timings inherit the wide-ladder
-//! round, not the round the algorithm would have created. That is a bias of
-//! the same order as the effects under study, and it is why `validate`
-//! exists: the simulator's answer for an algorithm we *also* measured
-//! directly has to match, or the simulation is not measuring that algorithm.
+//! that also contained the other rungs. An algorithm that stood only on rung
+//! k would establish a different regime - different cache occupancy,
+//! different round period - and composition moves a cost by percent-scale
+//! amounts, so a replayed timing inherits the recorded round rather than the
+//! one that algorithm would have created.
+//!
+//! How much that matters depends on the algorithm. One that samples the
+//! whole ladder is replayed almost exactly, because the recorder draws rungs
+//! the same way; one that parks on a single rung is the case where the
+//! recorded round and the real one diverge most. Checking it means measuring
+//! an algorithm for real and comparing, which is worth doing once there is
+//! an algorithm worth checking.
 
 use crate::timing::{rung_name, Run};
 
@@ -44,13 +48,13 @@ pub struct Rung {
     /// counted batch time would price tiny rungs at nearly free.
     ///
     /// Measured from the recording rather than assumed, because it is not
-    /// one number. Across five of seven workloads it is flat at ~370ns from
-    /// n=1 to n=524288 - genuinely a per-measurement constant - but
-    /// `f64_sin` prepares an input per iteration at 12.5ns each and
-    /// `parse_u64` at ~90ns each, so for those it grows with the batch. A
-    /// hard-coded constant would be right for most and wrong by a couple of
-    /// hundredfold for `parse_u64` at the top of its ladder, which is more
-    /// than enough to invert a ranking.
+    /// one number. For most workloads it is flat at ~370ns across the whole
+    /// ladder - genuinely a per-measurement constant - but a workload that
+    /// prepares an input per iteration pays that per iteration too, so for
+    /// those it grows with the batch. `f64_sin` runs about 12.5ns an
+    /// iteration of preparation. A hard-coded constant would be right for
+    /// most and badly wrong at the top of such a ladder, which is more than
+    /// enough to invert a ranking.
     pub overhead_ns: f64,
     /// Whole-batch times in ns, in recorded order. Batch times rather than
     /// per-iteration, because a fixed cost per measurement only stands still

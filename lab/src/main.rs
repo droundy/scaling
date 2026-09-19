@@ -178,14 +178,25 @@ fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
     ) {
         return (bits >> 33) as usize % r.len();
     }
-    let total: f64 = r.iter().map(|x| 1.0 / x.2).sum();
+    // The cost of a sample is its batch *plus* the per-measurement overhead,
+    // not the batch alone.
+    //
+    // Weighting by the batch alone says a cpu_canary sample at n=1 costs
+    // 2.36ns when it really costs 372ns - over-weighting the cheapest rung
+    // by 158x and pushing the dearest rung's draw probability down to
+    // 1.2e-4. Filling the top rung then took 83 million rounds instead of
+    // 1.7 million, which buffered 166 million samples and ran the machine
+    // out of memory before anything could be written. `round_cost` had the
+    // overhead in all along; this is the half that disagreed.
+    let cost = |x: &(usize, String, f64)| x.2 + OVERHEAD_NS;
+    let total: f64 = r.iter().map(|x| 1.0 / cost(x)).sum();
     if !total.is_finite() || total <= 0.0 {
         return (bits >> 33) as usize % r.len();
     }
     let u = (bits >> 11) as f64 / (1u64 << 53) as f64 * total;
     let mut acc = 0.0;
     for (k, x) in r.iter().enumerate() {
-        acc += 1.0 / x.2;
+        acc += 1.0 / cost(x);
         if u < acc {
             return k;
         }
@@ -396,6 +407,20 @@ fn round_cost(ws: &[Arc<Workload>], counts: &HashMap<&'static str, (usize, f64)>
 /// Roughly what a measurement costs outside the timer; see `Rung::overhead_ns`
 /// in `replay.rs`, where it is measured rather than assumed.
 const OVERHEAD_NS: f64 = 370.0;
+
+/// Most samples worth recording at any one rung.
+///
+/// Not a stopping rule - nothing here looks at the numbers - but a capacity
+/// one, of a kind with the rung window. A cheap composition runs at nearly a
+/// million rounds a second, so an equal *time* slice buys it far more data
+/// than any replay can read and about 33MB a second of disk: thirty seconds
+/// of `f64_sin` alone produced a gigabyte. Past this point a subset has
+/// nothing left to learn and moves on, which also means the expensive
+/// subsets are reached sooner.
+///
+/// Twenty-five times `MIN_SAMPLES_PER_RUNG`, so there is a wide margin
+/// between the least a rung may have and the most it may keep.
+const MAX_SAMPLES_PER_RUNG: usize = 10_000;
 
 /// Fewest samples a rung should end up with, for the most expensive subset.
 ///
@@ -683,7 +708,23 @@ fn run(
 
     // One shared log for the whole sweep, appended to. Keyed by composition
     // and pass so a sample can be lined up with the rounds it sat between.
-    const MACHINE_EVERY: usize = 200;
+    // How often to snapshot the machine's state, **in time rather than in
+    // rounds**.
+    //
+    // This was every 200 rounds, which is a trap: a round is 2.1us for
+    // f64_sin alone and 11.5ms for the full set, so the same round count
+    // meant a /proc read every 420us in one composition and every 2.3s in
+    // another. Reading CPU frequency, package temperature and
+    // procs_running is far from free - /proc/stat alone walks every CPU -
+    // so cheap compositions were spending a large fraction of each round
+    // inside the instrumentation.
+    //
+    // That is the worst shape a bug can have here. The contamination scales
+    // inversely with round cost, so it lands hardest on exactly the cheap
+    // compositions the powerset exists to compare, and it would be
+    // indistinguishable from the composition effect being measured. It also
+    // wrote 36MB of machine.csv in five minutes.
+    const MACHINE_EVERY: Duration = Duration::from_secs(1);
     let mach_path = format!("{dir}/machine.csv");
     let fresh = std::fs::metadata(&mach_path)
         .map(|m| m.len() == 0)
@@ -700,6 +741,11 @@ fn run(
     let composition = composition_of(&out);
 
     let mut done = 0usize;
+    let mut last_machine = Instant::now() - MACHINE_EVERY;
+    // Samples taken at each rung, so a subset can stop once every rung has
+    // more than any replay will read. The thinnest rung is what counts: the
+    // rest are cheaper and fill up sooner.
+    let mut taken: Vec<Vec<usize>> = rungs.iter().map(|r| vec![0; r.len()]).collect();
     for r in 0..rounds {
         // The budget running out - *not* a convergence test. Nothing here
         // looks at the numbers it is collecting, and no workload ever
@@ -717,7 +763,8 @@ fn run(
                 break;
             }
         }
-        if r % MACHINE_EVERY == 0 {
+        if last_machine.elapsed() >= MACHINE_EVERY {
+            last_machine = Instant::now();
             if let Some(f) = mach.as_mut() {
                 use std::io::Write as _;
                 let t_ns = std::time::SystemTime::now()
@@ -762,8 +809,19 @@ fn run(
             }
             let time_me = ws[i].time_batch(*count);
             t.time(r, slot, name, time_me);
+            taken[i][pick[i]] += 1;
         }
         done += 1;
+        // Checked once a round, and only against the cheapest thing to
+        // check: whether the thinnest rung anywhere has filled up.
+        if done % 4096 == 0
+            && taken
+                .iter()
+                .all(|w| w.iter().all(|&c| c >= MAX_SAMPLES_PER_RUNG))
+        {
+            eprintln!("  every rung full at {done} rounds");
+            break;
+        }
     }
     // What was actually run, not what was asked for: a deadline-driven run
     // is handed `usize::MAX` and would otherwise report it.
@@ -890,11 +948,20 @@ fn machine_state() -> String {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "-".to_string())
     };
-    let temp = (0..)
-        .map(|z| format!("/sys/class/thermal/thermal_zone{z}"))
-        .take_while(|z| std::path::Path::new(z).exists())
-        .find(|z| read(&format!("{z}/type")) == "x86_pkg_temp")
-        .map(|z| read(&format!("{z}/temp")))
+    // Located once. Finding it means stat-ing every thermal zone and
+    // reading each one's `type`, which is a dozen file opens to answer a
+    // question whose answer cannot change while the process runs.
+    static TEMP_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let temp = TEMP_PATH
+        .get_or_init(|| {
+            (0..)
+                .map(|z| format!("/sys/class/thermal/thermal_zone{z}"))
+                .take_while(|z| std::path::Path::new(z).exists())
+                .find(|z| read(&format!("{z}/type")) == "x86_pkg_temp")
+                .map(|z| format!("{z}/temp"))
+        })
+        .as_ref()
+        .map(|p| read(p))
         .unwrap_or_else(|| "-".to_string());
     let procs = std::fs::read_to_string("/proc/stat")
         .ok()
