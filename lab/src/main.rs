@@ -121,6 +121,9 @@ fn main() {
         Some("selftest") => {
             replay::selftest();
         }
+        Some("blocks") => {
+            replay::blocks();
+        }
         Some("ticks") => {
             replay::tick_ceiling();
         }

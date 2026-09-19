@@ -327,7 +327,7 @@ pub enum Choice {
     /// `trim` is the fraction discarded from each end of every rung before
     /// fitting, which keeps the estimate centred on symmetric noise while
     /// discarding the one-sided contamination that ticks add.
-    All { trim: f64 },
+    All { trim: f64, floor: usize },
 }
 
 /// Rungs an algorithm could sensibly stand on.
@@ -555,9 +555,9 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut ladder: Vec<usize> = Vec::new();
     let fitting = matches!(c, Choice::All { .. });
-    let trim = match c {
-        Choice::All { trim } => trim,
-        _ => 0.0,
+    let (trim, floor) = match c {
+        Choice::All { trim, floor } => (trim, floor),
+        _ => (0.0, 0),
     };
     if fitting {
         // Discover the ladder by growing from one iteration, keeping every
@@ -634,7 +634,12 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
                 est = vals.iter().sum::<f64>() / vals.len() as f64;
                 se = batch_se(&vals);
             }
-            if est > 0.0 && se.is_finite() && se / est <= target {
+            // The floor is on *sweeps*, not samples: batch means needs
+            // blocks longer than the correlation time and enough of them to
+            // take a spread over, and stopping at the first moment the bar
+            // looks small enough is exactly how it fails to get either.
+            let sweeps = if fitting && !ladder.is_empty() { pts.len() / ladder.len() } else { 0 };
+            if est > 0.0 && se.is_finite() && se / est <= target && sweeps >= floor {
                 break;
             }
         }
@@ -863,8 +868,8 @@ pub fn report(paths: &[String]) {
             );
             let mut rows: Vec<Score> = Vec::new();
             for (label, c) in [
-                ("all-rungs", Choice::All { trim: 0.0 }),
-                ("all-rungs/trim", Choice::All { trim: TRIM }),
+                ("all-rungs", Choice::All { trim: 0.0, floor: 0 }),
+                ("all-rungs/trim", Choice::All { trim: TRIM, floor: 0 }),
             ] {
                 let outs: Vec<Outcome> = (0..CAL_TRIALS)
                     .map(|i| measure(tape, c, target, 10.0, i as f64 / CAL_TRIALS as f64))
@@ -1095,8 +1100,8 @@ pub fn selftest() {
         };
         let trials = SELFTEST_TRIALS;
         for (label, c) in [
-            ("all-rungs", Choice::All { trim: 0.0 }),
-            ("all-rungs/trim", Choice::All { trim: TRIM }),
+            ("all-rungs", Choice::All { trim: 0.0, floor: 0 }),
+            ("all-rungs/trim", Choice::All { trim: TRIM, floor: 0 }),
         ] {
             run(
                 label.to_string(),
@@ -1176,7 +1181,7 @@ pub fn tick_ceiling() {
                 .filter_map(|i| {
                     let o = measure(
                         &tape,
-                        Choice::All { trim },
+                        Choice::All { trim, floor: 0 },
                         target,
                         10.0,
                         i as f64 / trials as f64,
@@ -1199,4 +1204,85 @@ pub fn tick_ceiling() {
         );
     }
     println!();
+}
+
+/// Does batch means actually fix correlation, given enough samples?
+///
+/// The theory says yes: group consecutive measurements, take the spread of
+/// the group means, and whatever is correlated *within* a group divides out.
+/// The measured bar comes out three times too small anyway, and the reason
+/// is not that the theory is wrong but that the stopping rule never lets it
+/// apply. Two conditions have to hold, and early stopping breaks both:
+///
+///   - each block must be **longer than the correlation time**, or
+///     consecutive blocks are still correlated and their spread is too small;
+///   - there must be **enough blocks** for that spread to mean anything.
+///
+/// At the natural stopping point there are four blocks of two sweeps each,
+/// against an AR(1) correlation time of about five samples. So the bar is
+/// too small, which triggers stopping, which is why there are only four
+/// blocks. This sweeps a floor on the number of sweeps to break the loop and
+/// see whether the bar converges on the truth when the data is there.
+pub fn blocks() {
+    let (a, b) = (370.0, 2.5);
+    let target = 0.01;
+    let trials = SELFTEST_TRIALS;
+    println!(
+        "Batch means against how long the run is allowed to be.\n\
+         AR(1) noise: each sample pulls the next one with it, which is what\n\
+         makes sd/sqrt(n) a lie and what batch means is supposed to repair.\n\n\
+         bar/sd of 1 means the claimed error bar matches the actual spread.\n"
+    );
+    for phi in [0.0, 0.5, 0.8, 0.95] {
+        println!("  phi = {phi}  (correlation time ~{:.0} samples)", 1.0 / (1.0 - phi));
+        println!(
+            "    {:>10} {:>9} {:>9} {:>9} {:>8} {:>7}",
+            "min sweeps", "time", "spread", "bar", "bar/sd", "cover"
+        );
+        let tape = synthetic(
+            "x", a, b, Noise::Ar1(0.02, phi), SELFTEST_SAMPLES, 0x243F6A8885A308D3, MAX_RUNG_NS,
+        );
+        for floor in [8usize, 16, 32, 64, 128, 256] {
+            let outs: Vec<Outcome> = (0..trials)
+                .map(|i| {
+                    measure(
+                        &tape,
+                        Choice::All { trim: 0.0, floor },
+                        target,
+                        10.0,
+                        i as f64 / trials as f64,
+                    )
+                })
+                .collect();
+            let good: Vec<&Outcome> = outs
+                .iter()
+                .filter(|o| o.est.is_finite() && !o.wrapped)
+                .collect();
+            if good.len() < 10 {
+                println!("    {floor:>10}   too few trials without reusing the recording");
+                continue;
+            }
+            let k = good.len() as f64;
+            let m = good.iter().map(|o| o.est).sum::<f64>() / k;
+            let sd = (good.iter().map(|o| (o.est - m) * (o.est - m)).sum::<f64>()
+                / (k - 1.0))
+                .sqrt();
+            let mut bars: Vec<f64> = good.iter().map(|o| o.se).collect();
+            bars.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let bar = bars[bars.len() / 2];
+            let cover = good.iter().filter(|o| (o.est - b).abs() <= o.se).count() as f64 / k;
+            let mut ts: Vec<f64> = good.iter().map(|o| o.seconds).collect();
+            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            println!(
+                "    {:>10} {:>9} {:>8.2}% {:>8.2}% {:>8.2} {:>7}",
+                floor,
+                fmt_time(ts[ts.len() / 2], false),
+                100.0 * sd / b,
+                100.0 * bar / b,
+                bar / sd.max(f64::MIN_POSITIVE),
+                pct(cover)
+            );
+        }
+        println!();
+    }
 }
