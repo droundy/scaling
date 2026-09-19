@@ -124,16 +124,42 @@ fn main() {
 /// spends collection time on data no replay will ever read.
 const MAX_RUNG: Duration = Duration::from_secs(10);
 
-/// Top of a power-of-two ladder, as a multiple of [`SAMPLE`].
+/// Shortest batch worth recording.
 ///
-/// `SAMPLE` is 100us, which is five times the longest batch the analyzer
-/// will stand on. The headroom is deliberate - it leaves room to revisit
-/// that ceiling against recorded data rather than having to measure again -
-/// but it should not be much more than that. This was ten samples, a 1ms
-/// top rung, back when the ceiling was 2ms; with rungs drawn uniformly that
-/// spends most of a collection on batches no replay will ever read, since
-/// the cost of a round is dominated by the largest rung in it.
-const POW2_TOP: f64 = 1.0;
+/// The harness costs about 370ns per measurement outside the timer, so a
+/// batch below this is mostly overhead - the machine time buys almost no
+/// information about the workload.
+const RUNG_MIN_NS: f64 = 100.0;
+
+/// Longest batch worth recording.
+///
+/// Scheduler ticks arrive every millisecond and add ~5us to whatever batch
+/// they land in, so the chance of a batch being hit is its length over the
+/// tick period. Below about 20us a hit is a rare outlier that a trimmed
+/// estimate removes; by 100us it is 17% and trimming leaves a bias behind;
+/// past a millisecond every batch is hit and the contamination is
+/// indistinguishable from the workload being slower. Sweeping this against
+/// a known answer put the boundary at 20us.
+///
+/// Nothing is lost by stopping here. A fit takes its lever arm from the
+/// *ratio* of iteration counts, not from absolute duration, so a ladder
+/// reaching 8192 iterations at 20us has the same lever as one reaching 2ms
+/// at a hundredth of the cost.
+///
+/// This is a budget decision and can be revisited. What it is for is keeping
+/// a recording quick enough that the whole powerset is affordable and every
+/// rung ends up with far more samples than any replay needs - not for making
+/// a claim about precision. Widening it costs machine time in proportion to
+/// the largest rung, which is why it is set once, here, rather than
+/// negotiated per analysis.
+const RUNG_MAX_NS: f64 = 2e4;
+
+/// How long a second rung may run for a workload too slow for the window.
+///
+/// A workload slower than `RUNG_MAX_NS` has only n=1 inside it, and one rung
+/// admits no subtraction. Recording n=2 as well keeps that option open, up
+/// to a point: two samples of 4ms is cheap, two samples of a minute is not.
+const SLOW_PAIR_NS: f64 = 1e9;
 
 /// How rung draws are weighted; see [`weighted_rung`].
 static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -254,8 +280,8 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     eprintln!("\nladder plan:");
     let mut seen = BTreeSet::new();
     for w in ws.iter().chain(canaries.iter()).filter(|w| seen.insert(w.name)) {
-        let (cal, per) = counts[w.name];
-        let plan: Vec<String> = counts_for(cal, &[])
+        let (_cal, per) = counts[w.name];
+        let plan: Vec<String> = rungs_for(per)
             .iter()
             .map(|&c| {
                 let ns = c as f64 * per;
@@ -300,7 +326,6 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
                 subsets[i].clone(),
                 usize::MAX,
                 dir,
-                &[],
                 Some(&counts),
                 Some(pass),
                 0,
@@ -333,37 +358,42 @@ fn subsets_of(ws: &[Arc<Workload>]) -> Vec<Vec<Arc<Workload>>> {
     out
 }
 
-fn counts_for(cal: usize, ladder: &[f64]) -> Vec<usize> {
-    // An empty ladder means powers of two in *count*, from a single
-    // iteration up to about `POW2_TOP` samples' worth.
-    //
-    // Duration multiples are the right way to say where the rungs go when
-    // the rungs are the measurement. They are the wrong way when the
-    // recording has to support replaying a *calibration*, because the growth
-    // loop probes 1 and then doubles: a ladder of duration multiples lands
-    // on counts like 348 and 1740, so a replayed probe can never stand where
-    // it asked to, and the thing being simulated is not the thing that runs.
-    //
-    // Powers of two also reach n=1 for every workload by construction, which
-    // is where every growth loop starts - rather than by choosing a bottom
-    // rung small enough and hoping it was small enough.
-    if ladder.is_empty() {
-        let top = (POW2_TOP * cal as f64).max(1.0);
-        let mut out = vec![1usize];
-        // At least two rungs, however slow the workload. A workload whose
-        // single iteration already outruns the top gets [1] from the loop
-        // alone, and one rung admits no subtraction at all - so the pair
-        // the analyzer needs for a slow workload would never be recorded.
-        while (*out.last().unwrap() as f64) < top || out.len() < 2 {
-            out.push(out.last().unwrap() * 2);
+/// The rungs to record for a workload, given what one iteration costs.
+///
+/// Powers of two in count, because the calibration a replayed algorithm has
+/// to reproduce probes a count and then grows it - a ladder of duration
+/// multiples lands on counts like 348 and 1740, so a replayed probe could
+/// never stand where it asked to.
+///
+/// **This filter lives here, in the recorder, and not in the analysis.**
+/// Which rungs exist is a property of the recording. Deciding it twice -
+/// recording a wide ladder and then discarding most of it when reading -
+/// spends machine time on batches nothing will ever look at. The only thing
+/// it says to an analysis is which algorithms can be replayed at all: one
+/// that wants a rung outside this window needs fresh data, not a different
+/// query.
+///
+/// `n = 1` is always recorded, whatever it costs. For a slow workload it is
+/// the only rung inside reach, and for a fast one it is where a growth loop
+/// starts - so leaving it out would make calibration unreplayable and would
+/// throw away the cheapest, most informative point for the intercept.
+fn rungs_for(per_ns: f64) -> Vec<usize> {
+    let mut out = vec![1usize];
+    let mut n = 1usize;
+    while n < (1usize << 40) {
+        n *= 2;
+        let d = n as f64 * per_ns;
+        if d > RUNG_MAX_NS {
+            break;
         }
-        return out;
+        if d >= RUNG_MIN_NS {
+            out.push(n);
+        }
     }
-    let mut out: Vec<usize> = Vec::with_capacity(ladder.len());
-    for &t in ladder {
-        let want = (t * cal as f64).round().max(1.0) as usize;
-        let floor = out.last().map(|&p| p + 1).unwrap_or(1);
-        out.push(want.max(floor));
+    // A workload too slow for the window has only n=1 so far. Give it a
+    // partner if one is affordable, so subtraction stays possible.
+    if out.len() < 2 && 2.0 * per_ns <= SLOW_PAIR_NS {
+        out.push(2);
     }
     out
 }
@@ -375,7 +405,6 @@ fn run(
     mut payloads: Vec<Arc<Workload>>,
     rounds: usize,
     dir: &str,
-    ladder: &[f64],
     counts: Option<&HashMap<&'static str, (usize, f64)>>,
     pass: Option<usize>,
     warmup: usize,
@@ -436,7 +465,7 @@ fn run(
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut rungs: Vec<Vec<(usize, String, f64)>> = Vec::with_capacity(ws.len());
     for w in ws.iter() {
-        let (cal, per) = match (t.replaying(), counts.and_then(|c| c.get(w.name))) {
+        let (_cal, per) = match (t.replaying(), counts.and_then(|c| c.get(w.name))) {
             (true, _) => (*t.iters.get(w.name).unwrap_or(&1), f64::NAN),
             (false, Some(&(n, p))) => (n, p),
             (false, None) => calibrate(w, &mut seed),
@@ -449,7 +478,7 @@ fn run(
         // sample it silently halved every count, so replayed timings came
         // back attached to the wrong batch sizes and every per-iteration
         // cost doubled.
-        let derived = counts_for(cal, ladder);
+        let derived = rungs_for(per);
         let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(derived.len());
         for k in 0..derived.len() {
             let name = rung_name(w.name, k);

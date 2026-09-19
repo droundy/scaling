@@ -328,66 +328,18 @@ pub enum Choice {
     All { trim: f64, floor: usize },
 }
 
-/// Rungs an algorithm could sensibly stand on.
+/// The longest batch in a recording, which is where a growth loop stops.
 ///
-/// The window has a floor because the fixed cost per measurement is about
-/// 160ns, so a 100ns batch is more overhead than measurement, and a ceiling
-/// because past about a millisecond every batch contains a scheduler tick -
-/// contamination stops being a rare catastrophe and becomes a near-constant
-/// tax, which is a different regime and a worse one to measure in.
-///
-/// `n == 1` is kept however long it takes: a workload slower than the
-/// ceiling cannot be measured in less than one iteration, so the window
-/// would otherwise be empty for it.
-///
-/// `n == 2` is kept up to a second, so that a moderately slow workload still
-/// has *some* pair to subtract. Without it the window admits exactly one
-/// rung for anything past the ceiling, and subtraction - the thing that
-/// removes the fixed cost per measurement - becomes unavailable precisely
-/// where the ladder is shortest. Two samples of 4ms is a cheap way to keep
-/// the option; two samples of a minute is not, hence the ceiling on it.
-pub fn reasonable(tape: &Tape) -> Vec<usize> {
+/// Taken from the recording rather than from a constant, because which
+/// rungs exist is the recorder's decision - see `rungs_for` in `main.rs`.
+/// An analysis reads the ladder it was given; it does not get to filter it,
+/// and an algorithm that wants a rung outside it needs fresh data.
+fn top_ns(tape: &Tape) -> f64 {
     tape.rungs
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            let d = r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64 + r.overhead_ns;
-            (d >= MIN_RUNG_NS && d <= MAX_RUNG_NS)
-                || (r.n == 1 && d > MAX_RUNG_NS)
-                || (r.n == 2 && d <= SLOW_PAIR_NS)
-        })
-        .map(|(i, _)| i)
-        .collect()
+        .last()
+        .map(|r| r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64)
+        .unwrap_or(0.0)
 }
-
-/// Shortest batch worth standing on: below this the per-measurement cost is
-/// most of what is being timed.
-const MIN_RUNG_NS: f64 = 100.0;
-/// Longest batch worth standing on.
-///
-/// This was 2ms, chosen as "where every batch carries a scheduler tick" -
-/// which is an argument for staying well below it, not for putting the
-/// ceiling there. Ticks arrive every millisecond and add ~5us, so the chance
-/// of a batch being hit is its length over the tick period, and the bias
-/// that follows is ~0.5% of any batch long enough to be hit regularly.
-/// Sweeping the ceiling against a known answer:
-///
-/// | ceiling | P(hit) | plain fit | trimmed fit |
-/// | --- | --- | --- | --- |
-/// | 1ms | 100% | +0.545% | +0.549% |
-/// | 100us | 17% | +0.751% | +0.637% |
-/// | 50us | 8% | +0.403% | +0.161% |
-/// | 20us | 2% | +0.240% | -0.016% |
-///
-/// Nothing is lost by coming down here. A fit takes its lever arm from the
-/// *ratio* of iteration counts, not from absolute duration, so a ladder
-/// reaching 8192 iterations at 20us has the same lever as one reaching 2ms -
-/// at a hundredth of the cost, and in the regime where a tick is a rare
-/// outlier that trimming can remove rather than a tax on every sample.
-const MAX_RUNG_NS: f64 = 2e4;
-/// How long a second rung may run for a workload too slow for the window,
-/// so that subtraction stays possible there.
-const SLOW_PAIR_NS: f64 = 1e9;
 
 /// Measure at a fixed rung choice, charging nothing for calibration.
 ///
@@ -561,13 +513,13 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
         // Discover the ladder by growing from one iteration, keeping every
         // probe. This is the growth loop, except that nothing it measures
         // is thrown away.
+        // Every rung in the recording. There is no ceiling to discover
+        // here: the recorder already applied one, so what is on disk is
+        // what an algorithm is allowed to stand on.
         for k in 0..p.rungs() {
             let ns = p.draw(k);
             pts.push((p.n(k), ns));
             ladder.push(k);
-            if ns > MAX_RUNG_NS {
-                break;
-            }
         }
     }
     let mut rng: u64 = 0x2545F4914F6CDD1D ^ (p.spent_ns.to_bits() | 1);
@@ -661,20 +613,16 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
 /// algorithm is in.
 pub fn calibrated(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
     let mut p = Player::new(tape, start);
-    let (cal_n, per_iter) = calibrate(&mut p, MAX_RUNG_NS);
-    let ok = reasonable(tape);
-    let pick = |want: f64| -> usize {
-        let k = tape.nearest(want);
-        // Never stand outside the window, however calibration came out.
-        *ok.iter().min_by_key(|&&i| (i as i64 - k as i64).abs()).unwrap_or(&k)
-    };
+    let top = top_ns(tape);
+    let (cal_n, per_iter) = calibrate(&mut p, top);
+    let pick = |want: f64| -> usize { tape.nearest(want) };
     let c = if pol.rungs.is_empty() {
         Choice::One(pick(cal_n))
     } else if pol.rungs.len() == 1 {
-        Choice::One(pick(pol.rungs[0] * MAX_RUNG_NS / per_iter.max(1e-9)))
+        Choice::One(pick(pol.rungs[0] * top / per_iter.max(1e-9)))
     } else {
-        let a = pick(pol.rungs[0] * MAX_RUNG_NS / per_iter.max(1e-9));
-        let b = pick(pol.rungs[1] * MAX_RUNG_NS / per_iter.max(1e-9));
+        let a = pick(pol.rungs[0] * top / per_iter.max(1e-9));
+        let b = pick(pol.rungs[1] * top / per_iter.max(1e-9));
         if a == b { Choice::One(a) } else { Choice::Pair(a.min(b), a.max(b)) }
     };
     run_choice(&mut p, c, pol.target, pol.budget_s)
@@ -815,15 +763,15 @@ pub fn report(paths: &[String]) {
 
     println!(
         "Rung choice, calibration and stopping replayed from recordings.\n\
-         A rung is usable if one sample costs between {:.0}ns and {:.0}us, or if n=1,\n\
-         or if n=2 and it runs under a second.\n\n\
+         Which rungs exist is the recorder's decision, not this one: an algorithm\n\
+         wanting a rung outside the recorded ladder needs fresh data, not a new query.\n\n\
          all-rungs  = walk up from n=1 keeping every probe, then sample the ladder\n\
                       at random and fit; no rung choice, so no calibration to make one\n\
          cal *      = calibrate, pick a rung, measure there; charged for the probes\n\
          within     = landed inside the accuracy goal (want >={})\n\
          cover      = landed inside the bar the run itself claimed (want ~{})\n\
          blow       = off by more than {BLOWUP}x the goal (want <={})\n",
-        MIN_RUNG_NS, MAX_RUNG_NS / 1e3, pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
+        pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
     );
 
     for tape in &tapes {
@@ -831,21 +779,18 @@ pub fn report(paths: &[String]) {
         if !(truth_ns.is_finite() && truth_ns > 0.0) {
             continue;
         }
-        let ok = reasonable(tape);
-        if ok.is_empty() {
-            continue;
-        }
+
         println!(
             "===== {} =====  truth {:.4} ns/iter +- {:.2}%",
             tape.workload, truth_ns, 100.0 * truth_se / truth_ns
         );
         println!(
-            "  usable rungs: n={}..{} ({} of {}), overhead {:.0}ns/sample",
-            tape.rungs[ok[0]].n,
-            tape.rungs[*ok.last().unwrap()].n,
-            ok.len(),
+            "  recorded rungs: n={}..{} ({}), longest batch {:.1}us,              overhead {:.0}ns/sample",
+            tape.rungs[0].n,
+            tape.rungs[tape.rungs.len() - 1].n,
             tape.rungs.len(),
-            tape.rungs[ok[0]].overhead_ns,
+            top_ns(tape) / 1e3,
+            tape.rungs[0].overhead_ns,
         );
 
         for &target in &TARGETS {
@@ -1059,7 +1004,7 @@ pub fn selftest(dir: &str) {
             // Samples per rung, not per recording: a workload visits one
             // rung per round.
             let per_rung = SELFTEST_ROUNDS / 8;
-            synthetic(name, A, *b, *noise, per_rung, seed, MAX_RUNG_NS)
+            synthetic(name, A, *b, *noise, per_rung, seed, crate::RUNG_MAX_NS)
         })
         .collect();
 
