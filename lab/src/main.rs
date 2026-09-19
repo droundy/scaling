@@ -19,6 +19,7 @@ use itertools::Itertools;
 
 mod estimate;
 mod protocol;
+mod protocols;
 mod timing;
 mod workloads;
 
@@ -156,6 +157,7 @@ fn main() {
             args[3].parse().expect("budget in seconds"),
             args[4].parse().expect("repeat number"),
         ),
+        Some("protocols") if args.len() > 2 => protocols::report(&args[2..]),
         Some("intercept") if args.len() > 2 => intercept(&args[2..]),
         Some("shift") if args.len() > 2 => shift(&args[2..]),
         Some("compare") if args.len() > 2 => compare(&args[2..]),
@@ -424,7 +426,10 @@ fn run(
             // already printed the plan once, and repeating it for every
             // subset of every pass buries the log.
             if counts.is_none() && !t.replaying() {
-                eprintln!("  {name:>16} {n:>12} iters  ~{:>8.0} us", n as f64 * per / 1e3);
+                eprintln!(
+                    "  {name:>16} {n:>12} iters  ~{:>8.0} us",
+                    n as f64 * per / 1e3
+                );
             }
             this.push((n, name));
         }
@@ -444,7 +449,9 @@ fn run(
     // and pass so a sample can be lined up with the rounds it sat between.
     const MACHINE_EVERY: usize = 200;
     let mach_path = format!("{dir}/machine.csv");
-    let fresh = std::fs::metadata(&mach_path).map(|m| m.len() == 0).unwrap_or(true);
+    let fresh = std::fs::metadata(&mach_path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
     let mut mach = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -762,8 +769,7 @@ fn intercept(paths: &[String]) {
                                     .iter()
                                     .filter_map(|&m| rung(r, base, m, &canary, &range))
                                     .collect();
-                                (v.len() == want.len() && v.len() >= 2)
-                                    .then(|| (base.clone(), v))
+                                (v.len() == want.len() && v.len() >= 2).then(|| (base.clone(), v))
                             })
                             .collect()
                     })
@@ -796,7 +802,11 @@ fn intercept(paths: &[String]) {
     }
     println!();
     for base in &bases {
-        let Some((_, v)) = ladder.iter().flat_map(|p| p.iter()).find(|(b, _)| b == base) else {
+        let Some((_, v)) = ladder
+            .iter()
+            .flat_map(|p| p.iter())
+            .find(|(b, _)| b == base)
+        else {
             continue;
         };
         print!("{base:>14}");
@@ -828,9 +838,8 @@ fn intercept(paths: &[String]) {
             let lin = lin_of(v, &mean_v);
             // Every rung contributes to `lin` through one half or the other;
             // this is the conservative sum rather than the exact propagation.
-            let lin_se = v.iter().map(|r| r.se * r.se).sum::<f64>().sqrt()
-                / (v[l].n - v[0].n)
-                * 2.0;
+            let lin_se =
+                v.iter().map(|r| r.se * r.se).sum::<f64>().sqrt() / (v[l].n - v[0].n) * 2.0;
             got.push([v[0].mean / n, wide, fixed, fixed_se, lin, lin_se]);
         }
         if got.is_empty() {
@@ -951,7 +960,12 @@ fn shift(paths: &[String]) {
         let composition = composition_of(p);
         let canary = canary_per_iter(&r);
         let full = 0..usize::MAX;
-        let bases: Vec<String> = r.names.iter().filter(|n| !n.contains('@')).cloned().collect();
+        let bases: Vec<String> = r
+            .names
+            .iter()
+            .filter(|n| !n.contains('@'))
+            .cloned()
+            .collect();
         for b in bases {
             let want = rungs_present(&r, &b);
             let v: Vec<Rung> = want
@@ -998,8 +1012,8 @@ fn shift(paths: &[String]) {
             }
             // The spread of *this* composition across passes, which is the
             // local null: how much this number moves when nothing changed.
-            let pass_sd = 100.0
-                * estimate::rel_spread(&v.iter().map(|(e, _)| e[0]).collect::<Vec<f64>>());
+            let pass_sd =
+                100.0 * estimate::rel_spread(&v.iter().map(|(e, _)| e[0]).collect::<Vec<f64>>());
             println!(
                 "{:>12.0}{:>9}{:>7.2}%",
                 estimate::mean(&v.iter().map(|(_, f)| *f).collect::<Vec<f64>>()),
@@ -1034,13 +1048,16 @@ fn shift(paths: &[String]) {
             }
             100.0 * (each.iter().map(|x| x * x).sum::<f64>() / each.len() as f64).sqrt()
         };
-        let line = |what: String, rows: &[(&String, &Vec<([f64; 5], f64)>)], f: &dyn Fn(usize, &[(&String, &Vec<([f64; 5], f64)>)]) -> f64| {
-            print!("{what:>44}");
-            for k in 0..EST.len() {
-                print!("{:>11.2}%", f(k, rows));
-            }
-            println!();
-        };
+        let line =
+            |what: String,
+             rows: &[(&String, &Vec<([f64; 5], f64)>)],
+             f: &dyn Fn(usize, &[(&String, &Vec<([f64; 5], f64)>)]) -> f64| {
+                print!("{what:>44}");
+                for k in 0..EST.len() {
+                    print!("{:>11.2}%", f(k, rows));
+                }
+                println!();
+            };
         // Only compositions that have a canary, so raw and ratio columns are
         // scored on exactly the same rounds. Crediting the ratio for being
         // asked about a different set of subsets would be no test at all.
@@ -1055,11 +1072,7 @@ fn shift(paths: &[String]) {
             scored,
             &across,
         );
-        line(
-            "pass-to-pass spread (the null):".to_string(),
-            scored,
-            &null,
-        );
+        line("pass-to-pass spread (the null):".to_string(), scored, &null);
     }
 }
 
@@ -1246,7 +1259,10 @@ fn composition_of(path: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
-    let stem = stem.strip_suffix(".csv").or_else(|| stem.strip_suffix(".bin")).unwrap_or(&stem);
+    let stem = stem
+        .strip_suffix(".csv")
+        .or_else(|| stem.strip_suffix(".bin"))
+        .unwrap_or(&stem);
     match stem.rsplit_once(".p") {
         Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head.to_string(),
         _ => stem.to_string(),
@@ -1279,8 +1295,10 @@ fn machine_state() -> String {
     let procs = std::fs::read_to_string("/proc/stat")
         .ok()
         .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("procs_running ").map(|v| v.trim().to_string()))
+            s.lines().find_map(|l| {
+                l.strip_prefix("procs_running ")
+                    .map(|v| v.trim().to_string())
+            })
         })
         .unwrap_or_else(|| "-".to_string());
     format!(

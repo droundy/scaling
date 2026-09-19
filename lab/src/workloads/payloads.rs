@@ -16,7 +16,7 @@
 
 use super::{Kind, Workload};
 use rand::seq::SliceRandom;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::hint::black_box;
@@ -114,16 +114,66 @@ impl Workload {
         })
     }
 
-    /// 6. Pointer Chasing: `BTreeMap::get`, always missing
+    /// 6. Pointer Chasing: `BTreeMap::get`, always missing, never twice the
+    ///    same way.
+    ///
+    /// **Every call looks up a different key, and that is the whole point.**
+    /// This benchmark used to probe one fixed missing key a million times
+    /// over, which made its cost depend entirely on whether that single tree
+    /// path was still in cache - a property of whatever the harness had
+    /// interleaved, not of `BTreeMap::get`. It measured 28.04 ns/iter in one
+    /// round composition, 29.8 in another and 33.2 in a third: an 18% swing
+    /// with the code under test unchanged. `cpu_canary` and `instant_now`,
+    /// which have no such reusable state, did not move at all across the same
+    /// compositions.
+    ///
+    /// With a fresh key each call nothing a previous call warmed can help the
+    /// next one, so there is no warm-up transient to sit inside and no cached
+    /// path for a neighbour to evict. That is the general rule this lab keeps
+    /// rediscovering: a benchmark that reuses one input is measuring
+    /// residency, and no amount of statistics repairs it. Real benchmarks
+    /// want a prepared table of inputs, built far enough ahead to be cold.
+    ///
+    /// It also buys something we were short of - genuine per-call variability,
+    /// since each probe walks a different path through 24 MiB.
+    ///
+    /// Generating the key inside the timed region is sloppy: a few ns of
+    /// splitmix lands in every measurement. Against a tree walk that misses
+    /// cache at every level it does not matter here, and keeping the
+    /// generator in the closure avoids a table that would itself be a second
+    /// cache-residency experiment.
     pub fn btree_miss() -> Self {
+        // Repeatable: a fixed seed, so every process builds the same map and
+        // probes the same sequence. Pseudorandom keys rather than 0..n so
+        // that probes land all over the tree instead of walking one spine.
+        fn splitmix(state: &mut u64) -> u64 {
+            *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = *state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
         // A million entries, built once in the constructor. Doing it lazily
         // would put the construction inside whichever sample touched it
         // first, since `simple` runs its closure wholly inside the timed
         // region.
-        let mut map: BTreeMap<u64, u64> = (0..1_000_000).map(|i| (i, i)).collect();
-        const MISS: u64 = 500_123;
-        map.remove(&MISS);
-        Workload::simple("btree_miss", Kind::Payload, move || map.get(&MISS).copied())
+        let mut build = 0x243F_6A88_85A3_08D3u64;
+        let map: BTreeMap<u64, u64> = (0..1_000_000)
+            .map(|_| {
+                let k = splitmix(&mut build);
+                (k, k)
+            })
+            .collect();
+        // A probe stream disjoint from the keys: a random u64 is missing from
+        // a million random u64s with overwhelming probability, so every
+        // lookup still descends to a leaf and fails, as the name promises.
+        let probe = Cell::new(0x853C_49E6_748F_EA9Bu64);
+        Workload::simple("btree_miss", Kind::Payload, move || {
+            let mut s = probe.get();
+            let k = splitmix(&mut s);
+            probe.set(s);
+            map.get(&k).copied()
+        })
     }
 
     /// 7. Macro-Memory Bandwidth: 64 MiB copy

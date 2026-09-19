@@ -171,7 +171,9 @@ impl Timing {
             // Integer nanoseconds. u32 reaches 4.3 s, against a longest
             // batch here of about 25 ms, and sub-nanosecond resolution on a
             // batch of hundreds of nanoseconds is not information.
-            buf.extend_from_slice(&(x.ns.round().max(0.0).min(u32::MAX as f64) as u32).to_le_bytes());
+            buf.extend_from_slice(
+                &(x.ns.round().max(0.0).min(u32::MAX as f64) as u32).to_le_bytes(),
+            );
         }
         if let Err(e) = std::fs::write(path, buf) {
             eprintln!("could not write {path}: {e}");
@@ -218,10 +220,7 @@ pub fn read(path: &str) -> Recording {
     if bytes.starts_with(b"LABBIN1\n") {
         return read_bin(path, &bytes);
     }
-    read_csv(
-        path,
-        &String::from_utf8_lossy(&bytes),
-    )
+    read_csv(path, &String::from_utf8_lossy(&bytes))
 }
 
 fn read_bin(path: &str, bytes: &[u8]) -> Recording {
@@ -256,7 +255,10 @@ fn read_bin(path: &str, bytes: &[u8]) -> Recording {
         let off = u64::from_le_bytes([r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13]]);
         let ns = u32::from_le_bytes([r[14], r[15], r[16], r[17]]) as f64;
         let Some(workload) = order.get(widx) else {
-            panic!("{path}: sample names workload {widx}, but the header lists {}", order.len())
+            panic!(
+                "{path}: sample names workload {widx}, but the header lists {}",
+                order.len()
+            )
         };
         samples.push(Sample {
             round,
