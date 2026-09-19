@@ -17,6 +17,7 @@
 
 use itertools::Itertools;
 
+mod accuracy;
 mod estimate;
 mod protocol;
 mod protocols;
@@ -158,6 +159,7 @@ fn main() {
             args[4].parse().expect("repeat number"),
         ),
         Some("protocols") if args.len() > 2 => protocols::report(&args[2..]),
+        Some("accuracy") if args.len() > 3 => accuracy::report(&args[2], &args[3]),
         Some("intercept") if args.len() > 2 => intercept(&args[2..]),
         Some("shift") if args.len() > 2 => shift(&args[2..]),
         Some("compare") if args.len() > 2 => compare(&args[2..]),

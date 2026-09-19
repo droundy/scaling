@@ -546,7 +546,14 @@ pub fn run(cell_name: &str, budget_s: f64, rep: usize) {
         // Early stopping, as a real benchmark does it: once every workload's
         // reported relative standard error is under target, there is nothing
         // more to learn - or so the error bar says.
-        if cell.name == "E-stop" && rounds >= 3 {
+        //
+        // This applies to every algorithm now, because it is how the crate
+        // actually behaves: a budget is a cap that is rarely reached, not a
+        // quantity to spend. With stopping universal the comparison is
+        // "given the same accuracy request, who answers sooner", which is
+        // the question - an algorithm that is more accurate than asked has
+        // bought nothing and paid time for it.
+        if std::env::var("LAB_STOP_ALL").is_ok() && rounds >= 3 {
             let done = plans.iter().all(|p| {
                 let (_, v) = &p.rungs[0];
                 let s = stat(v);

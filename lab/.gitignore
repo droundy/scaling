@@ -1,3 +1,7 @@
 target
 runs
 *.csv
+# Measurement output: recordings are large and regenerable, logs are noise.
+day/
+night/
+*.log
