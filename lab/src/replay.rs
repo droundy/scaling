@@ -938,7 +938,7 @@ fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64
                     // Correlated in time, which is what breaks sd/sqrt(n)
                     // and what batch means exist to survive.
                     Noise::Ar1(rel, phi) => {
-                        prev = phi * prev + (1.0 - phi * phi).sqrt() * z;
+                        prev = phi * prev + (1.0f64 - phi * phi).sqrt() * z;
                         rel * clean * prev
                     }
                     // Rare, large, one-sided: a scheduler tick landing in
@@ -975,22 +975,29 @@ fn synthetic(name: &str, a: f64, b: f64, noise: Noise, samples: usize, seed: u64
     Tape { workload: name.to_string(), rungs }
 }
 
-/// Kept small deliberately. This is a unit test of the arithmetic, not a
-/// measurement: a trial that cannot reach its goal runs until the budget or
-/// the end of the tape, so a generous tape makes the test cost minutes
-/// without making it more conclusive.
-const SELFTEST_SAMPLES: usize = 3000;
-const SELFTEST_TRIALS: usize = 80;
-
+/// Rounds written per synthetic recording.
+///
+/// Each workload visits one rung per round, so a rung collects roughly
+/// `SELFTEST_ROUNDS / rungs` samples - about 2800 across a fourteen-rung
+/// ladder. That has to be generous enough that the analyzer's trials do not
+/// run off the end of the recording and start re-reading noise they have
+/// already seen, since a cell that wraps reports nothing.
+const SELFTEST_ROUNDS: usize = 40000;
+/// Noise models for synthetic ladders, each isolating one thing that goes
+/// wrong with real timings.
 #[derive(Clone, Copy)]
 enum Noise {
+    /// Fixed jitter per measurement, whatever the batch size.
     Additive(f64),
+    /// Jitter proportional to the batch, as a clock drifting in rate gives.
     Multiplicative(f64),
+    /// Correlated in time: what breaks sd/sqrt(n), and what batch means
+    /// exists to survive.
     Ar1(f64, f64),
-    /// Baseline multiplicative noise *plus* periodic ticks. The baseline
-    /// matters: without it the fit converges the moment its error estimate
-    /// hits zero, takes a handful of samples, and never meets a tick - which
-    /// looked like an unbiased estimator and was an untested one.
+    /// Baseline multiplicative noise *plus* periodic scheduler ticks. The
+    /// baseline matters: without it a fit converges the moment its error
+    /// estimate hits zero, takes a handful of samples, and never meets a
+    /// tick - which looks like an unbiased estimator and is an untested one.
     MulTick(f64, f64, f64),
 }
 
@@ -1008,244 +1015,122 @@ impl Noise {
     }
 }
 
-/// Check the harness against data whose answer is not in dispute.
+/// Write synthetic recordings whose true answer is stated in the name.
 ///
-/// Two things are being asked, and they are different:
+/// The self-test used to build ladders in memory, score them itself, and
+/// print its own table - a second analyzer, with its own opinions about what
+/// to report, kept alongside the real one. So a bug in `analyze` could not
+/// be caught by `selftest`, and a bug in the recording format could not be
+/// caught by either, because nothing was ever written down.
 ///
-///   - **bias**: does the estimate land on `b`? An estimator that is off by
-///     a percent on data this clean is wrong in a way no amount of real
-///     machine time would reveal, because on real data the disagreement
-///     would be blamed on the machine.
-///   - **honesty**: does the claimed error bar match the actual spread of
-///     the estimates? This is the one real data cannot answer at all. If
-///     the bar is twice the spread, the stopping rule buys samples it does
-///     not need and every reported time is inflated; if it is half, the
-///     number is a lie. `spread` here is the standard deviation of the
-///     estimates across trials, which is what the bar is *claiming to be*.
-pub fn selftest() {
-    // A fixed cost of 370ns and a per-iteration cost of 2.5ns is roughly
-    // cpu_canary; 250ns per iteration is roughly slice_sort.
-    let cases = [
-        // With no noise every estimator must return b exactly, except a
-        // single rung, which by construction returns b + a/n. Anything else
-        // is an arithmetic bug and no amount of real data would show it.
-        ("fast", 370.0, 2.5, Noise::Additive(0.0)),
-        ("fast", 370.0, 2.5, Noise::Multiplicative(0.02)),
-        ("fast", 370.0, 2.5, Noise::Additive(150.0)),
-        ("fast", 370.0, 2.5, Noise::Ar1(0.02, 0.8)),
-        ("fast", 370.0, 2.5, Noise::MulTick(0.02, 1e6, 5000.0)),
-        ("slow", 370.0, 250.0, Noise::Multiplicative(0.02)),
-        ("slow", 370.0, 250.0, Noise::Ar1(0.02, 0.8)),
-    ];
-    let target = 0.01;
-    println!(
-        "Harness self-test: synthetic ladders where the per-iteration cost is known.\n\n\
-         bias   = median estimate against the true value (want ~0)\n\
-         spread = actual sd of the estimates across trials\n\
-         bar    = median error bar the algorithm claimed\n\
-         bar/sd = claimed over actual (want ~1; >1 buys samples it does not need)\n\
-         cover  = fraction inside the claimed bar (want ~{})\n",
-        pct(EXPECT_COVERAGE)
-    );
-    for (which, a, b, noise) in cases {
-        let tape = synthetic(which, a, b, noise, SELFTEST_SAMPLES, 0x243F6A8885A308D3, MAX_RUNG_NS);
-        println!(
-            "===== {which}: {b} ns/iter, fixed {a:.0}ns, {} =====",
-            noise.label()
-        );
-        println!(
-            "    {:>22} {:>9} {:>9} {:>9} {:>9} {:>8} {:>7}",
-            "algorithm", "time", "bias", "spread", "bar", "bar/sd", "cover"
-        );
-        let run = |label: String, outs: Vec<Outcome>| {
-            let good: Vec<&Outcome> = outs.iter().filter(|o| o.est.is_finite()).collect();
-            if good.len() < 10 {
-                println!("    {label:>22}   too few usable trials");
-                return;
-            }
-            let k = good.len() as f64;
-            let mut es: Vec<f64> = good.iter().map(|o| o.est).collect();
-            es.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            let med = es[es.len() / 2];
-            let m = es.iter().sum::<f64>() / k;
-            let sd = (es.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (k - 1.0)).sqrt();
-            let mut bars: Vec<f64> = good.iter().map(|o| o.se).collect();
-            bars.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            let bar = bars[bars.len() / 2];
-            let cover = good.iter().filter(|o| (o.est - b).abs() <= o.se).count() as f64 / k;
-            let mut ts: Vec<f64> = good.iter().map(|o| o.seconds).collect();
-            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            println!(
-                "    {:>22} {:>9} {:>8.2}% {:>8.2}% {:>8.2}% {:>8.2} {:>7}",
-                label,
-                fmt_time(ts[ts.len() / 2], false),
-                100.0 * (med - b) / b,
-                100.0 * sd / b,
-                100.0 * bar / b,
-                bar / sd.max(f64::MIN_POSITIVE),
-                pct(cover)
-            );
-        };
-        let trials = SELFTEST_TRIALS;
-        for (label, c) in [
-            ("all-rungs", Choice::All { trim: 0.0, floor: 0 }),
-            ("all-rungs/trim", Choice::All { trim: TRIM, floor: 0 }),
-        ] {
-            run(
-                label.to_string(),
-                (0..trials)
-                    .map(|i| measure(&tape, c, target, 10.0, i as f64 / trials as f64))
-                    .collect(),
-            );
-        }
-        // A mid rung and a wide pair, chosen here rather than calibrated,
-        // so that what is being tested is the estimator and not the search.
-        let ok = reasonable(&tape);
-        if !ok.is_empty() {
-            let mid = ok[ok.len() / 2];
-            let lo = ok[0];
-            let hi = *ok.last().unwrap();
-            run(
-                format!("one-rung n={}", tape.rungs[mid].n),
-                (0..trials)
-                    .map(|i| {
-                        measure(&tape, Choice::One(mid), target, 10.0, i as f64 / trials as f64)
-                    })
-                    .collect(),
-            );
-            if lo != hi {
-                run(
-                    format!("pair n={},{}", tape.rungs[lo].n, tape.rungs[hi].n),
-                    (0..trials)
-                        .map(|i| {
-                            measure(&tape, Choice::Pair(lo, hi), target, 10.0,
-                                    i as f64 / trials as f64)
-                        })
-                        .collect(),
-                );
-            }
-        }
-        println!();
+/// Now it only generates. Each fake workload is named for the per-iteration
+/// cost it was built with - `2.5ns-mul2pct` really is 2.5 ns an iteration
+/// with 2% multiplicative noise - so running `analyze` over the output puts
+/// the claimed truth next to the right answer on the same line. The format
+/// round-trip stops being a separate test and becomes a condition of the
+/// whole thing working: if `Timing::write` or `Run::load` mangled anything,
+/// every reported truth would disagree with its own label.
+pub fn selftest(dir: &str) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("could not create {dir}: {e}");
+        std::process::exit(2);
     }
-}
+    // Fixed cost of 370ns per measurement, which is what the real harness
+    // costs outside the timer; see `Rung::overhead_ns`.
+    const A: f64 = 370.0;
+    let cases: [(&str, f64, Noise); 7] = [
+        // No noise at all: every estimator must return the name exactly,
+        // and anything else is an arithmetic bug that no amount of real
+        // machine time would expose.
+        ("2.5ns-clean", 2.5, Noise::Additive(0.0)),
+        ("2.5ns-mul2pct", 2.5, Noise::Multiplicative(0.02)),
+        ("2.5ns-add150ns", 2.5, Noise::Additive(150.0)),
+        ("2.5ns-ar1phi8", 2.5, Noise::Ar1(0.02, 0.8)),
+        ("2.5ns-ticks", 2.5, Noise::MulTick(0.02, 1e6, 5000.0)),
+        ("250ns-mul2pct", 250.0, Noise::Multiplicative(0.02)),
+        ("250ns-ar1phi8", 250.0, Noise::Ar1(0.02, 0.8)),
+    ];
 
-/// Write a synthetic tape as a real recording, read it back, and check it
-/// survived.
-///
-/// Until now the self-test built `Tape` values in memory and handed them
-/// straight to the estimators, so it proved the arithmetic and nothing about
-/// the path the runner actually uses: `Timing::write` to LABBIN1, `Run::load`
-/// back, `tapes()` to regroup by rung. Every serious bug this lab has had
-/// lived in that stretch - a rung index that silently dropped rung zero, a
-/// replay that re-applied the ladder and halved every count - and none of
-/// them would change an in-memory number.
-///
-/// So: round-trip the synthetic data through disk and compare. The estimate
-/// from the reloaded recording has to match the estimate from the tape it
-/// was written from.
-fn round_trip(tape: &Tape, path: &str) -> Option<Tape> {
+    let mut seed = 0x243F6A8885A308D3u64;
+    let tapes: Vec<Tape> = cases
+        .iter()
+        .map(|(name, b, noise)| {
+            seed = crate::step(seed);
+            // Samples per rung, not per recording: a workload visits one
+            // rung per round.
+            let per_rung = SELFTEST_ROUNDS / 8;
+            synthetic(name, A, *b, *noise, per_rung, seed, MAX_RUNG_NS)
+        })
+        .collect();
+
     let mut t = crate::timing::Timing::from_env();
     if t.replaying() {
-        eprintln!("LAB_REPLAY is set; not round-tripping");
-        return None;
+        eprintln!("LAB_REPLAY is set; refusing to generate");
+        std::process::exit(2);
     }
-    for (k, r) in tape.rungs.iter().enumerate() {
-        t.iters.insert(rung_name(&tape.workload, k), r.n);
+    for tape in &tapes {
+        for (k, r) in tape.rungs.iter().enumerate() {
+            t.iters.insert(rung_name(&tape.workload, k), r.n);
+        }
     }
-    // Emitted round by round, one sample per rung per round, so the
-    // per-rung sequences come back in the order they were written - which
-    // is what every block-based error estimate depends on.
-    let rounds = tape.rungs.iter().map(|r| r.batch_ns.len()).min()?;
+
+    // Emitted exactly as the runner emits: one sample per workload per
+    // round, at a rung drawn from a shuffled sweep of that workload's own
+    // ladder, in a fresh slot order each round. A recording that is laid
+    // out differently from a real one would let the analyzer pass here and
+    // fail on the machine.
+    let mut cursor: Vec<Vec<usize>> = tapes.iter().map(|x| vec![0; x.rungs.len()]).collect();
+    let mut queue: Vec<Vec<usize>> = vec![Vec::new(); tapes.len()];
+    let mut rng = 0x9E3779B97F4A7C15u64;
     let mut t_ns: u128 = 1;
-    for r in 0..rounds {
-        for (k, rung) in tape.rungs.iter().enumerate() {
-            let ns = rung.batch_ns[r];
+    let mut short = 0usize;
+    for round in 0..SELFTEST_ROUNDS {
+        let mut order: Vec<usize> = (0..tapes.len()).collect();
+        for i in (1..order.len()).rev() {
+            rng = crate::step(rng);
+            order.swap(i, (rng >> 33) as usize % (i + 1));
+        }
+        for (slot, &w) in order.iter().enumerate() {
+            if queue[w].is_empty() {
+                queue[w] = (0..tapes[w].rungs.len()).collect();
+                for i in (1..queue[w].len()).rev() {
+                    rng = crate::step(rng);
+                    let j = (rng >> 33) as usize % (i + 1);
+                    queue[w].swap(i, j);
+                }
+            }
+            let k = queue[w].pop().unwrap();
+            let rung = &tapes[w].rungs[k];
+            if cursor[w][k] >= rung.batch_ns.len() {
+                short += 1;
+                continue;
+            }
+            let ns = rung.batch_ns[cursor[w][k]];
+            cursor[w][k] += 1;
             t.log.push(crate::timing::Sample {
-                round: r,
-                slot: k,
-                workload: rung_name(&tape.workload, k),
+                round,
+                slot,
+                workload: rung_name(&tapes[w].workload, k),
                 t_ns,
                 ns,
             });
             t_ns += ns as u128 + rung.overhead_ns as u128;
         }
     }
-    t.write(path);
-    let run = Run::load(path);
-    tapes(&run).into_iter().find(|x| x.workload == tape.workload)
-}
-
-/// How much the round trip may change an estimate.
-///
-/// The format stores batch times as integer nanoseconds, so a 2930.7ns batch
-/// reads back as 2931 and the recovered slope moves in the last few digits.
-/// Measured, that is about two parts per million - four orders of magnitude
-/// below the tightest accuracy goal anything here aims at (0.5%), and it
-/// averages down over samples rather than accumulating.
-///
-/// The tolerance is therefore set from what the measurement needs, not from
-/// how exact the arithmetic happens to be: 0.01%, a fiftieth of the tightest
-/// goal. Anything larger is not rounding and wants explaining.
-const FORMAT_TOLERANCE: f64 = 1e-4;
-
-/// Check the recording format preserves what the estimators need.
-pub fn format_test() {
-    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    let cases = [
-        ("noiseless", Noise::Additive(0.0)),
-        ("additive", Noise::Additive(150.0)),
-        ("multiplicative", Noise::Multiplicative(0.02)),
-        ("ticks", Noise::MulTick(0.02, 1e6, 5000.0)),
-    ];
-    println!(
-        "Round-tripping synthetic data through the recording format the runner writes.\n\n\
-         Each case is written as LABBIN1, read back, and regrouped into rungs. The\n\
-         estimate from the reloaded file must match the one from the tape it came from.\n"
-    );
-    println!(
-        "{:>16} {:>8} {:>8} {:>14} {:>14} {:>12}",
-        "case", "rungs", "samples", "in memory", "from disk", "difference"
-    );
-    let (a, b) = (370.0, 2.5);
-    let mut bad = 0;
-    for (name, noise) in cases {
-        let tape = synthetic(name, a, b, noise, 600, 0x243F6A8885A308D3, MAX_RUNG_NS);
-        let path = format!("{dir}/lab-format-{name}.bin");
-        let Some(back) = round_trip(&tape, &path) else {
-            continue;
-        };
-        let est = |t: &Tape| -> f64 {
-            let mut p = Player::new(t, 0.0);
-            let mut pts = Vec::new();
-            for k in 0..p.rungs() {
-                for _ in 0..40 {
-                    let ns = p.draw(k);
-                    pts.push((p.n(k), ns));
-                }
-            }
-            slope(&pts)
-        };
-        let (x, y) = (est(&tape), est(&back));
-        let diff = if x != 0.0 { (y - x).abs() / x } else { 0.0 };
-        let samples: usize = back.rungs.iter().map(|r| r.batch_ns.len()).sum();
-        let ok = diff < FORMAT_TOLERANCE && back.rungs.len() == tape.rungs.len();
-        if !ok {
-            bad += 1;
-        }
-        println!(
-            "{:>16} {:>8} {:>8} {:>14.6} {:>14.6} {:>11.2e} {}",
-            name,
-            format!("{}/{}", back.rungs.len(), tape.rungs.len()),
-            samples,
-            x,
-            y,
-            diff,
-            if ok { "ok" } else { "MISMATCH" }
-        );
-        let _ = std::fs::remove_file(&path);
+    if short > 0 {
+        eprintln!("note: ran out of generated samples {short} times; rungs are uneven");
     }
-    if bad > 0 {
-        println!("\n{bad} case(s) did not survive the round trip.");
+
+    let path = format!("{dir}/synthetic.bin");
+    t.write(&path);
+    println!(
+        "wrote {} samples to {path}\n\n\
+         Each workload is named for the per-iteration cost it was built with, so\n\
+         `lab analyze {path}` should report a truth matching every name:\n",
+        t.log.len()
+    );
+    for (name, b, noise) in cases {
+        println!("  {name:>16}  true {b} ns/iter, {}", noise.label());
     }
-    println!();
+    println!("\n  lab analyze {path}");
 }
