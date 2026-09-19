@@ -320,15 +320,16 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     eprintln!();
 
     let subsets = subsets_of(&ws, budget, passes, &counts, canaries[0].clone());
-    let slice = budget.div_f64((subsets.len() * passes) as f64);
     eprintln!(
-        "{} subsets x {passes} passes, {:.1}s each, {:.1} min total",
+        "{} subsets x {passes} passes, ~{:.1}s each to start, {:.1} min total",
         subsets.len(),
-        slice.as_secs_f64(),
+        budget.as_secs_f64() / (subsets.len() * passes) as f64,
         budget.as_secs_f64() / 60.0,
     );
 
     let end = Instant::now() + budget;
+    // Slices still to run, including this pass's.
+    let mut left = subsets.len() * passes;
     let mut perm = 0xD1B54A32D192ED03u64;
     // Cheapest compositions first, so a run cut short loses the expensive
     // ones rather than a random half of everything.
@@ -364,11 +365,29 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
             i = j;
         }
         for &i in &order {
-            if Instant::now() >= end {
+            let now = Instant::now();
+            if now >= end || left == 0 {
                 eprintln!("budget spent");
                 return;
             }
-            let stop = (Instant::now() + slice).min(end);
+            // Slice from what is *left*, over what is left to do, rather
+            // than a fixed share worked out up front.
+            //
+            // The duration is the one input to this program, and a fixed
+            // share stopped honouring it once subsets could finish early:
+            // a cheap composition fills its rung cap in seconds and would
+            // simply hand its remaining twelve minutes back to nobody, so
+            // `collect 20h` quietly became a fifteen-hour run whose real
+            // length depended on which subsets happened to fill up.
+            //
+            // Recomputing spreads that surplus over whatever has not run
+            // yet. With compositions ordered cheapest-first, the ones that
+            // finish early are exactly the ones with time to give, and the
+            // expensive ones that receive it are the ones that are starved
+            // - they reach a few hundred samples at their dearest rung
+            // where a cheap subset reaches ten thousand.
+            let stop = now + (end - now) / left as u32;
+            left -= 1;
             run(
                 &canaries,
                 subsets[i].clone(),
