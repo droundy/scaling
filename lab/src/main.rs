@@ -167,31 +167,28 @@ static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// Draw a rung so that, over many rounds, every rung gets the same *wall
 /// time* rather than the same number of samples.
 ///
-/// Drawing uniformly spends the run in proportion to rung cost: on a ladder
-/// reaching 1000x, the top rung takes nearly all the clock and the bottom
-/// rungs - the ones a fast workload's algorithm will actually select - end up
-/// with too few samples to say anything about. Weighting by inverse duration
-/// equalises the time, which buys many more samples where they are cheap.
+/// This is the shape a replay wants. An algorithm with a time budget takes
+/// `B/d` samples at a rung costing `d` - many at the cheap rungs, few at the
+/// expensive ones - so a recording weighted by inverse duration holds
+/// samples roughly in the proportion that replays consume them. Equal counts
+/// over-collect the top of the ladder and starve the bottom, where an
+/// algorithm will take orders of magnitude more samples.
 ///
-/// Falls back to uniform when durations are unknown, which is the replay
-/// case: `per` is NaN there because nothing was calibrated.
+/// I argued the other way earlier, when the ladder ran from n=1 to n=524288
+/// and inverse weighting would have given the top rung about one sample per
+/// million rounds. The recorder's window has since cut that span to roughly
+/// a hundredfold, so the starvation that argument rested on is gone.
+///
+/// The cost is real though: the longest rung now gets the fewest samples, so
+/// a replayed algorithm that parks on it exhausts the recording soonest.
+/// `LAB_RUNG_WEIGHT=count` restores equal sample counts.
 fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
-    // Equal samples per rung by default, and equal *time* per rung only if
-    // asked for.
-    //
-    // Equalising time is the obvious instinct and it is right for a narrow
-    // ladder. On a power-of-two ladder it is a disaster: the span from n=1
-    // to n=524288 is a factor of 500000 in cost, so inverse-duration
-    // weighting gives the top rung a probability near 1e-6 and a million
-    // rounds record about one sample there. The expensive rungs are not
-    // decoration - an algorithm that calibrates its way up the ladder stands
-    // on them - and a rung with one sample cannot be replayed at all.
-    //
-    // Equal counts cost little here because the ladder is capped: N samples
-    // at every rung costs N * sum(d), and a geometric ladder sums to about
-    // twice its top rung. Paying 2x the top rung to sample the whole ladder
-    // evenly is the cheaper mistake by far.
-    if !matches!(RUNG_WEIGHT.get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default()).as_str(), "time") {
+    if matches!(
+        RUNG_WEIGHT
+            .get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default())
+            .as_str(),
+        "count"
+    ) {
         return (bits >> 33) as usize % r.len();
     }
     let total: f64 = r.iter().map(|x| 1.0 / x.2).sum();
@@ -296,7 +293,7 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
     eprintln!();
 
-    let subsets = subsets_of(&ws);
+    let subsets = subsets_of(&ws, budget, passes, &counts);
     let slice = budget.div_f64((subsets.len() * passes) as f64);
     eprintln!(
         "{} subsets x {passes} passes, {:.1}s each, {:.1} min total",
@@ -335,26 +332,91 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
 }
 
+/// What one round of a composition costs, in ns.
+///
+/// One sample per workload, at the average of its rungs, plus the harness
+/// overhead paid per measurement whatever the batch size.
+fn round_cost(ws: &[Arc<Workload>], counts: &HashMap<&'static str, (usize, f64)>) -> f64 {
+    ws.iter()
+        .map(|w| {
+            let per = counts.get(w.name).map(|c| c.1).unwrap_or(0.0);
+            let rungs = rungs_for(per);
+            // Harmonic mean, because rungs are drawn weighted by inverse
+            // duration: the expected cost of a draw is K / sum(1/d), not
+            // the arithmetic mean of the durations.
+            let inv: f64 = rungs
+                .iter()
+                .map(|&n| 1.0 / (n as f64 * per + OVERHEAD_NS))
+                .sum();
+            rungs.len() as f64 / inv
+        })
+        .sum()
+}
+
+/// Roughly what a measurement costs outside the timer; see `Rung::overhead_ns`
+/// in `replay.rs`, where it is measured rather than assumed.
+const OVERHEAD_NS: f64 = 370.0;
+
+/// Fewest samples a rung should end up with, for the most expensive subset.
+///
+/// A replay draws samples in recorded order and stops when it runs off the
+/// end, so a rung with too few samples yields nothing at all - the analysis
+/// reports the cell blank rather than reporting recycled noise. This is the
+/// floor that makes a collection worth starting.
+const MIN_SAMPLES_PER_RUNG: f64 = 400.0;
+
 /// Which compositions to measure.
 ///
 /// The powerset is what answers "does this number move with its company",
-/// and nothing else does - but it is 2^n, which is 31 subsets for five
-/// workloads and 2047 for eleven. Past a threshold the budget per subset
-/// gets too thin to say anything, so the choice becomes singletons (each
-/// workload alone, the control) plus the full set (what a user actually
-/// runs), which is where most of the composition signal lives.
-fn subsets_of(ws: &[Arc<Workload>]) -> Vec<Vec<Arc<Workload>>> {
-    const MAX_POWERSET: usize = 63;
-    if (1usize << ws.len()) - 1 <= MAX_POWERSET {
-        return ws
-            .iter()
-            .cloned()
-            .powerset()
-            .filter(|s| !s.is_empty())
-            .collect();
+/// and nothing else does. The reason to fall back from it is not that 2^n
+/// gets large but that the slice per subset gets too short to leave each
+/// rung usable - so that is what is checked, rather than a count.
+///
+/// The check matters because equal-*time* slices already absorb most of the
+/// cost objection: an expensive composition simply completes fewer rounds in
+/// its slice. Splitting workloads into a fast group and a slow group to make
+/// the powerset affordable is the wrong trade, because it removes exactly
+/// the compositions worth having - a memory-destroying workload sharing a
+/// round with a cheap one is the case most likely to move a number, and
+/// grouping by cost guarantees it never happens.
+fn subsets_of(
+    ws: &[Arc<Workload>],
+    budget: Duration,
+    passes: usize,
+    counts: &HashMap<&'static str, (usize, f64)>,
+) -> Vec<Vec<Arc<Workload>>> {
+    let full: Vec<Arc<Workload>> = ws.to_vec();
+    // One composition, sampled hard. The powerset answers whether a number
+    // moves with its company; developing an algorithm against recorded data
+    // is a different question that wants depth in the composition a user
+    // would actually get, not breadth across compositions they would not.
+    if std::env::var("LAB_SUBSETS").map(|v| v == "full").unwrap_or(false) {
+        eprintln!("one composition: the full set");
+        return vec![full];
     }
+    let n_subsets = (1usize << ws.len()) - 1;
+    // The full set is the most expensive subset, and the most rungs any
+    // workload has is what its samples get divided between.
+    let cost = round_cost(&full, counts);
+    let max_rungs = ws
+        .iter()
+        .map(|w| rungs_for(counts.get(w.name).map(|c| c.1).unwrap_or(0.0)).len())
+        .max()
+        .unwrap_or(1) as f64;
+    let slice_ns = budget.as_secs_f64() * 1e9 / (n_subsets * passes) as f64;
+    let per_rung = slice_ns / cost / max_rungs;
+    if per_rung >= MIN_SAMPLES_PER_RUNG {
+        eprintln!(
+            "powerset: {n_subsets} subsets, worst case ~{per_rung:.0} samples per rung"
+        );
+        return ws.iter().cloned().powerset().filter(|s| !s.is_empty()).collect();
+    }
+    eprintln!(
+        "powerset would leave ~{per_rung:.0} samples per rung (want {MIN_SAMPLES_PER_RUNG:.0}); \
+         measuring singletons and the full set instead"
+    );
     let mut out: Vec<Vec<Arc<Workload>>> = ws.iter().map(|w| vec![w.clone()]).collect();
-    out.push(ws.to_vec());
+    out.push(full);
     out
 }
 
