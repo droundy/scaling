@@ -188,6 +188,16 @@ impl<'a> Player<'a> {
     pub fn n(&self, k: usize) -> f64 {
         self.tape.rungs[k].n as f64
     }
+
+    /// What one sample at this rung costs in wall time: batch plus overhead.
+    pub fn cost(&self, k: usize) -> f64 {
+        let r = &self.tape.rungs[k];
+        r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64 + r.overhead_ns
+    }
+
+    pub fn rungs(&self) -> usize {
+        self.tape.rungs.len()
+    }
 }
 
 /// What an algorithm is, as far as replay is concerned.
@@ -281,11 +291,28 @@ fn calibrate(p: &mut Player, target_ns: f64) -> (f64, f64) {
     }
 }
 
-/// A rung choice: stand on one rung, or subtract a low from a high.
+/// What an algorithm does with the ladder.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Choice {
+    /// Stand on one rung.
     One(usize),
+    /// Subtract a low rung from a high one.
     Pair(usize, usize),
+    /// Use every rung, drawn at random, and fit a line.
+    ///
+    /// This needs no rung *choice*, and so needs no calibration to make
+    /// one. The ladder is discovered by walking up from n=1 until a batch
+    /// overruns the ceiling, and every probe taken on the way is kept as a
+    /// data point - so the growth loop stops being a tax paid before
+    /// measuring and becomes part of the measurement. That matters because
+    /// the calibrated policies spend ten to twenty times the measurement on
+    /// probes for a fast workload.
+    ///
+    /// `time_weighted` draws cheap rungs more often, so each rung gets
+    /// roughly equal wall time rather than an equal count. Which is better
+    /// is not obvious - equal counts buy lever arm at the top of the
+    /// ladder, equal time buys samples at the bottom - so both are here.
+    All { time_weighted: bool },
 }
 
 /// Rungs an algorithm could sensibly stand on.
@@ -341,18 +368,85 @@ pub fn measure(tape: &Tape, c: Choice, target: f64, budget_s: f64, start: f64) -
     run_choice(&mut p, c, target, budget_s)
 }
 
+/// Least-squares slope of batch time against batch size.
+///
+/// The slope is the per-iteration cost and the intercept is the fixed cost
+/// per measurement, so a fit over the whole ladder yields both - where a
+/// single rung yields neither separately, and a pair yields the slope only.
+fn slope(pts: &[(f64, f64)]) -> f64 {
+    let k = pts.len() as f64;
+    let sx: f64 = pts.iter().map(|p| p.0).sum();
+    let sy: f64 = pts.iter().map(|p| p.1).sum();
+    let sxx: f64 = pts.iter().map(|p| p.0 * p.0).sum();
+    let sxy: f64 = pts.iter().map(|p| p.0 * p.1).sum();
+    let den = k * sxx - sx * sx;
+    if den.abs() < f64::EPSILON {
+        return f64::NAN;
+    }
+    (k * sxy - sx * sy) / den
+}
+
+/// Standard error of the slope, from the spread of slopes fitted to
+/// contiguous blocks.
+///
+/// The textbook standard error of a regression slope assumes independent
+/// residuals, and consecutive timings are not independent: they share a
+/// clock frequency, a cache state, a scheduler phase. Fitting each block
+/// separately and taking the spread of those slopes divides out whatever is
+/// correlated within a block - the batch-means argument, applied to a slope
+/// instead of to a mean.
+fn slope_se(pts: &[(f64, f64)]) -> f64 {
+    if pts.len() < MIN_SAMPLES * 2 {
+        return f64::INFINITY;
+    }
+    let b = (pts.len() / 8).clamp(4, 20);
+    let per = pts.len() / b;
+    if per < 3 {
+        return f64::INFINITY;
+    }
+    let mut sl: Vec<f64> = Vec::with_capacity(b);
+    for i in 0..b {
+        let v = slope(&pts[i * per..(i + 1) * per]);
+        if !v.is_finite() {
+            return f64::INFINITY;
+        }
+        sl.push(v);
+    }
+    let m = sl.iter().sum::<f64>() / b as f64;
+    let var = sl.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b as f64 - 1.0);
+    (var / b as f64).sqrt()
+}
+
 fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome {
     let budget_ns = budget_s * 1e9;
     let mut vals: Vec<f64> = Vec::new();
+    // For `All`: (n, batch_ns) points to fit.
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    let mut ladder: Vec<usize> = Vec::new();
+    let fitting = matches!(c, Choice::All { .. });
+    if fitting {
+        // Discover the ladder by growing from one iteration, keeping every
+        // probe. This is the growth loop, except that nothing it measures
+        // is thrown away.
+        for k in 0..p.rungs() {
+            let ns = p.draw(k);
+            pts.push((p.n(k), ns));
+            ladder.push(k);
+            if ns > MAX_RUNG_NS {
+                break;
+            }
+        }
+    }
+    let mut rng: u64 = 0x2545F4914F6CDD1D ^ (p.spent_ns.to_bits() | 1);
     let mut est = f64::NAN;
     let mut se = f64::INFINITY;
     let mut capped = false;
     // Next sample count at which to test the stopping rule.
     //
-    // Testing it on every draw makes the simulation quadratic: `batch_se`
-    // is linear in the samples so far, and a tight target at a small rung
-    // runs for tens of thousands of draws. Checking on a geometric schedule
-    // costs a constant factor of the draws instead, and is what a real
+    // Testing it on every draw makes the simulation quadratic: the error
+    // estimate is linear in the samples so far, and a tight goal at a small
+    // rung runs for tens of thousands of draws. A geometric schedule costs
+    // a constant factor of the draws instead, and is what a real
     // implementation would do anyway - recomputing a standard error to
     // decide whether to take one more 150ns sample is not free either.
     let mut check = MIN_SAMPLES;
@@ -369,12 +463,39 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
                 let hi = p.draw(b);
                 vals.push((hi - lo) / (p.n(b) - p.n(a)));
             }
+            Choice::All { time_weighted } => {
+                rng = crate::step(rng);
+                let k = if time_weighted {
+                    let w: Vec<f64> = ladder.iter().map(|&k| 1.0 / p.cost(k).max(1.0)).collect();
+                    let tot: f64 = w.iter().sum();
+                    let mut u = (rng >> 11) as f64 / (1u64 << 53) as f64 * tot;
+                    let mut pick = *ladder.last().unwrap();
+                    for (i, &k) in ladder.iter().enumerate() {
+                        u -= w[i];
+                        if u <= 0.0 {
+                            pick = k;
+                            break;
+                        }
+                    }
+                    pick
+                } else {
+                    ladder[(rng >> 33) as usize % ladder.len()]
+                };
+                let ns = p.draw(k);
+                pts.push((p.n(k), ns));
+            }
         }
-        if vals.len() >= check {
-            check = ((vals.len() as f64 * 1.3) as usize).max(vals.len() + 1);
-            est = vals.iter().sum::<f64>() / vals.len() as f64;
-            se = batch_se(&vals);
-            if est > 0.0 && se / est <= target {
+        let count = if fitting { pts.len() } else { vals.len() };
+        if count >= check {
+            check = ((count as f64 * 1.3) as usize).max(count + 1);
+            if fitting {
+                est = slope(&pts);
+                se = slope_se(&pts);
+            } else {
+                est = vals.iter().sum::<f64>() / vals.len() as f64;
+                se = batch_se(&vals);
+            }
+            if est > 0.0 && se.is_finite() && se / est <= target {
                 break;
             }
         }
@@ -391,6 +512,7 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
     let used = match c {
         Choice::One(k) => vec![p.n(k) as usize],
         Choice::Pair(a, b) => vec![p.n(a) as usize, p.n(b) as usize],
+        Choice::All { .. } => ladder.iter().map(|&k| p.n(k) as usize).collect(),
     };
     Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped, used }
 }
@@ -561,9 +683,11 @@ pub fn report(paths: &[String]) {
 
     println!(
         "Rung choice, calibration and stopping replayed from recordings.\n\
-         A rung is usable if one sample costs between {:.0}ns and {:.0}ms, or if n=1.\n\n\
-         oracle     = told which rung to stand on, and charged nothing for knowing\n\
-         calibrated = had to find the rung, and charged for the probes\n\
+         A rung is usable if one sample costs between {:.0}ns and {:.0}ms, or if n=1,\n\
+         or if n=2 and it runs under a second.\n\n\
+         all-rungs  = walk up from n=1 keeping every probe, then sample the ladder\n\
+                      at random and fit; no rung choice, so no calibration to make one\n\
+         cal *      = calibrate, pick a rung, measure there; charged for the probes\n\
          within     = landed inside the accuracy goal (want >={})\n\
          cover      = landed inside the bar the run itself claimed (want ~{})\n\
          blow       = off by more than {BLOWUP}x the goal (want <={})\n",
@@ -592,72 +716,39 @@ pub fn report(paths: &[String]) {
             tape.rungs[ok[0]].overhead_ns,
         );
 
-        // Every usable rung, and every usable pair.
-        let mut choices: Vec<Choice> = ok.iter().map(|&k| Choice::One(k)).collect();
-        for (x, &a) in ok.iter().enumerate() {
-            for &b in &ok[x + 1..] {
-                choices.push(Choice::Pair(a, b));
-            }
-        }
-
         for &target in &TARGETS {
             println!("  goal {:.1}%", 100.0 * target);
             println!(
                 "    {:>22} {:>9} {:>8} {:>8} {:>8}",
-                "choice", "time", "within", "cover", "blow"
+                "algorithm", "time", "within", "cover", "blow"
             );
-            let mut scores: Vec<Score> = choices
-                .iter()
-                .map(|&c| {
-                    let label = match c {
-                        Choice::One(k) => format!("n={}", tape.rungs[k].n),
-                        Choice::Pair(a, b) => {
-                            format!("n={},{}", tape.rungs[a].n, tape.rungs[b].n)
-                        }
-                    };
-                    let outs: Vec<Outcome> = (0..ORACLE_TRIALS)
-                        .map(|i| {
-                            measure(tape, c, target, 10.0, i as f64 / ORACLE_TRIALS as f64)
-                        })
-                        .collect();
-                    score(label, &outs, truth_ns, target)
-                })
-                .collect();
-            scores.retain(|s| !s.thin);
-            let passing: Vec<&Score> = {
-                let mut v: Vec<&Score> = scores.iter().filter(|s| s.pass).collect();
-                v.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-                v
-            };
-            if passing.is_empty() {
-                // Nothing to rank, so nothing is printed in rank order. The
-                // useful fact is which choice came closest and how far short
-                // it fell, not a list of failures sorted by a time that was
-                // never earned.
-                let best = scores.iter().max_by(|a, b| {
-                    a.within.partial_cmp(&b.within).unwrap()
-                });
-                match best {
-                    Some(b) => println!(
-                        "      no usable choice; closest was {} at within {}",
-                        b.label, pct(b.within)
-                    ),
-                    None => println!("      recording too thin at this goal"),
-                }
-            } else {
-                for s in passing.iter().take(3) {
-                    println!("    {}  oracle", line(s));
-                }
+            let mut rows: Vec<Score> = Vec::new();
+            for (label, c) in [
+                ("all-rungs", Choice::All { time_weighted: false }),
+                ("all-rungs/time", Choice::All { time_weighted: true }),
+            ] {
+                let outs: Vec<Outcome> = (0..CAL_TRIALS)
+                    .map(|i| measure(tape, c, target, 10.0, i as f64 / CAL_TRIALS as f64))
+                    .collect();
+                rows.push(score(label.to_string(), &outs, truth_ns, target));
             }
             for pol in cal_policies(target) {
                 let outs: Vec<Outcome> = (0..CAL_TRIALS)
                     .map(|i| calibrated(tape, &pol, i as f64 / CAL_TRIALS as f64))
                     .collect();
-                let s = score(pol.name.to_string(), &outs, truth_ns, target);
-                if s.thin {
-                    continue;
-                }
-                println!("    {}  {}", line(&s), if s.pass { "pass" } else { "FAIL" });
+                rows.push(score(pol.name.to_string(), &outs, truth_ns, target));
+            }
+            // A cell whose trials ran off the end of the recording is
+            // reporting the same noise repeatedly, so it is not reported at
+            // all rather than reported with a caveat beside it.
+            rows.retain(|r| !r.thin);
+            if rows.is_empty() {
+                println!("      recording too thin at this goal");
+                continue;
+            }
+            rows.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            for r in &rows {
+                println!("    {}  {}", line(r), if r.pass { "pass" } else { "FAIL" });
             }
         }
         println!();
