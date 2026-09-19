@@ -446,3 +446,183 @@ pub fn all() -> Vec<(&'static str, Estimator)> {
         ("ratio_corr", ratio_corr),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Turning a recording into a number.
+//
+// These lived in `main.rs` beside the command-line plumbing, which is why
+// every new analysis grew its own copy rather than reusing them - and why
+// the protocol harness ended up a second program with a second format
+// instead of another caller of this one. A recording is the interface; this
+// is what reads it.
+// ---------------------------------------------------------------------------
+pub fn rung_name(name: &str, k: usize) -> String {
+    if k == 0 {
+        name.to_string()
+    } else {
+        format!("{name}@{k}")
+    }
+}
+
+/// One rung of a ladder, summarised over the rounds that happened to draw it.
+///
+/// A mean and its standard error, because the whole question is whether a
+/// difference between two rungs is bigger than the noise on it. The rungs
+/// are not paired - each round runs a workload at one rung only - so there
+/// is no per-round difference to take, and the uncertainty has to be carried
+/// explicitly instead.
+pub struct Rung {
+    /// Batch size, in iterations.
+    pub n: f64,
+    /// Trimmed mean batch time, ns.
+    pub mean: f64,
+    /// Standard error of that mean, ns.
+    pub se: f64,
+    /// The same thing divided by the cpu canary in the same round, which
+    /// removes whatever the clock was doing between one round and the next.
+    pub ratio: f64,
+}
+
+/// Trimmed mean and the standard error of that mean.
+pub fn mean_se(v: &[f64]) -> (f64, f64) {
+    let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let k = (s.len() as f64 * 0.10) as usize;
+    let s = &s[k..s.len() - k];
+    let m = mean(s);
+    (m, variance(s, m).sqrt() / (s.len() as f64).sqrt())
+}
+
+/// One rung, over the rounds in `range`.
+///
+/// The range is what lets the same code answer two different questions: the
+/// whole run, for the size of the fixed cost, and a block of it, for how
+/// noisy an estimator is at a given number of rounds.
+pub fn rung(
+    r: &Run,
+    base: &str,
+    m: usize,
+    canary: &HashMap<usize, f64>,
+    range: &std::ops::Range<usize>,
+) -> Option<Rung> {
+    let name = rung_name(base, m);
+    let n = *r.iters.get(&name)? as f64;
+    let b: HashMap<usize, f64> = r
+        .batches(&name)
+        .into_iter()
+        .filter(|(k, _)| range.contains(k))
+        .collect();
+    if b.len() < 32 {
+        return None;
+    }
+    let v: Vec<f64> = b.values().copied().collect();
+    let (mean, se) = mean_se(&v);
+    let rat: Vec<f64> = b
+        .iter()
+        .filter_map(|(k, t)| canary.get(k).map(|c| t / c))
+        .collect();
+    Some(Rung {
+        n,
+        mean,
+        se,
+        ratio: mean_se(&rat).0,
+    })
+}
+
+/// Which rungs this recording actually holds for `base`, by batch multiple.
+///
+/// Read back from the names rather than assumed from [`LADDER`], so an
+/// analysis works on a recording made with any ladder - including one made
+/// before the ladder was changed.
+pub fn rungs_present(r: &Run, base: &str) -> Vec<usize> {
+    let prefix = format!("{base}@");
+    let mut ms: Vec<usize> = r
+        .names
+        .iter()
+        .filter_map(|n| n.strip_prefix(&prefix)?.parse().ok())
+        // Index 0, not 1: `rung_name` gives rung 0 the bare workload name.
+        // This said 1 while naming was still by batch multiple, and the
+        // effect after the switch was to drop the smallest rung from every
+        // analysis while leaving the tables looking entirely reasonable -
+        // losing exactly the rung where a fixed cost is most visible.
+        .chain(r.names.iter().any(|n| n == base).then_some(0))
+        .collect();
+    ms.sort_unstable();
+    ms.dedup();
+    ms
+}
+
+/// Slope from the two extreme rungs: the two-point subtraction, longest lever.
+pub fn wide_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
+    let l = v.len() - 1;
+    (y(&v[l]) - y(&v[0])) / (v[l].n - v[0].n)
+}
+
+/// Slope from an unweighted least-squares line through every rung.
+///
+/// The textbook alternative to [`wide_of`], and on this data a dead heat
+/// with it. Under multiplicative noise - where a batch's error scales with
+/// its duration - the extreme pair is very nearly the optimal design, and an
+/// unweighted fit slightly over-trusts the noisiest rung.
+pub fn lsq_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
+    let k = v.len() as f64;
+    let xm = v.iter().map(|r| r.n).sum::<f64>() / k;
+    let ym = v.iter().map(|r| y(r)).sum::<f64>() / k;
+    let num: f64 = v.iter().map(|r| (r.n - xm) * (y(r) - ym)).sum();
+    let den: f64 = v.iter().map(|r| (r.n - xm).powi(2)).sum();
+    num / den
+}
+
+/// The intercept the widest pair implies: the part of a batch's cost that
+/// its iterations do not account for.
+pub fn fixed_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
+    y(&v[0]) - wide_of(v, y) * v[0].n
+}
+
+/// Is the line a line? The slope over the bottom half of the ladder against
+/// the slope over the top half, which agree if and only if the fixed cost is
+/// genuinely fixed.
+///
+/// A constant intercept makes these equal. Anything else - a warm-up that
+/// keeps on warming, a queue that fills as the batch runs - shows up here,
+/// and means no two-point subtraction can be right, however tidy its answer.
+pub fn lin_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
+    let mid = v.len() / 2;
+    wide_of(&v[..=mid], y) - wide_of(&v[mid..], y)
+}
+
+pub fn mean_v(r: &Rung) -> f64 {
+    r.mean
+}
+pub fn ratio_v(r: &Rung) -> f64 {
+    r.ratio
+}
+
+/// The cpu canary's **per-iteration** time, by round.
+///
+/// Per-iteration and not per-batch, which is the trap: the canary is
+/// recalibrated every run and lands on a different batch size each time, so
+/// dividing by its batch time would make the ratio carry that calibration
+/// difference and be worse than not normalising at all. Asking this the
+/// wrong way round scored every ratio at ~20% between runs, against ~1% for
+/// the raw nanoseconds.
+pub fn canary_per_iter(r: &Run) -> HashMap<usize, f64> {
+    // Every rung, not just the first. The canary draws a random rung each
+    // round like everything else, so taking only rung 1 leaves most rounds
+    // with no canary to divide by - which showed up as the ratio columns
+    // going NaN for any ladder longer than a couple of rungs.
+    //
+    // Each rung is converted to per-iteration by its own count before
+    // pooling. That leaves the canary's own fixed cost in the reference,
+    // varying a little by rung; second order against the clock signal the
+    // ratio is here to cancel, but it is there.
+    let mut out = HashMap::new();
+    for m in rungs_present(r, "cpu_canary") {
+        let name = rung_name("cpu_canary", m);
+        let n = *r.iters.get(&name).unwrap_or(&1) as f64;
+        for (round, t) in r.batches(&name) {
+            out.insert(round, t / n);
+        }
+    }
+    out
+}

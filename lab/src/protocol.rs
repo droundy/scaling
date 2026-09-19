@@ -320,79 +320,6 @@ fn find_optimum(w: &Workload, per_iter: f64, deadline: Instant) -> (f64, Vec<(us
     (best.1, kept)
 }
 
-/// Write every individual sample time, in the order taken.
-///
-/// The summary row says what two particular error estimators claimed. That
-/// is enough to score those two and nothing else, which is a poor trade when
-/// the entire question is *which* estimator tells the truth - a third idea
-/// would cost another six hours of measuring rather than a second of
-/// arithmetic. This is the same discipline `run` and `compare` were split
-/// for, applied to the experiment that most needs it.
-///
-/// Four bytes a sample, integer nanoseconds. Order within a rung is
-/// preserved because that is what any estimator dealing with correlation
-/// needs, and the probe count says where calibration ended and measurement
-/// began.
-fn dump(
-    cell: &str,
-    budget_s: f64,
-    rep: usize,
-    ws: &[Workload],
-    plans: &[Plan],
-    probes: &[Vec<usize>],
-    log: &[(u32, u8, u8, f64)],
-) {
-    use std::fmt::Write as _;
-    let Ok(dir) = std::env::var("LAB_PROTO_DUMP") else {
-        return;
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let tag = std::env::var("LAB_PROTO_TAG").unwrap_or_default();
-    let path = format!("{dir}/{cell}.{budget_s}.{rep}{tag}.bin");
-
-    let mut head = String::from("LABPROTO1\n");
-    let _ = writeln!(head, "# cell {cell}\n# budget {budget_s}\n# rep {rep}");
-    let mut body: Vec<u8> = Vec::new();
-    for (i, w) in ws.iter().enumerate() {
-        for (k, (n, v)) in plans[i].rungs.iter().enumerate() {
-            let _ = writeln!(
-                head,
-                "# series {} {k} {n} {} {}",
-                w.name,
-                probes[i].get(k).copied().unwrap_or(0),
-                v.len()
-            );
-            for &ns in v {
-                body.extend_from_slice(
-                    &(ns.round().clamp(0.0, u32::MAX as f64) as u32).to_le_bytes(),
-                );
-            }
-        }
-    }
-    // Ten bytes a sample in execution order: round, workload, rung, ns.
-    // Calibration probes are not in here - they were taken with the workload
-    // running back to back and alone, which is a different regime from the
-    // interleaved rounds, and the `series` lines above say how many there
-    // were so they can be found in the grouped block instead.
-    let _ = writeln!(
-        head,
-        "# order {} records of 10 bytes: u32 round, u8 workload, u8 rung, u32 ns",
-        log.len()
-    );
-    head.push_str("DATA\n");
-    let mut out = head.into_bytes();
-    out.extend_from_slice(&body);
-    for (r, w, k, ns) in log {
-        out.extend_from_slice(&r.to_le_bytes());
-        out.push(*w);
-        out.push(*k);
-        out.extend_from_slice(&(ns.round().clamp(0.0, u32::MAX as f64) as u32).to_le_bytes());
-    }
-    let _ = std::fs::write(path, out);
-}
-
 /// Run one cell, for one budget, in this process, and print one row per
 /// workload.
 pub fn run(cell_name: &str, budget_s: f64, rep: usize) {
@@ -516,28 +443,37 @@ pub fn run(cell_name: &str, budget_s: f64, rep: usize) {
     // drawn at random, in a random order - the same discipline as the sweeps.
     let mut perm = 0x853C49E6748FEA9Bu64 ^ ((rep as u64) << 32);
     let mut rounds = 0usize;
-    // (round, workload, rung, ns) in the order actually executed.
-    let mut log: Vec<(u32, u8, u8, f64)> = Vec::new();
+
+    // Recorded through `Timing`, in the same format every other part of this
+    // lab writes and reads.
+    //
+    // This used to be a second format, LABPROTO1, written by a bespoke
+    // dumper - which severed protocol data from `estimate::Run` and every
+    // estimator built on it. The cost showed up as re-measuring: asking
+    // "what if we stopped at 0.5% instead?" became a thirty-minute
+    // experiment rather than a query over recordings we already had. The
+    // sweep format already carried everything needed; rungs are `name@k`
+    // with their counts in the header, and every sample keeps its round,
+    // slot, wall-clock and duration.
+    let mut t = crate::timing::Timing::from_env();
+    for (i, p) in plans.iter().enumerate() {
+        for (k, (n, _)) in p.rungs.iter().enumerate() {
+            t.iters.insert(crate::rung_name(ws[i].name, k), *n);
+        }
+    }
     while start.elapsed() < budget {
         let mut order: Vec<usize> = (0..ws.len()).collect();
         for i in (1..order.len()).rev() {
             perm = crate::step(perm);
             order.swap(i, (perm >> 33) as usize % (i + 1));
         }
-        for &i in &order {
+        for (slot, &i) in order.iter().enumerate() {
             perm = crate::step(perm);
             let k = (perm >> 33) as usize % plans[i].rungs.len();
             let n = plans[i].rungs[k].0;
-            let ns = ws[i].time_batch(n)();
+            let name = crate::rung_name(ws[i].name, k);
+            let ns = t.time(rounds, slot, &name, ws[i].time_batch(n));
             plans[i].rungs[k].1.push(ns);
-            // Also in execution order, so the round structure survives into
-            // the recording. Grouping by workload was enough for the error
-            // estimators, and no use at all to anyone later asking whether a
-            // payload's sample moves with its neighbours' in the same round,
-            // or whether position within a round matters - both of which
-            // this project has already found to be real effects. The order
-            // is data, and storing it sorted throws it away.
-            log.push((rounds as u32, i as u8, k as u8, ns));
         }
         rounds += 1;
         if start.elapsed() >= budget {
@@ -565,7 +501,13 @@ pub fn run(cell_name: &str, budget_s: f64, rep: usize) {
         }
     }
     let total_s = start.elapsed().as_secs_f64();
-    dump(cell.name, budget_s, rep, &ws, &plans, &probe_counts, &log);
+    if let Ok(dir) = std::env::var("LAB_PROTO_DUMP") {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let tag = std::env::var("LAB_PROTO_TAG").unwrap_or_default();
+            t.write(&format!("{dir}/{}.{budget_s}.{rep}{tag}.bin", cell.name));
+        }
+    }
+    let _ = &probe_counts;
 
     for (i, w) in ws.iter().enumerate() {
         let p = &plans[i];

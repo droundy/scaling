@@ -64,6 +64,11 @@ struct Row {
     estimate: f64,
     se: f64,
     secs: f64,
+    /// Ran out of budget before the error bar reached the target. The
+    /// crate calls this `(limit)`: not wrong, just less precise than asked,
+    /// and the reported bar says how much less. Its *time* is censored - all
+    /// we know is that it exceeded the cap.
+    capped: bool,
 }
 
 fn parse(path: &str, with_target: bool) -> Vec<Row> {
@@ -98,7 +103,16 @@ fn parse(path: &str, with_target: bool) -> Vec<Row> {
         } else {
             f64::NAN
         };
-        out.push(Row { target, cell: c.into(), workload: w.into(), estimate: e, se, secs: t });
+        let budget: f64 = get("budget_s").and_then(|x| x.parse().ok()).unwrap_or(f64::INFINITY);
+        out.push(Row {
+            target,
+            cell: c.into(),
+            workload: w.into(),
+            estimate: e,
+            se,
+            secs: t,
+            capped: t >= 0.98 * budget,
+        });
     }
     out
 }
@@ -180,15 +194,19 @@ pub fn report(truth_path: &str, eval_path: &str) {
                 }
                 total += 1;
                 let n = v.len() as f64;
-                let off = |r: &&Row| ((r.estimate - tv) / tv).abs();
-                let w1 = v.iter().filter(|r| off(r) <= *goal).count() as f64 / n;
-                let w2 = v.iter().filter(|r| off(r) <= 2.0 * goal).count() as f64 / n;
-                let nblow = v.iter().filter(|r| off(r) > BLOWUP * goal).count();
-                let cover = v
-                    .iter()
-                    .filter(|r| r.se.is_finite() && (r.estimate - tv).abs() <= r.se)
-                    .count() as f64
-                    / n;
+                // Judge every run against the bar *it reported*, not against
+                // the target it was asked for. A run that hit the limit and
+                // said "+/- 1.2%" is honest if it really is 1.2% - it is
+                // slow, not wrong, and conflating the two would fail an
+                // algorithm for running out of time.
+                let off = |r: &&Row| (r.estimate - tv).abs();
+                let bar = |r: &&Row| if r.se.is_finite() && r.se > 0.0 { r.se } else { f64::INFINITY };
+                let w1 = v.iter().filter(|r| off(r) <= bar(r)).count() as f64 / n;
+                let w2 = v.iter().filter(|r| off(r) <= 2.0 * bar(r)).count() as f64 / n;
+                let nblow = v.iter().filter(|r| off(r) > BLOWUP * bar(r)).count();
+                // Reported separately: how often it actually delivered the
+                // precision requested, rather than stopping at the cap.
+                let reached = v.iter().filter(|r| !r.capped).count() as f64 / n;
                 let secs: f64 = v.iter().map(|r| r.secs).sum::<f64>() / n;
 
                 // Blow-ups are counted, not rated: the Gaussian expectation
@@ -196,13 +214,11 @@ pub fn report(truth_path: &str, eval_path: &str) {
                 // that from zero. One event in 200 reads as 0.5%, which looks
                 // like a rate and is one event.
                 let why = if w1 < PASS_WITHIN_1X {
-                    Some(format!("within 1x goal {:.0}% (floor {:.0}%)", 100.0 * w1, 100.0 * PASS_WITHIN_1X))
+                    Some(format!("inside its own bar {:.0}% (floor {:.0}%)", 100.0 * w1, 100.0 * PASS_WITHIN_1X))
                 } else if w2 < PASS_WITHIN_2X {
-                    Some(format!("within 2x goal {:.0}% (floor {:.0}%)", 100.0 * w2, 100.0 * PASS_WITHIN_2X))
-                } else if cover < COVERAGE_FLOOR {
-                    Some(format!("error bar covers {:.0}% (floor {:.0}%)", 100.0 * cover, 100.0 * COVERAGE_FLOOR))
+                    Some(format!("inside 2x its bar {:.0}% (floor {:.0}%)", 100.0 * w2, 100.0 * PASS_WITHIN_2X))
                 } else if (nblow as f64) / n > BLOWUP_MAX {
-                    Some(format!("{nblow} of {} runs off by >{:.0}x the goal", v.len(), BLOWUP))
+                    Some(format!("{nblow} of {} runs off by >{:.0}x its own bar", v.len(), BLOWUP))
                 } else {
                     None
                 };
@@ -212,7 +228,14 @@ pub fn report(truth_path: &str, eval_path: &str) {
                         times.entry((c.clone(), gk.clone())).or_default().push(secs);
                         passed.entry((c.clone(), gk.clone())).or_default().insert(w.clone());
                     }
-                    Some(reason) => fails.push(format!("      {w:<14} {reason}")),
+                    Some(reason) => fails.push(format!(
+                        "      {w:<14} {reason}{}",
+                        if reached < 0.99 {
+                            format!("  [reached target in {:.0}% of runs]", 100.0 * reached)
+                        } else {
+                            String::new()
+                        }
+                    )),
                 }
             }
             if total == 0 {
@@ -255,15 +278,33 @@ pub fn report(truth_path: &str, eval_path: &str) {
         // If an algorithm's own-set time is much better than its common-set
         // time, it is fast on exactly the workloads it can handle and slow on
         // the hard ones - worth seeing rather than averaging away.
-        let time_over = |c: &String, set: &BTreeSet<String>| -> Option<f64> {
-            let mut v: Vec<f64> = e
+        // Times are right-censored: a run that hit the budget cap tells us
+        // only that it needed *more* than the cap, not how much more. A
+        // median of such data is honest while fewer than half are censored;
+        // past that the only truthful statement is "> cap", so say that
+        // rather than quoting the cap as though it were a measurement.
+        let time_over = |c: &String, set: &BTreeSet<String>| -> Option<String> {
+            let v: Vec<&Row> = e
                 .iter()
                 .filter(|r| {
                     r.cell == *c && (r.target - goal).abs() < 1e-12 && set.contains(&r.workload)
                 })
-                .map(|r| r.secs)
                 .collect();
-            if v.is_empty() { None } else { Some(median(&mut v)) }
+            if v.is_empty() {
+                return None;
+            }
+            let censored = v.iter().filter(|r| r.capped).count() as f64 / v.len() as f64;
+            let cap = v.iter().map(|r| r.secs).fold(0.0, f64::max);
+            if censored > 0.5 {
+                return Some(format!("> {:.0} ms ({:.0}% hit the cap)", 1000.0 * cap, 100.0 * censored));
+            }
+            let mut t: Vec<f64> = v.iter().map(|r| r.secs).collect();
+            let m = median(&mut t);
+            Some(if censored > 0.0 {
+                format!("{:.1} ms ({:.0}% capped)", 1000.0 * m, 100.0 * censored)
+            } else {
+                format!("{:.1} ms", 1000.0 * m)
+            })
         };
         let empty = BTreeSet::new();
         print!("  {:>5.1}%  each on what it passed: ", 100.0 * goal);
@@ -271,8 +312,8 @@ pub fn report(truth_path: &str, eval_path: &str) {
         for c in &cells {
             let own = passed.get(&(c.clone(), gk.clone())).unwrap_or(&empty);
             match time_over(c, own) {
-                Some(t) => parts.push(format!("{c} {:.1} ms ({})", 1000.0 * t, own.len())),
-                None => parts.push(format!("{c} - (0)")),
+                Some(t) => parts.push(format!("{c} {t} [{} wl]", own.len())),
+                None => parts.push(format!("{c} - [0 wl]")),
             }
         }
         println!("{}", parts.join("   "));
@@ -289,7 +330,7 @@ pub fn report(truth_path: &str, eval_path: &str) {
         let mut parts = Vec::new();
         for c in &cells {
             if let Some(t) = time_over(c, &common) {
-                parts.push(format!("{c} {:.1} ms", 1000.0 * t));
+                parts.push(format!("{c} {t}"));
             }
         }
         println!("{}", parts.join("   "));

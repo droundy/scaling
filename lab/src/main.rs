@@ -24,7 +24,10 @@ mod protocols;
 mod timing;
 mod workloads;
 
-use estimate::Run;
+use estimate::{
+    canary_per_iter, fixed_of, lin_of, lsq_of, mean_v, ratio_v, rung, rung_name,
+    rungs_present, wide_of, Run, Rung,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -218,6 +221,42 @@ fn ladder_from_env() -> Vec<f64> {
 /// rungs distinct at the least possible cost in time, which for a 4.5 ms
 /// iteration is the difference between a ladder ending at 4 iterations and
 /// one ending at 8.
+/// Longest batch worth recording, for any rung above a single iteration.
+///
+/// The ladder is written in multiples of `SAMPLE`, so a slow workload lands
+/// on counts like 1,2,3,4 rather than 1,2,4,8 - but the top of a wide ladder
+/// can still ask for a batch longer than the budget an algorithm is given to
+/// finish in. Such a rung cannot be chosen by anything, and recording it
+/// spends collection time on data no replay will ever read.
+const MAX_RUNG: Duration = Duration::from_secs(10);
+
+/// Draw a rung so that, over many rounds, every rung gets the same *wall
+/// time* rather than the same number of samples.
+///
+/// Drawing uniformly spends the run in proportion to rung cost: on a ladder
+/// reaching 1000x, the top rung takes nearly all the clock and the bottom
+/// rungs - the ones a fast workload's algorithm will actually select - end up
+/// with too few samples to say anything about. Weighting by inverse duration
+/// equalises the time, which buys many more samples where they are cheap.
+///
+/// Falls back to uniform when durations are unknown, which is the replay
+/// case: `per` is NaN there because nothing was calibrated.
+fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
+    let total: f64 = r.iter().map(|x| 1.0 / x.2).sum();
+    if !total.is_finite() || total <= 0.0 {
+        return (bits >> 33) as usize % r.len();
+    }
+    let u = (bits >> 11) as f64 / (1u64 << 53) as f64 * total;
+    let mut acc = 0.0;
+    for (k, x) in r.iter().enumerate() {
+        acc += 1.0 / x.2;
+        if u < acc {
+            return k;
+        }
+    }
+    r.len() - 1
+}
+
 fn counts_for(cal: usize, ladder: &[f64]) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::with_capacity(ladder.len());
     for &t in ladder {
@@ -397,7 +436,7 @@ fn run(
     // averages out over rounds rather than a systematic one that loads onto
     // whichever rung ran later.
     let mut seed = 0x9E3779B97F4A7C15u64;
-    let mut rungs: Vec<Vec<(usize, String)>> = Vec::with_capacity(ws.len());
+    let mut rungs: Vec<Vec<(usize, String, f64)>> = Vec::with_capacity(ws.len());
     for w in ws.iter() {
         let (cal, per) = match (t.replaying(), counts.and_then(|c| c.get(w.name))) {
             (true, _) => (*t.iters.get(w.name).unwrap_or(&1), f64::NAN),
@@ -413,16 +452,28 @@ fn run(
         // back attached to the wrong batch sizes and every per-iteration
         // cost doubled.
         let derived = counts_for(cal, ladder);
-        let mut this: Vec<(usize, String)> = Vec::with_capacity(ladder.len());
+        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(ladder.len());
         for k in 0..ladder.len() {
             let name = rung_name(w.name, k);
             let n = if t.replaying() {
-                *t.iters
-                    .get(&name)
-                    .unwrap_or_else(|| panic!("replay recording has no rung {name}"))
+                // A rung absent from the recording was dropped when it was
+                // made - see MAX_RUNG - so skip it rather than failing.
+                match t.iters.get(&name) {
+                    Some(&n) => n,
+                    None => continue,
+                }
             } else {
                 derived[k]
             };
+            let dur = n as f64 * per;
+            // A rung is only worth recording if some algorithm could pick
+            // it, and nothing can pick a batch that overruns the whole
+            // budget. `n == 1` is exempt: one iteration is the least a
+            // workload can be measured in, so however long it takes, that
+            // is the measurement.
+            if !t.replaying() && n > 1 && dur > MAX_RUNG.as_nanos() as f64 {
+                continue;
+            }
             t.iters.insert(name.clone(), n);
             // Only when this call did its own calibrating. A sweep has
             // already printed the plan once, and repeating it for every
@@ -433,7 +484,7 @@ fn run(
                     n as f64 * per / 1e3
                 );
             }
-            this.push((n, name));
+            this.push((n, name, dur));
         }
         rungs.push(this);
     }
@@ -487,7 +538,7 @@ fn run(
             .iter()
             .map(|r| {
                 perm = step(perm);
-                (perm >> 33) as usize % r.len()
+                weighted_rung(r, perm)
             })
             .collect();
         let mut order: Vec<usize> = (0..ws.len()).collect();
@@ -497,7 +548,7 @@ fn run(
         }
         for (slot, &i) in order.iter().enumerate() {
             seed = step(seed);
-            let (count, name) = &rungs[i][pick[i]];
+            let (count, name, _) = &rungs[i][pick[i]];
             // Untimed iterations first, to separate the two things that
             // could make a measurement cost more than its iterations do.
             // Harness overhead - the two clock reads, the boxed call - is
@@ -527,7 +578,7 @@ fn run(
     for (i, name) in rungs
         .iter()
         .enumerate()
-        .flat_map(|(i, r)| r.iter().map(move |(_, name)| (i, name)))
+        .flat_map(|(i, r)| r.iter().map(move |(_, name, _)| (i, name)))
     {
         let v = run.get(name);
         let kind = match ws[i].kind {
@@ -552,177 +603,6 @@ fn run(
 /// a time-based ladder the batch size is a different number for every
 /// workload. The count lives in the `# iters` header, which is where every
 /// reader already gets it.
-fn rung_name(name: &str, k: usize) -> String {
-    if k == 0 {
-        name.to_string()
-    } else {
-        format!("{name}@{k}")
-    }
-}
-
-/// One rung of a ladder, summarised over the rounds that happened to draw it.
-///
-/// A mean and its standard error, because the whole question is whether a
-/// difference between two rungs is bigger than the noise on it. The rungs
-/// are not paired - each round runs a workload at one rung only - so there
-/// is no per-round difference to take, and the uncertainty has to be carried
-/// explicitly instead.
-struct Rung {
-    /// Batch size, in iterations.
-    n: f64,
-    /// Trimmed mean batch time, ns.
-    mean: f64,
-    /// Standard error of that mean, ns.
-    se: f64,
-    /// The same thing divided by the cpu canary in the same round, which
-    /// removes whatever the clock was doing between one round and the next.
-    ratio: f64,
-}
-
-/// Trimmed mean and the standard error of that mean.
-fn mean_se(v: &[f64]) -> (f64, f64) {
-    let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let k = (s.len() as f64 * 0.10) as usize;
-    let s = &s[k..s.len() - k];
-    let m = estimate::mean(s);
-    (m, estimate::variance(s, m).sqrt() / (s.len() as f64).sqrt())
-}
-
-/// One rung, over the rounds in `range`.
-///
-/// The range is what lets the same code answer two different questions: the
-/// whole run, for the size of the fixed cost, and a block of it, for how
-/// noisy an estimator is at a given number of rounds.
-fn rung(
-    r: &Run,
-    base: &str,
-    m: usize,
-    canary: &HashMap<usize, f64>,
-    range: &std::ops::Range<usize>,
-) -> Option<Rung> {
-    let name = rung_name(base, m);
-    let n = *r.iters.get(&name)? as f64;
-    let b: HashMap<usize, f64> = r
-        .batches(&name)
-        .into_iter()
-        .filter(|(k, _)| range.contains(k))
-        .collect();
-    if b.len() < 32 {
-        return None;
-    }
-    let v: Vec<f64> = b.values().copied().collect();
-    let (mean, se) = mean_se(&v);
-    let rat: Vec<f64> = b
-        .iter()
-        .filter_map(|(k, t)| canary.get(k).map(|c| t / c))
-        .collect();
-    Some(Rung {
-        n,
-        mean,
-        se,
-        ratio: mean_se(&rat).0,
-    })
-}
-
-/// Which rungs this recording actually holds for `base`, by batch multiple.
-///
-/// Read back from the names rather than assumed from [`LADDER`], so an
-/// analysis works on a recording made with any ladder - including one made
-/// before the ladder was changed.
-fn rungs_present(r: &Run, base: &str) -> Vec<usize> {
-    let prefix = format!("{base}@");
-    let mut ms: Vec<usize> = r
-        .names
-        .iter()
-        .filter_map(|n| n.strip_prefix(&prefix)?.parse().ok())
-        // Index 0, not 1: `rung_name` gives rung 0 the bare workload name.
-        // This said 1 while naming was still by batch multiple, and the
-        // effect after the switch was to drop the smallest rung from every
-        // analysis while leaving the tables looking entirely reasonable -
-        // losing exactly the rung where a fixed cost is most visible.
-        .chain(r.names.iter().any(|n| n == base).then_some(0))
-        .collect();
-    ms.sort_unstable();
-    ms.dedup();
-    ms
-}
-
-/// Slope from the two extreme rungs: the two-point subtraction, longest lever.
-fn wide_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
-    let l = v.len() - 1;
-    (y(&v[l]) - y(&v[0])) / (v[l].n - v[0].n)
-}
-
-/// Slope from an unweighted least-squares line through every rung.
-///
-/// The textbook alternative to [`wide_of`], and on this data a dead heat
-/// with it. Under multiplicative noise - where a batch's error scales with
-/// its duration - the extreme pair is very nearly the optimal design, and an
-/// unweighted fit slightly over-trusts the noisiest rung.
-fn lsq_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
-    let k = v.len() as f64;
-    let xm = v.iter().map(|r| r.n).sum::<f64>() / k;
-    let ym = v.iter().map(|r| y(r)).sum::<f64>() / k;
-    let num: f64 = v.iter().map(|r| (r.n - xm) * (y(r) - ym)).sum();
-    let den: f64 = v.iter().map(|r| (r.n - xm).powi(2)).sum();
-    num / den
-}
-
-/// The intercept the widest pair implies: the part of a batch's cost that
-/// its iterations do not account for.
-fn fixed_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
-    y(&v[0]) - wide_of(v, y) * v[0].n
-}
-
-/// Is the line a line? The slope over the bottom half of the ladder against
-/// the slope over the top half, which agree if and only if the fixed cost is
-/// genuinely fixed.
-///
-/// A constant intercept makes these equal. Anything else - a warm-up that
-/// keeps on warming, a queue that fills as the batch runs - shows up here,
-/// and means no two-point subtraction can be right, however tidy its answer.
-fn lin_of(v: &[Rung], y: &dyn Fn(&Rung) -> f64) -> f64 {
-    let mid = v.len() / 2;
-    wide_of(&v[..=mid], y) - wide_of(&v[mid..], y)
-}
-
-fn mean_v(r: &Rung) -> f64 {
-    r.mean
-}
-fn ratio_v(r: &Rung) -> f64 {
-    r.ratio
-}
-
-/// The cpu canary's **per-iteration** time, by round.
-///
-/// Per-iteration and not per-batch, which is the trap: the canary is
-/// recalibrated every run and lands on a different batch size each time, so
-/// dividing by its batch time would make the ratio carry that calibration
-/// difference and be worse than not normalising at all. Asking this the
-/// wrong way round scored every ratio at ~20% between runs, against ~1% for
-/// the raw nanoseconds.
-fn canary_per_iter(r: &Run) -> HashMap<usize, f64> {
-    // Every rung, not just the first. The canary draws a random rung each
-    // round like everything else, so taking only rung 1 leaves most rounds
-    // with no canary to divide by - which showed up as the ratio columns
-    // going NaN for any ladder longer than a couple of rungs.
-    //
-    // Each rung is converted to per-iteration by its own count before
-    // pooling. That leaves the canary's own fixed cost in the reference,
-    // varying a little by rung; second order against the clock signal the
-    // ratio is here to cancel, but it is there.
-    let mut out = HashMap::new();
-    for m in rungs_present(r, "cpu_canary") {
-        let name = rung_name("cpu_canary", m);
-        let n = *r.iters.get(&name).unwrap_or(&1) as f64;
-        for (round, t) in r.batches(&name) {
-            out.insert(round, t / n);
-        }
-    }
-    out
-}
-
 /// How big the fixed per-measurement cost is, and what subtracting it costs.
 ///
 /// Four numbers per workload, all per-iteration:
