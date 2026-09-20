@@ -54,7 +54,7 @@ fn scales(n: usize) -> u64 {
 // call - `n` reaches the generator, not the timed function ----
 
 #[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
-fn scales_with_gen_input(v: &mut Vec<u64>) -> u64 {
+fn scales_with_fresh_input(v: &mut Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
 }
 
@@ -136,7 +136,7 @@ fn every_written_benchmark_is_found_and_measured() {
 
     let gen_scaling_key = report
         .names()
-        .find(|k| k.ends_with("scales_with_gen_input"))
+        .find(|k| k.ends_with("scales_with_fresh_input"))
         .expect("the gen_input scaling benchmark registered")
         .to_string();
     assert!(

@@ -37,7 +37,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Type};
 
-/// Register a benchmark, as [`scaling::bench`] would run it.
+/// Register a benchmark, as `scaling::bench` would run it.
 ///
 /// ```ignore
 /// #[scaling::bench]
@@ -82,7 +82,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Register a scaling benchmark, as [`scaling::bench_scaling`] would run it.
+/// Register a scaling benchmark, as `scaling::bench_scaling` would run it.
 ///
 /// ```ignore
 /// #[scaling::bench_scaling(nmin = 100)]

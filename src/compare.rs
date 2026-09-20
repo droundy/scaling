@@ -1,9 +1,13 @@
 use super::*;
 use std::fmt::{self, Display, Formatter};
 
+/// One alternative measured against another: the two [`Stats`] and the
+/// verdict built from them.
 #[derive(Debug, Clone)]
 pub struct Comparison {
+    /// What the alternative this one is judged against measured.
     pub baseline: Stats,
+    /// What this alternative measured.
     pub candidate: Stats,
     /// The Bonferroni limit this comparison was judged against, carried from
     /// the family of comparisons it was measured in. See
@@ -16,6 +20,8 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// How much slower `candidate` measured than `baseline`, in nanoseconds.
+    /// Negative when `candidate` was faster.
     pub fn difference_ns(&self) -> f64 {
         self.candidate.ns_per_iter - self.baseline.ns_per_iter
     }
@@ -49,6 +55,11 @@ impl Comparison {
         }
         self.paired_std_error
     }
+    /// Whether [`Comparison::difference_ns`] is large enough, relative to
+    /// [`Comparison::std_error`], to call a real change rather than noise -
+    /// judged against the family of comparisons this one was measured
+    /// alongside. See [`Comparison::min_detectable_difference`] for what
+    /// "large enough" came to on this particular result.
     pub fn is_changed(&self) -> bool {
         crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
     }

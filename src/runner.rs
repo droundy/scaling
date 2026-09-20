@@ -333,6 +333,16 @@ fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diag
 /// ```no_run
 /// use scaling::runner::{measure, Options};
 ///
+/// #[scaling::bench(group = "lookup", name = "linear_scan", baseline)]
+/// fn scan() -> bool {
+///     (0..1000u64).any(|x| x == 42)
+/// }
+///
+/// #[scaling::bench(group = "lookup", name = "binary_search")]
+/// fn bsearch() -> bool {
+///     (0..1000u64).collect::<Vec<_>>().binary_search(&42).is_ok()
+/// }
+///
 /// let mut options = Options::default();
 /// options.filter = scaling::Filter::everything().matching("lookup");
 /// let report = measure(&options).expect("the registrations compose");

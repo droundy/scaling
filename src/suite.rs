@@ -1069,12 +1069,16 @@ impl Report {
     ///
     /// A `Report` comes from [`crate::runner::measure`], not built here.
     ///
-    /// ```ignore
-    /// let cfg = scaling::Config::default();
-    /// let mut suite = cfg.suite();
-    /// let _ = suite.add("sum", || (0..100u64).sum::<u64>());
-    /// let report = suite.run();
-    /// let stats: scaling::Stats = report.get("sum").expect("it ran");
+    /// ```no_run
+    /// use scaling::runner::{measure, Options};
+    ///
+    /// #[scaling::bench(name = "sum_to_100")]
+    /// fn my_benchmark() -> u64 {
+    ///     (0..100u64).sum()
+    /// }
+    ///
+    /// let report = measure(&Options::default()).expect("the registrations compose");
+    /// let stats: scaling::Stats = report.get("sum_to_100").expect("it ran");
     /// assert!(stats.ns_per_iter > 0.0);
     /// ```
     pub fn get<T: Clone + 'static>(&self, name: &str) -> Option<T> {

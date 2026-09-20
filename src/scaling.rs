@@ -138,6 +138,17 @@ pub struct ScalingStats {
     /// `NaN` when no scaling law was identified, there being nothing for it
     /// to be the error of.
     pub rel_std_error: f64,
+    /// The R² of the fitted scaling law: how well one power law explains the
+    /// measured costs across sizes, from 0 (no better than chance) to 1
+    /// (fits exactly).
+    ///
+    /// This is about whether the right *shape* was found at all - a
+    /// different question from [`ScalingStats::rel_std_error`], which is
+    /// about how precisely the constant in front of it is known *given*
+    /// that shape. Zero specifically when the fit could not tell the
+    /// candidate powers apart, which is the case `rel_std_error`'s own doc
+    /// comment says to watch for: a tight error bar next to a zero
+    /// `goodness_of_fit` is precise about a shape that was not pinned down.
     pub goodness_of_fit: f64,
     /// How many times the benchmarked code was actually run.
     pub iterations: u64,
