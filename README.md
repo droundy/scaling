@@ -42,13 +42,15 @@ name = "bench"
 harness = false
 ```
 
-`cargo bench` then yields:
+`cargo bench` then yields - module-qualified, `bench::` here because that is
+what `[[bench]] name = "bench"` makes `module_path!()` at the top of that
+file:
 
 ```none
-fib_200:    71.716ns ± 0.057ns
-fib_500:    262.75ns ± 0.14ns
-reverse:     51.80ns ± 0.62ns
-sort:        111.3ns ± 1.1ns
+bench::fib_200:    71.716ns ± 0.057ns
+bench::fib_500:    262.75ns ± 0.14ns
+bench::reverse:     51.80ns ± 0.62ns
+bench::sort:        111.3ns ± 1.1ns
 ```
 
 The `±` figure is the standard error of the reported time, in the same unit
@@ -134,7 +136,7 @@ alternative of one, and exactly one of them is the `baseline` the others are
 reported against:
 
 ```rust
-#[scaling::gen_input(group = "sorting")]
+#[scaling::bench_input(group = "sorting")]
 fn sorting_data() -> Vec<u64> { (0..400).rev().collect() }
 
 #[scaling::bench(group = "sorting", baseline)]
@@ -166,7 +168,7 @@ fn already_sorted() -> Vec<u64> { (0..400).collect() }
 fn reversed() -> Vec<u64> { (0..400).rev().collect() }
 ```
 
-Five declarations, four cells; a fifth input would make six without touching
+Four declarations, four cells; a third input would make six without touching
 anything already written. Candidates are paired with inputs by *type*, so
 one matrix can hold several unrelated type families and a `String` candidate
 is never handed a `Vec<u8>`. Each input's cells are a comparison, printed as

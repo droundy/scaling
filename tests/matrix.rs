@@ -67,6 +67,13 @@ fn ramp(n: usize) -> Vec<u64> {
     (0..n as u64).collect()
 }
 
+// ---- and one with `name` overriding the bare function name too ----
+
+#[scaling::input(matrix = "sized", name = "flat", sizes(32, 128))]
+fn flat_of_len(n: usize) -> Vec<u64> {
+    vec![7u64; n]
+}
+
 #[scaling::candidate(matrix = "sized", baseline)]
 fn total(v: &mut Vec<u64>) -> u64 {
     v.iter().sum()
@@ -110,6 +117,19 @@ fn every_pairing_is_measured() {
         assert!(
             report.contains(&format!("sized@ramp@{size}")),
             "expected a comparison per size",
+        );
+    }
+
+    // sized: `name = "flat"` must override the bare function name here too,
+    // not just when `sizes(..)` is absent.
+    for size in [32, 128] {
+        assert!(
+            report.contains(&format!("sized@flat@{size}")),
+            "name should override the bare function name under sizes(..) too",
+        );
+        assert!(
+            !report.contains(&format!("sized@flat_of_len@{size}")),
+            "the bare function name should not have been used instead",
         );
     }
 }

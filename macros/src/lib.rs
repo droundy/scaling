@@ -814,10 +814,18 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             "an input registered at several `sizes(..)` takes the size as its one argument",
         ));
     }
+    // `name = "..."` overrides the bare function name here exactly as it
+    // does in the no-`sizes` branch above - previously only that branch
+    // honored it, so `#[scaling::input(name = "...", sizes(..))]` silently
+    // registered under the function's own name instead.
+    let bare = args
+        .name
+        .as_ref()
+        .map(|lit| lit.value())
+        .unwrap_or_else(|| fname.to_string());
     let mut out = quote! { #func };
     for (n, size) in args.sizes.iter().enumerate() {
         let shim = format_ident!("__scaling_minput_{}_{}", fname, n);
-        let bare = fname.to_string();
         let size_txt = size.base10_digits().to_string();
         let name = format!("{bare}@{size_txt}");
         out.extend(quote! {

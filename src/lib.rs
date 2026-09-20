@@ -39,12 +39,14 @@ The binary that runs them is one line, and [`main!`] is the whole of it:
 scaling::main!();
 ```
 
-`cargo bench` then yields:
+`cargo bench` then yields - module-qualified, `bench::` here because that is
+what `[[bench]] name = "bench"` makes `module_path!()` at the top of that
+file:
 
 ```none
-fib_200:      71.716ns ± 0.057ns
-reverse:       51.80ns ± 0.62ns
-fib_scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
+bench::fib_200:      71.716ns ± 0.057ns
+bench::reverse:       51.80ns ± 0.62ns
+bench::fib_scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
 ```
 
 Easy! However, please read the [caveats](#caveats) below before using.
