@@ -540,6 +540,14 @@ pub struct Lane {
     /// implementations quietly changes what is being measured if the
     /// generator itself has changed since.
     pub inputs: Vec<Named<MatrixInput>>,
+    /// Whether this lane shares an input name with another lane of the same
+    /// matrix - two different types, both with an input called `small`,
+    /// say - which `comparison_name` needs to know: it disambiguates only
+    /// when that has actually happened, the same "carries only what
+    /// distinguishes them" rule [`resolve_versions`] follows for names that
+    /// collide across crates or versions. Set once, after every lane of a
+    /// matrix is known, by comparing input names across them.
+    pub needs_type_suffix: bool,
 }
 
 impl Lane {
@@ -549,8 +557,19 @@ impl Lane {
     /// so the comparison is named for the matrix and the input and the
     /// candidates are its alternatives. A lone candidate has nothing to
     /// compare against and is a plain benchmark, which needs its own name.
+    ///
+    /// The type is appended only when [`Lane::needs_type_suffix`] says
+    /// another lane of this matrix has an input of the same name - two
+    /// lanes each with a `small` input, say. Without that, `matrix@small`
+    /// from one lane collides with `matrix@small` from the other: both
+    /// resolve to the same report entry, and the second silently overwrites
+    /// the first's result.
     pub fn comparison_name(&self, input: &Named<MatrixInput>) -> String {
-        format!("{}@{}", self.matrix, input.name)
+        if self.needs_type_suffix {
+            format!("{}@{} ({})", self.matrix, input.name, self.type_name)
+        } else {
+            format!("{}@{}", self.matrix, input.name)
+        }
     }
 
     pub fn flat_name(
@@ -824,7 +843,32 @@ pub fn lanes(
             type_name: key.1,
             candidates: cs,
             inputs: is,
+            // Set below, once every lane of every matrix is known - a
+            // lane cannot tell by itself whether another lane of its
+            // matrix shares one of its input names.
+            needs_type_suffix: false,
         });
+    }
+
+    // A lane's input names can collide with another lane's in the same
+    // matrix - two different types, each with an input called `small`, say.
+    // Disambiguate only the lanes where that has actually happened, the
+    // same rule `resolve_versions` follows for names that collide across
+    // crates or versions: carry only what distinguishes them.
+    // Owned `String` keys in the inner map, not `&str` borrowed from
+    // `lanes` itself - a name lives inside `lane.inputs`, which lives
+    // inside `lanes`, so borrowing it here would keep `lanes` immutably
+    // borrowed right through the `&mut lanes` pass below.
+    let mut counts_by_matrix: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
+    for lane in &lanes {
+        let counts = counts_by_matrix.entry(lane.matrix).or_default();
+        for i in &lane.inputs {
+            *counts.entry(i.name.clone()).or_insert(0) += 1;
+        }
+    }
+    for lane in &mut lanes {
+        let counts = &counts_by_matrix[lane.matrix];
+        lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
     }
 
     (lanes, problems)
@@ -1684,6 +1728,52 @@ pub(crate) mod lane_tests {
             );
             assert!(lane.inputs.iter().all(|i| i.reg.type_name == ty));
         }
+    }
+
+    /// Two lanes of one matrix with an input of the same name -
+    /// `comparison_name` must tell their cells apart, or the second lane's
+    /// result silently overwrites the first's under one shared report
+    /// entry. Only these two lanes disambiguate: a third, unrelated lane in
+    /// the same matrix keeps its plain name.
+    #[test]
+    fn two_lanes_sharing_an_input_name_are_told_apart() {
+        let cs = leak_c(vec![
+            cand::<Vec<u8>>("m", "bytes_a", "Vec<u8>", true),
+            cand::<Vec<u8>>("m", "bytes_b", "Vec<u8>", false),
+            cand::<String>("m", "text_a", "String", true),
+            cand::<String>("m", "text_b", "String", false),
+            cand::<u8>("m", "byte_a", "u8", true),
+            cand::<u8>("m", "byte_b", "u8", false),
+        ]);
+        let is = leak_i(vec![
+            // Both lanes register an input called "small" - the collision.
+            inp::<Vec<u8>>("m", "small", "Vec<u8>"),
+            inp::<String>("m", "small", "String"),
+            // Unrelated third lane, name shared with nothing.
+            inp::<u8>("m", "one", "u8"),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes.len(), 3);
+
+        let names: Vec<String> = lanes
+            .iter()
+            .flat_map(|lane| lane.inputs.iter().map(|i| lane.comparison_name(i)))
+            .collect();
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "every cell name must be unique: {names:?}",
+        );
+        assert!(names.iter().any(|n| n == "m@small (Vec<u8>)"), "{names:?}",);
+        assert!(names.iter().any(|n| n == "m@small (String)"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "m@one"),
+            "the uncontested lane should not be disambiguated: {names:?}",
+        );
     }
 
     /// With nobody marked, the first by name is the baseline - a matrix

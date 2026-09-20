@@ -1089,6 +1089,7 @@ mod grids {
                 reg: &REVERSED,
                 origin: origin(),
             }],
+            needs_type_suffix: false,
         }
     }
 
