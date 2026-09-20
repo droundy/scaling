@@ -47,7 +47,7 @@
 //! library has. Two ways of measuring one quantity that agree are evidence;
 //! the interesting day is the one where they stop agreeing.
 
-use scaling::{bench, bench_gen_input, bench_clone_input, bench_scaling, bench_scaling_gen};
+use scaling::{bench, bench_clone_input, bench_gen_input, bench_scaling, bench_scaling_gen};
 use std::time::{Duration, Instant};
 
 /// How many independent runs each row is built from.

@@ -248,12 +248,14 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         }
     };
     let seconds = value * seconds;
-    // `Duration::from_secs_f64` panics on anything it cannot represent, and
-    // a mistyped flag is not a reason to abort with a backtrace.
-    if !seconds.is_finite() || seconds < 0.0 || seconds > u64::MAX as f64 {
-        return Err(format!("`{s}` is not a duration this can represent"));
-    }
-    Ok(Duration::from_secs_f64(seconds))
+    // `try_from_secs_f64` rather than `from_secs_f64`: the latter panics on
+    // anything it cannot represent, and a mistyped flag is not a reason to
+    // abort with a backtrace. A hand-rolled bound here would have to
+    // reproduce `Duration`'s own overflow check exactly - `u64::MAX as f64`
+    // rounds up to 2^64, one past what `Duration` can actually hold, so a
+    // bound written that way would accept a value that still panics.
+    Duration::try_from_secs_f64(seconds)
+        .map_err(|_| format!("`{s}` is not a duration this can represent"))
 }
 
 /// What a run came to.
@@ -288,11 +290,37 @@ impl From<Outcome> for ExitCode {
     }
 }
 
+/// Every flag that takes the argument after it as a value, so `-h`/`--help`
+/// right after one of these is that value - `--filter -h`, say, filtering
+/// for a benchmark whose name contains "-h" - not a help request.
+const VALUE_FLAGS: &[&str] = &[
+    "--filter",
+    "--skip",
+    "--format",
+    "--rel-error",
+    "--abs-error",
+    "--max-time",
+    "--versions",
+    "--baseline",
+];
+
+/// Whether `args` asks for help, in the sense `main` intercepts: a bare
+/// `-h`/`--help` not itself the value of a preceding flag.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(i, a)| {
+        (a == "--help" || a == "-h")
+            && !i
+                .checked_sub(1)
+                .is_some_and(|prev| VALUE_FLAGS.contains(&args[prev].as_str()))
+    })
+}
+
 /// The whole of a benchmark binary. See [`crate::main!`].
 pub fn main() -> ExitCode {
     // Intercepted before parsing: `auto-args` has no idea what `-h` is, and
     // its own `--help` handling belongs to a code path this does not use.
-    if std::env::args().any(|a| a == "--help" || a == "-h") {
+    let args: Vec<String> = std::env::args().collect();
+    if wants_help(&args) {
         println!("{}", Flags::help());
         return ExitCode::SUCCESS;
     }
@@ -377,13 +405,16 @@ pub fn run(options: Options) -> Outcome {
         eprintln!("warning: {w}");
     }
 
-    if suite.filter().is_listing() {
-        print!("{}", listing(&suite, &tokens));
+    // Before `is_listing`: an empty suite has nothing to list either, and
+    // `--list` on one - nothing registered at all, or a filter that matched
+    // nothing - should say so rather than print zero bytes and exit clean.
+    if suite.is_empty() {
+        eprintln!("{}", nothing_to_run(&tokens));
         return Outcome::Measured;
     }
 
-    if suite.is_empty() {
-        eprintln!("{}", nothing_to_run(&tokens));
+    if suite.filter().is_listing() {
+        print!("{}", listing(&suite, &tokens));
         return Outcome::Measured;
     }
     eprintln!(
@@ -891,6 +922,34 @@ mod tests {
         assert_eq!(options.registry.baseline, BaselinePolicy::Newest);
         assert!(options.fail_on_regression);
         assert!(!options.fail_on_untrustworthy);
+    }
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bare_help_flag_is_a_help_request() {
+        assert!(wants_help(&s(&["bench", "-h"])));
+        assert!(wants_help(&s(&["bench", "--help"])));
+        assert!(wants_help(&s(&["bench", "--filter", "sort", "--help"])));
+    }
+
+    /// The bug this guards: `--filter -h` means "filter for a benchmark
+    /// whose name contains -h", not "show help". Scanning every argument
+    /// for a literal `-h` cannot tell these apart; only knowing which flags
+    /// consume the next argument as their value can.
+    #[test]
+    fn a_help_flag_used_as_a_value_is_not_a_help_request() {
+        assert!(!wants_help(&s(&["bench", "--filter", "-h"])));
+        assert!(!wants_help(&s(&["bench", "--skip", "--help"])));
+        assert!(!wants_help(&s(&["bench", "--baseline", "-h"])));
+    }
+
+    #[test]
+    fn no_help_flag_is_not_a_help_request() {
+        assert!(!wants_help(&s(&["bench", "--filter", "sort"])));
+        assert!(!wants_help(&s(&["bench"])));
     }
 
     /// The plainest invocation there is: `cargo bench` appends `--bench` on

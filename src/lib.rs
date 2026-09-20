@@ -377,7 +377,7 @@ pub use self::bench::Stats;
 /// [`main!`] are, and unlike these they get an interleaved measurement, a
 /// name in the report, and a share of the multiple-comparison correction.
 #[doc(hidden)]
-pub use self::bench::{bench, bench_gen_input, bench_clone_input};
+pub use self::bench::{bench, bench_clone_input, bench_gen_input};
 pub use self::compare::Comparison;
 pub use self::filter::Filter;
 pub use self::kway::Comparisons;
@@ -911,8 +911,14 @@ mod tests {
         println!("fib 200: {}", bench(|| fib(200)));
         println!("fib 500: {}", bench(|| fib(500)));
         println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
-        println!("reverse: {}", bench_clone_input(vec![0; 100], |xs| xs.reverse()));
-        println!("sort:    {}", bench_clone_input(vec![0; 100], |xs| xs.sort()));
+        println!(
+            "reverse: {}",
+            bench_clone_input(vec![0; 100], |xs| xs.reverse())
+        );
+        println!(
+            "sort:    {}",
+            bench_clone_input(vec![0; 100], |xs| xs.sort())
+        );
 
         // This is fine:
         println!("fib 1:   {}", bench(|| fib(500)));

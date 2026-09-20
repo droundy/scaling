@@ -15,7 +15,7 @@
 //! benchmark, a machine claim, or a linker.
 
 use crate::registry::{
-    ErasedInput, BenchInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
+    BenchInputRegistration, ErasedInput, Kind, MatrixCandidate, MatrixInput, Registered,
 };
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
@@ -1135,7 +1135,10 @@ mod tests {
         }
     }
 
-    fn generator<I: 'static>(group: &'static str, type_name: &'static str) -> BenchInputRegistration {
+    fn generator<I: 'static>(
+        group: &'static str,
+        type_name: &'static str,
+    ) -> BenchInputRegistration {
         BenchInputRegistration {
             group,
             crate_name: "testcrate",

@@ -832,7 +832,17 @@ impl<'a> Suite<'a> {
         // consults for the accuracy goal, so it must also be what the budget
         // comes from. A set built from a different `Config` than the suite
         // would otherwise chase one target on the other's clock.
-        let clock = Rc::new(Clock::new(set.cfg().max_time * k as u32));
+        //
+        // `checked_mul`, not `*`: a large but individually valid `max_time`
+        // (see `parse_duration`) times enough alternatives can overflow
+        // `Duration`, and a caller who asked for a huge budget should get
+        // one clamped to the largest this can represent, not a panic.
+        let budget = set
+            .cfg()
+            .max_time
+            .checked_mul(k as u32)
+            .unwrap_or(Duration::MAX);
+        let clock = Rc::new(Clock::new(budget));
         let token = Token::new();
         let answer = token.clone();
         let mine = clock.clone();
@@ -2280,7 +2290,7 @@ mod per_benchmark_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Adder, Alternative, ErasedInput, BenchInputRegistration, Handle};
+    use crate::registry::{Adder, Alternative, BenchInputRegistration, ErasedInput, Handle};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -2517,7 +2527,11 @@ mod registered_by_hand {
             .with_filter(Filter::everything().matching("e2e"));
         // Deliberately thrown away: a script driving a benchmark binary has no
         // way to get hold of these.
-        drop(suite.try_add_registered_with(RegistryOptions::default()).unwrap());
+        drop(
+            suite
+                .try_add_registered_with(RegistryOptions::default())
+                .unwrap(),
+        );
         let report = suite.run();
 
         let stats = report
@@ -2544,7 +2558,11 @@ mod registered_by_hand {
         let mut suite = cfg
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
-        drop(suite.try_add_registered_with(RegistryOptions::default()).unwrap());
+        drop(
+            suite
+                .try_add_registered_with(RegistryOptions::default())
+                .unwrap(),
+        );
         let report = suite.run();
 
         let (_, cmp) = report
