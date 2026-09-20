@@ -219,19 +219,30 @@ pub(crate) fn resolve_versions<T: 'static>(
 
         if policy == VersionPolicy::LatestPerCrate {
             // Newest of each crate, so rivals all survive and only a crate's
-            // own older copies are dropped.
-            let mut newest: BTreeMap<&'static str, (&'static T, Origin)> = BTreeMap::new();
+            // own strictly older copies are dropped. Ties within one crate -
+            // two registrations at the same version - are kept rather than
+            // one silently winning: a real version difference is exactly one
+            // crate replacing an older copy of itself, but an equal version
+            // is not that, it is the same crate registering one name twice.
+            // Collapsing it here, the same way an older copy is dropped,
+            // would hide precisely the duplicate the fallthrough below - and
+            // the ordinary `VersionPolicy::All` path - exists to report.
+            let mut newest: BTreeMap<&'static str, Vec<(&'static T, Origin)>> = BTreeMap::new();
             for (reg, origin) in sharers {
-                newest
-                    .entry(origin.crate_name)
-                    .and_modify(|held| {
-                        if origin.version() > held.1.version() {
-                            *held = (reg, origin);
+                let held = newest.entry(origin.crate_name).or_default();
+                match held.first() {
+                    None => held.push((reg, origin)),
+                    Some((_, held_origin)) => match origin.version().cmp(&held_origin.version()) {
+                        std::cmp::Ordering::Greater => {
+                            held.clear();
+                            held.push((reg, origin));
                         }
-                    })
-                    .or_insert((reg, origin));
+                        std::cmp::Ordering::Equal => held.push((reg, origin)),
+                        std::cmp::Ordering::Less => {}
+                    },
+                }
             }
-            sharers = newest.into_values().collect();
+            sharers = newest.into_values().flatten().collect();
             if sharers.len() == 1 {
                 let (reg, origin) = sharers.pop().expect("just checked");
                 out.push(Named {
@@ -651,6 +662,27 @@ pub fn lanes(
     for n in named_i {
         let key = (n.reg.matrix, n.reg.type_name, n.reg.name);
         match best.get(&key) {
+            // Same crate, same version: not redundancy, a genuine
+            // duplicate - two registrations of one input, from the same
+            // source. Silently keeping either would be exactly the
+            // "regardless of origin" collapse this diagnostic exists to
+            // catch, so it is reported rather than resolved. `held` is left
+            // as it is, matching how the candidate duplicate check below
+            // reports every extra claimant rather than only the first.
+            Some(held)
+                if held.origin.crate_name == n.origin.crate_name
+                    && Version::parse(held.origin.crate_version)
+                        == Version::parse(n.origin.crate_version) =>
+            {
+                problems.push(Diagnostic::DuplicateMatrixEntry {
+                    matrix: key.0.to_string(),
+                    what: "input",
+                    name: n.reg.name.to_string(),
+                });
+            }
+            // A different crate, or an older version of this one: this is
+            // the intended case the comment above describes - genuinely
+            // redundant, so keep the newest and say nothing.
             Some(held)
                 if Version::parse(held.origin.crate_version)
                     >= Version::parse(n.origin.crate_version) => {}
@@ -2089,6 +2121,27 @@ mod version_tests {
         assert_eq!(
             lanes[0].inputs[0].origin.crate_version, "0.9.0",
             "and it is the newest, not whichever happened to register first",
+        );
+    }
+
+    /// Two registrations of one input, same crate, same version, are not
+    /// redundancy - nothing distinguishes them, so picking one silently
+    /// would hide a real mistake rather than resolve an intended one.
+    #[test]
+    fn a_genuine_duplicate_input_is_reported_not_silently_kept() {
+        let cs = leak_c(vec![cand::<u8>("m", "a", "u8", true)]);
+        let is = leak_i(vec![
+            inp_from::<u8>("m", "data", "u8", "mycrate", "0.9.0"),
+            inp_from::<u8>("m", "data", "u8", "mycrate", "0.9.0"),
+        ]);
+        let (_lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        assert!(
+            problems.iter().any(|p| matches!(
+                p,
+                Diagnostic::DuplicateMatrixEntry { what, name, .. }
+                    if *what == "input" && name == "data"
+            )),
+            "{problems:?}",
         );
     }
 
