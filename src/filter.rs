@@ -33,7 +33,7 @@
 ///
 /// # It changes the verdicts, and should
 ///
-/// [`Suite::run`] takes the Bonferroni limit from the number of comparisons
+/// Running a suite takes the Bonferroni limit from the number of comparisons
 /// the suite actually holds. Run five and you have five chances at a false
 /// positive; run one and you have one. So a comparison filtered down to on
 /// its own is judged more leniently than the same comparison among others,
@@ -41,8 +41,6 @@
 /// the suite. That is correct rather than surprising - the correction is
 /// *for* the size of the family - but it does mean a filtered run and a full
 /// one are not quite asking the same question.
-///
-/// [`Suite::run`]: crate::Suite::run
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     patterns: Vec<String>,
@@ -79,13 +77,11 @@ impl Filter {
     /// it.
     ///
     /// Acted on by the caller rather than here, because printing is not this
-    /// crate's business: ask a suite for [`Suite::names`] and print those.
+    /// crate's business: ask a suite for its names and print those.
     ///
     /// It earns its place because registered benchmarks are named after the
     /// module and function they were written in, and nobody wrote those names
     /// down anywhere - so "what is there?" has no other answer.
-    ///
-    /// [`Suite::names`]: crate::Suite::names
     pub fn is_listing(&self) -> bool {
         self.list
     }

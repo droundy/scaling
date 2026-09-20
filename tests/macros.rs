@@ -1,13 +1,20 @@
 //! Benchmarks written the way they are meant to be written.
 //!
-//! `tests/registry.rs` builds the same registrations by hand, which is what
+//! `tests/registry.rs`'s equivalent (now `registered_by_hand` inside
+//! `src/suite.rs`, since it needs direct `Suite` access that only exists
+//! inside the crate) builds the same registrations by hand, which is what
 //! proved the runtime path before any macro existed. This checks that the
 //! macros produce the same thing from an attribute, so the two are worth
 //! keeping side by side: if one passes and the other fails, the fault is in
 //! the macro rather than in the registry.
 //!
-//! Stage 4 of `REGISTRATION.md`.
+//! Driven through [`scaling::runner::measure`] rather than `Config::suite`:
+//! `Suite`, `Token` and `RegisteredTokens` are `pub(crate)`, reachable only
+//! from inside the crate, so an ordinary integration test - which links
+//! `scaling` the way any downstream crate would - can only ever reach the
+//! registry through the runner's public entry point.
 
+use scaling::runner::{measure, Options};
 use scaling::Config;
 use std::time::Duration;
 
@@ -88,44 +95,43 @@ fn iter_sum() -> u64 {
 
 // ---------------------------------------------------------------------
 
+fn options(max_time_ms: u64) -> Options {
+    Options {
+        cfg: Config::default().with_max_time(Duration::from_millis(max_time_ms)),
+        ..Options::default()
+    }
+}
+
 #[test]
 fn every_written_benchmark_is_found_and_measured() {
-    let cfg = Config::default().with_max_time(Duration::from_millis(50));
-    let mut suite = cfg.suite();
-    let tokens = suite.add_registered();
+    let report = measure(&options(50)).expect("these registrations compose");
 
-    // Four standalone benchmarks and two comparison groups; a group is one
-    // entry, since it is measured as a unit.
-    assert_eq!(suite.len(), 7, "five flat/scaling entries and two groups");
-    let report = suite.run();
-
-    for name in ["plain", "with_input", "with_gen_input", "renamed"] {
-        let full = tokens
-            .flat
-            .keys()
+    for name in ["plain", "with_input", "with_gen_input"] {
+        let full = report
+            .names()
             .find(|k| k.ends_with(name))
-            .unwrap_or_else(|| panic!("{name} not registered: {:?}", tokens.flat.keys()));
+            .unwrap_or_else(|| panic!("{name} not registered"))
+            .to_string();
         assert!(
-            tokens.flat[full].get().is_some(),
+            report.stats(&full).is_some(),
             "{name} was registered but never measured",
         );
     }
+    assert!(report.stats("renamed").is_some());
 
-    let scaling_key = tokens
-        .scaling
-        .keys()
+    let scaling_key = report
+        .names()
         .find(|k| k.ends_with("scales"))
-        .expect("the scaling benchmark registered");
-    assert!(tokens.scaling[scaling_key].get().is_some());
+        .expect("the scaling benchmark registered")
+        .to_string();
+    assert!(report.scaling(&scaling_key).is_some());
 
-    let sorting = tokens.comparisons["sorting"]
-        .get()
-        .expect("the sorting group ran");
+    let sorting = report.comparison("sorting").expect("the sorting group ran");
     assert_eq!(sorting.stats().len(), 3);
     assert_eq!(sorting.against_baseline().count(), 2);
 
-    let summing = tokens.comparisons["summing"]
-        .get()
+    let summing = report
+        .comparison("summing")
         .expect("the no-input group ran");
     assert_eq!(summing.stats().len(), 2);
 
@@ -140,21 +146,18 @@ fn every_written_benchmark_is_found_and_measured() {
 /// in different modules do not collide.
 #[test]
 fn names_default_to_the_module_path() {
-    let cfg = Config::default().with_max_time(Duration::from_millis(20));
-    let mut suite = cfg.suite();
-    let tokens = suite.add_registered();
-    suite.run();
+    let report = measure(&options(20)).expect("these registrations compose");
 
     assert!(
-        tokens.flat.contains_key("macros::plain"),
+        report.names().any(|k| k.ends_with("::plain")),
         "expected a module-qualified name, got {:?}",
-        tokens.flat.keys().collect::<Vec<_>>(),
+        report.names().collect::<Vec<_>>(),
     );
     // And `name = "..."` replaces it outright rather than qualifying it.
     assert!(
-        tokens.flat.contains_key("renamed"),
+        report.contains("renamed"),
         "an explicit name is used as given: {:?}",
-        tokens.flat.keys().collect::<Vec<_>>(),
+        report.names().collect::<Vec<_>>(),
     );
 }
 
@@ -164,12 +167,9 @@ fn names_default_to_the_module_path() {
 /// if it is the baseline that is the `baseline` word doing it.
 #[test]
 fn the_declared_baseline_is_used() {
-    let cfg = Config::default().with_max_time(Duration::from_millis(20));
-    let mut suite = cfg.suite();
-    let tokens = suite.add_registered();
-    suite.run();
+    let report = measure(&options(20)).expect("these registrations compose");
 
-    let cmps = tokens.comparisons["sorting"].get().unwrap();
+    let cmps = report.comparison("sorting").unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
     assert_eq!(against.len(), 2);
     assert!(

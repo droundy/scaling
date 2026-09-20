@@ -5,17 +5,14 @@
 //! crate: running means claiming the machine, which pins threads and blocks
 //! until whatever else is benchmarking gives the reserved CPUs back. A
 //! mistake reported after that wait has cost real time and says nothing that
-//! could not have been said immediately - the same reasoning
-//! [`crate::ComparisonSet::run`] already applies when it checks its
-//! alternative count before claiming.
+//! could not have been said immediately - the same reasoning a comparison set
+//! already applies when it checks its alternative count before claiming.
 //!
 //! [`plan`](crate::assemble::plan) is therefore a pure function over slices:
 //! it takes registrations
 //! and returns either a plan or a list of complaints, touching nothing and
 //! measuring nothing. That makes every diagnostic below testable without a
 //! benchmark, a machine claim, or a linker.
-//!
-//! Stage 2 of `REGISTRATION.md`.
 
 use crate::registry::{
     ErasedInput, GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
@@ -300,14 +297,12 @@ pub enum Diagnostic {
         sources: Vec<String>,
     },
     /// A comparison group with fewer than two alternatives. There is nothing
-    /// to compare a lone alternative against, and
-    /// [`crate::Suite::add_comparison`] would panic.
+    /// to compare a lone alternative against, and assembling it would panic.
     LonelyGroup { group: String, members: Vec<String> },
     /// A comparison group where nobody is the baseline.
     ///
-    /// A hand-built [`crate::ComparisonSet`] takes its first alternative as
-    /// the baseline, but registrations have no order, so one of them has to
-    /// say.
+    /// A hand-built comparison set takes its first alternative as the
+    /// baseline, but registrations have no order, so one of them has to say.
     NoBaseline { group: String, members: Vec<String> },
     /// A comparison group where more than one alternative claims to be the
     /// baseline.
@@ -378,8 +373,8 @@ impl Diagnostic {
     /// else still runs. A contradiction is not - the lane holding it is
     /// discarded, so benchmarks that were written produce nothing, and
     /// saying so only in a field of the returned value means a caller who
-    /// writes `suite.add_registered();` and drops the result sees a run that
-    /// silently measured nothing.
+    /// writes `suite.try_add_registered_with(..).unwrap();` and drops the
+    /// result sees a run that silently measured nothing.
     pub fn is_fatal(&self) -> bool {
         !matches!(
             self,
@@ -489,7 +484,7 @@ pub struct Plan {
     pub groups: Vec<Group>,
 }
 
-/// One comparison group, ready to become a [`crate::ComparisonSet`].
+/// One comparison group, ready to become a comparison set.
 #[derive(Debug)]
 pub struct Group {
     pub name: &'static str,
@@ -1096,21 +1091,15 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::ErasedInput;
-    use crate::{ComparisonSet, Config, Stats, Suite, Token};
+    use crate::registry::{noop_alt, Adder, Handle};
+    use crate::Stats;
     use std::any::TypeId;
 
-    // Shims that do nothing. Assembly never calls them - it decides what
+    // Shim that does nothing. Assembly never calls it - it decides what
     // *would* be run - so a plan can be checked without a machine claim, a
     // benchmark, or a linker.
-    fn noop_flat(suite: &mut Suite<'_>, _: &Config, name: &str) -> Token<Stats> {
-        suite.add(name, || ())
-    }
-    fn noop_alt<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
-        _: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
-        set
+    fn noop_flat(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
+        adder.flat(name, || ())
     }
 
     /// A standalone benchmark.
@@ -1554,23 +1543,16 @@ mod pairing {
 #[cfg(test)]
 pub(crate) mod lane_tests {
     use super::*;
-    use crate::registry::{ErasedInput, MatrixCandidate, MatrixInput};
-    use crate::{ComparisonSet, Config, Stats, Suite, Token};
+    use crate::registry::{noop_alt, Adder, ErasedInput, Handle, MatrixCandidate, MatrixInput};
+    use crate::Stats;
     use std::any::TypeId;
 
     fn noop_flat(
-        suite: &mut Suite<'_>,
-        _: &Config,
+        adder: &mut Adder<'_, '_>,
         name: &str,
         make: fn() -> ErasedInput,
-    ) -> Token<Stats> {
-        suite.add_gen_input(name, make, |_: &mut ErasedInput| ())
-    }
-    fn noop_alt<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
-        _: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
-        set
+    ) -> Handle<Stats> {
+        adder.gen_input(name, make, |_: &mut ErasedInput| ())
     }
 
     pub(crate) fn cand<I: 'static>(
@@ -2234,8 +2216,8 @@ mod review_regressions {
 
     /// A contradiction inside a lane discards that lane, so it has to be
     /// fatal. Reported only as a warning it meant a caller who wrote
-    /// `suite.add_registered();` and dropped the result saw a run that
-    /// silently measured nothing.
+    /// `suite.try_add_registered_with(..).unwrap();` and dropped the result
+    /// saw a run that silently measured nothing.
     #[test]
     fn a_lane_contradiction_is_fatal_but_an_orphan_is_not() {
         let two_baselines = Diagnostic::ManyBaselines {
@@ -2261,7 +2243,7 @@ mod review_regressions {
             crate_version: version,
             group: None,
             is_baseline: false,
-            kind: Kind::Flat(|s, _, n| s.add(n, || ())),
+            kind: Kind::Flat(|a, n| a.flat(n, || ())),
         }
     }
 

@@ -204,8 +204,7 @@ them.
 Comparisons are declared the same way. `group = "..."` makes a function one
 alternative of a comparison, and `#[scaling::candidate]` with
 `#[scaling::input]` builds a matrix of implementations against inputs -
-paired by type, with no list of the pairings anywhere. `REGISTRATION.md` in
-the repository has the design.
+paired by type, with no list of the pairings anywhere.
 
 ## Why they are measured together
 
@@ -333,7 +332,7 @@ for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
 */
 
-/// Assembling registered benchmarks into a suite. See `REGISTRATION.md`.
+/// Assembling registered benchmarks into a suite.
 #[doc(hidden)]
 pub mod assemble;
 mod bench;
@@ -341,7 +340,7 @@ mod compare;
 mod filter;
 mod kway;
 pub mod quiet;
-/// Benchmarks registered from anywhere in a crate. See `REGISTRATION.md`.
+/// Benchmarks registered from anywhere in a crate.
 ///
 /// Public but hidden: the types here are named by generated registration
 /// code rather than written by hand, and their shapes are not yet stable.
@@ -390,22 +389,8 @@ pub use self::scaling::{Scaling, ScalingStats};
 pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
-/// The machinery a registration is written against.
-///
-/// Reachable but not documented, for the same reason [`registry`] and
-/// [`assemble`] are: an attribute macro expands to a shim that names
-/// `scaling::Suite` and `scaling::Token` in the *calling* crate, so these
-/// have to be public for generated code to compile. They are not how a
-/// benchmark is written - `#[scaling::bench]` and [`main!`] are - and their
-/// shapes are not stable.
-///
-/// Before stage 8 these were the documented way to assemble a suite by hand.
-/// That path is gone; what is left is the contract between the macros and
-/// the runner, which happens to be spelled in public types.
-#[doc(hidden)]
-pub use self::kway::ComparisonSet;
-#[doc(hidden)]
-pub use self::suite::{RegisteredTokens, Suite, Token};
+pub(crate) use self::kway::ComparisonSet;
+pub(crate) use self::suite::{RegisteredTokens, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.
@@ -413,7 +398,7 @@ pub use self::suite::{RegisteredTokens, Suite, Token};
 pub use inventory;
 
 /// Attribute macros that register a benchmark where it is written, rather
-/// than requiring it be added to a suite by hand. See `REGISTRATION.md`.
+/// than requiring it be added to a suite by hand.
 pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 
 /// A whole benchmark binary, in one line.
@@ -425,9 +410,9 @@ pub use scaling_macros::{bench, bench_scaling, candidate, gen_input, input};
 ///
 /// Every benchmark registered anywhere in this binary is discovered,
 /// measured together, and printed. What used to be written out - a
-/// [`Config`], a [`Suite`], the `add` calls, the printing - is either
-/// decided by the attributes on the benchmarks themselves or asked for on
-/// the command line:
+/// [`Config`], a suite, the `add` calls, the printing - is either decided by
+/// the attributes on the benchmarks themselves or asked for on the command
+/// line:
 ///
 /// ```none
 /// cargo bench --bench bench -- --list

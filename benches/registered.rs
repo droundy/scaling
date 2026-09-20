@@ -12,8 +12,6 @@
 //! cargo bench --bench registered -- --max-time 200ms
 //! cargo bench --bench registered -- --format json
 //! ```
-//!
-//! Stages 7 and 8 of `REGISTRATION.md`.
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))

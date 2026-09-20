@@ -49,10 +49,10 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 /// runs.
 ///
 /// The first one added is the baseline; every other is reported against it.
-/// Build one with [`Config::comparison`], add the alternatives, then
-/// [`ComparisonSet::run`]:
+/// Built internally from `group = "..."` or a matrix - not constructed
+/// directly, hence `ignore` below rather than a doctest.
 ///
-/// ```no_run
+/// ```ignore
 /// # fn old() -> u64 { 0 }
 /// # fn new() -> u64 { 0 }
 /// # fn newer() -> u64 { 0 }
@@ -74,7 +74,7 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 /// sets and reading them together is a larger family than any of them knows
 /// about, and [`ComparisonSet::run`] cannot correct for it - add them to a
 /// [`Suite`] instead, which sees them all before running any.
-pub struct ComparisonSet<'a, I> {
+pub(crate) struct ComparisonSet<'a, I> {
     cfg: &'a Config,
     gen_input: Box<GenInput<'a, I>>,
     entries: Vec<Entry<'a, I>>,
@@ -86,11 +86,17 @@ struct Entry<'a, I> {
 }
 
 impl Config {
-    /// Start gathering alternatives that take no input. See
-    /// [`ComparisonSet`], and note that it is hidden: a comparison is
+    /// Start gathering alternatives that take no input. A comparison is
     /// declared with `group = "..."` or a matrix, not built here.
-    #[doc(hidden)]
-    pub fn comparison(&self) -> ComparisonSet<'_, ()> {
+    ///
+    /// Assembly only ever needs [`Config::comparison_gen_input`] - every
+    /// registered alternative takes an (erased) input. This unit-input
+    /// sibling exists so tests can exercise the k-way comparison algorithm
+    /// directly, independent of registration - hence `allow(dead_code)`
+    /// rather than `#[cfg(test)]`: it is real crate-internal API, not test
+    /// scaffolding, even though nothing outside tests currently calls it.
+    #[allow(dead_code)]
+    pub(crate) fn comparison(&self) -> ComparisonSet<'_, ()> {
         ComparisonSet {
             cfg: self,
             gen_input: Box::new(|| ()),
@@ -110,10 +116,12 @@ impl Config {
     /// Neither the generating nor the cloning is timed, but both are paid
     /// out of [`Config::max_time`].
     ///
-    /// Hidden, like [`Config::comparison`]: this is what assembles a
-    /// registered comparison group or matrix lane.
-    #[doc(hidden)]
-    pub fn comparison_gen_input<'a, G, I: Clone>(&'a self, gen_input: G) -> ComparisonSet<'a, I>
+    /// Like [`Config::comparison`]: this is what assembles a registered
+    /// comparison group or matrix lane.
+    pub(crate) fn comparison_gen_input<'a, G, I: Clone>(
+        &'a self,
+        gen_input: G,
+    ) -> ComparisonSet<'a, I>
     where
         G: FnMut() -> I + 'a,
     {
@@ -128,6 +136,10 @@ impl Config {
 impl<'a> ComparisonSet<'a, ()> {
     /// Add an alternative that takes no input. The first one added is the
     /// baseline.
+    ///
+    /// Only used by tests exercising [`Config::comparison`] directly - see
+    /// its doc comment.
+    #[allow(dead_code)]
     pub fn add<F, O>(self, name: &str, mut f: F) -> Self
     where
         F: FnMut() -> O + 'a,
@@ -171,11 +183,6 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         self.cfg
     }
 
-    /// Whether no alternatives have been added yet.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Time them all, interleaved, and report each against the baseline.
     ///
     /// # Algorithm
@@ -203,6 +210,13 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     ///
     /// If fewer than two alternatives were added: there is nothing to
     /// compare a lone alternative against.
+    ///
+    /// A `Suite` never calls this: it interleaves a registered comparison's
+    /// samples with the rest of the suite via its own scheduler instead of
+    /// driving this standalone loop. Only tests call it directly, to check
+    /// the k-way algorithm itself - the statistics, the pairing, the stopping
+    /// rule - independent of registration or a suite.
+    #[allow(dead_code)]
     pub fn run(self) -> Comparisons {
         // Before pinning and before the machine lock, both of which have
         // effects that outlive a panic and the second of which blocks: a
@@ -417,8 +431,8 @@ async fn calibrate<'a, I: Clone>(
     }
 }
 
-/// What [`ComparisonSet::run`] measured: a [`Stats`] for every alternative,
-/// and every alternative's difference from the baseline.
+/// What running a comparison set measured: a [`Stats`] for every
+/// alternative, and every alternative's difference from the baseline.
 #[derive(Debug, Clone)]
 pub struct Comparisons {
     names: Vec<String>,

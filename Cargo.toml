@@ -25,8 +25,7 @@ libc = "0.2"
 auto-args = "0.3.2"
 # Collects benchmarks registered anywhere in a crate, through linker
 # sections, so that they need not be assembled into one list by hand. This is
-# what makes `#[scaling::bench]` work from wherever it is written. See
-# REGISTRATION.md.
+# what makes `#[scaling::bench]` work from wherever it is written.
 inventory = "0.3.21"
 # The attribute macros themselves.
 scaling-macros = { version = "0.9.0", path = "macros" }
@@ -36,7 +35,7 @@ scaling-macros = { version = "0.9.0", path = "macros" }
 # crate using only that path paid for neither. There is no such path now:
 # registration is how a benchmark is declared and `scaling::runner` is how it
 # is run, so every build needs all three and a feature to turn them off would
-# only turn the crate off. See "Stage 8" in REGISTRATION.md.
+# only turn the crate off.
 
 [workspace]
 members = [".", "macros"]

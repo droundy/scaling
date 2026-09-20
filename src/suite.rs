@@ -54,7 +54,9 @@
 
 use super::*;
 use crate::assemble::RegistryOptions;
-use crate::registry::{GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered};
+use crate::registry::{
+    Adder, Alternative, GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
+};
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -339,7 +341,7 @@ impl<'a> Scheduler<'a> {
 /// comparison a [`Comparisons`], and each token remembers which.
 ///
 /// [`Token::get`] is `None` until the suite has run.
-pub struct Token<T>(Arc<Mutex<Option<T>>>);
+pub(crate) struct Token<T>(Arc<Mutex<Option<T>>>);
 
 // Not `#[derive(Clone)]`, which would demand `T: Clone` for no reason: what
 // is cloned is the handle, not the answer behind it.
@@ -364,6 +366,12 @@ impl<T> Token<T> {
 
 impl<T: Clone> Token<T> {
     /// The answer, or `None` if the suite has not run yet.
+    ///
+    /// A registered benchmark's result is read back through [`Report`]
+    /// instead - see its own doc comment for why. Only tests hold a `Token`
+    /// directly, to check `Suite`'s own scheduling and interleaving without
+    /// going through registration at all.
+    #[allow(dead_code)]
     pub fn get(&self) -> Option<T> {
         self.cell().clone()
     }
@@ -418,7 +426,11 @@ impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
 
 /// A set of benchmarks measured together, their samples interleaved.
 ///
-/// ```
+/// Built internally by [`crate::runner`] from `#[scaling::bench]` and
+/// friends - not constructed directly, hence `ignore` below rather than a
+/// doctest.
+///
+/// ```ignore
 /// let cfg = scaling::Config::default();
 /// let mut suite = cfg.suite();
 /// let sort = suite.add("sort", || {
@@ -438,7 +450,7 @@ impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
 /// benchmark's samples are drawn: across the whole session rather than in one
 /// stretch of it, so that no benchmark is measured in a machine state its
 /// neighbours never saw.
-pub struct Suite<'a> {
+pub(crate) struct Suite<'a> {
     cfg: &'a Config,
     scheduler: Scheduler<'a>,
     /// Names and type-erased cells, in declaration order, for [`Report`].
@@ -462,12 +474,9 @@ pub struct Suite<'a> {
 }
 
 impl Config {
-    /// Begin a suite of benchmarks to be measured together.
-    ///
-    /// See [`Suite`], and note that it is hidden: this is what
+    /// Begin a suite of benchmarks to be measured together. What
     /// [`crate::runner`] calls, not what a benchmark is written against.
-    #[doc(hidden)]
-    pub fn suite(&self) -> Suite<'_> {
+    pub(crate) fn suite(&self) -> Suite<'_> {
         Suite {
             cfg: self,
             // A fixed seed: what must vary is the starting position from one
@@ -506,7 +515,7 @@ impl<'a> Suite<'a> {
     /// simply never fills - the same thing that happens to any token when a
     /// suite is built and not run.
     ///
-    /// ```
+    /// ```ignore
     /// # use scaling::Filter;
     /// let cfg = scaling::Config::default();
     /// let mut suite = cfg.suite().with_filter(Filter::everything().matching("sort"));
@@ -533,7 +542,7 @@ impl<'a> Suite<'a> {
     /// answers [`Filter::is_listing`] - acted on by the caller rather than
     /// here, printing not being a library's business.
     ///
-    /// ```no_run
+    /// ```ignore
     /// # let cfg = scaling::Config::default();
     /// # let suite = cfg.suite();
     /// if suite.filter().is_listing() {
@@ -660,7 +669,7 @@ impl<'a> Suite<'a> {
     /// suite holds. A benchmark cannot opt out of the family it is part of by
     /// bringing its own `Config`.
     ///
-    /// ```
+    /// ```ignore
     /// use std::time::Duration;
     /// let cfg = scaling::Config::default();
     /// // Declared before the suite, so it outlives it.
@@ -775,7 +784,7 @@ impl<'a> Suite<'a> {
     /// fair rather than merely necessary - one poll here runs `k` batches
     /// where a flat benchmark runs one, and it is producing `k` [`Stats`].
     ///
-    /// ```
+    /// ```ignore
     /// let cfg = scaling::Config::default();
     /// let mut suite = cfg.suite();
     /// let hashing = suite.add_comparison(
@@ -874,7 +883,7 @@ impl<'a> Suite<'a> {
 /// than mixed, because the three answers are different types and a token
 /// remembers which: that is exactly what stops a caller having to downcast.
 #[derive(Debug, Default)]
-pub struct RegisteredTokens {
+pub(crate) struct RegisteredTokens {
     /// Flat benchmarks, by name.
     pub flat: BTreeMap<String, Token<Stats>>,
     /// Scaling benchmarks, by name.
@@ -884,8 +893,8 @@ pub struct RegisteredTokens {
     pub comparisons: BTreeMap<String, Token<Comparisons>>,
     /// Things worth saying that did not stop the run - a matrix candidate no
     /// input matches, say. Errors come back through
-    /// [`Suite::try_add_registered`] instead; these are the complaints that
-    /// leave the rest of the run perfectly good.
+    /// [`Suite::try_add_registered_with`] instead; these are the complaints
+    /// that leave the rest of the run perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
     /// The comparison groups as they were assembled, in the order they were
     /// added.
@@ -906,7 +915,10 @@ pub struct RegisteredTokens {
 }
 
 impl<'a> Suite<'a> {
-    /// Add every benchmark registered anywhere in this binary.
+    /// Add every benchmark registered anywhere in this binary, handing back
+    /// what is wrong rather than panicking - what a runner printing
+    /// diagnostics of its own should do. See [`RegistryOptions`] for what to
+    /// do about registrations that come from more than one crate or version.
     ///
     /// Discovery only; the suite is otherwise unchanged, and benchmarks added
     /// by hand before or after this call sit alongside the discovered ones
@@ -917,63 +929,9 @@ impl<'a> Suite<'a> {
     /// other, so they are counted towards the suite's multiple-comparison
     /// plan by the machinery that was already there.
     ///
-    /// # Panics
-    ///
-    /// If the registrations do not make sense together - a duplicate name, a
-    /// comparison group with no baseline or two, an alternative whose input
-    /// type is not the one its group generates. The panic lists *every*
-    /// problem rather than the first, since they are found before anything
-    /// runs and fixing them one rebuild at a time would be tedious.
-    ///
-    /// Use [`Suite::try_add_registered`] to handle them instead, which is
-    /// what a runner printing diagnostics of its own should do.
-    pub fn add_registered(&mut self) -> RegisteredTokens {
-        self.add_registered_with(RegistryOptions::default())
-    }
-
-    /// [`Suite::add_registered`], saying what to do about registrations that
-    /// come from more than one crate or version.
-    ///
-    /// The case this is for: a crate pulls an older copy of itself, or a
-    /// rival crate, in as a dev-dependency with registrations enabled. Both
-    /// register, and both may use the same names for the same ideas.
-    ///
-    /// ```no_run
-    /// # let cfg = scaling::Config::default();
-    /// # let mut suite = cfg.suite();
-    /// use scaling::assemble::RegistryOptions;
-    /// // Measure only the newest version of each crate that registered.
-    /// suite.add_registered_with(RegistryOptions::latest_per_crate());
-    /// # let _ = suite;
-    /// ```
-    pub fn add_registered_with(&mut self, options: RegistryOptions) -> RegisteredTokens {
-        match self.try_add_registered_with(options) {
-            Ok(tokens) => tokens,
-            Err(problems) => {
-                let mut msg = String::from("registered benchmarks do not make sense together:");
-                for p in &problems {
-                    msg.push_str("\n  - ");
-                    msg.push_str(&p.to_string());
-                }
-                panic!("{msg}");
-            }
-        }
-    }
-
-    /// [`Suite::add_registered`], handing back what is wrong rather than
-    /// panicking.
-    ///
     /// Nothing is added when this returns `Err`: the registrations are
     /// checked in full before the first one is added, so a suite is never
     /// left holding half of a set that did not check out.
-    pub fn try_add_registered(
-        &mut self,
-    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
-        self.try_add_registered_with(RegistryOptions::default())
-    }
-
-    /// [`Suite::try_add_registered`], with [`RegistryOptions`]. See
-    /// [`Suite::add_registered_with`].
     pub fn try_add_registered_with(
         &mut self,
         options: RegistryOptions,
@@ -981,7 +939,25 @@ impl<'a> Suite<'a> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let gens: Vec<&'static GenInputRegistration> =
             inventory::iter::<GenInputRegistration>().collect();
-        let plan = crate::assemble::plan(&regs, &gens, options)?;
+        let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
+        let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
+        self.assemble_registered(&regs, &gens, &cands, &mins, options)
+    }
+
+    /// [`Suite::try_add_registered_with`], taking the registrations as
+    /// explicit slices rather than reading them off `inventory` - which is
+    /// what they really are outside a test, but reading them there would mean
+    /// a set built to test one contradiction shares a process-wide registry
+    /// with every other test's registrations.
+    fn assemble_registered(
+        &mut self,
+        regs: &[&'static Registered],
+        gens: &[&'static GenInputRegistration],
+        cands: &[&'static MatrixCandidate],
+        mins: &[&'static MatrixInput],
+        options: RegistryOptions,
+    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
+        let plan = crate::assemble::plan(regs, gens, options)?;
 
         let cfg = self.cfg;
         let mut tokens = RegisteredTokens::default();
@@ -989,12 +965,12 @@ impl<'a> Suite<'a> {
         for r in plan.flat {
             match r.reg.kind {
                 Kind::Flat(add) => {
-                    let token = add(self, cfg, &r.name);
-                    tokens.flat.insert(r.name, token);
+                    let handle = add(&mut Adder(&mut *self), &r.name);
+                    tokens.flat.insert(r.name, handle.into_token());
                 }
                 Kind::Scaling(add) => {
-                    let token = add(self, cfg, &r.name);
-                    tokens.scaling.insert(r.name, token);
+                    let handle = add(&mut Adder(&mut *self), &r.name);
+                    tokens.scaling.insert(r.name, handle.into_token());
                 }
                 // `plan` puts anything with a group in `groups`, so a bare
                 // alternative cannot reach here.
@@ -1006,25 +982,24 @@ impl<'a> Suite<'a> {
             // One generator for the whole group, cloned per alternative, which
             // is what makes the differences paired - see `ErasedInput`.
             let make = group.make_input();
-            let mut set = cfg.comparison_gen_input(make);
+            let mut alt = Alternative(cfg.comparison_gen_input(make));
             for m in &group.members {
                 match m.reg.kind {
-                    Kind::Alt { add, .. } => set = add(set, &m.name),
+                    Kind::Alt { add, .. } => alt = add(alt, &m.name),
                     // `plan` only puts alternatives in a group.
                     _ => unreachable!("a group member that is not an alternative"),
                 }
             }
-            tokens
-                .comparisons
-                .insert(group.name.to_string(), self.add_comparison(group.name, set));
+            tokens.comparisons.insert(
+                group.name.to_string(),
+                self.add_comparison(group.name, alt.0),
+            );
         }
         tokens.groups = plan.groups;
 
         // Matrices: candidates and inputs registered apart from each other,
         // paired by type into lanes, every pairing measured.
-        let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
-        let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
-        let (lanes, lane_problems) = crate::assemble::lanes(&cands, &mins, options);
+        let (lanes, lane_problems) = crate::assemble::lanes(cands, mins, options);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
         // other error, not a field on the returned value that a caller
@@ -1044,17 +1019,17 @@ impl<'a> Suite<'a> {
                     // benchmark rather than a one-sided comparison.
                     let c = &lane.candidates[0];
                     let name = lane.flat_name(c, input);
-                    let token = (c.reg.add_flat)(self, cfg, &name, input.reg.make);
-                    tokens.flat.insert(name, token);
+                    let handle = (c.reg.add_flat)(&mut Adder(&mut *self), &name, input.reg.make);
+                    tokens.flat.insert(name, handle.into_token());
                     continue;
                 }
                 let make = input.reg.make;
-                let mut set = cfg.comparison_gen_input(make);
+                let mut alt = Alternative(cfg.comparison_gen_input(make));
                 for c in &lane.candidates {
-                    set = (c.reg.add_alt)(set, &c.name);
+                    alt = (c.reg.add_alt)(alt, &c.name);
                 }
                 let name = lane.comparison_name(input);
-                let token = self.add_comparison(&name, set);
+                let token = self.add_comparison(&name, alt.0);
                 tokens.comparisons.insert(name, token);
             }
         }
@@ -1064,7 +1039,7 @@ impl<'a> Suite<'a> {
     }
 }
 
-/// Everything a [`Suite`] measured, in the order it was declared.
+/// Everything a suite measured, in the order it was declared.
 pub struct Report {
     entries: Vec<(String, Arc<dyn Reportable>)>,
 }
@@ -1092,7 +1067,9 @@ impl Report {
     /// [`Report::comparison`] - are usually what you want; this is here for
     /// completeness and for anything added later.
     ///
-    /// ```
+    /// A `Report` comes from [`crate::runner::measure`], not built here.
+    ///
+    /// ```ignore
     /// let cfg = scaling::Config::default();
     /// let mut suite = cfg.suite();
     /// let _ = suite.add("sum", || (0..100u64).sum::<u64>());
@@ -2278,5 +2255,662 @@ mod per_benchmark_config {
             "the limit counts the suite's comparisons, whatever config each \
              benchmark was measured under",
         );
+    }
+}
+
+/// Discovering benchmarks that were never assembled by hand.
+///
+/// Registrations here are written by hand rather than by the macros - the
+/// same shims `#[scaling::bench]` and friends would generate against
+/// [`crate::registry::Adder`], written out so the registry/assembly path is
+/// proved independently of the macro crate. `tests/macros.rs` checks that
+/// the macros produce the same thing from an attribute, so the two are
+/// worth keeping side by side: if one passes and the other fails, the fault
+/// is in the macro rather than in the registry.
+///
+/// Every `#[cfg(test)]` module in this crate shares one process-wide
+/// `inventory` registry, so names here are prefixed `e2e::` and nothing
+/// below asserts a raw [`Suite::len`] - only that its own tokens, found by
+/// name, have real answers. A `tests/*.rs` integration test would not need
+/// this care, since each file there is its own binary; a module here is not.
+#[cfg(test)]
+mod registered_by_hand {
+    use super::*;
+    use crate::registry::{Adder, Alternative, ErasedInput, GenInputRegistration, Handle};
+    use std::any::TypeId;
+    use std::time::Duration;
+
+    fn work(n: usize) -> u64 {
+        (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
+    }
+
+    fn add_flat(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
+        adder.flat(name, || work(200))
+    }
+
+    inventory::submit! {
+        Registered {
+            name: "e2e::flat",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            group: None,
+            is_baseline: false,
+            kind: Kind::Flat(add_flat),
+        }
+    }
+
+    fn add_scaling(adder: &mut Adder<'_, '_>, name: &str) -> Handle<ScalingStats> {
+        // `nmin` is baked in here, since the shim signature has nowhere to
+        // pass it - which is the whole reason it must be a literal at the
+        // macro.
+        adder.scaling(name, |n: usize| work(n), 32)
+    }
+
+    inventory::submit! {
+        Registered {
+            name: "e2e::scaling",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            group: None,
+            is_baseline: false,
+            kind: Kind::Scaling(add_scaling),
+        }
+    }
+
+    // A comparison group: three alternatives and one shared input, each
+    // registered independently and none of them naming the others.
+
+    fn make_input() -> ErasedInput {
+        ErasedInput::new((0..600u64).collect::<Vec<u64>>())
+    }
+
+    inventory::submit! {
+        GenInputRegistration {
+            group: "e2e-sort",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            type_id: TypeId::of::<Vec<u64>>,
+            type_name: "Vec<u64>",
+            make: make_input,
+        }
+    }
+
+    fn alt_baseline<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort();
+            v.len()
+        })
+    }
+
+    fn alt_unstable<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort_unstable();
+            v.len()
+        })
+    }
+
+    /// Deliberately slower, so the comparison has something real to find.
+    fn alt_slow<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort();
+            v.sort_unstable();
+            v.sort();
+            v.len()
+        })
+    }
+
+    inventory::submit! {
+        Registered {
+            name: "e2e::sort_stable",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            group: Some("e2e-sort"),
+            is_baseline: true,
+            kind: Kind::Alt {
+                add: alt_baseline,
+                input_type: TypeId::of::<Vec<u64>>,
+                input_type_name: "Vec<u64>",
+            },
+        }
+    }
+
+    inventory::submit! {
+        Registered {
+            name: "e2e::sort_unstable",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            group: Some("e2e-sort"),
+            is_baseline: false,
+            kind: Kind::Alt {
+                add: alt_unstable,
+                input_type: TypeId::of::<Vec<u64>>,
+                input_type_name: "Vec<u64>",
+            },
+        }
+    }
+
+    inventory::submit! {
+        Registered {
+            name: "e2e::sort_thrice",
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            group: Some("e2e-sort"),
+            is_baseline: false,
+            kind: Kind::Alt {
+                add: alt_slow,
+                input_type: TypeId::of::<Vec<u64>>,
+                input_type_name: "Vec<u64>",
+            },
+        }
+    }
+
+    /// Everything above is found and measured, without one line listing it.
+    #[test]
+    fn a_suite_discovers_what_was_registered() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(60));
+        // Restricted to this module's own names - see `versions_and_rivals`'s
+        // `run` for why: one process-wide registry, shared with every other
+        // `#[cfg(test)]` module in the crate.
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("e2e"));
+        let tokens = suite
+            .try_add_registered_with(RegistryOptions::default())
+            .unwrap();
+        let report = suite.run();
+
+        let flat = tokens.flat["e2e::flat"]
+            .get()
+            .expect("the flat benchmark ran");
+        assert!(flat.ns_per_iter > 0.0);
+
+        let scaling = tokens.scaling["e2e::scaling"]
+            .get()
+            .expect("the scaling benchmark ran");
+        assert!(scaling.iterations > 0);
+
+        let cmps = tokens.comparisons["e2e-sort"]
+            .get()
+            .expect("the comparison ran");
+        // Three alternatives, two of them reported against the baseline.
+        assert_eq!(cmps.stats().len(), 3);
+        assert_eq!(cmps.against_baseline().count(), 2);
+
+        // Everything appears in the report, under the name it registered with.
+        let shown = format!("{report}");
+        for name in ["e2e::flat", "e2e::scaling", "e2e-sort"] {
+            assert!(shown.contains(name), "{name} missing from report:\n{shown}");
+        }
+    }
+
+    /// The baseline is the one that said so, not the one that happened to be
+    /// registered or sorted first.
+    ///
+    /// `sort_stable` is neither: `sort_thrice` and `sort_unstable` both sort
+    /// before it alphabetically. So if this passes, the `is_baseline` flag is
+    /// what decided, which is the only thing that can decide when registrations
+    /// have no order.
+    #[test]
+    fn the_declared_baseline_is_the_one_used() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(60));
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("e2e"));
+        let tokens = suite
+            .try_add_registered_with(RegistryOptions::default())
+            .unwrap();
+        suite.run();
+
+        let cmps = tokens.comparisons["e2e-sort"].get().unwrap();
+        let against: Vec<&str> = cmps.against_baseline().map(|(name, _)| name).collect();
+        assert!(
+            !against.contains(&"e2e::sort_stable"),
+            "the baseline must not be reported against itself: {against:?}",
+        );
+        assert_eq!(against.len(), 2);
+        assert!(against.contains(&"e2e::sort_unstable"), "{against:?}");
+        assert!(against.contains(&"e2e::sort_thrice"), "{against:?}");
+    }
+
+    /// Discovered benchmarks and hand-added ones share one suite and are
+    /// measured together, which is the whole claim of the hybrid design.
+    #[test]
+    fn registered_and_hand_added_benchmarks_mix() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(60));
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("e2e"));
+        let by_hand = suite.add("e2e::by_hand", || work(150));
+        let tokens = suite
+            .try_add_registered_with(RegistryOptions::default())
+            .unwrap();
+        let after = suite.add("e2e::after", || work(150));
+        let report = suite.run();
+
+        assert!(by_hand.get().is_some(), "the hand-added one ran");
+        assert!(after.get().is_some(), "so did the one added afterwards");
+        assert!(
+            tokens.flat["e2e::flat"].get().is_some(),
+            "so did the registered one"
+        );
+
+        let shown = format!("{report}");
+        assert!(shown.contains("e2e::by_hand"), "{shown}");
+        assert!(shown.contains("e2e::flat"), "{shown}");
+    }
+
+    /// Results are recoverable from the report even when nobody ever held a
+    /// token - which is the situation `add_registered` always creates, since
+    /// nothing wrote the `add` call that would have returned one.
+    #[test]
+    fn registered_results_are_recoverable_from_the_report_alone() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(30));
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("e2e"));
+        // Deliberately thrown away: a script driving a benchmark binary has no
+        // way to get hold of these.
+        drop(suite.try_add_registered_with(RegistryOptions::default()).unwrap());
+        let report = suite.run();
+
+        let stats = report
+            .stats("e2e::flat")
+            .expect("the flat benchmark's measurement comes back");
+        assert!(stats.ns_per_iter > 0.0);
+
+        let cmp = report
+            .comparison("e2e-sort")
+            .expect("the comparison comes back too");
+        assert_eq!(cmp.stats().len(), 3);
+
+        // And the scaling benchmark, which is a third type again.
+        assert!(report.scaling("e2e::scaling").is_some());
+    }
+
+    /// The question the lookup exists to answer: is the implementation being
+    /// shipped really the best one under these conditions?
+    ///
+    /// Nothing here holds a token and nothing knows a name in advance.
+    #[test]
+    fn a_script_can_check_which_registered_alternative_wins() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(30));
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("e2e"));
+        drop(suite.try_add_registered_with(RegistryOptions::default()).unwrap());
+        let report = suite.run();
+
+        let (_, cmp) = report
+            .all_comparisons()
+            .find(|(name, _)| *name == "e2e-sort")
+            .expect("the sorting comparison");
+
+        let slowest = cmp
+            .names()
+            .zip(cmp.stats())
+            .max_by(|a, b| {
+                a.1.ns_per_iter
+                    .partial_cmp(&b.1.ns_per_iter)
+                    .expect("no NaN timings")
+            })
+            .map(|(name, _)| name)
+            .expect("at least one alternative");
+        assert_eq!(
+            slowest, "e2e::sort_thrice",
+            "the one that sorts three times should be the slow one",
+        );
+    }
+}
+
+/// What happens when registrations do not make sense together.
+///
+/// Built entirely from local, non-registered values passed straight to
+/// [`Suite::assemble_registered`] rather than through `inventory::submit!`:
+/// a registry covers everything linked into one binary, and every
+/// `#[cfg(test)]` module in this crate shares that binary, so deliberately
+/// broken registrations cannot go through the real global registry without
+/// poisoning every other test that calls `add_registered` unfiltered.
+#[cfg(test)]
+mod bad_registrations {
+    use super::*;
+    use crate::registry::{Adder, Alternative, Handle};
+
+    fn add(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
+        adder.flat(name, || (0..16u64).sum::<u64>())
+    }
+
+    fn alt<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |_| ())
+    }
+
+    // Two registrations under one name, which a report could not tell apart.
+    static COLLIDES_1: Registered = Registered {
+        name: "collides",
+        crate_name: "testcrate",
+        crate_version: "1.0.0",
+        group: None,
+        is_baseline: false,
+        kind: Kind::Flat(add),
+    };
+    static COLLIDES_2: Registered = Registered {
+        name: "collides",
+        crate_name: "testcrate",
+        crate_version: "1.0.0",
+        group: None,
+        is_baseline: false,
+        kind: Kind::Flat(add),
+    };
+
+    // A comparison group nobody claimed the baseline of. Order cannot decide
+    // this, since registrations have none.
+    static ORPHAN_A: Registered = Registered {
+        name: "orphan_a",
+        crate_name: "testcrate",
+        crate_version: "1.0.0",
+        group: Some("no-baseline"),
+        is_baseline: false,
+        kind: Kind::Alt {
+            add: alt,
+            input_type: std::any::TypeId::of::<()>,
+            input_type_name: "()",
+        },
+    };
+    static ORPHAN_B: Registered = Registered {
+        name: "orphan_b",
+        crate_name: "testcrate",
+        crate_version: "1.0.0",
+        group: Some("no-baseline"),
+        is_baseline: false,
+        kind: Kind::Alt {
+            add: alt,
+            input_type: std::any::TypeId::of::<()>,
+            input_type_name: "()",
+        },
+    };
+
+    /// Both problems are reported together, and nothing is added.
+    ///
+    /// Reporting every complaint at once is what stops fixing a set of
+    /// registrations from being one rebuild per mistake, and it is only
+    /// possible because they are all found before anything runs.
+    #[test]
+    fn bad_registrations_are_reported_together_and_nothing_is_added() {
+        let cfg = Config::default();
+        let mut suite = cfg.suite();
+        let regs = [&COLLIDES_1, &COLLIDES_2, &ORPHAN_A, &ORPHAN_B];
+        let problems = suite
+            .assemble_registered(&regs, &[], &[], &[], RegistryOptions::default())
+            .expect_err("these registrations contradict each other");
+
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, crate::assemble::Diagnostic::DuplicateName { name, .. } if name == "collides")),
+            "{problems:?}",
+        );
+        assert!(
+            problems.iter().any(
+                |p| matches!(p, crate::assemble::Diagnostic::NoBaseline { group, .. } if group == "no-baseline")
+            ),
+            "{problems:?}",
+        );
+
+        // Nothing half-added: the checks all run before the first benchmark is
+        // handed to the suite, so a rejected set leaves no trace in it.
+        assert!(
+            suite.is_empty(),
+            "a rejected set of registrations must not leave anything behind",
+        );
+    }
+}
+
+/// Registrations arriving from more than one crate, or more than one version
+/// of one crate.
+///
+/// This is what happens when a crate pulls an older copy of itself, or a
+/// rival crate, in as a dev-dependency with registrations enabled: both
+/// register, and both use the same names for the same ideas, because they
+/// *are* the same source a version apart.
+///
+/// Registrations are written by hand here rather than by the macros, because
+/// the macros necessarily stamp every registration with *this* crate's name
+/// and version - there is no second crate to register from. Writing them out
+/// is the only way to have two origins present at once. The matrix name
+/// `mixing` is unique to this module, so its registrations cannot be
+/// confused with any other `#[cfg(test)]` module's despite sharing one
+/// process-wide registry.
+#[cfg(test)]
+mod versions_and_rivals {
+    // These registrations are written by hand, so they do not get the
+    // `allow(clippy::ptr_arg)` that `#[scaling::candidate]` puts on what it
+    // emits. The reason for it is the same: a benchmark's argument type is
+    // the input type the registry keys it on, not a borrow chosen for
+    // convenience, so taking `&mut [u64]` instead would change what is
+    // registered.
+    #![allow(clippy::ptr_arg)]
+
+    use super::*;
+    use crate::assemble::BaselinePolicy;
+    use crate::registry::{Adder, Alternative, ErasedInput, Handle};
+    use std::any::TypeId;
+
+    fn work(v: &[u64], rounds: usize) -> u64 {
+        let mut acc = 0u64;
+        for _ in 0..rounds {
+            acc = v
+                .iter()
+                .fold(acc, |a, x| a.wrapping_mul(31).wrapping_add(*x));
+        }
+        acc
+    }
+
+    // The current crate's implementation, and the same function a version
+    // back. They differ in speed so the comparison has something to find.
+    fn mix_new(v: &mut Vec<u64>) -> u64 {
+        work(v, 1)
+    }
+    fn mix_old(v: &mut Vec<u64>) -> u64 {
+        work(v, 3)
+    }
+
+    fn add_flat_new(
+        adder: &mut Adder<'_, '_>,
+        name: &str,
+        make: fn() -> ErasedInput,
+    ) -> Handle<Stats> {
+        adder.gen_input(name, make, |e: &mut ErasedInput| {
+            mix_new(e.get_mut::<Vec<u64>>())
+        })
+    }
+    fn add_flat_old(
+        adder: &mut Adder<'_, '_>,
+        name: &str,
+        make: fn() -> ErasedInput,
+    ) -> Handle<Stats> {
+        adder.gen_input(name, make, |e: &mut ErasedInput| {
+            mix_old(e.get_mut::<Vec<u64>>())
+        })
+    }
+    fn add_alt_new<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
+    }
+    fn add_alt_old<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
+        set.add(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
+    }
+
+    fn make_data() -> ErasedInput {
+        ErasedInput::new((0..300u64).rev().collect::<Vec<u64>>())
+    }
+
+    // Both versions call the function `mix`, and both call themselves the
+    // baseline - because they are the same line of source, a version apart.
+    inventory::submit! {
+        MatrixCandidate {
+            matrix: "mixing",
+            name: "mix",
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
+            is_baseline: true,
+            crate_name: "mycrate",
+            crate_version: "0.9.0",
+            add_flat: add_flat_new,
+            add_alt: add_alt_new,
+        }
+    }
+
+    inventory::submit! {
+        MatrixCandidate {
+            matrix: "mixing",
+            name: "mix",
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
+            is_baseline: true,
+            crate_name: "mycrate",
+            crate_version: "0.8.0",
+            add_flat: add_flat_old,
+            add_alt: add_alt_old,
+        }
+    }
+
+    // A rival crate, on a *lower* version number than ours.
+    inventory::submit! {
+        MatrixCandidate {
+            matrix: "mixing",
+            name: "mix",
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
+            is_baseline: false,
+            crate_name: "theircrate",
+            crate_version: "0.1.0",
+            add_flat: add_flat_new,
+            add_alt: add_alt_new,
+        }
+    }
+
+    // And both versions of our crate register the same input, which is
+    // redundant: they are meant to build the same data.
+    inventory::submit! {
+        MatrixInput {
+            matrix: "mixing",
+            name: "data",
+            crate_name: "mycrate",
+            crate_version: "0.9.0",
+            type_id: TypeId::of::<Vec<u64>>,
+            type_name: "Vec<u64>",
+            make: make_data,
+        }
+    }
+
+    inventory::submit! {
+        MatrixInput {
+            matrix: "mixing",
+            name: "data",
+            crate_name: "mycrate",
+            crate_version: "0.8.0",
+            type_id: TypeId::of::<Vec<u64>>,
+            type_name: "Vec<u64>",
+            make: make_data,
+        }
+    }
+
+    fn run(options: RegistryOptions) -> RegisteredTokens {
+        let cfg = Config::default().with_max_time(Duration::from_millis(30));
+        // Every `#[cfg(test)]` module in this crate shares one process-wide
+        // `inventory` registry - restricted to this module's own names, so
+        // `add_registered_with` does not also assemble and measure
+        // `registered_by_hand`'s benchmarks on every call here.
+        let mut suite = cfg
+            .suite()
+            .with_filter(Filter::everything().matching("mixing"));
+        let tokens = suite.try_add_registered_with(options).unwrap();
+        suite.run();
+        tokens
+    }
+
+    /// Two versions of one function, and a rival, all measured against each
+    /// other - and told apart, rather than colliding as duplicates.
+    #[test]
+    fn versions_and_rivals_are_all_measured_and_distinguished() {
+        let tokens = run(RegistryOptions::default());
+        assert!(
+            tokens.warnings.is_empty(),
+            "a well-formed set of registrations should warn about nothing: {:?}",
+            tokens
+                .warnings
+                .iter()
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>(),
+        );
+
+        let cmps = tokens.comparisons["mixing@data"]
+            .get()
+            .expect("the comparison ran");
+        let names: Vec<&str> = cmps.names().collect();
+        assert_eq!(names.len(), 3, "two of ours and one of theirs: {names:?}");
+        assert!(names.contains(&"mix@mycrate-0.9.0"), "{names:?}");
+        assert!(names.contains(&"mix@mycrate-0.8.0"), "{names:?}");
+        assert!(names.contains(&"mix@theircrate-0.1.0"), "{names:?}");
+    }
+
+    /// The redundant input is dropped: one comparison, not one per version of
+    /// the generator.
+    #[test]
+    fn the_redundant_input_is_measured_once() {
+        let tokens = run(RegistryOptions::default());
+        let matrix_entries: Vec<&String> = tokens
+            .comparisons
+            .keys()
+            .filter(|k| k.starts_with("mixing@"))
+            .collect();
+        assert_eq!(
+            matrix_entries.len(),
+            1,
+            "both versions register `data`, but it is one input: {matrix_entries:?}",
+        );
+    }
+
+    /// The older version is the baseline by default, so a regression reads
+    /// the right way round: the new code is reported *against* the old.
+    #[test]
+    fn the_old_version_is_what_the_new_one_is_measured_against() {
+        let tokens = run(RegistryOptions::default());
+        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
+        let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
+        assert!(
+            !against.contains(&"mix@mycrate-0.8.0"),
+            "the old version is the baseline, not a candidate: {against:?}",
+        );
+        assert!(against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
+    }
+
+    /// `Newest` flips which end the comparison is anchored at.
+    #[test]
+    fn the_baseline_policy_can_anchor_on_the_newest_instead() {
+        let tokens = run(RegistryOptions::default().with_baseline(BaselinePolicy::Newest));
+        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
+        let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
+        assert!(!against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
+        assert!(against.contains(&"mix@mycrate-0.8.0"), "{against:?}");
+    }
+
+    /// Asking for only the latest of each crate drops our old copy but keeps
+    /// the rival, whose version number is lower than ours.
+    #[test]
+    fn latest_per_crate_keeps_the_rival_and_drops_our_old_copy() {
+        let tokens = run(RegistryOptions::latest_per_crate());
+        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
+        let names: Vec<&str> = cmps.names().collect();
+        assert_eq!(names.len(), 2, "one per crate: {names:?}");
+        assert!(names.contains(&"mix@mycrate"), "{names:?}");
+        assert!(
+            names.contains(&"mix@theircrate"),
+            "a rival on a lower version number must survive: {names:?}",
+        );
+        // Only the crate tells them apart now, so the version is not in the name.
+        assert!(!names.iter().any(|n| n.contains("0.")), "{names:?}");
     }
 }

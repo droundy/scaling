@@ -415,6 +415,12 @@ mourning here.
 
 *Skipped.* Student-t rather than z: mooted by (1), which makes the sample counts large enough that t and z agree.
 
+### [ ] 16. Say what a filter skipped, not just what it kept
+
+A run the filter emptied entirely already says so and names the count. One
+that keeps some registered entries and drops others still says nothing about
+what it dropped - only silence where a name used to be.
+
 ### [x] 12. `flock` gap when the reservation comes from the environment
 
 *Done.* `reserved_cpus()` prefers `SCALING_BENCH_CPUS` and falls back to the

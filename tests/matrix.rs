@@ -6,7 +6,8 @@
 //! thing distributed registration buys which hand assembly cannot: a central
 //! list of pairings is exactly what there is nowhere to put.
 //!
-//! Stage 5 of `REGISTRATION.md`.
+//! Driven through [`scaling::runner::measure`] rather than `Config::suite` -
+//! see `tests/macros.rs`'s doc comment for why.
 
 use scaling::Config;
 use std::time::Duration;
@@ -78,39 +79,37 @@ fn total_folded(v: &mut Vec<u64>) -> u64 {
 
 // ---------------------------------------------------------------------
 
-fn run() -> (scaling::Report, scaling::RegisteredTokens) {
-    let cfg = Config::default().with_max_time(Duration::from_millis(30));
-    let mut suite = cfg.suite();
-    let tokens = suite.add_registered();
-    (suite.run(), tokens)
+fn run() -> scaling::Report {
+    let options = scaling::runner::Options {
+        cfg: Config::default().with_max_time(Duration::from_millis(30)),
+        ..scaling::runner::Options::default()
+    };
+    scaling::runner::measure(&options).expect("these registrations compose")
 }
 
 /// The cross-product forms itself, and every cell is a comparison.
 #[test]
 fn every_pairing_is_measured() {
-    let (_report, tokens) = run();
+    let report = run();
 
     // sorting: 3 candidates x 2 inputs -> one comparison per input.
     for input in ["reversed", "sorted"] {
-        let cmps = tokens.comparisons[&format!("sorting@{input}")]
-            .get()
+        let cmps = report
+            .comparison(&format!("sorting@{input}"))
             .unwrap_or_else(|| panic!("sorting@{input} did not run"));
         assert_eq!(cmps.stats().len(), 3, "three candidates on {input}");
         assert_eq!(cmps.against_baseline().count(), 2);
     }
 
     // hashing is a different type, so it is its own lane and unaffected.
-    let hashing = tokens.comparisons["hashing@short"].get().unwrap();
+    let hashing = report.comparison("hashing@short").unwrap();
     assert_eq!(hashing.stats().len(), 2);
 
     // sized: one input function registered at two sizes.
     for size in [64, 256] {
         assert!(
-            tokens
-                .comparisons
-                .contains_key(&format!("sized@ramp@{size}")),
-            "expected a comparison per size, have {:?}",
-            tokens.comparisons.keys().collect::<Vec<_>>(),
+            report.contains(&format!("sized@ramp@{size}")),
+            "expected a comparison per size",
         );
     }
 }
@@ -122,31 +121,16 @@ fn every_pairing_is_measured() {
 /// panic on the downcast - so passing is the assertion.
 #[test]
 fn lanes_of_different_types_stay_apart() {
-    let (_report, tokens) = run();
-    assert!(tokens.comparisons.contains_key("sorting@reversed"));
-    assert!(tokens.comparisons.contains_key("hashing@short"));
+    let report = run();
+    assert!(report.contains("sorting@reversed"));
+    assert!(report.contains("hashing@short"));
     assert!(
-        !tokens.comparisons.contains_key("sorting@short"),
+        !report.contains("sorting@short"),
         "a Vec<u64> candidate must not be paired with a String input",
     );
     assert!(
-        !tokens.comparisons.contains_key("hashing@reversed"),
+        !report.contains("hashing@reversed"),
         "a String candidate must not be paired with a Vec<u64> input",
-    );
-}
-
-/// Nothing is wrong with any of the above, so nothing is warned about.
-#[test]
-fn a_well_formed_matrix_warns_about_nothing() {
-    let (_report, tokens) = run();
-    assert!(
-        tokens.warnings.is_empty(),
-        "unexpected warnings: {:?}",
-        tokens
-            .warnings
-            .iter()
-            .map(|w| w.to_string())
-            .collect::<Vec<_>>(),
     );
 }
 
@@ -155,8 +139,8 @@ fn a_well_formed_matrix_warns_about_nothing() {
 /// - the plain grid of numbers is still in there.
 #[test]
 fn a_comparison_still_has_every_absolute_timing() {
-    let (_report, tokens) = run();
-    let cmps = tokens.comparisons["sorting@reversed"].get().unwrap();
+    let report = run();
+    let cmps = report.comparison("sorting@reversed").unwrap();
     for stats in cmps.stats() {
         assert!(
             stats.ns_per_iter > 0.0,
@@ -166,12 +150,12 @@ fn a_comparison_still_has_every_absolute_timing() {
 }
 
 /// The declared baseline is used. `stable` is not first alphabetically -
-/// `thrice` is not either, but `stable` sorts after `sorting`'s other
-/// entries only because of the word `baseline`.
+/// `thrice` is not either, but `stable` sorts after the others only because
+/// of the word `baseline`.
 #[test]
 fn the_declared_baseline_wins_over_alphabetical_order() {
-    let (_report, tokens) = run();
-    let cmps = tokens.comparisons["sorting@reversed"].get().unwrap();
+    let report = run();
+    let cmps = report.comparison("sorting@reversed").unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
     assert_eq!(against.len(), 2);
     assert!(!against.contains(&"stable"), "{against:?}");
@@ -212,13 +196,13 @@ fn generic_bytes() -> Vec<u8> {
 /// land in the two lanes their types belong to.
 #[test]
 fn a_generic_candidate_is_registered_once_per_listed_type() {
-    let (_report, tokens) = run();
+    let report = run();
 
     // One comparison per input, and the two inputs are of different types -
     // so each lane found both candidates at its own type.
     for input in ["text", "bytes"] {
-        let cmps = tokens.comparisons[&format!("generic@{input}")]
-            .get()
+        let cmps = report
+            .comparison(&format!("generic@{input}"))
             .unwrap_or_else(|| panic!("generic@{input} did not run"));
         assert_eq!(
             cmps.stats().len(),
@@ -226,13 +210,4 @@ fn a_generic_candidate_is_registered_once_per_listed_type() {
             "both candidates should be instantiated for {input}",
         );
     }
-    assert!(
-        tokens.warnings.is_empty(),
-        "listing exactly the types that have inputs should warn about nothing: {:?}",
-        tokens
-            .warnings
-            .iter()
-            .map(|w| w.to_string())
-            .collect::<Vec<_>>(),
-    );
 }

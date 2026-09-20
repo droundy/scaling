@@ -5,8 +5,6 @@
 //! what is exercised is everything that macro would reach. Registrations are
 //! written with the attributes rather than by hand, because the thing under
 //! test is the whole path from an attribute to an exit status.
-//!
-//! Stages 7 and 8 of `REGISTRATION.md`.
 
 use scaling::runner::{measure, run, Format, Options, Outcome};
 use scaling::{Config, Filter};

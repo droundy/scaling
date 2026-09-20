@@ -10,29 +10,130 @@
 //! Nothing here is written by hand. The attribute macros emit it, and it is
 //! documented so that what they emit can be read and checked rather than
 //! taken on faith.
-//!
-//! See `REGISTRATION.md` for the design this implements.
 
-use crate::{ComparisonSet, Config, ScalingStats, Stats, Suite, Token};
+use crate::{ComparisonSet, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
 use std::fmt;
+
+/// What a registered shim is given to add its one benchmark with, in place of
+/// a suite itself.
+///
+/// This is the whole of what a `Kind::Flat` or `Kind::Scaling` shim may do -
+/// exactly the "add rather than run" contract [`Kind`] documents, spelled as
+/// a type a macro's generated code can name without also naming (and so,
+/// without the docs promising anything about) `Suite`.
+pub struct Adder<'a, 'b>(pub(crate) &'b mut Suite<'a>);
+
+impl<'a, 'b> Adder<'a, 'b> {
+    /// Adds a benchmark, as [`Suite::add`] would.
+    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle<Stats>
+    where
+        F: FnMut() -> O + 'a,
+        O: 'a,
+    {
+        Handle(self.0.add(name, f))
+    }
+
+    /// Adds a benchmark over a fixed input, as [`Suite::add_input`] would.
+    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle<Stats>
+    where
+        F: FnMut(&mut I) -> O + 'a,
+        I: Clone + 'a,
+        O: 'a,
+    {
+        Handle(self.0.add_input(name, input, f))
+    }
+
+    /// Adds a benchmark over generated inputs, as [`Suite::add_gen_input`]
+    /// would.
+    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen_input: G, f: F) -> Handle<Stats>
+    where
+        G: FnMut() -> I + 'a,
+        F: FnMut(&mut I) -> O + 'a,
+        I: 'a,
+        O: 'a,
+    {
+        Handle(self.0.add_gen_input(name, gen_input, f))
+    }
+
+    /// Adds a scaling benchmark, as [`Suite::add_scaling`] would.
+    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle<ScalingStats>
+    where
+        F: Fn(usize) -> O + 'a,
+        O: 'a,
+    {
+        Handle(self.0.add_scaling(name, f, nmin))
+    }
+
+    /// Adds a scaling benchmark over generated inputs, as
+    /// [`Suite::add_scaling_gen`] would.
+    pub fn scaling_gen<G, F, I, O>(
+        &mut self,
+        name: &str,
+        gen_input: G,
+        f: F,
+        nmin: usize,
+    ) -> Handle<ScalingStats>
+    where
+        G: FnMut(usize) -> I + 'a,
+        F: Fn(&mut I) -> O + 'a,
+        I: 'a,
+        O: 'a,
+    {
+        Handle(self.0.add_scaling_gen(name, gen_input, f, nmin))
+    }
+}
+
+/// The opaque result of a shim adding its benchmark to a suite - a token,
+/// with the type itself kept private so that nothing outside assembly can
+/// read or construct one directly.
+pub struct Handle<T>(pub(crate) Token<T>);
+
+impl<T> Handle<T> {
+    pub(crate) fn into_token(self) -> Token<T> {
+        self.0
+    }
+}
+
+/// One alternative's slot in a comparison group under assembly, threaded
+/// through every `Kind::Alt` shim by value because a comparison set is a
+/// consuming builder.
+pub struct Alternative<'a>(pub(crate) ComparisonSet<'a, ErasedInput>);
+
+impl<'a> Alternative<'a> {
+    /// Adds one alternative, as [`ComparisonSet::add_input`] would.
+    pub fn add<F, O>(self, name: &str, f: F) -> Self
+    where
+        F: FnMut(&mut ErasedInput) -> O + 'a,
+        O: 'a,
+    {
+        Alternative(self.0.add_input(name, f))
+    }
+}
+
+/// An `AddAlt` shim that does nothing, for tests that check what assembly
+/// *decides* rather than what it *measures* - a plan or a lane can be built
+/// and inspected without a real alternative behind it.
+#[cfg(test)]
+pub(crate) fn noop_alt<'a>(set: Alternative<'a>, _: &str) -> Alternative<'a> {
+    set
+}
 
 /// How a flat benchmark adds itself to a suite.
 ///
 /// Named, along with its siblings below, because these signatures appear in
 /// several places and are easier to compare when they are spelled once.
-pub type AddFlat = fn(&mut Suite<'_>, &Config, &str) -> Token<Stats>;
+pub type AddFlat = fn(&mut Adder<'_, '_>, &str) -> Handle<Stats>;
 
 /// How a scaling benchmark adds itself to a suite.
-pub type AddScaling = fn(&mut Suite<'_>, &Config, &str) -> Token<ScalingStats>;
+pub type AddScaling = fn(&mut Adder<'_, '_>, &str) -> Handle<ScalingStats>;
 
 /// How one alternative joins a comparison.
-pub type AddAlt =
-    for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>;
+pub type AddAlt = for<'a> fn(Alternative<'a>, &str) -> Alternative<'a>;
 
 /// How a matrix candidate is added as a plain benchmark, given a maker for
 /// the input it is paired with.
-pub type AddPaired = fn(&mut Suite<'_>, &Config, &str, MakeInput) -> Token<Stats>;
+pub type AddPaired = fn(&mut Adder<'_, '_>, &str, MakeInput) -> Handle<Stats>;
 
 /// Builds one erased input.
 pub type MakeInput = fn() -> ErasedInput;
@@ -75,9 +176,9 @@ pub struct Registered {
     /// Whether this is its group's baseline, which every other member is
     /// reported against.
     ///
-    /// Order cannot say this, as it does for a hand-built
-    /// [`ComparisonSet`] where the first alternative added is the baseline,
-    /// because registrations have no order. It has to be declared.
+    /// Order cannot say this, as it does for a hand-built comparison set
+    /// where the first alternative added is the baseline, because
+    /// registrations have no order. It has to be declared.
     pub is_baseline: bool,
     /// How to add this benchmark to a suite.
     pub kind: Kind,
@@ -87,8 +188,8 @@ pub struct Registered {
 ///
 /// Each variant is a bare `fn` pointer, which is what makes these
 /// registrable: a `fn` item captures nothing and is `'static`, and `'static`
-/// outlives any `'a`, so one of these satisfies a [`Suite<'a>`]'s bounds
-/// whatever borrow the caller ends up with.
+/// outlives any `'a`, so one of these satisfies a suite's bounds whatever
+/// borrow the caller ends up with.
 ///
 /// # Why these add rather than run
 ///
@@ -96,7 +197,7 @@ pub struct Registered {
 /// answer - would be wrong. [`Config::bench`] and friends drive their
 /// sampling loop to completion with `block_on`, so a registry of those would
 /// run every benchmark start to finish, one after another. That is precisely
-/// what [`Suite`] exists not to do: its scheduler interleaves samples so that
+/// what a suite exists not to do: its scheduler interleaves samples so that
 /// no benchmark is measured in a machine state its neighbours never saw.
 ///
 /// So a shim is handed the suite and adds itself to it, and the sampling
@@ -117,21 +218,20 @@ pub struct Registered {
 /// [`Comparisons`]: crate::Comparisons
 /// [`Config::bench`]: crate::Config::bench
 pub enum Kind {
-    /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
-    /// [`Suite::add_gen_input`] - which of the three, and any input
-    /// generator, is baked into the shim.
+    /// Adds itself with [`Adder::flat`], [`Adder::input`] or
+    /// [`Adder::gen_input`] - which of the three, and any input generator, is
+    /// baked into the shim.
     ///
-    /// Hands back the token that `add` returned, so that a caller can still
+    /// Hands back the handle that `add` returned, so that a caller can still
     /// look this benchmark's answer up by name after the suite has run
     /// rather than only reading it out of the printed report.
     Flat(AddFlat),
-    /// Adds itself with [`Suite::add_scaling`] or
-    /// [`Suite::add_scaling_gen`]. `nmin` is baked in too, since this
-    /// signature has nowhere to pass it.
+    /// Adds itself with [`Adder::scaling`] or [`Adder::scaling_gen`]. `nmin`
+    /// is baked in too, since this signature has nowhere to pass it.
     Scaling(AddScaling),
-    /// Adds itself to a comparison group's [`ComparisonSet`].
+    /// Adds itself to a comparison group's comparison set.
     Alt {
-        /// Takes the set and gives it back because `ComparisonSet` is a
+        /// Takes the set and gives it back because a comparison set is a
         /// consuming builder. The `for<'a>` is what lets one registration
         /// serve whatever `Config` borrow assembly ends up with, rather than
         /// being tied to a lifetime chosen at registration time - which,
@@ -202,7 +302,7 @@ inventory::collect!(Registered);
 ///
 /// # Why erased
 ///
-/// [`ComparisonSet<I>`] is generic over one input type shared by every
+/// A comparison set is generic over one input type shared by every
 /// alternative. A registry cannot name that type - it holds registrations
 /// from all over a crate, and they do not agree on one - so the input has to
 /// become a single concrete type before it can be stored, and the real type
@@ -210,23 +310,20 @@ inventory::collect!(Registered);
 ///
 /// # Why it is `Clone`, and why that matters
 ///
-/// [`Config::comparison_gen_input`] generates **one** input per round and
-/// clones it for each alternative, so that within a round they are all
-/// measured on the same input. That sharing is not a convenience: it is what
-/// makes the per-round differences genuinely paired, and paired differences
-/// are the whole reason a comparison's error bar is narrower than combining
-/// two separate measurements. If each alternative drew its own input, and
-/// cost varied with the input, every difference would carry the difference
-/// between two draws as well - and it would still print a number, just a
-/// worse one, with nothing to say it had happened.
+/// Assembly generates **one** input per round and clones it for each
+/// alternative, so that within a round they are all measured on the same
+/// input. That sharing is not a convenience: it is what makes the per-round
+/// differences genuinely paired, and paired differences are the whole reason
+/// a comparison's error bar is narrower than combining two separate
+/// measurements. If each alternative drew its own input, and cost varied
+/// with the input, every difference would carry the difference between two
+/// draws as well - and it would still print a number, just a worse one, with
+/// nothing to say it had happened.
 ///
 /// So the erased input must be `Clone`, and `Box<dyn Any>` is not.
 /// [`ErasedInput::new`] captures a clone function alongside the value, which
 /// works because it is generic: it knows `I` even though nothing that stores
 /// the result does.
-///
-/// [`ComparisonSet<I>`]: crate::ComparisonSet
-/// [`Config::comparison_gen_input`]: crate::Config::comparison_gen_input
 pub struct ErasedInput {
     value: Box<dyn Any>,
     /// `I::clone`, monomorphised where `I` was still known.
@@ -344,9 +441,9 @@ pub struct MatrixCandidate {
     /// That type as the source spells it, for diagnostics.
     pub input_type_name: &'static str,
     /// Whether this is the one the others are reported against. If nobody in
-    /// a lane says so, assembly picks the first by name - see
-    /// `REGISTRATION.md`, and note that adding a candidate sorting earlier
-    /// then moves the baseline, which is why the report names it.
+    /// a lane says so, assembly picks the first by name; adding a candidate
+    /// sorting earlier then moves the baseline, which is why the report
+    /// names it.
     pub is_baseline: bool,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
@@ -406,6 +503,7 @@ inventory::collect!(MatrixInput);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Config;
 
     /// The point of `ErasedInput`: a clone that goes through the erased type
     /// is still a real, deep clone of the original.
@@ -486,7 +584,8 @@ mod tests {
             }
             match r.kind {
                 Kind::Flat(add) => {
-                    let _token = add(&mut suite, &cfg, r.name);
+                    let mut adder = Adder(&mut suite);
+                    let _handle = add(&mut adder, r.name);
                     added += 1;
                 }
                 _ => panic!("the self-test registrations are all flat"),
@@ -506,12 +605,12 @@ mod tests {
     // Two registrations, written the way generated code will write them.
     // Deliberately at item position in a test module: that is where
     // `submit!` has to work, and it is the arrangement a macro produces.
-    fn add_alpha(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
-        suite.add(name, || (0..32u64).sum::<u64>())
+    fn add_alpha(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
+        adder.flat(name, || (0..32u64).sum::<u64>())
     }
 
-    fn add_beta(suite: &mut Suite<'_>, _cfg: &Config, name: &str) -> Token<Stats> {
-        suite.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort())
+    fn add_beta(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
+        adder.input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort())
     }
 
     inventory::submit! {

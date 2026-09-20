@@ -3,7 +3,7 @@
 //!
 //! This is the half of the registry that is not about registration. Once
 //! benchmarks are declared where they belong rather than assembled in one
-//! place, nobody is left holding the [`Suite`] - so choosing the accuracy,
+//! place, nobody is left holding the suite - so choosing the accuracy,
 //! choosing which ones to run, and choosing how to print them stop being
 //! things a caller writes and start being things this asks for.
 //!
@@ -952,19 +952,14 @@ mod tests {
 mod grids {
     use super::*;
     use crate::assemble::{Named, Origin};
-    use crate::registry::{ErasedInput, MakeInput, MatrixCandidate, MatrixInput};
-    use crate::{ComparisonSet, Token};
+    use crate::registry::{
+        noop_alt, Adder, ErasedInput, Handle, MakeInput, MatrixCandidate, MatrixInput,
+    };
     use std::any::TypeId;
 
     // Never called: `grid` pairs and prints, it does not measure. They exist
     // because a registration is a struct and its fields have to be filled.
-    fn unused_alt<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
-        _: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
-        set
-    }
-    fn unused_flat(_: &mut Suite<'_>, _: &Config, _: &str, _: MakeInput) -> Token<Stats> {
+    fn unused_flat(_: &mut Adder<'_, '_>, _: &str, _: MakeInput) -> Handle<Stats> {
         unreachable!("a grid does not measure")
     }
     fn unused_make() -> ErasedInput {
@@ -980,7 +975,7 @@ mod grids {
         crate_name: "scaling",
         crate_version: "0.9.0",
         add_flat: unused_flat,
-        add_alt: unused_alt,
+        add_alt: noop_alt,
     };
     static UNSTABLE: MatrixCandidate = MatrixCandidate {
         name: "unstable",

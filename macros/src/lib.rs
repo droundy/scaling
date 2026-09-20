@@ -1,7 +1,7 @@
 //! Attribute macros that register benchmarks for the `scaling` crate.
 //!
 //! These are re-exported by `scaling` itself and are not meant to be depended
-//! on directly. See `REGISTRATION.md` in that crate for the design.
+//! on directly.
 //!
 //! # What these do, and what they deliberately do not
 //!
@@ -356,10 +356,10 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             quote! {
                 #[doc(hidden)]
                 fn #shim<'__s>(
-                    __set: ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput>,
+                    __set: ::scaling::registry::Alternative<'__s>,
                     __name: &str,
-                ) -> ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput> {
-                    __set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                ) -> ::scaling::registry::Alternative<'__s> {
+                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
                 }
                 ::scaling::inventory::submit! {
                     ::scaling::registry::Registered {
@@ -387,8 +387,8 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         // A standalone benchmark.
         (None, Flavour::Flat) => {
             let body = match (&args.input, &args.gen_input) {
-                (Some(input), None) => quote!(__suite.add_input(__name, #input, #fname)),
-                (None, Some(gen)) => quote!(__suite.add_gen_input(__name, #gen, #fname)),
+                (Some(input), None) => quote!(__adder.input(__name, #input, #fname)),
+                (None, Some(gen)) => quote!(__adder.gen_input(__name, #gen, #fname)),
                 (None, None) => {
                     // No input declared, so the function must take none.
                     if input_type(&func)?.is_some() {
@@ -399,18 +399,16 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                              <closure>` builds a fresh one",
                         ));
                     }
-                    quote!(__suite.add(__name, #fname))
+                    quote!(__adder.flat(__name, #fname))
                 }
                 (Some(_), Some(_)) => unreachable!("checked above"),
             };
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __suite: &mut ::scaling::Suite<'_>,
-                    __cfg: &::scaling::Config,
+                    __adder: &mut ::scaling::registry::Adder<'_, '_>,
                     __name: &str,
-                ) -> ::scaling::Token<::scaling::Stats> {
-                    let _ = __cfg;
+                ) -> ::scaling::registry::Handle<::scaling::Stats> {
                     #body
                 }
                 ::scaling::inventory::submit! {
@@ -434,17 +432,15 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 )
             })?;
             let body = match &args.gen_input {
-                Some(gen) => quote!(__suite.add_scaling_gen(__name, #gen, #fname, #nmin)),
-                None => quote!(__suite.add_scaling(__name, #fname, #nmin)),
+                Some(gen) => quote!(__adder.scaling_gen(__name, #gen, #fname, #nmin)),
+                None => quote!(__adder.scaling(__name, #fname, #nmin)),
             };
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __suite: &mut ::scaling::Suite<'_>,
-                    __cfg: &::scaling::Config,
+                    __adder: &mut ::scaling::registry::Adder<'_, '_>,
                     __name: &str,
-                ) -> ::scaling::Token<::scaling::ScalingStats> {
-                    let _ = __cfg;
+                ) -> ::scaling::registry::Handle<::scaling::ScalingStats> {
                     #body
                 }
                 ::scaling::inventory::submit! {
@@ -645,13 +641,11 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         out.extend(quote! {
             #[doc(hidden)]
             fn #flat(
-                __suite: &mut ::scaling::Suite<'_>,
-                __cfg: &::scaling::Config,
+                __adder: &mut ::scaling::registry::Adder<'_, '_>,
                 __name: &str,
                 __make: fn() -> ::scaling::registry::ErasedInput,
-            ) -> ::scaling::Token<::scaling::Stats> {
-                let _ = __cfg;
-                __suite.add_gen_input(
+            ) -> ::scaling::registry::Handle<::scaling::Stats> {
+                __adder.gen_input(
                     __name,
                     __make,
                     |__e: &mut ::scaling::registry::ErasedInput| #call,
@@ -659,10 +653,10 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             }
             #[doc(hidden)]
             fn #alt<'__s>(
-                __set: ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput>,
+                __set: ::scaling::registry::Alternative<'__s>,
                 __name: &str,
-            ) -> ::scaling::ComparisonSet<'__s, ::scaling::registry::ErasedInput> {
-                __set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+            ) -> ::scaling::registry::Alternative<'__s> {
+                __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
             }
             ::scaling::inventory::submit! {
                 ::scaling::registry::MatrixCandidate {

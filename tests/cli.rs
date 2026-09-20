@@ -1,6 +1,4 @@
 //! Building a filter from the command line.
-//!
-//! Stage 1 of the filtering plan in `REGISTRATION.md`.
 
 use scaling::Filter;
 

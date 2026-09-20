@@ -853,9 +853,9 @@ generated code needs them public to compile - the same reason `registry` and
 `assemble` are already public and hidden. What changed is that they are no
 longer documented as a way to write anything.
 
-### The façade that would make them private, and why it is not here
+### The façade that makes them private
 
-`#[scaling::bench]` currently expands to a shim spelled in the crate's own
+`#[scaling::bench]` used to expand to a shim spelled in the crate's own
 vocabulary:
 
 ```rust
@@ -868,60 +868,74 @@ fn __shim(
 }
 ```
 
-Three public names, and `Suite` brings twenty public methods with it. The
-alternative is to give generated code a vocabulary of its own - a newtype
-over exactly the capability a shim needs, and nothing else:
+Three public names, and `Suite` brings twenty public methods with it. What
+generated code gets instead is a vocabulary of its own - a newtype over
+exactly the capability a shim needs, and nothing else:
 
 ```rust
 // in the already-hidden `registry` module
-pub struct Adder<'a, 'b> { suite: &'b mut Suite<'a>, cfg: &'a Config }
+pub struct Adder<'a, 'b>(pub(crate) &'b mut Suite<'a>);
 
 impl Adder<'_, '_> {
-    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle { ... }
-    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle { ... }
-    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen: G, f: F) -> Handle { ... }
-    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle { ... }
-    pub fn scaling_gen<G, F, I, O>(&mut self, name: &str, gen: G, f: F, nmin: usize) -> Handle { ... }
+    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle<Stats> { ... }
+    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle<Stats> { ... }
+    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen: G, f: F) -> Handle<Stats> { ... }
+    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle<ScalingStats> { ... }
+    pub fn scaling_gen<G, F, I, O>(&mut self, name: &str, gen: G, f: F, nmin: usize) -> Handle<ScalingStats> { ... }
 }
 
 /// Opaque. A shim's caller keeps it; nothing else can look inside.
-pub struct Handle(Token<Stats>);
+pub struct Handle<T>(pub(crate) Token<T>);
 ```
 
 and the shim becomes
 
 ```rust
-fn __shim(adder: &mut ::scaling::registry::Adder<'_, '_>, name: &str) -> Handle {
+fn __shim(adder: &mut ::scaling::registry::Adder<'_, '_>, name: &str) -> Handle<Stats> {
     adder.gen_input(name, gen, f)
 }
 ```
 
-`Suite`, `Token` and `Config::suite` can then be `pub(crate)`. What that
-buys is not smaller docs - they are hidden either way - but two things a
-`#[doc(hidden)]` does not:
+`Suite`, `Token`, `ComparisonSet` and `RegisteredTokens` are now `pub(crate)`,
+along with `Config::suite`, `Config::comparison` and
+`Config::comparison_gen_input`. What that buys is not smaller docs - they
+were hidden either way - but two things `#[doc(hidden)]` did not:
 
-- **The contract becomes readable.** `Adder` has five methods and they are
-  exactly what a macro may do. Today the contract is "whatever of `Suite`'s
-  twenty methods the macros happen to call", which is a thing you learn by
+- **The contract is readable.** `Adder` has five methods and they are
+  exactly what a macro may do, rather than "whatever of `Suite`'s twenty
+  methods the macros happen to call", a thing you used to have to learn by
   reading the macro crate.
-- **It stops being reachable at all.** Nothing outside can assemble a suite
-  by hand, even by ignoring the docs, so there is no undocumented second way
-  that quietly keeps working.
+- **It is unreachable, not just undocumented.** Nothing outside can assemble
+  a suite by hand, even by ignoring the docs, so there is no second way that
+  quietly keeps working.
 
-Three things make it more than a rename. `ComparisonSet` is a *consuming*
-builder threaded through the `Alt` shims by value, so it needs a second
-façade with the same by-value threading rather than sharing `Adder`'s
-`&mut self`. `RegisteredTokens` holds `Token<T>` by kind, so it becomes
-`Handle`s or goes `pub(crate)` - and the runner reads it for the listing, so
-whichever is chosen has to keep that working. And `tests/registry.rs` and
-`tests/registry_bad.rs` build registrations by hand, which is what proved
-the runtime path *before* any macro existed; they would be rewritten against
-the façade, and the point of writing them by hand was to be independent of
-the thing the façade is for.
+**One deliberate difference from the sketch above: `Adder` carries no
+`Config`.** The sketch's `cfg: &'a Config` field anticipated per-benchmark
+accuracy overrides reaching through to `#[scaling::bench]`. Asked directly
+whether that was worth building - a noisier benchmark wanting a looser
+target, a canary wanting a tighter one, a CI-gating benchmark wanting a
+larger time budget - none of it was compelling enough to justify the surface
+area yet. One `Config` for the whole suite, decided 2026-09-20; revisitable
+if a real need shows up.
 
-Deferred rather than rejected: it is the right shape, it is invisible on
-docs.rs either way, and it only bites against someone deliberately reaching
-for undocumented API.
+`ComparisonSet` got its own façade, `Alternative`, threaded by value through
+the `Alt` shims the same way `ComparisonSet` itself was - a second newtype
+rather than reusing `Adder`, since a consuming builder and an `&mut self`
+one don't share a shape. `RegisteredTokens` kept holding `Token<T>`
+internally rather than switching to `Handle`s; it went `pub(crate)` instead,
+which is enough since nothing outside the crate names it either way.
+
+`tests/registry.rs` and `tests/registry_bad.rs` built registrations by hand,
+which is what proved the runtime path *before* any macro existed - and
+which stopped compiling the moment `Suite` and `Token` went `pub(crate)`,
+since a `tests/*.rs` file is an external crate and cannot name a
+crate-private type. Rewriting them against the façade would have meant
+testing the façade with the façade, losing the independence that was the
+point of writing them by hand. Deleted instead; every scenario they covered
+was checked against `src/registry.rs`'s, `src/suite.rs`'s and
+`src/assemble.rs`'s own internal `#[cfg(test)]` modules, where `pub(crate)`
+is no obstacle, and confirmed to still be covered there before the files
+came out.
 
 ### `runner::measure`, which is why hiding `Suite` costs nothing
 
