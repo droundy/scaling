@@ -159,20 +159,38 @@ pub struct Run {
 }
 
 impl Run {
-    pub fn load(path: &str) -> Run {
-        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+    /// Read a recording, or `None` if the file is not one.
+    ///
+    /// An interrupted collection leaves a file that was opened and never
+    /// written to, so this has to be a normal outcome rather than a panic:
+    /// globbing a directory of recordings should not die on the one the run
+    /// was killed during. A *truncated* file is fine and is read as far as
+    /// it goes - the records are self-delimiting, so a half-written last one
+    /// is simply dropped.
+    pub fn load(path: &str) -> Option<Run> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping {path}: {e}");
+                return None;
+            }
+        };
         if !bytes.starts_with(b"LABBIN4\n") {
             // The magic moves with the layout every time, because each of
             // these would otherwise parse as the next without complaining:
             // LABBIN2 had an extra header number, LABBIN3 an extra byte per
             // record, and either would misread every sample after the first
             // rather than fail.
-            panic!("{path}: not a LABBIN4 recording");
+            eprintln!(
+                "skipping {path}: not a LABBIN4 recording ({} bytes)",
+                bytes.len()
+            );
+            return None;
         }
-        let split = bytes
-            .windows(5)
-            .position(|w| w == b"DATA\n")
-            .unwrap_or_else(|| panic!("{path}: no DATA marker"));
+        let Some(split) = bytes.windows(5).position(|w| w == b"DATA\n") else {
+            eprintln!("skipping {path}: no DATA marker");
+            return None;
+        };
         let head = String::from_utf8_lossy(&bytes[..split]);
         let mut rungs: HashMap<String, RungMeta> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -201,10 +219,12 @@ impl Run {
                 break;
             };
             let Some(workload) = order.get(widx) else {
-                panic!(
-                    "{path}: a sample names rung {widx}, but the header lists {}",
+                eprintln!(
+                    "{path}: a sample names rung {widx}, but the header lists {}; \
+                     stopping there",
                     order.len()
-                )
+                );
+                break;
             };
             let m = &rungs[workload];
             // Per iteration from here on. Calibration happens once, at
@@ -219,11 +239,11 @@ impl Run {
 
         let mut names: Vec<String> = by_name.keys().cloned().collect();
         names.sort();
-        Run {
+        Some(Run {
             names,
             by_name,
             rungs,
-        }
+        })
     }
 
     pub fn get(&self, name: &str) -> &[f64] {

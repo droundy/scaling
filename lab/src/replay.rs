@@ -750,7 +750,9 @@ pub fn report(paths: &[String]) {
     // the report either way.
     let mut any = false;
     for path in paths {
-        let run = Run::load(path);
+        let Some(run) = Run::load(path) else {
+            continue;
+        };
         let tapes = self::tapes(&run);
         if tapes.is_empty() {
             continue;
@@ -1065,4 +1067,108 @@ pub fn selftest(dir: &str) {
         println!("  {name:>16}  true {b} ns/iter, {}", noise.label());
     }
     println!("\n  lab analyze {path}");
+}
+
+/// Does a workload's cost move with the company it keeps?
+///
+/// This is what the powerset is for, and nothing else answers it. Every
+/// other question here - which rung, which estimator, when to stop - is
+/// about measuring *a* number well. This one asks whether the number is a
+/// property of the workload at all, or of the round it was measured in.
+///
+/// Each recording holds one fixed composition, so the comparison is between
+/// files: the same workload, measured in different company, against the same
+/// truth estimator. Where a workload was measured alone that is the control.
+///
+/// Repeated passes over the same composition give the other half of it. A
+/// difference between compositions only means something if it is larger than
+/// the difference between two measurements of the *same* composition, so
+/// both are reported side by side.
+pub fn compositions(paths: &[String]) {
+    // workload -> composition -> truths, one per pass
+    let mut by: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<f64>>> =
+        Default::default();
+    for path in paths {
+        let Some(run) = Run::load(path) else {
+            continue;
+        };
+        let tapes = self::tapes(&run);
+        // The composition is who shared the round. cpu_canary is in every
+        // round structurally, so naming it would say nothing.
+        let mut present: Vec<String> = tapes
+            .iter()
+            .map(|t| t.workload.clone())
+            .filter(|w| w != "cpu_canary")
+            .collect();
+        present.sort();
+        let composition = present.join("+");
+        for tape in &tapes {
+            let (t, _) = truth(tape);
+            if t.is_finite() && t > 0.0 {
+                by.entry(tape.workload.clone())
+                    .or_default()
+                    .entry(composition.clone())
+                    .or_default()
+                    .push(t);
+            }
+        }
+    }
+
+    println!(
+        "Does a workload's cost depend on what shares its round?\n\n\
+         Each row is one composition. `vs alone` compares against the same workload\n\
+         measured by itself; `repeat` is the spread between passes over that same\n\
+         composition, which is how much disagreement means nothing.\n"
+    );
+
+    for (workload, comps) in &by {
+        // The control: this workload with no company. Without it there is
+        // nothing to compare against and the workload is skipped rather
+        // than compared to an arbitrary other composition.
+        let Some(alone) = comps.get(workload.as_str()) else {
+            continue;
+        };
+        let base = median_of(alone);
+        println!(
+            "===== {workload} =====  alone {base:.4} ns/iter over {} pass(es)",
+            alone.len()
+        );
+        println!(
+            "  {:>52} {:>12} {:>9} {:>8}",
+            "composition", "truth", "vs alone", "repeat"
+        );
+        let mut rows: Vec<(f64, String, f64, f64, usize)> = comps
+            .iter()
+            .map(|(c, v)| {
+                let m = median_of(v);
+                let rel = 100.0 * (m - base) / base;
+                (rel.abs(), c.clone(), m, rel, v.len())
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        for (_, c, m, rel, n) in rows.iter().take(12) {
+            let v = &comps[c];
+            let repeat = if v.len() > 1 {
+                let lo = v.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                format!("{:.2}%", 100.0 * (hi - lo) / m)
+            } else {
+                "  -".to_string()
+            };
+            let _ = n;
+            let short = if c.len() > 52 { &c[c.len() - 52..] } else { c };
+            println!("  {short:>52} {m:>12.4} {rel:>+8.2}% {repeat:>8}");
+        }
+        println!();
+    }
+}
+
+fn median_of(v: &[f64]) -> f64 {
+    let mut w = v.to_vec();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if w.is_empty() {
+        f64::NAN
+    } else {
+        w[w.len() / 2]
+    }
 }
