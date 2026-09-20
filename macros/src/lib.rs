@@ -44,11 +44,23 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// fn fib_200() -> usize { fib(200) }
 ///
 /// #[scaling::bench(input = vec![0u8; 1024])]
-/// fn hash(buf: &mut Vec<u8>) -> u64 { hash_of(buf) }
+/// fn hash(buf: &Vec<u8>) -> u64 { hash_of(buf) }
 ///
 /// #[scaling::bench(gen_input = || random_vec(1000))]
 /// fn sort(v: &mut Vec<i32>) { v.sort() }
+///
+/// #[scaling::bench(gen_input = || random_vec(1000))]
+/// fn total(v: Vec<i32>) -> i32 { v.into_iter().sum() }
 /// ```
+///
+/// The input argument may be `&I`, `&mut I`, or `I` by value - `&I` for one
+/// like `hash` above that only reads it, plain `I` for one like `total`
+/// that has to consume it (`into_iter()` needs ownership, and there is no
+/// borrowed way to write it). The registry itself only ever hands out
+/// `&mut I`; an ordinary reference downgrades it at the call site, the same
+/// way any `&mut T` reborrows as `&T` when a function asks for less, and
+/// `I` by value is taken from behind an `Option` the generated shim manages
+/// for you - nothing to write by hand for it.
 ///
 /// Add `group = "name"` to make this one alternative of a comparison, and
 /// `baseline` on exactly one member of each group to say which the others
@@ -73,6 +85,10 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// #[scaling::bench(group = "sort")]
 /// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
 /// ```
+///
+/// A group's members must currently take `&I` or `&mut I`, not `I` by
+/// value - not a fundamental restriction, just not yet taught to a group's
+/// shared, cloned-per-round input.
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -118,6 +134,9 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// rather than accepted: a scaling benchmark sweeps `n`, so a fixed input
 /// that does not vary with it would be measuring the same size at every
 /// point on the curve, which is not a scaling law.
+///
+/// As with [`bench`], the function may take `&I`, `&mut I`, or `I` by
+/// value.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -270,10 +289,52 @@ impl syn::parse::Parse for Args {
 /// `None` means it takes nothing, which the registry represents as `()` -
 /// so a group of no-input alternatives and a group of generated-input ones
 /// are one code path rather than two.
-fn input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
+/// What a benchmark function's own signature declares its input to be.
+enum Input {
+    /// No argument: the benchmark takes nothing.
+    None,
+    /// `&I` or `&mut I`. The registry only ever hands out `&mut I` - one
+    /// erasure mechanism, not two - but the generated shim calls the
+    /// benchmark as an ordinary function call rather than passing it as a
+    /// value to satisfy some generic bound elsewhere, so an ordinary
+    /// reborrow at that call site turns the `&mut I` into `&I` when that is
+    /// what the signature asks for. Nothing downstream needs to know which
+    /// was written.
+    Ref(Type),
+    /// `I`, by value: the function consumes its input. Only meaningful
+    /// where the caller checks for it - see [`Input::owned_rejected`].
+    Owned(Type),
+}
+
+impl Input {
+    /// The type, regardless of whether it arrived by reference or by
+    /// value - what type-identity code (matrix pairing, a group's shared
+    /// input) cares about.
+    fn ty(&self) -> Option<&Type> {
+        match self {
+            Input::None => None,
+            Input::Ref(ty) | Input::Owned(ty) => Some(ty),
+        }
+    }
+
+    /// An error for a context that has not been taught to accept an owned
+    /// input, naming what to write instead.
+    fn owned_rejected(&self, span: proc_macro2::Span) -> Option<syn::Error> {
+        match self {
+            Input::Owned(_) => Some(syn::Error::new(
+                span,
+                "this benchmark takes its input by value, which is not supported here yet - \
+                 take it as `&I` or `&mut I` instead",
+            )),
+            _ => None,
+        }
+    }
+}
+
+fn input_kind(func: &ItemFn) -> syn::Result<Input> {
     let mut args = func.sig.inputs.iter();
     let first = match args.next() {
-        None => return Ok(None),
+        None => return Ok(Input::None),
         Some(a) => a,
     };
     if args.next().is_some() {
@@ -292,12 +353,8 @@ fn input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
         FnArg::Typed(t) => t,
     };
     match &*pat.ty {
-        // The input is passed as `&mut I`, matching `bench_clone_input`.
-        Type::Reference(r) if r.mutability.is_some() => Ok(Some((*r.elem).clone())),
-        other => Err(syn::Error::new(
-            other.span(),
-            "a benchmark's input argument must be `&mut I`, as `bench_clone_input` takes it",
-        )),
+        Type::Reference(r) => Ok(Input::Ref((*r.elem).clone())),
+        other => Ok(Input::Owned(other.clone())),
     }
 }
 
@@ -430,11 +487,14 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     let registration = match (&args.group, &flavour) {
         // An alternative in a comparison group.
         (Some(group), Flavour::Flat) => {
-            let declared = input_type(&func)?;
+            let kind = input_kind(&func)?;
+            if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
+                return Err(e);
+            }
             let baseline = args.baseline;
             // The call, and the type the group's input must have.
-            let call = call_expr(fname, declared.as_ref());
-            let (ty_id, ty_name) = ty_id_and_name(declared.as_ref());
+            let call = call_expr(fname, kind.ty());
+            let (ty_id, ty_name) = ty_id_and_name(kind.ty());
             quote! {
                 #[doc(hidden)]
                 fn #shim<'__s>(
@@ -468,12 +528,59 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         }
         // A standalone benchmark.
         (None, Flavour::Flat) => {
+            let kind = input_kind(&func)?;
+            let owned = matches!(kind, Input::Owned(_));
             let body = match (&args.input, &args.gen_input) {
-                (Some(input), None) => quote!(__adder.input(__name, #input, #fname)),
-                (None, Some(gen)) => quote!(__adder.gen_input(__name, #gen, #fname)),
+                // `|__v| #fname(__v)`, not `#fname` passed directly: `Adder`
+                // always hands out `&mut I`, and a named function's own type
+                // does not satisfy a generic `FnMut(&mut I)` bound merely
+                // because Rust would reborrow `&mut I` as `&I` at an
+                // ordinary call site - that coercion only applies to an
+                // actual call expression, which this closure body gives it.
+                (Some(input), None) if !owned => {
+                    quote!(__adder.input(__name, #input, |__v| #fname(__v)))
+                }
+                (None, Some(gen)) if !owned => {
+                    quote!(__adder.gen_input(__name, #gen, |__v| #fname(__v)))
+                }
+                // The function consumes its input, so `Adder` - which only
+                // ever hands out `&mut I` - cannot call it directly. Wrap
+                // the stored value in `Option`, hand out `&mut Option<I>`
+                // as always, and `.take()` the real value out of it right
+                // before the call: exactly the trick this crate's own
+                // documentation would otherwise have to tell a caller to
+                // write by hand. `.take()` can only ever see `None` if
+                // something else already emptied this slot, which nothing
+                // does - each slot is visited once per round, by this
+                // closure alone.
+                (Some(input), None) => {
+                    quote! {
+                        __adder.input(
+                            __name,
+                            ::core::option::Option::Some(#input),
+                            |__v| #fname(__v.take().expect(
+                                "scaling: input slot was already empty - please report this bug"
+                            )),
+                        )
+                    }
+                }
+                (None, Some(gen)) => {
+                    quote! {
+                        __adder.gen_input(
+                            __name,
+                            {
+                                let mut __gen = #gen;
+                                move || ::core::option::Option::Some(__gen())
+                            },
+                            |__v| #fname(__v.take().expect(
+                                "scaling: input slot was already empty - please report this bug"
+                            )),
+                        )
+                    }
+                }
                 (None, None) => {
                     // No input declared, so the function must take none.
-                    if input_type(&func)?.is_some() {
+                    if !matches!(kind, Input::None) {
                         return Err(syn::Error::new(
                             func.sig.inputs.span(),
                             "this benchmark takes an input, so say where it comes from: \
@@ -514,7 +621,25 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 )
             })?;
             let body = match &args.gen_input {
-                Some(gen) => quote!(__adder.scaling_gen(__name, #gen, #fname, #nmin)),
+                // Wrapped for the same reason as the flat case above.
+                Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
+                    quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
+                }
+                Some(gen) => {
+                    quote! {
+                        __adder.scaling_gen(
+                            __name,
+                            {
+                                let mut __gen = #gen;
+                                move |__n: usize| ::core::option::Option::Some(__gen(__n))
+                            },
+                            |__v| #fname(__v.take().expect(
+                                "scaling: input slot was already empty - please report this bug"
+                            )),
+                            #nmin,
+                        )
+                    }
+                }
                 None => quote!(__adder.scaling(__name, #fname, #nmin)),
             };
             quote! {
@@ -663,7 +788,11 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     let fname = &func.sig.ident;
     let reported = name_or_bare(&args.name, fname);
     let baseline = args.baseline;
-    let declared = input_type(&func)?;
+    let kind = input_kind(&func)?;
+    if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
+        return Err(e);
+    }
+    let declared = kind.ty().cloned();
 
     // One registration per listed type, or a single one at whatever the
     // signature says.

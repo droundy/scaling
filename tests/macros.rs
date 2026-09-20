@@ -43,6 +43,25 @@ fn with_gen_input(v: &mut Vec<i32>) {
     v.sort_unstable();
 }
 
+// ---- one that only reads its input, taking &T rather than &mut T ----
+
+#[scaling::bench(input = vec![9i32, 8, 7, 6, 5])]
+fn with_ref_input(v: &Vec<i32>) -> i32 {
+    v.iter().sum()
+}
+
+// ---- one that consumes its input, taking T by value ----
+
+#[scaling::bench(input = vec![9i32, 8, 7, 6, 5])]
+fn with_owned_input(v: Vec<i32>) -> i32 {
+    v.into_iter().sum()
+}
+
+#[scaling::bench(gen_input = || vec![9i32, 8, 7, 6, 5])]
+fn with_owned_gen_input(v: Vec<i32>) -> i32 {
+    v.into_iter().sum()
+}
+
 // ---- a scaling benchmark ----
 
 #[scaling::bench_scaling(nmin = 32)]
@@ -56,6 +75,22 @@ fn scales(n: usize) -> u64 {
 #[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
 fn scales_with_fresh_input(v: &mut Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
+}
+
+// ---- the same, but only reading its generated input. Named to share no
+// suffix with any other registration here - see the comment on the
+// scales_with_fresh_input rename a few commits back for why that matters ----
+
+#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+fn scales_by_reading(v: &Vec<u64>) -> u64 {
+    v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
+}
+
+// ---- the same, but consuming its generated input by value ----
+
+#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+fn scales_by_consuming(v: Vec<u64>) -> u64 {
+    v.into_iter().fold(0u64, |a, x| a.wrapping_add(x))
 }
 
 // ---- a renamed one ----
@@ -114,7 +149,14 @@ fn options(max_time_ms: u64) -> Options {
 fn every_written_benchmark_is_found_and_measured() {
     let report = measure(&options(50)).expect("these registrations compose");
 
-    for name in ["plain", "with_input", "with_gen_input"] {
+    for name in [
+        "plain",
+        "with_input",
+        "with_gen_input",
+        "with_ref_input",
+        "with_owned_input",
+        "with_owned_gen_input",
+    ] {
         let full = report
             .names()
             .find(|k| k.ends_with(name))
@@ -142,6 +184,26 @@ fn every_written_benchmark_is_found_and_measured() {
     assert!(
         report.scaling(&gen_scaling_key).is_some(),
         "a scaling benchmark with gen_input should measure just like one without",
+    );
+
+    let ref_scaling_key = report
+        .names()
+        .find(|k| k.ends_with("scales_by_reading"))
+        .expect("the &T scaling benchmark registered")
+        .to_string();
+    assert!(
+        report.scaling(&ref_scaling_key).is_some(),
+        "&T should measure exactly as &mut T does",
+    );
+
+    let owned_scaling_key = report
+        .names()
+        .find(|k| k.ends_with("scales_by_consuming"))
+        .expect("the owned-input scaling benchmark registered")
+        .to_string();
+    assert!(
+        report.scaling(&owned_scaling_key).is_some(),
+        "T by value should measure exactly as &T and &mut T do",
     );
 
     let sorting = report.comparison("sorting").expect("the sorting group ran");

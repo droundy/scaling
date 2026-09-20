@@ -555,7 +555,7 @@ pub struct Lane {
     /// matrix - two different types, both with an input called `small`,
     /// say - which `comparison_name` needs to know: it disambiguates only
     /// when that has actually happened, the same "carries only what
-    /// distinguishes them" rule [`resolve_versions`] follows for names that
+    /// distinguishes them" rule `resolve_versions` follows for names that
     /// collide across crates or versions. Set once, after every lane of a
     /// matrix is known, by comparing input names across them.
     pub needs_type_suffix: bool,
