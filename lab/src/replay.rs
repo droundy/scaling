@@ -1011,7 +1011,7 @@ pub fn selftest(dir: &str) {
             rng = crate::step(rng);
             order.swap(i, (rng >> 33) as usize % (i + 1));
         }
-        for (slot, &w) in order.iter().enumerate() {
+        for &w in order.iter() {
             if queue[w].is_empty() {
                 queue[w] = (0..tapes[w].rungs.len()).collect();
                 for i in (1..queue[w].len()).rev() {
@@ -1029,7 +1029,6 @@ pub fn selftest(dir: &str) {
             let ns = rung.batch_ns[cursor[w][k]];
             cursor[w][k] += 1;
             t.log.push(crate::timing::Sample {
-                slot,
                 workload: rung_name(&tapes[w].workload, k),
                 ns,
             });

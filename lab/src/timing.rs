@@ -1,6 +1,6 @@
 //! The recording format, and reading it back.
 //!
-//! `LABBIN3`. A recording is the product of this lab: the runner measures, writes one of
+//! `LABBIN4`. A recording is the product of this lab: the runner measures, writes one of
 //! these, and every question about algorithms is then arithmetic over it. So
 //! the format has to be cheap to write at a million samples a second, cheap
 //! to read a hundred million rows of, and self-describing enough that `head`
@@ -10,17 +10,20 @@ use std::collections::HashMap;
 
 /// One timing, as it is kept in memory while a slice runs.
 ///
-/// Three fields, and the two that used to be here are gone. `round` was
-/// redundant with position - the runner takes exactly one sample per
-/// workload per round - and `t_offset` cost eight bytes a sample to support
-/// one measurement, the per-sample overhead, which the recorder now makes
-/// once per rung and writes in the header instead.
+/// Two fields. Three others have been dropped, each because the file
+/// already said it:
+///
+///   - `t_offset` cost eight bytes a sample to support one derived
+///     quantity, the per-sample overhead, which the recorder now measures
+///     per rung and writes once in the header.
+///   - `round` and `slot` are position. The runner takes exactly one sample
+///     per workload per round, in slot order, and never cuts a round short
+///     - the deadline and the rung cap are both tested between rounds - so
+///     for sample `i` of a round holding `W` workloads, `slot` is `i % W`
+///     and `round` is `i / W`. Storing either wrote down what the layout
+///     already told us.
 #[derive(Clone, Debug)]
 pub struct Sample {
-    /// Position within the round. Kept because order is data: a memory-heavy
-    /// neighbour immediately before a payload leaves that payload's cache
-    /// cold, so anything that wants to ask about position still can.
-    pub slot: usize,
     pub workload: String,
     /// Whole-batch time in ns.
     pub ns: f64,
@@ -61,10 +64,9 @@ impl Timing {
     }
 
     /// Time one batch and record it.
-    pub fn time(&mut self, slot: usize, name: &str, f: impl FnOnce() -> f64) -> f64 {
+    pub fn time(&mut self, name: &str, f: impl FnOnce() -> f64) -> f64 {
         let ns = f();
         self.log.push(Sample {
-            slot,
             workload: name.to_string(),
             ns,
         });
@@ -73,7 +75,7 @@ impl Timing {
 
     /// Write the recording.
     ///
-    /// Slot, workload index, then the batch time in nanoseconds as LEB128.
+    /// Workload index, then the batch time in nanoseconds as LEB128.
     ///
     /// A single file holds batches from 42ns to 12.5ms, a 300000-fold range,
     /// so no fixed integer width suits all of it. A previous version gave
@@ -104,7 +106,7 @@ impl Timing {
             .collect();
 
         let mut head = String::new();
-        head.push_str("LABBIN3\n");
+        head.push_str("LABBIN4\n");
         for n in &names {
             let m = &self.rungs[*n];
             let _ = writeln!(
@@ -121,7 +123,6 @@ impl Timing {
             let Some(&i) = idx.get(x.workload.as_str()) else {
                 continue;
             };
-            buf.push(x.slot as u8);
             buf.push(i);
             put_leb128(&mut buf, x.ns.round().max(0.0) as u64);
         }
@@ -150,12 +151,13 @@ pub struct Run {
 impl Run {
     pub fn load(path: &str) -> Run {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
-        if !bytes.starts_with(b"LABBIN3\n") {
-            // The magic moved with the layout on purpose: LABBIN2 wrote a
-            // per-rung scale in the header, and reading one of those here
-            // would take the scale for the overhead and misparse every
-            // record after it, quietly.
-            panic!("{path}: not a LABBIN3 recording");
+        if !bytes.starts_with(b"LABBIN4\n") {
+            // The magic moves with the layout every time, because each of
+            // these would otherwise parse as the next without complaining:
+            // LABBIN2 had an extra header number, LABBIN3 an extra byte per
+            // record, and either would misread every sample after the first
+            // rather than fail.
+            panic!("{path}: not a LABBIN4 recording");
         }
         let split = bytes
             .windows(5)
@@ -182,9 +184,9 @@ impl Run {
         let body = &bytes[split + 5..];
         let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
         let mut i = 0usize;
-        while i + 2 < body.len() {
-            let widx = body[i + 1] as usize;
-            i += 2;
+        while i + 1 < body.len() {
+            let widx = body[i] as usize;
+            i += 1;
             let Some(ns) = get_leb128(body, &mut i) else {
                 break;
             };

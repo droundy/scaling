@@ -794,7 +794,7 @@ fn run(
             perm = step(perm);
             order.swap(i, (perm >> 33) as usize % (i + 1));
         }
-        for (slot, &i) in order.iter().enumerate() {
+        for &i in order.iter() {
             seed = step(seed);
             let (count, name, _) = &rungs[i][pick[i]];
             // Untimed iterations first, to separate the two things that
@@ -809,7 +809,7 @@ fn run(
                 ws[i].time_batch(warmup)();
             }
             let time_me = ws[i].time_batch(*count);
-            t.time(slot, name, time_me);
+            t.time(name, time_me);
             taken[i][pick[i]] += 1;
         }
         done += 1;
