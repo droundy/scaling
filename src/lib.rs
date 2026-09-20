@@ -316,6 +316,17 @@ In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
 own input. This has the desired effect, but looks a bit weird.
 
+This applies equally to [`bench_scaling`] and to a comparison's
+alternatives, not just to a plain `#[bench]`: every timed call, whichever
+of the three it is, is protected by [`std::hint::black_box`] the same way -
+a comparison's own timing loop is shared with [`bench`] rather than having
+its own, so there is one place this is done rather than three. A scaling
+benchmark has one further wrinkle: the size `N` itself is also passed
+through `black_box` before the call, not just the result afterward -
+without that, the optimiser can see `N` as a literal within one round and
+hoist the call out on that basis alone, the same elimination this caveat
+is about, one step earlier.
+
 ## Caveat 3: A busy machine
 
 **TL;DR: on Linux, ``sudo `which quiet-bench` reserve 2`` then
@@ -332,6 +343,25 @@ them, and pins the clock frequency. Benchmarks then pin themselves to the
 reserved CPUs automatically, with no code change. See the [`quiet`] module
 for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
+
+### CI
+
+`quiet-bench reserve` wants root and exclusive cores, which an ordinary CI
+runner - shared, often virtualized, rarely handing out either - usually
+cannot give it. [`quiet::status`] still tells you outright rather than
+letting a run silently assume it is quiesced: check it in CI the same way
+you would locally, and expect [`quiet::Status::NotQuiesced`] there.
+
+Be honest with yourself about what that costs
+[`--fail-on-regression`](runner::Options::fail_on_regression):
+`--fail-on-untrustworthy` catches too *few* samples, a fact about the
+budget the statistics can see. It cannot catch a busy machine, which is
+exactly the failure this caveat opened with - the whole run shifted
+together, so the error bar stays tight and looks fully earned. There is no
+flag that turns that into a caught case; the only fix is a quieter
+machine, or judging `--fail-on-regression`'s verdicts on CI with that
+firmly in mind rather than trusting them the way a quiesced run's would
+be trusted.
 */
 
 /// Assembling registered benchmarks into a suite.

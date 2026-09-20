@@ -95,6 +95,11 @@ pub struct Options {
     pub registry: RegistryOptions,
     /// Exit non-zero if any comparison's alternative measured slower than
     /// its baseline, by more than the run's own threshold.
+    ///
+    /// The threshold is a statement about *sampling* noise, not about
+    /// everything else that can move a measurement - see the crate's own
+    /// "A busy machine" caveat, and its "CI" section for what that means
+    /// for this flag specifically on a runner `quiet-bench` cannot quiesce.
     pub fail_on_regression: bool,
     /// Exit non-zero if any error bar came from too few samples to believe.
     ///
