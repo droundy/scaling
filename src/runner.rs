@@ -54,13 +54,18 @@ use auto_args::AutoArgs;
 /// wrapper in `benches/` that calls straight into its public API,
 /// alongside one that calls your current code - the same `group`/
 /// `baseline` machinery any other comparison uses, sidestepping version
-/// resolution entirely. A crate can also be set up to register its own
-/// benchmarks so that an old *tagged* copy, pulled in the same way, is
-/// picked up automatically without a wrapper - but two versions of
-/// `scaling` itself anywhere in the dependency graph then split the
-/// registry silently, so this is sharper than it looks; see
-/// "Comparing against past versions" in `REGISTRATION.md` for the full
-/// account before reaching for it.
+/// resolution entirely.
+///
+/// A crate can also be set up so an old release's own registrations are
+/// picked up automatically, without a wrapper, once it is pulled in the
+/// same way - but only if that release already carried the attributes,
+/// and only as long as every crate in the graph resolves to the *same*
+/// `scaling`: registration is keyed on the literal monomorphized type
+/// `inventory` collects, so two `scaling` versions anywhere in the
+/// dependency graph split the registry silently rather than erroring -
+/// the old registrations compile fine and simply never appear. That risk
+/// is why the manual wrapper above is the recommended default rather
+/// than this automatic path.
 pub use crate::assemble::{BaselinePolicy, Diagnostic, RegistryOptions, VersionPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
