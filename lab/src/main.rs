@@ -426,19 +426,38 @@ fn round_cost(ws: &[Arc<Workload>], counts: &HashMap<&'static str, (usize, f64)>
 /// in `replay.rs`, where it is measured rather than assumed.
 const OVERHEAD_NS: f64 = 370.0;
 
-/// Most samples worth recording at any one rung.
+/// Most data worth recording at any one rung, as wall time.
 ///
-/// Not a stopping rule - nothing here looks at the numbers - but a capacity
-/// one, of a kind with the rung window. A cheap composition runs at nearly a
-/// million rounds a second, so an equal *time* slice buys it far more data
-/// than any replay can read and about 33MB a second of disk: thirty seconds
-/// of `f64_sin` alone produced a gigabyte. Past this point a subset has
-/// nothing left to learn and moves on, which also means the expensive
-/// subsets are reached sooner.
+/// Time rather than a sample count, because rungs are drawn weighted by
+/// inverse cost: every rung of a workload ends up holding the same wall
+/// time and wildly different sample counts, so one number in seconds says
+/// the same thing about the whole ladder where a sample count does not.
 ///
-/// Twenty-five times `MIN_SAMPLES_PER_RUNG`, so there is a wide margin
-/// between the least a rung may have and the most it may keep.
-const MAX_SAMPLES_PER_RUNG: usize = 10_000;
+/// The number comes from what consumes a recording. An analysis replays
+/// trials from different starting points, and they are only independent if
+/// they do not read the same samples, so what a rung needs is
+///
+///     trials  x  time one trial spends at that rung
+///
+/// Measured on real recordings, the slowest *converging* trial was about
+/// 670us spread over nine rungs, and the worst per-rung case - a
+/// single-rung algorithm at the 0.5% goal, spending everything in one place
+/// - was about 320us. A second per rung therefore supports some three
+/// thousand independent trials against the two hundred the report runs.
+///
+/// The margin is deliberate. Two hundred trials put about +-3.5% of
+/// sampling error on every percentage in that report, so wanting to raise
+/// the trial count later is likely, and it is much cheaper to have the data
+/// than to measure again.
+///
+/// A trial that never converges is a different matter: it runs to its whole
+/// budget, and no affordable recording makes a thousand of *those*
+/// independent. Those are the runs the report already marks as having hit
+/// the cap, and their answers are not being trusted anyway.
+///
+/// This binds only on cheap compositions. An expensive one reaches a few
+/// milliseconds per rung inside its slice and stops when the slice ends.
+const CAP_PER_RUNG: Duration = Duration::from_secs(1);
 
 /// Fewest samples a rung should end up with, for the most expensive subset.
 ///
@@ -756,10 +775,10 @@ fn run(
 
     let mut done = 0usize;
     let mut last_machine = Instant::now() - MACHINE_EVERY;
-    // Samples taken at each rung, so a subset can stop once every rung has
-    // more than any replay will read. The thinnest rung is what counts: the
-    // rest are cheaper and fill up sooner.
-    let mut taken: Vec<Vec<usize>> = rungs.iter().map(|r| vec![0; r.len()]).collect();
+    // Wall time spent at each rung, so a subset can stop once every rung
+    // holds more than any replay will read.
+    let mut held: Vec<Vec<f64>> = rungs.iter().map(|r| vec![0.0; r.len()]).collect();
+    let cap_ns = CAP_PER_RUNG.as_nanos() as f64;
     for r in 0..rounds {
         // The budget running out - *not* a convergence test. Nothing here
         // looks at the numbers it is collecting, and no workload ever
@@ -824,17 +843,16 @@ fn run(
             }
             let time_me = ws[i].time_batch(*count);
             t.time(ridx, time_me);
-            taken[i][pick[i]] += 1;
+            held[i][pick[i]] += rungs[i][pick[i]].2;
         }
         done += 1;
         // Checked once a round, and only against the cheapest thing to
         // check: whether the thinnest rung anywhere has filled up.
-        if done % 4096 == 0
-            && taken
-                .iter()
-                .all(|w| w.iter().all(|&c| c >= MAX_SAMPLES_PER_RUNG))
-        {
-            eprintln!("  every rung full at {done} rounds");
+        if done % 4096 == 0 && held.iter().all(|w| w.iter().all(|&t| t >= cap_ns)) {
+            eprintln!(
+                "  every rung holds {:.1}s at {done} rounds",
+                CAP_PER_RUNG.as_secs_f64()
+            );
             break;
         }
     }

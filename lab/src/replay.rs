@@ -726,15 +726,6 @@ fn cal_policies(target: f64) -> Vec<Policy> {
 }
 
 pub fn report(paths: &[String]) {
-    let mut tapes: Vec<Tape> = Vec::new();
-    for p in paths {
-        let r = Run::load(p);
-        tapes.extend(self::tapes(&r));
-    }
-    if tapes.is_empty() {
-        eprintln!("no usable recordings");
-        return;
-    }
 
     println!(
         "Rung choice, calibration and stopping replayed from recordings.\n\
@@ -749,6 +740,25 @@ pub fn report(paths: &[String]) {
         pct(PASS_WITHIN), pct(EXPECT_COVERAGE), pct(BLOWUP_MAX),
     );
 
+    // One file at a time, loaded and dropped.
+    //
+    // Loading them all first would hold every recording at once: a deep
+    // cheap composition is 100MB on disk and some 600MB loaded, so the full
+    // powerset would ask for tens of gigabytes. Nothing needs two
+    // recordings in memory together - a tape is reported against its own
+    // truth, and two files holding the same workload are two sections of
+    // the report either way.
+    let mut any = false;
+    for path in paths {
+        let run = Run::load(path);
+        let tapes = self::tapes(&run);
+        if tapes.is_empty() {
+            continue;
+        }
+        any = true;
+        if paths.len() > 1 {
+            println!("--- {path} ---");
+        }
     for tape in &tapes {
         let (truth_ns, truth_se) = truth(tape);
         if !(truth_ns.is_finite() && truth_ns > 0.0) {
@@ -804,6 +814,10 @@ pub fn report(paths: &[String]) {
             }
         }
         println!();
+    }
+    }
+    if !any {
+        eprintln!("no usable recordings");
     }
 }
 
