@@ -388,7 +388,7 @@ impl Clone for ErasedInput {
 /// group, because there is exactly one generator per group - see
 /// [`ErasedInput`] for why the alternatives cannot each bring their own.
 #[derive(Debug)]
-pub struct GenInputRegistration {
+pub struct BenchInputRegistration {
     /// The group this generates input for.
     pub group: &'static str,
     /// Which crate registered it, and at what version.
@@ -411,7 +411,7 @@ pub struct GenInputRegistration {
     pub make: MakeInput,
 }
 
-inventory::collect!(GenInputRegistration);
+inventory::collect!(BenchInputRegistration);
 
 /// One implementation to be measured against the others in a matrix.
 ///

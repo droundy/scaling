@@ -197,13 +197,13 @@ where
 /// Run a benchmark with an input, with default accuracy (see
 /// [`Config`]).
 ///
-/// See [`Config::bench_input`] for the full documentation.
-pub fn bench_input<F, I, O>(input: I, f: F) -> Stats
+/// See [`Config::bench_clone_input`] for the full documentation.
+pub fn bench_clone_input<F, I, O>(input: I, f: F) -> Stats
 where
     F: FnMut(&mut I) -> O,
     I: Clone,
 {
-    Config::default().bench_input(input, f)
+    Config::default().bench_clone_input(input, f)
 }
 
 /// Run a benchmark with a generated input, with default
@@ -231,7 +231,7 @@ impl Config {
     where
         F: FnMut() -> O,
     {
-        self.bench_input((), |_| f())
+        self.bench_clone_input((), |_| f())
     }
 
     /// Run a benchmark with an input.
@@ -249,7 +249,7 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench_input<F, I, O>(&self, input: I, f: F) -> Stats
+    pub fn bench_clone_input<F, I, O>(&self, input: I, f: F) -> Stats
     where
         F: FnMut(&mut I) -> O,
         I: Clone,
@@ -497,7 +497,7 @@ where
     // A ceiling on the *total* cost of one probe, setup as well as timing.
     // Ordinarily the extrapolation below is driven by the timed portion
     // approaching `SAMPLE_TIME`, but when `f`'s cost is optimised away (see
-    // the module docs' "Pure functions" caveat, e.g. `bench_input(v, |_| {})`)
+    // the module docs' "Pure functions" caveat, e.g. `bench_clone_input(v, |_| {})`)
     // that portion never grows however large `unit` gets - while untimed
     // input construction does, unboundedly, and before the
     // `start.elapsed() > cfg.max_time` check below can ever run, since the
@@ -634,11 +634,11 @@ mod tests {
     fn noop() {
         println!();
         println!("noop base: {}", bench(|| {}));
-        println!("noop 0:    {}", bench_input(vec![0u64; 0], |_| {}));
-        println!("noop 16:   {}", bench_input(vec![0u64; 16], |_| {}));
-        println!("noop 64:   {}", bench_input(vec![0u64; 64], |_| {}));
-        println!("noop 256:  {}", bench_input(vec![0u64; 256], |_| {}));
-        println!("noop 512:  {}", bench_input(vec![0u64; 512], |_| {}));
+        println!("noop 0:    {}", bench_clone_input(vec![0u64; 0], |_| {}));
+        println!("noop 16:   {}", bench_clone_input(vec![0u64; 16], |_| {}));
+        println!("noop 64:   {}", bench_clone_input(vec![0u64; 64], |_| {}));
+        println!("noop 256:  {}", bench_clone_input(vec![0u64; 256], |_| {}));
+        println!("noop 512:  {}", bench_clone_input(vec![0u64; 512], |_| {}));
     }
 
     #[test]
@@ -646,43 +646,43 @@ mod tests {
         println!();
         println!(
             "no ret 32:    {}",
-            bench_input(vec![0u64; 32], |x| { x.clone() })
+            bench_clone_input(vec![0u64; 32], |x| { x.clone() })
         );
         println!(
             "return 32:    {}",
-            bench_input(vec![0u64; 32], |x| x.clone())
+            bench_clone_input(vec![0u64; 32], |x| x.clone())
         );
         println!(
             "no ret 256:   {}",
-            bench_input(vec![0u64; 256], |x| { x.clone() })
+            bench_clone_input(vec![0u64; 256], |x| { x.clone() })
         );
         println!(
             "return 256:   {}",
-            bench_input(vec![0u64; 256], |x| x.clone())
+            bench_clone_input(vec![0u64; 256], |x| x.clone())
         );
         println!(
             "no ret 1024:  {}",
-            bench_input(vec![0u64; 1024], |x| { x.clone() })
+            bench_clone_input(vec![0u64; 1024], |x| { x.clone() })
         );
         println!(
             "return 1024:  {}",
-            bench_input(vec![0u64; 1024], |x| x.clone())
+            bench_clone_input(vec![0u64; 1024], |x| x.clone())
         );
         println!(
             "no ret 4096:  {}",
-            bench_input(vec![0u64; 4096], |x| { x.clone() })
+            bench_clone_input(vec![0u64; 4096], |x| { x.clone() })
         );
         println!(
             "return 4096:  {}",
-            bench_input(vec![0u64; 4096], |x| x.clone())
+            bench_clone_input(vec![0u64; 4096], |x| x.clone())
         );
         println!(
             "no ret 50000: {}",
-            bench_input(vec![0u64; 50000], |x| { x.clone() })
+            bench_clone_input(vec![0u64; 50000], |x| { x.clone() })
         );
         println!(
             "return 50000: {}",
-            bench_input(vec![0u64; 50000], |x| x.clone())
+            bench_clone_input(vec![0u64; 50000], |x| x.clone())
         );
     }
 

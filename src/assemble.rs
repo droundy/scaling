@@ -15,7 +15,7 @@
 //! benchmark, a machine claim, or a linker.
 
 use crate::registry::{
-    ErasedInput, GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
+    ErasedInput, BenchInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
 };
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
@@ -497,7 +497,7 @@ pub struct Group {
     /// `None` means the group takes no input, and assembly will use
     /// `ErasedInput::new(())` - which is what makes a no-input group and a
     /// generated-input group one code path rather than two.
-    pub gen_input: Option<&'static GenInputRegistration>,
+    pub gen_input: Option<&'static BenchInputRegistration>,
 }
 
 impl Group {
@@ -885,7 +885,7 @@ fn source(r: &Registered) -> String {
 /// not affect measurement: the scheduler reshuffles every round regardless.
 pub fn plan(
     regs: &[&'static Registered],
-    gens: &[&'static GenInputRegistration],
+    gens: &[&'static BenchInputRegistration],
     options: RegistryOptions,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let mut problems = Vec::new();
@@ -936,11 +936,11 @@ pub fn plan(
     // Deduplicated across versions the way a matrix input is, and for the
     // same reason: two versions of one generator are meant to build the same
     // thing, so keeping both would be redundant rather than a comparison.
-    let mut gens_by_group: BTreeMap<&str, Vec<&'static GenInputRegistration>> = BTreeMap::new();
+    let mut gens_by_group: BTreeMap<&str, Vec<&'static BenchInputRegistration>> = BTreeMap::new();
     for g in gens {
         gens_by_group.entry(g.group).or_default().push(g);
     }
-    let mut chosen_gen: BTreeMap<&str, &'static GenInputRegistration> = BTreeMap::new();
+    let mut chosen_gen: BTreeMap<&str, &'static BenchInputRegistration> = BTreeMap::new();
     for (group, gs) in &gens_by_group {
         // Two from one crate at one version is a contradiction: they cannot
         // both be the group's one shared input. Two from different origins
@@ -1135,8 +1135,8 @@ mod tests {
         }
     }
 
-    fn generator<I: 'static>(group: &'static str, type_name: &'static str) -> GenInputRegistration {
-        GenInputRegistration {
+    fn generator<I: 'static>(group: &'static str, type_name: &'static str) -> BenchInputRegistration {
+        BenchInputRegistration {
             group,
             crate_name: "testcrate",
             crate_version: "1.0.0",
@@ -1153,7 +1153,7 @@ mod tests {
         rs.into_iter().map(|r| &*Box::leak(Box::new(r))).collect()
     }
 
-    fn leak_gens(gs: Vec<GenInputRegistration>) -> Vec<&'static GenInputRegistration> {
+    fn leak_gens(gs: Vec<BenchInputRegistration>) -> Vec<&'static BenchInputRegistration> {
         gs.into_iter().map(|g| &*Box::leak(Box::new(g))).collect()
     }
 

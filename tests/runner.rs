@@ -20,7 +20,7 @@ fn work(n: usize) -> u64 {
 // is far outside anything the machine's noise reaches, and the test does not
 // depend on a quiet machine.
 
-#[scaling::gen_input(group = "regressing")]
+#[scaling::bench_input(group = "regressing")]
 fn regressing_input() -> Vec<u64> {
     (0..64u64).collect()
 }
@@ -45,7 +45,7 @@ fn slow(v: &mut Vec<u64>) -> u64 {
 // detects a change is not a regression unless the change is a slowdown, and
 // this is what says so.
 
-#[scaling::gen_input(group = "improving")]
+#[scaling::bench_input(group = "improving")]
 fn improving_input() -> Vec<u64> {
     (0..64u64).collect()
 }

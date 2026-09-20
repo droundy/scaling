@@ -56,6 +56,23 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// first one added as it is for a hand-built `ComparisonSet`. `name = "..."`
 /// overrides the reported name, which defaults to the module-qualified path
 /// of the function.
+///
+/// A group's members share one input, declared once with
+/// [`bench_input`](macro@bench_input) rather than with `input =` or
+/// `gen_input =` on each member - a group compiled with either of those is
+/// rejected, because a per-alternative input would break the pairing that
+/// makes a comparison's error bar narrower than two separate measurements:
+///
+/// ```ignore
+/// #[scaling::bench_input(group = "sort")]
+/// fn sort_data() -> Vec<i32> { random_vec(1000) }
+///
+/// #[scaling::bench(group = "sort", baseline)]
+/// fn std_sort(v: &mut Vec<i32>) { v.sort() }
+///
+/// #[scaling::bench(group = "sort")]
+/// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
+/// ```
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -74,6 +91,33 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// `nmin` must be a literal: it is baked into the generated shim, whose
 /// signature has nowhere to pass it.
+///
+/// # Holding size-dependent setup out of the timed call
+///
+/// The function above is timed in full, `random_n(n)` included - fine when
+/// building the input *is* part of what you want measured, wrong when it
+/// isn't: a scaling benchmark of "parse a buffer of size `n`" that also
+/// allocates and fills that buffer inside the timed call is measuring
+/// "allocate, fill, then parse", and the fitted power and constant answer
+/// for that combination rather than for parsing alone.
+///
+/// `gen_input = |n: usize| -> I { ... }` moves that cost out of the timed
+/// region, the same idea as `#[bench(gen_input = ...)]` but handed the size
+/// so it can build an input of exactly that size:
+///
+/// ```ignore
+/// #[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| random_n(n))]
+/// fn sort_n(v: &mut Vec<i32>) -> usize {
+///     v.sort();
+///     v.len()
+/// }
+/// ```
+///
+/// Called once per sample, before timing starts; only the function body -
+/// `v.sort()` above - is on the clock. `input = <value>` is rejected here
+/// rather than accepted: a scaling benchmark sweeps `n`, so a fixed input
+/// that does not vary with it would be measuring the same size at every
+/// point on the curve, which is not a scaling law.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -85,19 +129,30 @@ pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Declare the shared input of a comparison group.
 ///
+/// Named to pair with [`bench`]: this is the group-wide counterpart of the
+/// per-benchmark `gen_input = ...` argument `#[bench]` itself takes - the
+/// same idea, "build a fresh input", but shared by every alternative in a
+/// group rather than private to one benchmark.
+///
 /// ```ignore
-/// #[scaling::gen_input(group = "sort")]
+/// #[scaling::bench_input(group = "sort")]
 /// fn sort_data() -> Vec<i32> { random_vec(1000) }
 /// ```
 ///
 /// Called once per round, and the value cloned for each alternative, so that
 /// all of them are measured on the same input - which is what makes their
 /// differences paired. Exactly one per group.
+///
+/// A `group = "..."` on `#[bench]`/`#[bench_scaling]` itself cannot also
+/// take `input = ...` or `gen_input = ...`: an alternative's input always
+/// comes from its group's `#[bench_input]`, and per-alternative inputs
+/// would break the pairing the whole statistical model depends on. Use this
+/// attribute instead.
 #[proc_macro_attribute]
-pub fn gen_input(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn bench_input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
     let func = parse_macro_input!(item as ItemFn);
-    expand_gen_input(args, func)
+    expand_bench_input(args, func)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -237,11 +292,11 @@ fn input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
         FnArg::Typed(t) => t,
     };
     match &*pat.ty {
-        // The input is passed as `&mut I`, matching `bench_input`.
+        // The input is passed as `&mut I`, matching `bench_clone_input`.
         Type::Reference(r) if r.mutability.is_some() => Ok(Some((*r.elem).clone())),
         other => Err(syn::Error::new(
             other.span(),
-            "a benchmark's input argument must be `&mut I`, as `bench_input` takes it",
+            "a benchmark's input argument must be `&mut I`, as `bench_clone_input` takes it",
         )),
     }
 }
@@ -326,12 +381,39 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
              benchmark grows with N",
         ));
     }
+    if let (Flavour::Scaling, Some(input)) = (&flavour, &args.input) {
+        return Err(syn::Error::new(
+            input.span(),
+            "`input` fixes one value regardless of size, but a scaling benchmark \
+             sweeps `n` - use `gen_input = |n: usize| ...` to build a size-dependent \
+             input instead",
+        ));
+    }
     if args.input.is_some() && args.gen_input.is_some() {
         return Err(syn::Error::new(
             func.sig.span(),
             "give either `input` or `gen_input`, not both: one clones a value per \
              iteration, the other builds a fresh one",
         ));
+    }
+    // `Flavour::Flat` only: a scaling benchmark in a group is rejected below,
+    // for its own, more specific reason, regardless of `input`/`gen_input`.
+    if let Flavour::Flat = flavour {
+        if args.group.is_some() && (args.input.is_some() || args.gen_input.is_some()) {
+            let span = args
+                .input
+                .as_ref()
+                .map(|e| e.span())
+                .or_else(|| args.gen_input.as_ref().map(|e| e.span()))
+                .unwrap_or_else(|| func.sig.span());
+            return Err(syn::Error::new(
+                span,
+                "a comparison group's alternatives share one input, declared once with \
+                 `#[scaling::bench_input(group = \"...\")]` - not `input =` or \
+                 `gen_input =` on each member, which would give every alternative its \
+                 own input and break the pairing a comparison's accuracy depends on",
+            ));
+        }
     }
     if args.baseline && args.group.is_none() {
         return Err(syn::Error::new(
@@ -470,11 +552,11 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     })
 }
 
-fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+fn expand_bench_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     let group = args.group.as_ref().ok_or_else(|| {
         syn::Error::new(
             func.sig.span(),
-            "`#[scaling::gen_input]` declares the shared input of a comparison group, \
+            "`#[scaling::bench_input]` declares the shared input of a comparison group, \
              so it needs `group = \"...\"` to say which",
         )
     })?;
@@ -504,7 +586,7 @@ fn expand_gen_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             ::scaling::registry::ErasedInput::new(#fname())
         }
         ::scaling::inventory::submit! {
-            ::scaling::registry::GenInputRegistration {
+            ::scaling::registry::BenchInputRegistration {
                 group: #group,
                 crate_name: ::core::env!("CARGO_PKG_NAME"),
                 crate_version: ::core::env!("CARGO_PKG_VERSION"),

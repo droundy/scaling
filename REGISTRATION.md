@@ -821,7 +821,7 @@ changes is that it applies to everyone rather than to whoever turned
 | | |
 | --- | --- |
 | **deleted** | `Config::compare`, `Config::compare_input`, `Config::compare_gen_input`, and the 219-line sampling loop behind them |
-| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input`; `bench`, `bench_input`, `bench_gen_input`, `bench_scaling`, `bench_scaling_gen` and `Config`'s five methods of those names |
+| **hidden** | `Suite`, `Token`, `ComparisonSet`, `RegisteredTokens`, `Config::suite`, `Config::comparison`, `Config::comparison_gen_input`; `bench`, `bench_clone_input`, `bench_gen_input`, `bench_scaling`, `bench_scaling_gen` and `Config`'s five methods of those names |
 | **added** | `runner::measure`, and `RegistryOptions` / `VersionPolicy` / `BaselinePolicy` / `Diagnostic` re-exported from `runner` |
 | **kept** | `Config` (four builders), the result types, `Filter`, `runner`, `main!`, the attribute macros, `quiet` |
 
@@ -957,7 +957,7 @@ suite behind it is no longer public.
 
 Design A's cons above list removing `bench`, `bench_scaling` and
 `bench_scaling_gen` as one of its costs. They are hidden, along with
-`bench_input` and `bench_gen_input` and `Config`'s five methods of the same
+`bench_clone_input` and `bench_gen_input` and `Config`'s five methods of the same
 names — `bench(f)` is `Config::default().bench(f)`, so hiding one and
 documenting the other would leave the API exactly as wide with a longer path
 to the same place.

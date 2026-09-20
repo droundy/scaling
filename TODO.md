@@ -157,7 +157,7 @@ does, against `harness-cost`:
 | | before | after |
 | --- | --- | --- |
 | `bench` overhead/iter | 0.5927ns | 0.5919ns |
-| `bench_input` | 1.489ns | 1.490ns |
+| `bench_clone_input` | 1.489ns | 1.490ns |
 | `bench_gen_input` | 1.521ns | 1.536ns |
 | 1 round of spin | 3.260ns | 3.261ns |
 | 10k rounds | 2.886us | 2.883us |

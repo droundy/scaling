@@ -36,7 +36,7 @@ fn hashing_scales(n: usize) -> u64 {
 
 // ---- a comparison: one shared input, three ways of using it ----
 
-#[scaling::gen_input(group = "summing")]
+#[scaling::bench_input(group = "summing")]
 fn summing_data() -> Vec<u64> {
     (0..256u64).collect()
 }

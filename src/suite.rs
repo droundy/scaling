@@ -55,7 +55,7 @@
 use super::*;
 use crate::assemble::RegistryOptions;
 use crate::registry::{
-    Adder, Alternative, GenInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
+    Adder, Alternative, BenchInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
 };
 use std::any::Any;
 use std::cell::Cell;
@@ -610,7 +610,7 @@ impl<'a> Suite<'a> {
         self.add_gen_input_with(cfg, name, || (), move |_: &mut ()| f())
     }
 
-    /// Add a benchmark over a mutable input, as [`bench_input`] would run it.
+    /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
     pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Token<Stats>
     where
         F: FnMut(&mut I) -> O + 'a,
@@ -937,8 +937,8 @@ impl<'a> Suite<'a> {
         options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
-        let gens: Vec<&'static GenInputRegistration> =
-            inventory::iter::<GenInputRegistration>().collect();
+        let gens: Vec<&'static BenchInputRegistration> =
+            inventory::iter::<BenchInputRegistration>().collect();
         let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
         let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
         self.assemble_registered(&regs, &gens, &cands, &mins, options)
@@ -952,7 +952,7 @@ impl<'a> Suite<'a> {
     fn assemble_registered(
         &mut self,
         regs: &[&'static Registered],
-        gens: &[&'static GenInputRegistration],
+        gens: &[&'static BenchInputRegistration],
         cands: &[&'static MatrixCandidate],
         mins: &[&'static MatrixInput],
         options: RegistryOptions,
@@ -2276,7 +2276,7 @@ mod per_benchmark_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Adder, Alternative, ErasedInput, GenInputRegistration, Handle};
+    use crate::registry::{Adder, Alternative, ErasedInput, BenchInputRegistration, Handle};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -2325,7 +2325,7 @@ mod registered_by_hand {
     }
 
     inventory::submit! {
-        GenInputRegistration {
+        BenchInputRegistration {
             group: "e2e-sort",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),

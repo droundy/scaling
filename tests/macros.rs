@@ -50,6 +50,14 @@ fn scales(n: usize) -> u64 {
     work(n)
 }
 
+// ---- a scaling benchmark whose input is built fresh, outside the timed
+// call - `n` reaches the generator, not the timed function ----
+
+#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+fn scales_with_gen_input(v: &mut Vec<u64>) -> u64 {
+    v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
+}
+
 // ---- a renamed one ----
 
 #[scaling::bench(name = "renamed")]
@@ -59,7 +67,7 @@ fn some_long_internal_name() -> u64 {
 
 // ---- a comparison group: one shared input, three alternatives ----
 
-#[scaling::gen_input(group = "sorting")]
+#[scaling::bench_input(group = "sorting")]
 fn sorting_data() -> Vec<u64> {
     (0..500u64).rev().collect()
 }
@@ -125,6 +133,16 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the scaling benchmark registered")
         .to_string();
     assert!(report.scaling(&scaling_key).is_some());
+
+    let gen_scaling_key = report
+        .names()
+        .find(|k| k.ends_with("scales_with_gen_input"))
+        .expect("the gen_input scaling benchmark registered")
+        .to_string();
+    assert!(
+        report.scaling(&gen_scaling_key).is_some(),
+        "a scaling benchmark with gen_input should measure just like one without",
+    );
 
     let sorting = report.comparison("sorting").expect("the sorting group ran");
     assert_eq!(sorting.stats().len(), 3);
