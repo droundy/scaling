@@ -1004,6 +1004,24 @@ fn composition_of(path: &str) -> String {
 /// Sampled between rounds, never inside a timed batch: these are three file
 /// reads and a few microseconds, which is nothing against a round but a
 /// large fraction of a 100 us sample.
+/// Where to read the clock of a core we are actually measuring on.
+///
+/// This read `cpu0` for the life of the lab, and cpu0 is a housekeeping
+/// core: idle, parked at its floor, and reporting 0.40 GHz while the
+/// reserved cores ran at whatever they ran at. The column exists to explain
+/// drift in the timings, and an idle core's clock is the one number
+/// guaranteed not to.
+///
+/// `quiet-bench` puts the reserved set in `SCALING_BENCH_CPUS`; take the
+/// first of them.
+fn bench_cpu_freq_path() -> String {
+    let cpu = std::env::var("SCALING_BENCH_CPUS")
+        .ok()
+        .and_then(|v| v.split(',').next().and_then(|c| c.trim().parse::<u32>().ok()))
+        .unwrap_or(0);
+    format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq")
+}
+
 fn machine_state() -> String {
     let read = |p: &str| {
         std::fs::read_to_string(p)
@@ -1037,7 +1055,7 @@ fn machine_state() -> String {
         .unwrap_or_else(|| "-".to_string());
     format!(
         "{},{},{}",
-        read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"),
+        read(&bench_cpu_freq_path()),
         temp,
         procs
     )
