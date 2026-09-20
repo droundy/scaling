@@ -1122,15 +1122,26 @@ pub fn compositions(paths: &[String]) {
     );
 
     for (workload, comps) in &by {
-        // The control: this workload with no company. Without it there is
-        // nothing to compare against and the workload is skipped rather
-        // than compared to an arbitrary other composition.
-        let Some(alone) = comps.get(workload.as_str()) else {
-            continue;
+        // The control is this workload with no company. `cpu_canary` never
+        // has that - it is in every round structurally - so for it the
+        // smallest composition stands in, which understates its
+        // sensitivity rather than overstating it: the baseline already has
+        // a neighbour in it.
+        let (label, alone) = match comps.get(workload.as_str()) {
+            Some(v) => ("alone", v),
+            None => {
+                let Some((c, v)) = comps
+                    .iter()
+                    .min_by_key(|(c, _)| c.matches('+').count())
+                else {
+                    continue;
+                };
+                (c.as_str(), v)
+            }
         };
         let base = median_of(alone);
         println!(
-            "===== {workload} =====  alone {base:.4} ns/iter over {} pass(es)",
+            "===== {workload} =====  {label} {base:.4} ns/iter over {} pass(es)",
             alone.len()
         );
         println!(
