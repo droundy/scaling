@@ -8,27 +8,6 @@
 
 use std::collections::HashMap;
 
-/// One timing, as it is kept in memory while a slice runs.
-///
-/// Two fields. Three others have been dropped, each because the file
-/// already said it:
-///
-///   - `t_offset` cost eight bytes a sample to support one derived
-///     quantity, the per-sample overhead, which the recorder now measures
-///     per rung and writes once in the header.
-///   - `round` and `slot` are position. The runner takes exactly one sample
-///     per workload per round, in slot order, and never cuts a round short
-///     - the deadline and the rung cap are both tested between rounds - so
-///     for sample `i` of a round holding `W` workloads, `slot` is `i % W`
-///     and `round` is `i / W`. Storing either wrote down what the layout
-///     already told us.
-#[derive(Clone, Debug)]
-pub struct Sample {
-    pub workload: String,
-    /// Whole-batch time in ns.
-    pub ns: f64,
-}
-
 /// What the header says about one rung.
 #[derive(Clone, Copy, Debug)]
 pub struct RungMeta {
@@ -43,17 +22,34 @@ pub struct RungMeta {
     pub overhead_ns: f64,
 }
 
+/// Writes a recording as it is taken.
+///
+/// Encoded and flushed as samples arrive, rather than buffered whole and
+/// written at the end. The in-memory form of a sample is about twenty times
+/// its encoded size - a `String` name and its heap allocation against a byte
+/// and a varint - so a cheap composition running its full slice would hold
+/// some 47GB against a 2.4GB file. That is not a hypothetical: it is what
+/// killed the first attempt at this collection, and it failed in the worst
+/// way, dying after hours of measuring with nothing written.
+///
+/// Streaming also takes a heap allocation per sample out of the measuring
+/// loop, since a name no longer has to be copied to be recorded.
 pub struct Timing {
     pub rungs: HashMap<String, RungMeta>,
-    /// Every timing taken, in the order taken.
-    pub log: Vec<Sample>,
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    path: String,
+    buf: Vec<u8>,
+    pub written: usize,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Timing {
             rungs: HashMap::new(),
-            log: Vec::new(),
+            out: None,
+            path: String::new(),
+            buf: Vec::with_capacity(16),
+            written: 0,
         }
     }
 }
@@ -63,72 +59,86 @@ impl Timing {
         Timing::default()
     }
 
-    /// Time one batch and record it.
-    pub fn time(&mut self, name: &str, f: impl FnOnce() -> f64) -> f64 {
-        let ns = f();
-        self.log.push(Sample {
-            workload: name.to_string(),
-            ns,
-        });
-        ns
-    }
-
-    /// Write the recording.
+    /// Write the header and begin streaming samples.
     ///
-    /// Workload index, then the batch time in nanoseconds as LEB128.
+    /// Call once `rungs` is complete: the header names every rung, and the
+    /// one-byte index on each sample is a position in that list, so nothing
+    /// can be recorded before it is fixed.
     ///
-    /// A single file holds batches from 42ns to 12.5ms, a 300000-fold range,
-    /// so no fixed integer width suits all of it. A previous version gave
-    /// each rung its own sub-nanosecond scale, which was false precision:
-    /// the clock delivers integer nanoseconds, so a finer unit stores
-    /// resolution the measurement never had. It also had to clamp anything
-    /// past its rung's range, discarding the size of exactly the outliers
-    /// worth keeping.
-    ///
-    /// A variable-length integer costs a byte for a batch under 128ns, two
-    /// under 16us, three under 2.1ms, four beyond - and since rungs are
-    /// drawn weighted by inverse cost, the cheap short-batch rungs are where
-    /// most of the samples are. Nothing is clamped and nothing is scaled.
-    ///
-    /// The header stays text so `head` still tells you what a file holds.
-    pub fn write(&self, path: &str) {
+    /// Returns the index of each rung, in the same order, so a caller can
+    /// resolve a name once rather than per sample.
+    pub fn open(&mut self, path: &str) -> HashMap<String, u8> {
         use std::fmt::Write as _;
         let mut names: Vec<&String> = self.rungs.keys().collect();
         names.sort();
         if names.len() > 256 {
             eprintln!("{path}: more than 256 rung names; not writing");
-            return;
+            return HashMap::new();
         }
-        let idx: HashMap<&str, u8> = names
+        let idx: HashMap<String, u8> = names
             .iter()
             .enumerate()
-            .map(|(i, n)| (n.as_str(), i as u8))
+            .map(|(i, n)| ((*n).clone(), i as u8))
             .collect();
 
         let mut head = String::new();
         head.push_str("LABBIN4\n");
         for n in &names {
             let m = &self.rungs[*n];
-            let _ = writeln!(
-                head,
-                "# rung {n} {} {:e}",
-                m.n, m.overhead_ns
-            );
+            let _ = writeln!(head, "# rung {n} {} {:e}", m.n, m.overhead_ns);
         }
         head.push_str("DATA\n");
 
-        let mut buf: Vec<u8> = Vec::with_capacity(head.len() + self.log.len() * 4);
-        buf.extend_from_slice(head.as_bytes());
-        for x in &self.log {
-            let Some(&i) = idx.get(x.workload.as_str()) else {
-                continue;
-            };
-            buf.push(i);
-            put_leb128(&mut buf, x.ns.round().max(0.0) as u64);
+        match std::fs::File::create(path) {
+            Ok(f) => {
+                use std::io::Write as _;
+                let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+                if let Err(e) = w.write_all(head.as_bytes()) {
+                    eprintln!("could not write {path}: {e}");
+                }
+                self.out = Some(w);
+                self.path = path.to_string();
+            }
+            Err(e) => eprintln!("could not create {path}: {e}"),
         }
-        if let Err(e) = std::fs::write(path, buf) {
-            eprintln!("could not write {path}: {e}");
+        idx
+    }
+
+    /// Time one batch at rung `idx` and append it.
+    ///
+    /// The index rather than the name, so the measuring loop neither hashes
+    /// nor allocates per sample.
+    pub fn time(&mut self, idx: u8, f: impl FnOnce() -> f64) -> f64 {
+        let ns = f();
+        self.buf.clear();
+        self.buf.push(idx);
+        put_leb128(&mut self.buf, ns.round().max(0.0) as u64);
+        if let Some(w) = self.out.as_mut() {
+            use std::io::Write as _;
+            if let Err(e) = w.write_all(&self.buf) {
+                eprintln!("could not write {}: {e}", self.path);
+                self.out = None;
+            }
         }
+        self.written += 1;
+        ns
+    }
+
+    /// Flush and close. Reported here rather than left to `Drop`, so a
+    /// failure to write is seen rather than swallowed.
+    pub fn finish(&mut self) {
+        if let Some(mut w) = self.out.take() {
+            use std::io::Write as _;
+            if let Err(e) = w.flush() {
+                eprintln!("could not flush {}: {e}", self.path);
+            }
+        }
+    }
+}
+
+impl Drop for Timing {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 

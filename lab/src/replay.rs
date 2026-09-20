@@ -1001,6 +1001,8 @@ pub fn selftest(dir: &str) {
     // ladder, in a fresh slot order each round. A recording that is laid
     // out differently from a real one would let the analyzer pass here and
     // fail on the machine.
+    let path = format!("{dir}/synthetic.bin");
+    let idx = t.open(&path);
     let mut cursor: Vec<Vec<usize>> = tapes.iter().map(|x| vec![0; x.rungs.len()]).collect();
     let mut queue: Vec<Vec<usize>> = vec![Vec::new(); tapes.len()];
     let mut rng = 0x9E3779B97F4A7C15u64;
@@ -1028,23 +1030,22 @@ pub fn selftest(dir: &str) {
             }
             let ns = rung.batch_ns[cursor[w][k]];
             cursor[w][k] += 1;
-            t.log.push(crate::timing::Sample {
-                workload: rung_name(&tapes[w].workload, k),
-                ns,
-            });
+            let Some(&i) = idx.get(&rung_name(&tapes[w].workload, k)) else {
+                continue;
+            };
+            t.time(i, || ns);
         }
     }
     if short > 0 {
         eprintln!("note: ran out of generated samples {short} times; rungs are uneven");
     }
 
-    let path = format!("{dir}/synthetic.bin");
-    t.write(&path);
+    t.finish();
     println!(
         "wrote {} samples to {path}\n\n\
          Each workload is named for the per-iteration cost it was built with, so\n\
          `lab analyze {path}` should report a truth matching every name:\n",
-        t.log.len()
+        t.written
     );
     for (name, b, noise) in cases {
         println!("  {name:>16}  true {b} ns/iter, {}", noise.label());

@@ -169,7 +169,7 @@ static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The cost is real though: the longest rung now gets the fewest samples, so
 /// a replayed algorithm that parks on it exhausts the recording soonest.
 /// `LAB_RUNG_WEIGHT=count` restores equal sample counts.
-fn weighted_rung(r: &[(usize, String, f64)], bits: u64) -> usize {
+fn weighted_rung(r: &[(usize, String, f64, u8)], bits: u64) -> usize {
     if matches!(
         RUNG_WEIGHT
             .get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default())
@@ -662,13 +662,13 @@ fn run(
     // averages out over rounds rather than a systematic one that loads onto
     // whichever rung ran later.
     let mut seed = 0x9E3779B97F4A7C15u64;
-    let mut rungs: Vec<Vec<(usize, String, f64)>> = Vec::with_capacity(ws.len());
+    let mut rungs: Vec<Vec<(usize, String, f64, u8)>> = Vec::with_capacity(ws.len());
     for w in ws.iter() {
         let (_cal, per) = match counts.and_then(|c| c.get(w.name)) {
             Some(&(n, p)) => (n, p),
             None => calibrate(w, &mut seed),
         };
-        let mut this: Vec<(usize, String, f64)> = Vec::with_capacity(8);
+        let mut this: Vec<(usize, String, f64, u8)> = Vec::with_capacity(8);
         for (k, &n) in rungs_for(per).iter().enumerate() {
             let name = rung_name(w.name, k);
             let dur = n as f64 * per;
@@ -693,9 +693,22 @@ fn run(
             }
             // The *cost* of a sample, batch plus overhead, because that is
             // what the draw is weighted by and what a slice is spent on.
-            this.push((n, name, dur + overhead_ns));
+            this.push((n, name, dur + overhead_ns, 0));
         }
         rungs.push(this);
+    }
+
+    // The header names every rung, so it can be written once the ladder is
+    // fixed and before any sample is taken. Resolving each rung's index now
+    // keeps a hash lookup out of the measuring loop.
+    let idx = t.open(&out);
+    for w in rungs.iter_mut() {
+        for r in w.iter_mut() {
+            r.3 = match idx.get(&r.1) {
+                Some(&i) => i,
+                None => continue,
+            };
+        }
     }
 
     // Round-robin, in a fresh random order each round.
@@ -796,7 +809,8 @@ fn run(
         }
         for &i in order.iter() {
             seed = step(seed);
-            let (count, name, _) = &rungs[i][pick[i]];
+            let (count, _, _, ridx) = &rungs[i][pick[i]];
+            let ridx = *ridx;
             // Untimed iterations first, to separate the two things that
             // could make a measurement cost more than its iterations do.
             // Harness overhead - the two clock reads, the boxed call - is
@@ -809,7 +823,7 @@ fn run(
                 ws[i].time_batch(warmup)();
             }
             let time_me = ws[i].time_batch(*count);
-            t.time(name, time_me);
+            t.time(ridx, time_me);
             taken[i][pick[i]] += 1;
         }
         done += 1;
@@ -827,8 +841,8 @@ fn run(
     // What was actually run, not what was asked for: a deadline-driven run
     // is handed `usize::MAX` and would otherwise report it.
     eprintln!("{done} rounds in {:.2}s", start.elapsed().as_secs_f64());
-    t.write(&out);
-    eprintln!("wrote {out}");
+    t.finish();
+    eprintln!("wrote {out} ({} samples)", t.written);
 
 }
 
