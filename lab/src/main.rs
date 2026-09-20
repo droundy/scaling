@@ -685,7 +685,6 @@ fn run(
                 name.clone(),
                 crate::timing::RungMeta {
                     n,
-                    scale_ns: crate::timing::scale_for(dur),
                     overhead_ns,
                 },
             );

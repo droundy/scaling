@@ -1,6 +1,6 @@
 //! The recording format, and reading it back.
 //!
-//! A recording is the product of this lab: the runner measures, writes one of
+//! `LABBIN3`. A recording is the product of this lab: the runner measures, writes one of
 //! these, and every question about algorithms is then arithmetic over it. So
 //! the format has to be cheap to write at a million samples a second, cheap
 //! to read a hundred million rows of, and self-describing enough that `head`
@@ -31,8 +31,6 @@ pub struct Sample {
 pub struct RungMeta {
     /// Batch size, in iterations.
     pub n: usize,
-    /// Nanoseconds per stored unit; see [`Timing::write`].
-    pub scale_ns: f64,
     /// Wall-clock cost of taking one sample beyond the batch itself: the
     /// harness loop, and whatever the workload does to prepare its inputs.
     ///
@@ -75,20 +73,20 @@ impl Timing {
 
     /// Write the recording.
     ///
-    /// Four bytes a sample: slot, workload index, and the batch time as a
-    /// `u16` count of a unit declared per rung in the header.
+    /// Slot, workload index, then the batch time in nanoseconds as LEB128.
     ///
-    /// A single file holds batches from 42ns to 12.5ms - a 300000-fold range
-    /// - so no one integer width works for all of them at a fixed
-    /// resolution: `u16` nanoseconds reaches 65us and `u24` reaches 16.7ms,
-    /// which barely covers the slowest rung and leaves nothing for an
-    /// outlier. But the rung's nominal size is known when it is written, so
-    /// the scale can be per rung, sized to cover `nominal + 20us` - room for
-    /// a few scheduler ticks on top of the expected batch.
+    /// A single file holds batches from 42ns to 12.5ms, a 300000-fold range,
+    /// so no fixed integer width suits all of it. A previous version gave
+    /// each rung its own sub-nanosecond scale, which was false precision:
+    /// the clock delivers integer nanoseconds, so a finer unit stores
+    /// resolution the measurement never had. It also had to clamp anything
+    /// past its rung's range, discarding the size of exactly the outliers
+    /// worth keeping.
     ///
-    /// That is finer than the 1ns integers it replaces, not coarser: 1ns is
-    /// 2.4% of a 42ns batch, where this gives 0.7% there and better than
-    /// 0.01% everywhere above a microsecond.
+    /// A variable-length integer costs a byte for a batch under 128ns, two
+    /// under 16us, three under 2.1ms, four beyond - and since rungs are
+    /// drawn weighted by inverse cost, the cheap short-batch rungs are where
+    /// most of the samples are. Nothing is clamped and nothing is scaled.
     ///
     /// The header stays text so `head` still tells you what a file holds.
     pub fn write(&self, path: &str) {
@@ -106,41 +104,26 @@ impl Timing {
             .collect();
 
         let mut head = String::new();
-        head.push_str("LABBIN2\n");
+        head.push_str("LABBIN3\n");
         for n in &names {
             let m = &self.rungs[*n];
             let _ = writeln!(
                 head,
-                "# rung {n} {} {:e} {:e}",
-                m.n, m.scale_ns, m.overhead_ns
+                "# rung {n} {} {:e}",
+                m.n, m.overhead_ns
             );
         }
         head.push_str("DATA\n");
 
         let mut buf: Vec<u8> = Vec::with_capacity(head.len() + self.log.len() * 4);
         buf.extend_from_slice(head.as_bytes());
-        let mut saturated = 0usize;
         for x in &self.log {
-            let m = match self.rungs.get(&x.workload) {
-                Some(m) => m,
-                None => continue,
+            let Some(&i) = idx.get(x.workload.as_str()) else {
+                continue;
             };
             buf.push(x.slot as u8);
-            buf.push(idx[x.workload.as_str()]);
-            let units = (x.ns / m.scale_ns).round().max(0.0);
-            if units > u16::MAX as f64 {
-                saturated += 1;
-            }
-            buf.extend_from_slice(&(units.min(u16::MAX as f64) as u16).to_le_bytes());
-        }
-        // Saying so rather than letting it pass, because a saturated sample
-        // is an outlier whose size has been thrown away - fine for a trimmed
-        // estimate, not fine for anything studying the tail.
-        if saturated > 0 {
-            eprintln!(
-                "{path}: {saturated} of {} samples ran past their rung's scale and were clamped",
-                self.log.len()
-            );
+            buf.push(i);
+            put_leb128(&mut buf, x.ns.round().max(0.0) as u64);
         }
         if let Err(e) = std::fs::write(path, buf) {
             eprintln!("could not write {path}: {e}");
@@ -167,8 +150,12 @@ pub struct Run {
 impl Run {
     pub fn load(path: &str) -> Run {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
-        if !bytes.starts_with(b"LABBIN2\n") {
-            panic!("{path}: not a LABBIN2 recording");
+        if !bytes.starts_with(b"LABBIN3\n") {
+            // The magic moved with the layout on purpose: LABBIN2 wrote a
+            // per-rung scale in the header, and reading one of those here
+            // would take the scale for the overhead and misparse every
+            // record after it, quietly.
+            panic!("{path}: not a LABBIN3 recording");
         }
         let split = bytes
             .windows(5)
@@ -182,37 +169,32 @@ impl Run {
                 continue;
             };
             let f: Vec<&str> = rest.split_whitespace().collect();
-            if f.len() < 4 {
+            if f.len() < 3 {
                 continue;
             }
-            let (Ok(n), Ok(scale_ns), Ok(overhead_ns)) =
-                (f[1].parse(), f[2].parse(), f[3].parse())
-            else {
+            let (Ok(n), Ok(overhead_ns)) = (f[1].parse(), f[2].parse()) else {
                 continue;
             };
-            rungs.insert(
-                f[0].to_string(),
-                RungMeta {
-                    n,
-                    scale_ns,
-                    overhead_ns,
-                },
-            );
+            rungs.insert(f[0].to_string(), RungMeta { n, overhead_ns });
             order.push(f[0].to_string());
         }
 
         let body = &bytes[split + 5..];
         let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
-        for r in body.chunks_exact(4) {
-            let Some(workload) = order.get(r[1] as usize) else {
+        let mut i = 0usize;
+        while i + 2 < body.len() {
+            let widx = body[i + 1] as usize;
+            i += 2;
+            let Some(ns) = get_leb128(body, &mut i) else {
+                break;
+            };
+            let Some(workload) = order.get(widx) else {
                 panic!(
-                    "{path}: a sample names rung {}, but the header lists {}",
-                    r[1],
+                    "{path}: a sample names rung {widx}, but the header lists {}",
                     order.len()
                 )
             };
             let m = &rungs[workload];
-            let units = u16::from_le_bytes([r[2], r[3]]) as f64;
             // Per iteration from here on. Calibration happens once, at
             // whatever clock speed prevailed then, so batch sizes differ
             // between runs; comparing batch durations across runs inherits
@@ -220,7 +202,7 @@ impl Run {
             by_name
                 .entry(workload.clone())
                 .or_default()
-                .push(units * m.scale_ns / m.n as f64);
+                .push(ns as f64 / m.n as f64);
         }
 
         let mut names: Vec<String> = by_name.keys().cloned().collect();
@@ -247,17 +229,34 @@ pub fn rung_name(name: &str, k: usize) -> String {
     }
 }
 
-/// Nanoseconds of headroom above a rung's nominal batch, for choosing its
-/// scale.
-///
-/// A scheduler tick adds about 5us to whatever batch it lands in, and the
-/// headroom is absolute rather than proportional for that reason: the same
-/// 5us is a rounding error on a 12ms batch and a hundredfold excursion on a
-/// 42ns one, so a proportional margin would clamp exactly the outliers that
-/// matter most on the rungs where they matter most.
-pub const SCALE_HEADROOM_NS: f64 = 20_000.0;
+/// Append `v` as LEB128: seven bits a byte, high bit set while more follow.
+fn put_leb128(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            buf.push(byte);
+            return;
+        }
+        buf.push(byte | 0x80);
+    }
+}
 
-/// The scale to record a rung at, given what one batch is expected to cost.
-pub fn scale_for(nominal_ns: f64) -> f64 {
-    ((nominal_ns + SCALE_HEADROOM_NS) / u16::MAX as f64).max(f64::MIN_POSITIVE)
+/// Read a LEB128 from `buf` at `i`, advancing `i`. `None` if it runs off the
+/// end or is longer than a `u64` can hold.
+fn get_leb128(buf: &[u8], i: &mut usize) -> Option<u64> {
+    let mut v: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        let byte = *buf.get(*i)?;
+        *i += 1;
+        v |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(v);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
 }

@@ -986,12 +986,10 @@ pub fn selftest(dir: &str) {
     let mut t = crate::timing::Timing::new();
     for tape in &tapes {
         for (k, r) in tape.rungs.iter().enumerate() {
-            let nominal = r.batch_ns.iter().sum::<f64>() / r.batch_ns.len() as f64;
             t.rungs.insert(
                 rung_name(&tape.workload, k),
                 crate::timing::RungMeta {
                     n: r.n,
-                    scale_ns: crate::timing::scale_for(nominal),
                     overhead_ns: r.overhead_ns,
                 },
             );
