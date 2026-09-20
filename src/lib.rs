@@ -446,6 +446,17 @@ pub use scaling_macros::{bench, bench_input, bench_scaling, candidate, input};
 /// the attributes on the benchmarks themselves or asked for on the command
 /// line:
 ///
+/// "This binary" means it literally: everything `#[scaling::bench]` and its
+/// siblings mark, anywhere in your crate's own `src/` - which the compiler
+/// links into every target regardless - is discovered automatically. A
+/// second *file* under `benches/` is not automatically part of it, though:
+/// Cargo treats each top-level file there as its own separate binary with
+/// its own separate `main`, so a benchmark written directly in
+/// `benches/other.rs` is invisible to `scaling::main!()` in
+/// `benches/bench.rs` unless something links them into one binary - `mod
+/// other;` from a `benches/bench/main.rs`, in Cargo's usual shape for a
+/// multi-file target, rather than one bare file per benchmark binary.
+///
 /// ```none
 /// cargo bench --bench bench -- --list
 /// cargo bench --bench bench -- --filter sort

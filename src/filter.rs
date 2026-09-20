@@ -22,6 +22,32 @@
 /// patterns are an *or*, and anything matching a skip pattern is dropped
 /// afterwards - so a skip can carve a hole in a broad filter.
 ///
+/// ```
+/// use scaling::Filter;
+///
+/// // Substring, by default - matches the module-qualified name too.
+/// let by_fn_name = Filter::everything().matching("fib_200");
+/// assert!(by_fn_name.matches("mymod::fib_200"));
+/// assert!(!by_fn_name.matches("mymod::fib_500"));
+///
+/// // `@` and the module path are just more of the string to match on.
+/// let by_matrix = Filter::everything().matching("sorting@reversed");
+/// assert!(by_matrix.matches("sorting@reversed"));
+/// assert!(!by_matrix.matches("sorting@sorted"));
+///
+/// // `exact` requires the whole name, module path included.
+/// let exact = Filter::everything().matching("fib_200").exact(true);
+/// assert!(!exact.matches("mymod::fib_200"), "the module prefix is part of the name");
+/// assert!(exact.matches("fib_200"), "matches only a name with nothing else in it");
+///
+/// // A skip narrows what a broader filter already matched.
+/// let with_skip = Filter::everything()
+///     .matching("mymod::")
+///     .skipping("slow");
+/// assert!(with_skip.matches("mymod::fib_200"));
+/// assert!(!with_skip.matches("mymod::slow_fib"));
+/// ```
+///
 /// # A comparison is filtered whole
 ///
 /// The alternatives of a comparison are measured in one interleaved round

@@ -37,6 +37,30 @@ use auto_args::AutoArgs;
 /// against. These four are different: two are what `--versions` and
 /// `--baseline` set, one is what a failure to assemble comes back as, and
 /// one is what those two are carried in.
+///
+/// # What `--versions`/`--baseline` are actually for
+///
+/// They resolve a collision, not set one up: if two registrations of one
+/// name, type and matrix arrive from different crates or versions -
+/// something else in the dependency graph happening to register a
+/// benchmark under a name yours also uses - `VersionPolicy` says whether
+/// to keep every one (the default) or only the newest per crate, and
+/// `BaselinePolicy` says which claimant a regression is judged against.
+///
+/// Deliberately comparing your current code against a past release is a
+/// different question, and the recommended way to ask it does not involve
+/// either of these: add the old release as a dev-dependency under a
+/// renamed package, and write a `#[scaling::bench(group = "...")]`
+/// wrapper in `benches/` that calls straight into its public API,
+/// alongside one that calls your current code - the same `group`/
+/// `baseline` machinery any other comparison uses, sidestepping version
+/// resolution entirely. A crate can also be set up to register its own
+/// benchmarks so that an old *tagged* copy, pulled in the same way, is
+/// picked up automatically without a wrapper - but two versions of
+/// `scaling` itself anywhere in the dependency graph then split the
+/// registry silently, so this is sharper than it looks; see
+/// "Comparing against past versions" in `REGISTRATION.md` for the full
+/// account before reaching for it.
 pub use crate::assemble::{BaselinePolicy, Diagnostic, RegistryOptions, VersionPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;

@@ -121,6 +121,18 @@ pub struct ScalingStats {
     /// which no caller could tell apart from a function that really is
     /// free; `None` says it outright. [`ScalingStats::hit_limit`] is always
     /// set alongside it.
+    ///
+    /// This happens *before* any degree's fit is judged against the
+    /// others - no coefficient cleared its own error bar, so there was
+    /// nothing to compare. It plays the same role for a scaling benchmark
+    /// that [`Stats::untrustworthy`](crate::Stats::untrustworthy) plays for
+    /// a flat one: a statement about the budget bumping into the noise
+    /// floor, not a verdict on the code. Nothing in [`crate::runner`] fails
+    /// a run over it - there is no `--fail-on-...` flag for this
+    /// specifically, so a script wanting to gate on it checks
+    /// `scaling.is_none()` itself. If you expected a real law and see
+    /// `None`, a longer `--max-time` or a wider `nmin` range is usually
+    /// the fix, not a sign the function has no scaling behavior at all.
     pub scaling: Option<Scaling>,
     /// Relative standard error of [`Scaling::ns_per_scale`], as a fraction
     /// (0.01 = 1%).
