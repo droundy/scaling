@@ -62,6 +62,19 @@ fn with_owned_gen_input(v: Vec<i32>) -> i32 {
     v.into_iter().sum()
 }
 
+// ---- one that builds state once and mutates it across every timed call,
+// rather than rebuilding it fresh each time - the pattern none of the
+// three input shapes above can express ----
+
+#[scaling::bench]
+fn with_persistent_state() -> impl FnMut() -> u64 {
+    let mut n = 0u64;
+    move || {
+        n = n.wrapping_add(1);
+        n
+    }
+}
+
 // ---- a scaling benchmark ----
 
 #[scaling::bench_scaling(nmin = 32)]
@@ -156,6 +169,7 @@ fn every_written_benchmark_is_found_and_measured() {
         "with_ref_input",
         "with_owned_input",
         "with_owned_gen_input",
+        "with_persistent_state",
     ] {
         let full = report
             .names()

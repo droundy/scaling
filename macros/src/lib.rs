@@ -62,6 +62,31 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// `I` by value is taken from behind an `Option` the generated shim manages
 /// for you - nothing to write by hand for it.
 ///
+/// A zero-argument function returning `impl Fn() -> O` or `impl FnMut() ->
+/// O` is a fourth shape, for state that has to persist and be mutated
+/// across many calls rather than being rebuilt fresh each time - the one
+/// pattern none of the above can express, because every input above is
+/// prepared anew per call:
+///
+/// ```ignore
+/// #[scaling::bench]
+/// fn next_from_rng() -> impl FnMut() -> u64 {
+///     let mut rng = StdRng::seed_from_u64(0);
+///     move || rng.next_u64()
+/// }
+/// ```
+///
+/// The function itself runs once, to build the closure; every timed call
+/// after that calls the closure it returned. This is not a smaller version
+/// of `gen_input` - it costs nothing extra to have. `impl Trait` in return
+/// position is a concrete type the compiler already knows at the call
+/// site, not a boxed one, so the generated shim holds it in a plain
+/// `Option` and calls it directly: no allocation, no dynamic dispatch, on
+/// any call, ever. Measured against the `thread_local!`-based workaround
+/// this shape replaces, it comes out faster, not merely equivalent - the
+/// workaround pays for a thread-local lookup on every call that this does
+/// not.
+///
 /// Add `group = "name"` to make this one alternative of a comparison, and
 /// `baseline` on exactly one member of each group to say which the others
 /// are reported against - registrations have no order, so it cannot be the
@@ -358,6 +383,36 @@ fn input_kind(func: &ItemFn) -> syn::Result<Input> {
     }
 }
 
+/// Whether a zero-argument function's return type is `impl Fn() -> O` or
+/// `impl FnMut() -> O` - the "run setup once, then call the result
+/// repeatedly" shape `#[bench]` recognizes there.
+///
+/// Deliberately narrow: only a zero-argument `Fn`/`FnMut` bound counts,
+/// not `impl Fn(X) -> O` (a different shape entirely, not handled here)
+/// and not `impl FnOnce() -> O` (which cannot be called more than the one
+/// time a benchmark's whole point is to avoid).
+fn returns_repeatable_closure(sig: &syn::Signature) -> bool {
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return false;
+    };
+    let Type::ImplTrait(imp) = &**ty else {
+        return false;
+    };
+    imp.bounds.iter().any(|bound| {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return false;
+        };
+        let Some(last) = trait_bound.path.segments.last() else {
+            return false;
+        };
+        (last.ident == "Fn" || last.ident == "FnMut")
+            && matches!(
+                &last.arguments,
+                syn::PathArguments::Parenthesized(p) if p.inputs.is_empty()
+            )
+    })
+}
+
 /// The input type, spelled the way a person would.
 ///
 /// Not `stringify!`: that keeps the spacing of the tokens it was handed, and
@@ -588,7 +643,28 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                              <closure>` builds a fresh one",
                         ));
                     }
-                    quote!(__adder.flat(__name, #fname))
+                    if returns_repeatable_closure(&func.sig) {
+                        // Setup runs once, lazily - on first call, which is
+                        // also the first time `Adder::flat`'s own filter
+                        // check has already passed, so a filtered-out
+                        // benchmark never pays for it. `__action` stays a
+                        // concrete (if unnameable) type the whole way
+                        // through: `impl Trait` is not `Box<dyn Trait>`, so
+                        // nothing here is a dynamic call - every call after
+                        // the first is a direct call through the same
+                        // monomorphized closure, exactly like any other
+                        // benchmark's timed call.
+                        quote! {
+                            {
+                                let mut __action = ::core::option::Option::None;
+                                __adder.flat(__name, move || {
+                                    (__action.get_or_insert_with(#fname))()
+                                })
+                            }
+                        }
+                    } else {
+                        quote!(__adder.flat(__name, #fname))
+                    }
                 }
                 (Some(_), Some(_)) => unreachable!("checked above"),
             };
