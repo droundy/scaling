@@ -161,6 +161,26 @@ fn thrice(v: &mut Vec<u64>) {
     v.sort();
 }
 
+// ---- a group with a Design A member: setup runs once, not every call, even
+// though the group's shared input is still regenerated and cloned every
+// round like any other member's ----
+
+#[scaling::bench_input(group = "counting")]
+fn counting_data() -> Vec<u64> {
+    (0..300u64).collect()
+}
+
+#[scaling::bench(group = "counting", baseline)]
+fn sum_it(v: &mut Vec<u64>) -> u64 {
+    v.iter().sum()
+}
+
+#[scaling::bench(group = "counting")]
+fn sum_it_stateful(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
+    let total: u64 = v.iter().sum();
+    move || total
+}
+
 // ---- a group whose alternatives take no input at all ----
 
 #[scaling::bench(group = "summing", baseline)]
@@ -254,6 +274,12 @@ fn every_written_benchmark_is_found_and_measured() {
         .comparison("summing")
         .expect("the no-input group ran");
     assert_eq!(summing.stats().len(), 2);
+
+    let counting = report
+        .comparison("counting")
+        .expect("the group with a Design A member ran");
+    assert_eq!(counting.stats().len(), 2);
+    assert_eq!(counting.against_baseline().count(), 1);
 
     let shown = format!("{report}");
     assert!(

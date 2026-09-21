@@ -144,6 +144,14 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// A group's members must currently take `&I` or `&mut I`, not `I` by
 /// value - not a fundamental restriction, just not yet taught to a group's
 /// shared, cloned-per-round input.
+///
+/// A member may also use the setup-once shape above, returning `impl
+/// Fn()/FnMut() -> O` instead of `O` directly: setup runs once for that
+/// member, not once per timed call, exactly as it would outside a group.
+/// The group's shared input is still regenerated and cloned every round
+/// regardless - a comparison's pairing depends on every member seeing that
+/// round's input, setup-once member included - so this saves the setup
+/// function's own work, not the input machinery's.
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -493,6 +501,20 @@ fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
     }
 }
 
+/// Wraps `call` - an expression that runs a setup function once - in Design
+/// A's lazy-build-once pattern: the first call runs `call` and keeps its
+/// result (the closure the setup function returned); every call after reuses
+/// what is stored rather than running `call` again. The caller declares `let
+/// mut __action = ::core::option::Option::None;` ahead of the closure this
+/// is spliced into and captures it there - where that lives (a group's shim
+/// function, a matrix candidate's) differs by call site, so this only
+/// builds the part that is the same everywhere.
+fn repeatable_call(call: TokenStream2) -> TokenStream2 {
+    quote! {
+        (__action.get_or_insert_with(|| #call))()
+    }
+}
+
 /// The reported name: the override if given, else the bare function name.
 fn name_or_bare(name: &Option<LitStr>, fname: &syn::Ident) -> TokenStream2 {
     match name {
@@ -580,13 +602,30 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             // The call, and the type the group's input must have.
             let call = call_expr(fname, kind.ty());
             let (ty_id, ty_name) = ty_id_and_name(kind.ty());
+            // A setup function runs once, lazily, on the first of the many
+            // calls a comparison makes to this alternative - see
+            // `repeatable_call`. The group's shared input still gets
+            // regenerated and cloned every round regardless, same as for
+            // any other alternative; only the setup function's own work is
+            // saved.
+            let add = if returns_repeatable_closure(&func.sig) {
+                let call = repeatable_call(call);
+                quote! {
+                    let mut __action = ::core::option::Option::None;
+                    __set.add(__name, move |__e: &mut ::scaling::registry::ErasedInput| #call)
+                }
+            } else {
+                quote! {
+                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                }
+            };
             quote! {
                 #[doc(hidden)]
                 fn #shim<'__s>(
                     __set: ::scaling::registry::Alternative<'__s>,
                     __name: &str,
                 ) -> ::scaling::registry::Alternative<'__s> {
-                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                    #add
                 }
                 ::scaling::inventory::submit! {
                     ::scaling::registry::Registered {
@@ -902,6 +941,14 @@ fn expand_bench_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 ///
 /// `types(A, B, ...)` registers the same generic function once per listed
 /// type, which is the one place monomorphisation has to be spelled out.
+///
+/// A candidate may also return `impl Fn()/FnMut() -> O` instead of `O`
+/// directly - the same setup-once shape [`bench`] documents. Setup runs once
+/// per (candidate, input) pairing this matrix measures, not once per timed
+/// call. The matrix's own input machinery still regenerates - and, in a
+/// comparison of two or more candidates, clones - a fresh input every round
+/// regardless, same as for any other candidate; this saves the setup
+/// function's own work on top of that, not the input machinery's.
 #[proc_macro_attribute]
 pub fn candidate(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -1005,6 +1052,45 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         let flat = format_ident!("__scaling_mflat_{}_{}", fname, n);
         let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
         let call = call_expr(fname, ty.as_ref());
+        // Same setup-once shape as an ordinary benchmark or a group member -
+        // see `repeatable_call`. `#flat` and `#alt` are each called once per
+        // (candidate, input) pairing (assembly builds a fresh one per lane),
+        // so `__action`'s scope here is exactly one pairing's whole run, not
+        // shared across others. The matrix's input is still regenerated (for
+        // `#flat`) or regenerated-and-cloned (for `#alt`, one comparison's
+        // shared input per round) every call regardless - only the setup
+        // function's own work, not the matrix's own input machinery, is
+        // what this saves.
+        let (flat_body, alt_body) = if returns_repeatable_closure(&func.sig) {
+            let repeatable = repeatable_call(call);
+            (
+                quote! {
+                    let mut __action = ::core::option::Option::None;
+                    __adder.gen_input(
+                        __name,
+                        __make,
+                        move |__e: &mut ::scaling::registry::ErasedInput| #repeatable,
+                    )
+                },
+                quote! {
+                    let mut __action = ::core::option::Option::None;
+                    __set.add(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
+                },
+            )
+        } else {
+            (
+                quote! {
+                    __adder.gen_input(
+                        __name,
+                        __make,
+                        |__e: &mut ::scaling::registry::ErasedInput| #call,
+                    )
+                },
+                quote! {
+                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                },
+            )
+        };
         out.extend(quote! {
             #[doc(hidden)]
             fn #flat(
@@ -1012,18 +1098,14 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 __name: &str,
                 __make: fn() -> ::scaling::registry::ErasedInput,
             ) -> ::scaling::registry::Handle<::scaling::Stats> {
-                __adder.gen_input(
-                    __name,
-                    __make,
-                    |__e: &mut ::scaling::registry::ErasedInput| #call,
-                )
+                #flat_body
             }
             #[doc(hidden)]
             fn #alt<'__s>(
                 __set: ::scaling::registry::Alternative<'__s>,
                 __name: &str,
             ) -> ::scaling::registry::Alternative<'__s> {
-                __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                #alt_body
             }
             ::scaling::inventory::submit! {
                 ::scaling::registry::MatrixCandidate {

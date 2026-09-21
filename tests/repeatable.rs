@@ -3,9 +3,9 @@
 //! timed repeatedly - the pattern an ordinary `input = <value>` /
 //! `gen_input = <closure>` benchmark can't express, since both rebuild the
 //! input fresh every iteration (see [`scaling::bench`]'s own doc comment).
-//! Covers the zero-argument shape and both input-taking ones - `input`
-//! given to the setup function that one time instead, by value or by
-//! reference.
+//! Covers the zero-argument shape, both input-taking ones - `input` given to
+//! the setup function that one time instead, by value or by reference - and
+//! the same shape used by a comparison group member and a matrix candidate.
 //!
 //! A separate process from `tests/macros.rs` on purpose: these tests use a
 //! shared counter to prove setup ran exactly once, and any other test's
@@ -145,6 +145,117 @@ fn ref_input_setup_runs_exactly_once_despite_many_timed_calls() {
         1,
         "setup must run exactly once per measure() call even when it only borrows \
          its input, not once per timed call"
+    );
+}
+
+// ---- the same, inside a comparison group: a group's own alternative closure
+// is what gets called many times per round across many rounds (see
+// `ComparisonSet::add_input`), exactly like `Adder::flat`/`input` is for an
+// ordinary benchmark - so the same lazy `Option` setup-once shape applies
+// unchanged. The group's shared input is still regenerated and cloned every
+// round like any other member's; only the setup function's own work is
+// skipped after the first call ----
+
+static GROUP_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench_input(group = "counts_group_setup_calls")]
+fn group_setup_data() -> u64 {
+    3
+}
+
+#[scaling::bench(group = "counts_group_setup_calls", baseline)]
+fn group_setup_plain(v: &mut u64) -> u64 {
+    *v
+}
+
+#[scaling::bench(group = "counts_group_setup_calls")]
+fn group_setup_stateful(v: &mut u64) -> impl FnMut() -> u64 {
+    GROUP_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
+    let base = *v;
+    let mut n = 0u64;
+    move || {
+        n = n.wrapping_add(1);
+        base + n
+    }
+}
+
+#[test]
+fn group_member_setup_runs_exactly_once_despite_many_timed_calls() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_group_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let cmp = report
+        .comparison("counts_group_setup_calls")
+        .expect("the group should have run");
+    assert!(
+        cmp.stats().iter().all(|s| s.iterations > 1000),
+        "expected many iterations: {:?}",
+        cmp.stats().iter().map(|s| s.iterations).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        GROUP_SETUP_CALLS.load(Ordering::SeqCst),
+        1,
+        "setup must run exactly once for a group member despite many timed calls \
+         and many rounds of freshly regenerated shared input"
+    );
+}
+
+// ---- the same, for a matrix candidate: `add_flat`/`add_alt` are each
+// called once per (candidate, input) pairing, so `__action` is correctly
+// scoped to that one pairing's whole run ----
+
+static CANDIDATE_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::candidate(matrix = "counts_candidate_setup_calls", baseline)]
+fn candidate_setup_plain(v: &mut u64) -> u64 {
+    *v
+}
+
+#[scaling::candidate(matrix = "counts_candidate_setup_calls")]
+fn candidate_setup_stateful(v: &mut u64) -> impl FnMut() -> u64 {
+    CANDIDATE_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
+    let base = *v;
+    let mut n = 0u64;
+    move || {
+        n = n.wrapping_add(1);
+        base + n
+    }
+}
+
+#[scaling::input(matrix = "counts_candidate_setup_calls", name = "seed")]
+fn candidate_setup_seed() -> u64 {
+    5
+}
+
+#[test]
+fn matrix_candidate_setup_runs_exactly_once_despite_many_timed_calls() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_candidate_setup_calls@seed"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let cmp = report
+        .comparison("counts_candidate_setup_calls@seed")
+        .expect("the matrix lane should have run");
+    assert!(
+        cmp.stats().iter().all(|s| s.iterations > 1000),
+        "expected many iterations: {:?}",
+        cmp.stats().iter().map(|s| s.iterations).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        CANDIDATE_SETUP_CALLS.load(Ordering::SeqCst),
+        1,
+        "setup must run exactly once for a matrix candidate despite many timed calls"
     );
 }
 

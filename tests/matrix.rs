@@ -183,6 +183,37 @@ fn the_declared_baseline_wins_over_alphabetical_order() {
     assert!(against.contains(&"thrice"), "{against:?}");
 }
 
+// ---- a matrix with a Design A candidate: setup runs once per (candidate,
+// input) pairing, not every timed call ----
+
+#[scaling::candidate(matrix = "stateful", baseline)]
+fn plain_sum(v: &mut Vec<u64>) -> u64 {
+    v.iter().sum()
+}
+
+#[scaling::candidate(matrix = "stateful")]
+fn cached_sum(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
+    let total: u64 = v.iter().sum();
+    move || total
+}
+
+#[scaling::input(matrix = "stateful", name = "data")]
+fn stateful_data() -> Vec<u64> {
+    (0..300u64).collect()
+}
+
+/// The Design A candidate above measures alongside an ordinary one, just
+/// like any other pairing in this matrix.
+#[test]
+fn a_design_a_candidate_is_measured_like_any_other() {
+    let report = run();
+    let cmps = report
+        .comparison("stateful@data")
+        .expect("stateful@data did not run");
+    assert_eq!(cmps.stats().len(), 2);
+    assert_eq!(cmps.against_baseline().count(), 1);
+}
+
 // ---- one generic implementation, registered at two concrete types ----
 //
 // Monomorphisation is the one place a matrix has to be explicit: Rust has no
