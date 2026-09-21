@@ -24,6 +24,50 @@
 //! run measured nothing. So `--format json > results.json` gives a file
 //! holding JSON and nothing else, without anybody having to remember to
 //! silence the rest.
+//!
+//! # Flags
+//!
+//! * `--filter <pattern>` - measure only names containing this. Repeatable;
+//!   several are an *or*. See [`Filter`] for what "name" means for a
+//!   comparison or a matrix cell, and what `--exact` changes about the
+//!   match.
+//! * `--skip <pattern>` - drop names containing this from what `--filter`
+//!   already matched. Repeatable, and independent of `--filter`: a `--skip`
+//!   with no `--filter` narrows the whole suite.
+//! * `--exact` - match the whole name rather than any part of it, for both
+//!   `--filter` and `--skip`.
+//! * `--list` - print what would run, and measure nothing.
+//! * `--format <table|list|json>` - how to print results; see
+//!   [`crate::runner::Format`]. Table is the default.
+//! * `--rel-error <fraction>` - stop once the standard error is this
+//!   fraction of the measurement, e.g. `0.01` for 1%.
+//! * `--abs-error <duration>` - stop once the standard error is below this,
+//!   e.g. `50ns`.
+//! * `--max-time <duration>` - give up on each benchmark after roughly this
+//!   long, e.g. `30s`.
+//! * `--versions <all|latest>` - measure every registered version of a
+//!   colliding benchmark, or only the newest per crate; see
+//!   [`crate::runner::VersionPolicy`].
+//! * `--baseline <oldest|newest|NAME@VERSION>` - which claimant a version
+//!   collision's regression is judged against; see
+//!   [`crate::runner::BaselinePolicy`].
+//! * `--fail-on-regression` - exit non-zero if any comparison's alternative
+//!   measured slower than its baseline; see
+//!   [`crate::runner::Options::fail_on_regression`].
+//! * `--fail-on-untrustworthy` - exit non-zero if any error bar came from
+//!   too few samples to believe; see
+//!   [`crate::runner::Options::fail_on_untrustworthy`].
+//!
+//! `--filter`, `--skip`, `--exact` and `--list` also read from the
+//! environment - `SCALING_FILTER`, `SCALING_SKIP`, `SCALING_EXACT`,
+//! `SCALING_LIST` - which survives a wrapper that does not pass arguments
+//! through on its own: `make bench`, a CI step, `cargo bench --workspace`
+//! fanning out over several crates. `SCALING_FILTER`/`SCALING_SKIP` hold
+//! whitespace-separated patterns; `SCALING_EXACT`/`SCALING_LIST` count if
+//! set to anything. The command line wins wherever it says anything, so
+//! `SCALING_SKIP=slow cargo bench -- --filter sort` means both. The
+//! remaining flags have no environment counterpart - see [`Filter::from_env`]
+//! for the full behavior.
 
 use crate::assemble::Lane;
 use crate::{Comparisons, Config, Filter, RegisteredTokens, Report, ScalingStats, Stats, Suite};

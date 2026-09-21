@@ -167,6 +167,18 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
 /// ```
 ///
+/// A group whose members all take nothing needs no
+/// [`bench_input`](macro@bench_input) at all - comparing two ways of doing
+/// the same fixed-cost work, say:
+///
+/// ```ignore
+/// #[scaling::bench(group = "summing", baseline)]
+/// fn fold_sum() -> u64 { (0..200u64).fold(0, |a, x| a.wrapping_add(x)) }
+///
+/// #[scaling::bench(group = "summing")]
+/// fn iter_sum() -> u64 { (0..200u64).sum() }
+/// ```
+///
 /// A group's members must currently take `&I` or `&mut I`, not `I` by
 /// value - not a fundamental restriction, just not yet taught to a group's
 /// shared, cloned-per-round input.
