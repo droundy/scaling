@@ -156,58 +156,6 @@ fn ref_input_setup_runs_exactly_once_despite_many_timed_calls() {
     );
 }
 
-// ---- the same, but `gen_input` supplies the returned closure with a value
-// that must keep changing every timed call, which a setup function that
-// runs once cannot supply itself - the flat counterpart of what
-// `#[bench_scaling]`'s own combination with `gen_input` does per size ----
-
-static ONE_ARG_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
-static ONE_ARG_GEN_CALLS: AtomicU64 = AtomicU64::new(0);
-
-#[scaling::bench(
-    name = "counts_its_own_one_arg_setup_calls",
-    gen_input = || ONE_ARG_GEN_CALLS.fetch_add(1, Ordering::SeqCst) % 1000
-)]
-fn counts_its_own_one_arg_setup_calls() -> impl FnMut(u64) -> bool {
-    ONE_ARG_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
-    let sorted: Vec<u64> = (0..1000u64).collect();
-    move |target: u64| sorted.binary_search(&target).is_ok()
-}
-
-#[test]
-fn one_arg_setup_runs_once_but_gen_input_runs_every_timed_call() {
-    let options = Options {
-        filter: Filter::everything().matching("counts_its_own_one_arg_setup_calls"),
-        cfg: Options::default()
-            .cfg
-            .with_max_time(Duration::from_millis(200)),
-        ..Options::default()
-    };
-
-    let report = measure(&options).expect("the registrations compose");
-    let stats = report
-        .stats("counts_its_own_one_arg_setup_calls")
-        .expect("it should have measured");
-
-    assert!(
-        stats.iterations > 1000,
-        "expected many iterations, got {}",
-        stats.iterations
-    );
-    assert_eq!(
-        ONE_ARG_SETUP_CALLS.load(Ordering::SeqCst),
-        1,
-        "setup must run exactly once despite many timed calls"
-    );
-    let gen_calls = ONE_ARG_GEN_CALLS.load(Ordering::SeqCst);
-    assert!(
-        gen_calls >= stats.iterations,
-        "gen_input should run fresh on every timed call, not be cached like \
-         setup is - got {gen_calls} calls against {} iterations",
-        stats.iterations,
-    );
-}
-
 // ---- the same, inside a comparison group: a group's own alternative closure
 // is what gets called many times per round across many rounds (see
 // `ComparisonSet::add_input`), exactly like `Adder::flat`/`input` is for an
@@ -383,34 +331,40 @@ fn scaling_setup_runs_at_most_once_per_distinct_size() {
     }
 }
 
-/// The `gen_input` variant: an expensive size-`n` structure (a `BTreeMap`
-/// full of entries, in the motivating case) is built once per size by
-/// setup, exactly like the plain shape above - `gen_input` itself is
-/// unchanged, still called fresh on every timed call, and its result is fed
-/// to the *cached* closure as an argument (a random lookup key, say, so
-/// every call queries something different even though the map it queries
-/// was only ever built once per size).
-static GEN_SCALING_SETUP_LOG: SetupLog = Mutex::new(None);
+/// The recommended way to combine "an expensive size-`n` structure, built
+/// once" with "a cheap value that must differ every call": an ordinary
+/// `gen_input` closure that caches the expensive part behind an `Arc`,
+/// keyed by size, and returns a fresh cheap value alongside a clone of it
+/// each call - no special shape on the benchmark function at all, which is
+/// what makes this compose with comparisons (every alternative shares the
+/// same cached `Arc`) in a way a setup function returning `impl
+/// Fn(K)/FnMut(K) -> O` could not.
+static GEN_SCALING_BUILD_LOG: SetupLog = Mutex::new(None);
 static GEN_SCALING_GEN_CALLS: AtomicU64 = AtomicU64::new(0);
 
 #[scaling::bench_scaling(
-    name = "counts_gen_scaling_setup_calls",
+    name = "counts_gen_scaling_build_calls",
     nmin = 4,
-    gen_input = |n: usize| {
-        let call_num = GEN_SCALING_GEN_CALLS.fetch_add(1, Ordering::SeqCst);
-        (n as u64).wrapping_add(call_num)
+    gen_input = {
+        let mut cache: HashMap<usize, ::std::sync::Arc<u64>> = HashMap::new();
+        move |n: usize| {
+            let call_num = GEN_SCALING_GEN_CALLS.fetch_add(1, Ordering::SeqCst);
+            let big = cache.entry(n).or_insert_with(|| {
+                record(&GEN_SCALING_BUILD_LOG, n);
+                ::std::sync::Arc::new(n as u64)
+            });
+            (big.clone(), call_num)
+        }
     }
 )]
-fn gen_scaling_setup_once_per_size(n: usize) -> impl FnMut(u64) -> u64 {
-    record(&GEN_SCALING_SETUP_LOG, n);
-    let base = n as u64;
-    move |k: u64| base.wrapping_add(k)
+fn gen_scaling_shares_cached_state(input: &(::std::sync::Arc<u64>, u64)) -> u64 {
+    input.0.wrapping_add(input.1)
 }
 
 #[test]
-fn gen_input_scaling_setup_runs_once_per_size_but_gen_input_every_call() {
+fn gen_input_can_cache_state_per_size_entirely_in_user_code() {
     let options = Options {
-        filter: Filter::everything().matching("counts_gen_scaling_setup_calls"),
+        filter: Filter::everything().matching("counts_gen_scaling_build_calls"),
         cfg: Options::default()
             .cfg
             .with_max_time(Duration::from_millis(200)),
@@ -419,27 +373,30 @@ fn gen_input_scaling_setup_runs_once_per_size_but_gen_input_every_call() {
 
     let _ = measure(&options).expect("the registrations compose");
 
-    let setup_log = GEN_SCALING_SETUP_LOG.lock().unwrap();
-    let setup_log = setup_log.as_ref().expect("setup should have run");
+    let build_log = GEN_SCALING_BUILD_LOG.lock().unwrap();
+    let build_log = build_log
+        .as_ref()
+        .expect("the cache should have built something");
     assert!(
-        setup_log.len() >= 2,
-        "expected several sizes: {setup_log:?}"
+        build_log.len() >= 2,
+        "expected several sizes: {build_log:?}"
     );
-    for (&n, &count) in setup_log.iter() {
+    for (&n, &count) in build_log.iter() {
         assert_eq!(
             count, 1,
-            "setup was expected to run once for size {n}, not {count} times - \
-             an expensive size-n structure rebuilt on every timed call is \
-             exactly what this shape exists to avoid",
+            "the expensive part was expected to build once for size {n}, not \
+             {count} times - rebuilding it on every timed call is exactly what \
+             the cache exists to avoid",
         );
     }
 
     let gen_calls = GEN_SCALING_GEN_CALLS.load(Ordering::SeqCst);
     assert!(
-        gen_calls > 10 * setup_log.len() as u64,
-        "gen_input should run fresh on every timed call, not be cached per \
-         size like setup is - got {gen_calls} calls across {} sizes",
-        setup_log.len(),
+        gen_calls > 10 * build_log.len() as u64,
+        "gen_input itself should still run fresh on every timed call, not be \
+         cached the way the expensive part inside it is - got {gen_calls} \
+         calls across {} sizes",
+        build_log.len(),
     );
 }
 

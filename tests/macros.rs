@@ -99,16 +99,6 @@ fn with_ref_input_and_persistent_state(v: &mut Vec<i32>) -> impl FnMut() -> i32 
     }
 }
 
-// ---- the same, but the returned closure takes an argument fed fresh by
-// `gen_input` on every timed call, rather than moving/borrowing anything
-// from setup itself ----
-
-#[scaling::bench(gen_input = || 3i32)]
-fn with_gen_arg_and_persistent_state() -> impl FnMut(i32) -> i32 {
-    let base = 100i32;
-    move |k: i32| base.wrapping_add(k)
-}
-
 // ---- a scaling benchmark ----
 
 #[scaling::bench_scaling(nmin = 32)]
@@ -151,16 +141,6 @@ fn scaling_setup_once(n: usize) -> impl FnMut() -> u64 {
         calls = calls.wrapping_add(1);
         base.wrapping_add(calls)
     }
-}
-
-// ---- the same, but the returned closure takes an argument fed fresh by
-// `gen_input` on every timed call, while setup itself - built from `n`
-// alone - still runs once per size ----
-
-#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| n as u64)]
-fn scales_by_caching(n: usize) -> impl FnMut(u64) -> u64 {
-    let base = work(n);
-    move |k: u64| base.wrapping_add(k)
 }
 
 // ---- a renamed one ----
@@ -249,7 +229,6 @@ fn every_written_benchmark_is_found_and_measured() {
         "with_persistent_state",
         "with_input_and_persistent_state",
         "with_ref_input_and_persistent_state",
-        "with_gen_arg_and_persistent_state",
     ] {
         let full = report
             .names()
@@ -308,16 +287,6 @@ fn every_written_benchmark_is_found_and_measured() {
     assert!(
         report.scaling(&persistent_scaling_key).is_some(),
         "a scaling benchmark with a setup-once function should measure like any other",
-    );
-
-    let cached_scaling_key = report
-        .names()
-        .find(|k| k.ends_with("scales_by_caching"))
-        .expect("the setup-once + gen_input scaling benchmark registered")
-        .to_string();
-    assert!(
-        report.scaling(&cached_scaling_key).is_some(),
-        "setup-once should combine with gen_input just as well as without it",
     );
 
     let sorting = report.comparison("sorting").expect("the sorting group ran");

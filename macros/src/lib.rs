@@ -112,32 +112,36 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// state, not for every timed call after. Take `I` by value instead when the
 /// state genuinely needs to own what was borrowed.
 ///
-/// `gen_input` combines with the zero-argument form instead, for a
-/// different reason than `input` does: not to build the persistent state -
-/// a zero-argument setup function has none of its own to build it from -
-/// but to supply the *returned closure* with a value that must keep
-/// changing every timed call, which setup itself cannot, having already run
-/// once. Return `impl Fn(K)/FnMut(K) -> O` to accept it:
+/// `gen_input` does not combine with this shape - a setup function whose
+/// returned closure itself takes an argument is rejected outright, in
+/// favor of a pattern that needs no special shape on the benchmark function
+/// at all and, unlike this one, composes with comparisons: build the
+/// expensive part once behind an `Arc` inside `gen_input`'s own closure,
+/// and pair it with a fresh per-call value as an ordinary tuple input.
 ///
 /// ```ignore
-/// #[scaling::bench(gen_input = || rand::random::<u64>() % 1_000_000)]
-/// fn search_in_sorted() -> impl FnMut(u64) -> bool {
-///     let sorted: Vec<u64> = (0..1_000_000).collect();
-///     move |target: u64| sorted.binary_search(&target).is_ok()
+/// #[scaling::bench(gen_input = {
+///     let sorted: std::sync::Arc<Vec<u64>> = std::sync::Arc::new((0..1_000_000).collect());
+///     move || (sorted.clone(), rand::random::<u64>() % 1_000_000)
+/// })]
+/// fn search_in_sorted(input: &(std::sync::Arc<Vec<u64>>, u64)) -> bool {
+///     input.0.binary_search(&input.1).is_ok()
 /// }
 /// ```
 ///
-/// `sorted` is built once; `gen_input` still runs fresh on every timed
-/// call, exactly as it always does, and its result becomes the argument the
-/// cached closure is called with each time. Building `sorted` inside
-/// `gen_input` instead - the shape without setup-once - would rebuild it on
-/// every single lookup, which dominates every measurement for anything
-/// sized to matter. A setup function combining `gen_input` this way takes
-/// no input of its own: `gen_input`'s value goes to the returned closure,
-/// which is what needs to vary per call, so `gen_input` cannot combine
-/// with `input`, or with a setup function returning `impl Fn()/FnMut() ->
-/// O` (no argument, nothing for the value to go to) - only with a
-/// zero-argument one returning `impl Fn(K)/FnMut(K) -> O`.
+/// `sorted` is built once, the moment `gen_input`'s own block runs, because
+/// `gen_input` accepts any expression - a block that builds something once
+/// and returns a closure capturing it is ordinary Rust, nothing this crate
+/// has to know about. `gen_input` itself is still called fresh on every
+/// timed call as it always is; cloning the `Arc` is cheap, and a
+/// comparison's every alternative sees the *same* clone, which a setup
+/// function's own returned closure - private to just that one benchmark -
+/// could never guarantee. Reach for the setup-once shape above instead
+/// when the thing that must vary per call is not an input at all but
+/// mutation whose own cost is what you are measuring - advancing an RNG's
+/// internal state, say: moving that into `gen_input` would exclude the
+/// very cost you wanted timed, since nothing `gen_input` does is on the
+/// clock.
 ///
 /// Add `group = "name"` to make this one alternative of a comparison, and
 /// `baseline` on exactly one member of each group to say which the others
@@ -245,37 +249,37 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// `gen_input` combines with this too, for a different reason than it
-/// combines with anything else here. It does not build the size-dependent
-/// state - `n` alone does that, same as above - but supplies the returned
-/// closure with something that must keep changing every timed call, which a
-/// setup function that runs once cannot supply itself. Return `impl
-/// Fn(K)/FnMut(K) -> O` to accept it:
+/// `gen_input` does not combine with this shape, same as [`bench`]'s own
+/// setup-once shape: a setup function whose returned closure takes an
+/// argument is rejected outright. `gen_input` already accepts any
+/// expression, including a stateful closure that caches its own expensive
+/// part - keyed by `n`, since a scaling sweep asks for many different
+/// sizes - behind an `Arc`, ordinary Rust with nothing new for this crate
+/// to support:
 ///
 /// ```ignore
-/// #[scaling::bench_scaling(nmin = 1_000, gen_input = |n: usize| random_key(n))]
-/// fn random_lookup(n: usize) -> impl FnMut(u64) -> u64 {
-///     let map = build_big_map(n);
-///     move |key: u64| *map.get(&key).unwrap()
+/// #[scaling::bench_scaling(nmin = 1_000, gen_input = {
+///     let mut cache: HashMap<usize, std::sync::Arc<BigMap>> = HashMap::new();
+///     move |n: usize| {
+///         let map = cache.entry(n).or_insert_with(|| std::sync::Arc::new(build_big_map(n)));
+///         (map.clone(), random_key(n))
+///     }
+/// })]
+/// fn random_lookup(input: &(std::sync::Arc<BigMap>, u64)) -> u64 {
+///     *input.0.get(&input.1).unwrap()
 /// }
 /// ```
 ///
-/// `gen_input` here is unchanged from what it always was: still called
-/// fresh on *every* timed call - there is no batching at this level, each
-/// call is individually timed - its own cost paid every time. What changes
-/// is where its result goes: not into building the map (setup does that,
-/// once per size, from `n` alone), but into the argument `random_lookup`'s
-/// returned closure takes, so each of the many lookups against one built
-/// map queries a different key. Building the map inside `gen_input`
-/// instead - the shape without setup-once - would rebuild it on every
-/// single lookup, which for anything sized to matter dominates every
-/// measurement.
-///
-/// The two combine, but neither optional on its own: a setup function
-/// returning `impl Fn()/FnMut() -> O` (no argument) rejects `gen_input` -
-/// there is nothing for its value to go to - and one returning `impl
-/// Fn(K)/FnMut(K) -> O` requires it - nothing else could supply `K` fresh
-/// every call.
+/// The cache is bounded the same way [`bench_scaling`](macro@bench_scaling)'s own
+/// per-size cache is: by however many distinct sizes the sweep visits, a
+/// handful in practice. `gen_input` itself is still called fresh on every
+/// timed call, exactly as it always is; cloning the `Arc` is cheap, and -
+/// unlike a setup function's own private, per-benchmark state - every
+/// alternative in a comparison sharing this input sees the same clone.
+/// Reach for the setup-once shape above instead only when what must vary
+/// per call is not an input but mutation whose own cost is the
+/// measurement: `gen_input`'s own work is never on the clock, so moving
+/// such a mutation there would exclude the very cost you meant to time.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -767,48 +771,21 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 ));
             }
             if repeatable_kind == Repeatable::OneArg {
-                if args.gen_input.is_none() {
-                    return Err(syn::Error::new(
-                        func.sig.span(),
-                        "this setup function's returned closure takes an argument, so \
-                         something has to supply it fresh on every timed call - add \
-                         `gen_input = || -> K { ... }` to build that value, or return \
-                         `impl Fn()/FnMut() -> O` (no argument) if nothing should vary \
-                         per call",
-                    ));
-                }
-                if !matches!(kind, Input::None) {
-                    return Err(syn::Error::new(
-                        func.sig.inputs.span(),
-                        "a setup function combined with `gen_input` this way takes no \
-                         input of its own - `gen_input`'s value goes to the *returned* \
-                         closure instead, which is what needs to vary per call, not to \
-                         this function, which still only ever runs once",
-                    ));
-                }
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "a setup function whose returned closure takes an argument isn't \
+                     supported - whatever that argument's own cost of generating a \
+                     fresh value doesn't matter, so build the state once behind an \
+                     `Arc`, clone it inside a `gen_input` closure alongside a fresh \
+                     per-call value as an ordinary tuple, and let this benchmark take \
+                     that tuple like any other input; if instead the argument's own \
+                     generation *is* part of what you want measured, keep it out of \
+                     the closure's signature and mutate captured state inside the \
+                     closure body instead - `impl Fn()/FnMut() -> O`, not `impl \
+                     Fn(K)/FnMut(K) -> O`",
+                ));
             }
             let body = match (&args.input, &args.gen_input) {
-                // Setup takes nothing and runs once, same as the plain
-                // no-`gen_input` case below; `gen_input` is unchanged from
-                // what it always was - still called fresh on every timed
-                // call - except its result now feeds the *cached* closure
-                // as an argument instead of being handed to a function that
-                // would otherwise run every time. The fix for something
-                // expensive to build once (a big sorted `Vec`, say) that
-                // still needs a fresh per-call value (a random target to
-                // search for) fed into it.
-                (None, Some(gen)) if repeatable_kind == Repeatable::OneArg => {
-                    quote! {
-                        {
-                            let mut __gen = #gen;
-                            let mut __action = ::core::option::Option::None;
-                            __adder.flat(__name, move || {
-                                let __k = __gen();
-                                (__action.get_or_insert_with(#fname))(__k)
-                            })
-                        }
-                    }
-                }
                 // The setup function itself runs once: `input` is given to
                 // it there, not cloned/regenerated per call the way
                 // `Adder::input`/`gen_input` would. Routing this through
@@ -960,14 +937,19 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 )
             })?;
             let repeatable = returns_repeatable_closure(&func.sig);
-            if repeatable == Repeatable::OneArg && args.gen_input.is_none() {
+            if repeatable == Repeatable::OneArg {
                 return Err(syn::Error::new(
                     func.sig.span(),
-                    "this setup function's returned closure takes an argument, so \
-                     something has to supply it fresh on every timed call - add \
-                     `gen_input = |n: usize| -> K { ... }` to build that value, or \
-                     return `impl Fn()/FnMut() -> O` (no argument) if nothing should \
-                     vary per call",
+                    "a setup function whose returned closure takes an argument isn't \
+                     supported - whatever that argument's own cost of generating a \
+                     fresh value doesn't matter, so build the state once behind an \
+                     `Arc`, clone it inside a `gen_input` closure alongside a fresh \
+                     per-call value as an ordinary tuple, and let this benchmark take \
+                     that tuple like any other input; if instead the argument's own \
+                     generation *is* part of what you want measured, keep it out of \
+                     the closure's signature and mutate captured state inside the \
+                     closure body instead - `impl Fn()/FnMut() -> O`, not `impl \
+                     Fn(K)/FnMut(K) -> O`",
                 ));
             }
             if repeatable == Repeatable::NoArg && args.gen_input.is_some() {
@@ -975,43 +957,14 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     func.sig.span(),
                     "this setup function's returned closure takes no argument, so \
                      `gen_input`'s value - rebuilt fresh on every timed call, unlike \
-                     setup itself - has nowhere to go. Return `impl Fn(K)/FnMut(K) -> \
-                     O` to accept it, or drop `gen_input` if the setup function alone \
-                     (built from `n`) is everything the benchmark needs",
+                     setup itself - has nowhere to go. Drop `gen_input` if the setup \
+                     function alone (built from `n`) is everything the benchmark \
+                     needs; if the input it builds needs to persist across calls at \
+                     the same size, cache it inside `gen_input`'s own closure - see \
+                     the module docs for the pattern",
                 ));
             }
             let body = match &args.gen_input {
-                // Design A, fed by `gen_input`: setup takes `n` directly, same
-                // as the plain `None` case below, and runs once per distinct
-                // size the sweep visits - cached in `__cache`, keyed by size,
-                // rather than the single `__action` slot the flat case uses,
-                // because a scaling sweep revisits every discovered size once
-                // per round (see `measure_scaling`'s round loop: n1, n2, ...,
-                // nk, n1, n2, ..., not advancing monotonically), so a single
-                // slot would be evicted and rebuilt on every call. The cache
-                // stays small: bounded by however many sizes `nmin` and the
-                // time budget settle on for this one benchmark.
-                //
-                // `gen_input` itself is unchanged by any of this - still
-                // called fresh on every timed call, exactly as it always was,
-                // and its result is what the *cached* closure is called
-                // with. That split is the whole point: an expensive
-                // size-`n` structure (built once by setup) queried with a
-                // cheap value that must differ every call (built fresh by
-                // `gen_input`) - a random lookup key into a large map, say.
-                Some(gen) if repeatable == Repeatable::OneArg => {
-                    quote! {
-                        {
-                            let mut __gen = #gen;
-                            let mut __cache: ::std::collections::HashMap<usize, _> =
-                                ::std::collections::HashMap::new();
-                            __adder.scaling(__name, move |__n: usize| {
-                                let __k = __gen(__n);
-                                (__cache.entry(__n).or_insert_with(|| #fname(__n)))(__k)
-                            }, #nmin)
-                        }
-                    }
-                }
                 // Wrapped for the same reason as the flat case above.
                 Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
                     quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
