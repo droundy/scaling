@@ -1,8 +1,11 @@
-//! `#[scaling::bench]` on a zero-argument function returning `impl Fn() ->
-//! O` / `impl FnMut() -> O`: setup runs once, and the returned closure is
-//! what gets timed repeatedly - the pattern neither `&mut I`, `&I`, nor
-//! owned `I` can express, since all three rebuild the input fresh every
-//! iteration (see [`scaling::bench`]'s own doc comment).
+//! `#[scaling::bench]` on a function returning `impl Fn() -> O` / `impl
+//! FnMut() -> O`: setup runs once, and the returned closure is what gets
+//! timed repeatedly - the pattern an ordinary `input = <value>` /
+//! `gen_input = <closure>` benchmark can't express, since both rebuild the
+//! input fresh every iteration (see [`scaling::bench`]'s own doc comment).
+//! Covers the zero-argument shape and both input-taking ones - `input`
+//! given to the setup function that one time instead, by value or by
+//! reference.
 //!
 //! A separate process from `tests/macros.rs` on purpose: these tests use a
 //! shared counter to prove setup ran exactly once, and any other test's
@@ -55,6 +58,93 @@ fn setup_runs_exactly_once_despite_many_timed_calls() {
         SETUP_CALLS.load(Ordering::SeqCst),
         1,
         "setup must run exactly once per measure() call, not once per timed call"
+    );
+}
+
+// ---- the input-taking variant: `input` is moved into the setup function
+// once, same as the setup function itself running once ----
+
+static INPUT_TAKING_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench(name = "counts_its_own_input_taking_setup_calls", input = vec![1u8, 2, 3])]
+fn counts_its_own_input_taking_setup_calls(buf: Vec<u8>) -> impl FnMut() -> u64 {
+    INPUT_TAKING_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
+    let mut pos = 0usize;
+    move || {
+        pos = (pos + 1) % buf.len();
+        buf[pos] as u64
+    }
+}
+
+#[test]
+fn input_taking_setup_runs_exactly_once_despite_many_timed_calls() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_its_own_input_taking_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let stats = report
+        .stats("counts_its_own_input_taking_setup_calls")
+        .expect("it should have measured");
+
+    assert!(
+        stats.iterations > 1000,
+        "expected many iterations, got {}",
+        stats.iterations
+    );
+    assert_eq!(
+        INPUT_TAKING_SETUP_CALLS.load(Ordering::SeqCst),
+        1,
+        "setup must run exactly once per measure() call, not once per timed call, \
+         and `input` must be moved into it that same one time"
+    );
+}
+
+// ---- the same, but the setup function only borrows `input` - it reads a
+// seed out of it to configure the persistent state, rather than owning the
+// state's data outright ----
+
+static REF_INPUT_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench(name = "counts_its_own_ref_input_setup_calls", input = 7u64)]
+fn counts_its_own_ref_input_setup_calls(seed: &u64) -> impl FnMut() -> u64 {
+    REF_INPUT_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
+    let mut n = *seed;
+    move || {
+        n = n.wrapping_add(1);
+        n
+    }
+}
+
+#[test]
+fn ref_input_setup_runs_exactly_once_despite_many_timed_calls() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_its_own_ref_input_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let stats = report
+        .stats("counts_its_own_ref_input_setup_calls")
+        .expect("it should have measured");
+
+    assert!(
+        stats.iterations > 1000,
+        "expected many iterations, got {}",
+        stats.iterations
+    );
+    assert_eq!(
+        REF_INPUT_SETUP_CALLS.load(Ordering::SeqCst),
+        1,
+        "setup must run exactly once per measure() call even when it only borrows \
+         its input, not once per timed call"
     );
 }
 

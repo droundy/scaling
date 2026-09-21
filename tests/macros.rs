@@ -75,6 +75,30 @@ fn with_persistent_state() -> impl FnMut() -> u64 {
     }
 }
 
+// ---- the same, but with `input` moved into the setup function once ----
+
+#[scaling::bench(input = vec![9i32, 8, 7, 6, 5])]
+fn with_input_and_persistent_state(v: Vec<i32>) -> impl FnMut() -> i32 {
+    let mut i = 0usize;
+    move || {
+        i = (i + 1) % v.len();
+        v[i]
+    }
+}
+
+// ---- the same, but the setup function only borrows `input` ----
+
+#[scaling::bench(input = vec![9i32, 8, 7, 6, 5])]
+fn with_ref_input_and_persistent_state(v: &mut Vec<i32>) -> impl FnMut() -> i32 {
+    v.sort();
+    let sorted = v.clone();
+    let mut i = 0usize;
+    move || {
+        i = (i + 1) % sorted.len();
+        sorted[i]
+    }
+}
+
 // ---- a scaling benchmark ----
 
 #[scaling::bench_scaling(nmin = 32)]
@@ -170,6 +194,8 @@ fn every_written_benchmark_is_found_and_measured() {
         "with_owned_input",
         "with_owned_gen_input",
         "with_persistent_state",
+        "with_input_and_persistent_state",
+        "with_ref_input_and_persistent_state",
     ] {
         let full = report
             .names()

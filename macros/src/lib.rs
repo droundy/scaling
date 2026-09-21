@@ -87,6 +87,36 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// workaround pays for a thread-local lookup on every call that this does
 /// not.
 ///
+/// `input = <value>` combines with this: the setup function takes `&I`,
+/// `&mut I`, or `I` by value, exactly as it would without a setup shape, to
+/// build its persistent state from.
+///
+/// ```ignore
+/// #[scaling::bench(input = 0u64)]
+/// fn next_from_seed(seed: &u64) -> impl FnMut() -> u64 {
+///     let mut rng = StdRng::seed_from_u64(*seed);
+///     move || rng.next_u64()
+/// }
+/// ```
+///
+/// `input` here is given to the setup function once, the same one time the
+/// function itself runs - not cloned/regenerated per call the way a plain
+/// `input = <value>` benchmark's is, since there is no per-call rebuild for
+/// it to feed. Reading `seed` to configure `rng`, as above, is what setup
+/// normally does with a reference and compiles as ordinary code; trying to
+/// have the *returned closure itself* keep borrowing the input - `move ||
+/// v.len()` for a `v: &mut Vec<u8>` parameter, say - does not, and is
+/// rejected at the setup function's own definition (`error[E0700]: hidden
+/// type ... captures lifetime that does not appear in bounds`): the
+/// reference setup receives is only good for the one call that builds the
+/// state, not for every timed call after. Take `I` by value instead when the
+/// state genuinely needs to own what was borrowed.
+///
+/// `gen_input` does not combine with this shape - it exists to rebuild its
+/// value fresh per call, which a setup function that runs once never does;
+/// write whatever `gen_input`'s closure would have as `input`'s value
+/// directly instead.
+///
 /// Add `group = "name"` to make this one alternative of a comparison, and
 /// `baseline` on exactly one member of each group to say which the others
 /// are reported against - registrations have no order, so it cannot be the
@@ -585,7 +615,57 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         (None, Flavour::Flat) => {
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
+            let repeatable = returns_repeatable_closure(&func.sig);
+            if repeatable && args.gen_input.is_some() {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "`gen_input` rebuilds its value for every timed call, but a setup \
+                     function that returns `impl Fn()/FnMut() -> O` only ever runs \
+                     once - use `input = <value>` instead, which this evaluates once, \
+                     for exactly that reason",
+                ));
+            }
             let body = match (&args.input, &args.gen_input) {
+                // The setup function itself runs once: `input` is given to
+                // it there, not cloned/regenerated per call the way
+                // `Adder::input`/`gen_input` would. Routing this through
+                // `Adder::input` instead would still type-check - the lazy
+                // `get_or_insert_with` below only ever uses the first of the
+                // many clones it would hand out - but it would pay to build
+                // every one of those unused clones first, for nothing.
+                //
+                // The `!owned` arm below always passes `&mut __input`, same
+                // reasoning as the ordinary `&I`/`&mut I` arms further down:
+                // an ordinary reference downgrades from `&mut` at the call
+                // site. Setup reading `v` to configure what it returns (`*v`,
+                // `v.clone()`, …) compiles as ordinary safe code; a setup
+                // that instead tries to have the returned closure keep
+                // borrowing `v` itself is rejected by the compiler right
+                // there, at its own definition (E0700, "hidden type captures
+                // lifetime that does not appear in bounds") - the borrow
+                // only lasts this one call, and nothing here needs it to
+                // last longer.
+                (Some(input), None) if repeatable && owned => {
+                    quote! {
+                        {
+                            let mut __action = ::core::option::Option::None;
+                            __adder.flat(__name, move || {
+                                (__action.get_or_insert_with(|| #fname(#input)))()
+                            })
+                        }
+                    }
+                }
+                (Some(input), None) if repeatable => {
+                    quote! {
+                        {
+                            let mut __input = #input;
+                            let mut __action = ::core::option::Option::None;
+                            __adder.flat(__name, move || {
+                                (__action.get_or_insert_with(|| #fname(&mut __input)))()
+                            })
+                        }
+                    }
+                }
                 // `|__v| #fname(__v)`, not `#fname` passed directly: `Adder`
                 // always hands out `&mut I`, and a named function's own type
                 // does not satisfy a generic `FnMut(&mut I)` bound merely
