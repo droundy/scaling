@@ -223,6 +223,42 @@ fn main() {
     table("Per-iteration harness overhead", "/iter", &overhead);
 
     // ----------------------------------------------------------------
+    // `#[scaling::bench] fn() -> impl FnMut() -> O` compiles down to
+    // exactly this `Option::get_or_insert_with` wrapper around the timed
+    // call (see the macro's own doc comment for `bench`). Isolates that
+    // one branch's cost against an identical closure with no wrapper at
+    // all - both compute the same thing, so any difference is the wrapper.
+    // ----------------------------------------------------------------
+    let design_a = [
+        Row::measure("plain counter closure", || {
+            let mut n = 0u64;
+            bench(move || {
+                n = n.wrapping_add(1);
+                n
+            })
+            .ns_per_iter
+        }),
+        Row::measure("Design A setup-once wrapper", || {
+            let mut action = None;
+            bench(move || {
+                (action.get_or_insert_with(|| {
+                    let mut n = 0u64;
+                    move || {
+                        n = n.wrapping_add(1);
+                        n
+                    }
+                }))()
+            })
+            .ns_per_iter
+        }),
+    ];
+    table(
+        "Design A: Option-wrapper overhead vs. a plain closure",
+        "/iter",
+        &design_a,
+    );
+
+    // ----------------------------------------------------------------
     // The library measuring itself, checked against the stopwatch above.
     //
     // `bench(|| bench(...))` is a fair benchmark of an ordinary 9ms
