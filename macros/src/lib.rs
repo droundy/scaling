@@ -200,6 +200,60 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// As with [`bench`], the function may take `&I`, `&mut I`, or `I` by
 /// value.
+///
+/// # Setup that runs once per size, not once per timed call
+///
+/// `fn(n: usize) -> impl Fn()/FnMut() -> O` is [`bench`]'s setup-once shape,
+/// applied to the size rather than an input: `n` builds something once, and
+/// every timed call at that size reuses what it built instead of rebuilding
+/// it. A scaling sweep revisits every size it discovers once per round -
+/// `nmin`, the next one up, ..., back to `nmin`, and around again - rather
+/// than advancing through sizes once each, so setup here is cached *per
+/// size*: the first call at a given `n` runs it, every later call at that
+/// same `n` reuses what it returned.
+///
+/// ```ignore
+/// #[scaling::bench_scaling(nmin = 8)]
+/// fn sort_n(n: usize) -> impl FnMut() -> usize {
+///     let mut v: Vec<u64> = random_n(n);
+///     move || {
+///         v.sort();
+///         v.len()
+///     }
+/// }
+/// ```
+///
+/// `gen_input` combines with this too, for a different reason than it
+/// combines with anything else here. It does not build the size-dependent
+/// state - `n` alone does that, same as above - but supplies the returned
+/// closure with something that must keep changing every timed call, which a
+/// setup function that runs once cannot supply itself. Return `impl
+/// Fn(K)/FnMut(K) -> O` to accept it:
+///
+/// ```ignore
+/// #[scaling::bench_scaling(nmin = 1_000, gen_input = |n: usize| random_key(n))]
+/// fn random_lookup(n: usize) -> impl FnMut(u64) -> u64 {
+///     let map = build_big_map(n);
+///     move |key: u64| *map.get(&key).unwrap()
+/// }
+/// ```
+///
+/// `gen_input` here is unchanged from what it always was: still called
+/// fresh on *every* timed call - there is no batching at this level, each
+/// call is individually timed - its own cost paid every time. What changes
+/// is where its result goes: not into building the map (setup does that,
+/// once per size, from `n` alone), but into the argument `random_lookup`'s
+/// returned closure takes, so each of the many lookups against one built
+/// map queries a different key. Building the map inside `gen_input`
+/// instead - the shape without setup-once - would rebuild it on every
+/// single lookup, which for anything sized to matter dominates every
+/// measurement.
+///
+/// The two combine, but neither optional on its own: a setup function
+/// returning `impl Fn()/FnMut() -> O` (no argument) rejects `gen_input` -
+/// there is nothing for its value to go to - and one returning `impl
+/// Fn(K)/FnMut(K) -> O` requires it - nothing else could supply `K` fresh
+/// every call.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -421,34 +475,59 @@ fn input_kind(func: &ItemFn) -> syn::Result<Input> {
     }
 }
 
-/// Whether a zero-argument function's return type is `impl Fn() -> O` or
-/// `impl FnMut() -> O` - the "run setup once, then call the result
-/// repeatedly" shape `#[bench]` recognizes there.
-///
-/// Deliberately narrow: only a zero-argument `Fn`/`FnMut` bound counts,
-/// not `impl Fn(X) -> O` (a different shape entirely, not handled here)
-/// and not `impl FnOnce() -> O` (which cannot be called more than the one
-/// time a benchmark's whole point is to avoid).
-fn returns_repeatable_closure(sig: &syn::Signature) -> bool {
+/// What kind of "run setup once, then call the result repeatedly" shape a
+/// function's return type promises, if any - a benchmark, a group member, a
+/// matrix candidate, or a scaling sweep may all return this instead of `O`
+/// directly. Only the return type says which; the function's own arguments
+/// (none, an input, or the size a scaling sweep passes) are a separate
+/// question every call site decides for itself.
+#[derive(PartialEq, Eq)]
+enum Repeatable {
+    /// An ordinary return type - not this shape.
+    No,
+    /// `impl Fn() -> O` / `impl FnMut() -> O`: setup takes no further
+    /// input, ever, after the one call that builds it.
+    NoArg,
+    /// `impl Fn(K) -> O` / `impl FnMut(K) -> O`: setup builds state once,
+    /// but the returned closure still takes one argument on every call -
+    /// `K` is exactly what `gen_input` supplies, unchanged, still called
+    /// fresh every time. This is `gen_input`'s reason to combine with
+    /// setup-once at all: something that genuinely should vary per call
+    /// (a random lookup key, say) alongside something expensive that
+    /// should not (the structure being looked up in).
+    OneArg,
+}
+
+/// Not `impl FnOnce() -> O`, and not more than one argument: a `FnOnce`
+/// cannot be called more than the one time setup-once's whole point is to
+/// avoid, and nothing here has a second argument to feed.
+fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
-        return false;
+        return Repeatable::No;
     };
     let Type::ImplTrait(imp) = &**ty else {
-        return false;
+        return Repeatable::No;
     };
-    imp.bounds.iter().any(|bound| {
+    for bound in &imp.bounds {
         let syn::TypeParamBound::Trait(trait_bound) = bound else {
-            return false;
+            continue;
         };
         let Some(last) = trait_bound.path.segments.last() else {
-            return false;
+            continue;
         };
-        (last.ident == "Fn" || last.ident == "FnMut")
-            && matches!(
-                &last.arguments,
-                syn::PathArguments::Parenthesized(p) if p.inputs.is_empty()
-            )
-    })
+        if last.ident != "Fn" && last.ident != "FnMut" {
+            continue;
+        }
+        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
+            continue;
+        };
+        return match p.inputs.len() {
+            0 => Repeatable::NoArg,
+            1 => Repeatable::OneArg,
+            _ => Repeatable::No,
+        };
+    }
+    Repeatable::No
 }
 
 /// The input type, spelled the way a person would.
@@ -608,7 +687,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             // regenerated and cloned every round regardless, same as for
             // any other alternative; only the setup function's own work is
             // saved.
-            let add = if returns_repeatable_closure(&func.sig) {
+            let add = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
                 let call = repeatable_call(call);
                 quote! {
                     let mut __action = ::core::option::Option::None;
@@ -654,7 +733,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         (None, Flavour::Flat) => {
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
-            let repeatable = returns_repeatable_closure(&func.sig);
+            let repeatable = returns_repeatable_closure(&func.sig) == Repeatable::NoArg;
             if repeatable && args.gen_input.is_some() {
                 return Err(syn::Error::new(
                     func.sig.span(),
@@ -762,7 +841,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                              <closure>` builds a fresh one",
                         ));
                     }
-                    if returns_repeatable_closure(&func.sig) {
+                    if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
                         // Setup runs once, lazily - on first call, which is
                         // also the first time `Adder::flat`'s own filter
                         // check has already passed, so a filtered-out
@@ -815,7 +894,59 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                      climbing from",
                 )
             })?;
+            let repeatable = returns_repeatable_closure(&func.sig);
+            if repeatable == Repeatable::OneArg && args.gen_input.is_none() {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "this setup function's returned closure takes an argument, so \
+                     something has to supply it fresh on every timed call - add \
+                     `gen_input = |n: usize| -> K { ... }` to build that value, or \
+                     return `impl Fn()/FnMut() -> O` (no argument) if nothing should \
+                     vary per call",
+                ));
+            }
+            if repeatable == Repeatable::NoArg && args.gen_input.is_some() {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "this setup function's returned closure takes no argument, so \
+                     `gen_input`'s value - rebuilt fresh on every timed call, unlike \
+                     setup itself - has nowhere to go. Return `impl Fn(K)/FnMut(K) -> \
+                     O` to accept it, or drop `gen_input` if the setup function alone \
+                     (built from `n`) is everything the benchmark needs",
+                ));
+            }
             let body = match &args.gen_input {
+                // Design A, fed by `gen_input`: setup takes `n` directly, same
+                // as the plain `None` case below, and runs once per distinct
+                // size the sweep visits - cached in `__cache`, keyed by size,
+                // rather than the single `__action` slot the flat case uses,
+                // because a scaling sweep revisits every discovered size once
+                // per round (see `measure_scaling`'s round loop: n1, n2, ...,
+                // nk, n1, n2, ..., not advancing monotonically), so a single
+                // slot would be evicted and rebuilt on every call. The cache
+                // stays small: bounded by however many sizes `nmin` and the
+                // time budget settle on for this one benchmark.
+                //
+                // `gen_input` itself is unchanged by any of this - still
+                // called fresh on every timed call, exactly as it always was,
+                // and its result is what the *cached* closure is called
+                // with. That split is the whole point: an expensive
+                // size-`n` structure (built once by setup) queried with a
+                // cheap value that must differ every call (built fresh by
+                // `gen_input`) - a random lookup key into a large map, say.
+                Some(gen) if repeatable == Repeatable::OneArg => {
+                    quote! {
+                        {
+                            let mut __gen = #gen;
+                            let mut __cache: ::std::collections::HashMap<usize, _> =
+                                ::std::collections::HashMap::new();
+                            __adder.scaling(__name, move |__n: usize| {
+                                let __k = __gen(__n);
+                                (__cache.entry(__n).or_insert_with(|| #fname(__n)))(__k)
+                            }, #nmin)
+                        }
+                    }
+                }
                 // Wrapped for the same reason as the flat case above.
                 Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
                     quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
@@ -833,6 +964,17 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                             )),
                             #nmin,
                         )
+                    }
+                }
+                None if repeatable == Repeatable::NoArg => {
+                    quote! {
+                        {
+                            let mut __cache: ::std::collections::HashMap<usize, _> =
+                                ::std::collections::HashMap::new();
+                            __adder.scaling(__name, move |__n: usize| {
+                                (__cache.entry(__n).or_insert_with(|| #fname(__n)))()
+                            }, #nmin)
+                        }
                     }
                 }
                 None => quote!(__adder.scaling(__name, #fname, #nmin)),
@@ -1061,7 +1203,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         // shared input per round) every call regardless - only the setup
         // function's own work, not the matrix's own input machinery, is
         // what this saves.
-        let (flat_body, alt_body) = if returns_repeatable_closure(&func.sig) {
+        let (flat_body, alt_body) = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
             let repeatable = repeatable_call(call);
             (
                 quote! {

@@ -7,6 +7,12 @@
 //! the setup function that one time instead, by value or by reference - and
 //! the same shape used by a comparison group member and a matrix candidate.
 //!
+//! `#[scaling::bench_scaling]` gets its own section further down: a scaling
+//! sweep revisits every discovered size once per round rather than advancing
+//! through sizes once each, so setup there runs once *per distinct size*,
+//! not once overall - a materially different cache shape from everything
+//! above it.
+//!
 //! A separate process from `tests/macros.rs` on purpose: these tests use a
 //! shared counter to prove setup ran exactly once, and any other test's
 //! `measure()` call touching the same registration - unavoidable, since
@@ -15,7 +21,9 @@
 
 use scaling::runner::{measure, Options};
 use scaling::Filter;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 static SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -256,6 +264,130 @@ fn matrix_candidate_setup_runs_exactly_once_despite_many_timed_calls() {
         CANDIDATE_SETUP_CALLS.load(Ordering::SeqCst),
         1,
         "setup must run exactly once for a matrix candidate despite many timed calls"
+    );
+}
+
+// =======================================================================
+// `#[scaling::bench_scaling]`: a sweep revisits every discovered size once
+// per round (n1, n2, ..., nk, n1, n2, ..., not advancing monotonically -
+// see `measure_scaling`'s round loop), so setup here is cached per size
+// rather than in the single slot the shapes above use.
+// =======================================================================
+
+/// How many times setup ran for each size it was asked to build, across the
+/// whole run - `None` until the first call creates it.
+type SetupLog = Mutex<Option<HashMap<usize, u32>>>;
+
+fn record(log: &SetupLog, n: usize) {
+    let mut log = log.lock().unwrap();
+    *log.get_or_insert_with(HashMap::new).entry(n).or_insert(0) += 1;
+}
+
+static SCALING_SETUP_LOG: SetupLog = Mutex::new(None);
+
+#[scaling::bench_scaling(name = "counts_scaling_setup_calls", nmin = 4)]
+fn scaling_setup_once_per_size(n: usize) -> impl FnMut() -> usize {
+    record(&SCALING_SETUP_LOG, n);
+    let mut calls = 0usize;
+    move || {
+        calls += 1;
+        n + calls
+    }
+}
+
+#[test]
+fn scaling_setup_runs_at_most_once_per_distinct_size() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_scaling_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let stats = report
+        .scaling("counts_scaling_setup_calls")
+        .expect("it should have measured");
+
+    let log = SCALING_SETUP_LOG.lock().unwrap();
+    let log = log.as_ref().expect("setup should have run at least once");
+    assert!(
+        log.len() >= 2,
+        "expected the sweep to visit several sizes, got {log:?}",
+    );
+    assert!(
+        stats.iterations > 10 * log.len() as u64,
+        "expected many more timed calls than distinct sizes (iterations={}, \
+         sizes={}) - otherwise the cache bought nothing worth testing",
+        stats.iterations,
+        log.len(),
+    );
+    for (&n, &count) in log.iter() {
+        assert_eq!(
+            count, 1,
+            "size {n} was set up {count} times, expected exactly once"
+        );
+    }
+}
+
+/// The `gen_input` variant: an expensive size-`n` structure (a `BTreeMap`
+/// full of entries, in the motivating case) is built once per size by
+/// setup, exactly like the plain shape above - `gen_input` itself is
+/// unchanged, still called fresh on every timed call, and its result is fed
+/// to the *cached* closure as an argument (a random lookup key, say, so
+/// every call queries something different even though the map it queries
+/// was only ever built once per size).
+static GEN_SCALING_SETUP_LOG: SetupLog = Mutex::new(None);
+static GEN_SCALING_GEN_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench_scaling(
+    name = "counts_gen_scaling_setup_calls",
+    nmin = 4,
+    gen_input = |n: usize| {
+        let call_num = GEN_SCALING_GEN_CALLS.fetch_add(1, Ordering::SeqCst);
+        (n as u64).wrapping_add(call_num)
+    }
+)]
+fn gen_scaling_setup_once_per_size(n: usize) -> impl FnMut(u64) -> u64 {
+    record(&GEN_SCALING_SETUP_LOG, n);
+    let base = n as u64;
+    move |k: u64| base.wrapping_add(k)
+}
+
+#[test]
+fn gen_input_scaling_setup_runs_once_per_size_but_gen_input_every_call() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_gen_scaling_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let _ = measure(&options).expect("the registrations compose");
+
+    let setup_log = GEN_SCALING_SETUP_LOG.lock().unwrap();
+    let setup_log = setup_log.as_ref().expect("setup should have run");
+    assert!(
+        setup_log.len() >= 2,
+        "expected several sizes: {setup_log:?}"
+    );
+    for (&n, &count) in setup_log.iter() {
+        assert_eq!(
+            count, 1,
+            "setup was expected to run once for size {n}, not {count} times - \
+             an expensive size-n structure rebuilt on every timed call is \
+             exactly what this shape exists to avoid",
+        );
+    }
+
+    let gen_calls = GEN_SCALING_GEN_CALLS.load(Ordering::SeqCst);
+    assert!(
+        gen_calls > 10 * setup_log.len() as u64,
+        "gen_input should run fresh on every timed call, not be cached per \
+         size like setup is - got {gen_calls} calls across {} sizes",
+        setup_log.len(),
     );
 }
 

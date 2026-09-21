@@ -59,7 +59,7 @@ impl<'a, 'b> Adder<'a, 'b> {
     /// Adds a scaling benchmark, as [`Suite::add_scaling`] would.
     pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle<ScalingStats>
     where
-        F: Fn(usize) -> O + 'a,
+        F: FnMut(usize) -> O + 'a,
         O: 'a,
     {
         Handle(self.0.add_scaling(name, f, nmin))

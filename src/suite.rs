@@ -705,7 +705,7 @@ impl<'a> Suite<'a> {
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
     pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
     where
-        F: Fn(usize) -> O + 'a,
+        F: FnMut(usize) -> O + 'a,
         O: 'a,
     {
         self.add_scaling_with(self.cfg, name, f, nmin)
@@ -721,7 +721,7 @@ impl<'a> Suite<'a> {
         nmin: usize,
     ) -> Token<ScalingStats>
     where
-        F: Fn(usize) -> O + 'a,
+        F: FnMut(usize) -> O + 'a,
         O: 'a,
     {
         self.add_task(name, cfg.max_time, |clock, token| {

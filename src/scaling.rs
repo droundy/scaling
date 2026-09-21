@@ -30,7 +30,7 @@ impl Config {
     #[doc(hidden)]
     pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
-        F: Fn(usize) -> O,
+        F: FnMut(usize) -> O,
     {
         let _machine = Machine::claim();
         let clock = Clock::new(self.max_time);
@@ -43,11 +43,11 @@ impl Config {
     pub(crate) async fn bench_scaling_async<F, O>(
         &self,
         clock: &Clock,
-        f: F,
+        mut f: F,
         nmin: usize,
     ) -> ScalingStats
     where
-        F: Fn(usize) -> O,
+        F: FnMut(usize) -> O,
     {
         scaling_sweep(self, nmin, clock, |n| {
             // `black_box` on the size as well as the result: without it the
@@ -319,7 +319,7 @@ impl Display for Scaling {
 /// See [`Config::bench_scaling`] to choose your own accuracy.
 pub fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
 where
-    F: Fn(usize) -> O,
+    F: FnMut(usize) -> O,
 {
     Config::default().bench_scaling(f, nmin)
 }

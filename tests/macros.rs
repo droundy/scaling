@@ -130,6 +130,29 @@ fn scales_by_consuming(v: Vec<u64>) -> u64 {
     v.into_iter().fold(0u64, |a, x| a.wrapping_add(x))
 }
 
+// ---- a scaling benchmark whose setup runs once per size rather than once
+// per timed call ----
+
+#[scaling::bench_scaling(nmin = 8)]
+fn scaling_setup_once(n: usize) -> impl FnMut() -> u64 {
+    let base = work(n);
+    let mut calls = 0u64;
+    move || {
+        calls = calls.wrapping_add(1);
+        base.wrapping_add(calls)
+    }
+}
+
+// ---- the same, but the returned closure takes an argument fed fresh by
+// `gen_input` on every timed call, while setup itself - built from `n`
+// alone - still runs once per size ----
+
+#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| n as u64)]
+fn scales_by_caching(n: usize) -> impl FnMut(u64) -> u64 {
+    let base = work(n);
+    move |k: u64| base.wrapping_add(k)
+}
+
 // ---- a renamed one ----
 
 #[scaling::bench(name = "renamed")]
@@ -264,6 +287,26 @@ fn every_written_benchmark_is_found_and_measured() {
     assert!(
         report.scaling(&owned_scaling_key).is_some(),
         "T by value should measure exactly as &T and &mut T do",
+    );
+
+    let persistent_scaling_key = report
+        .names()
+        .find(|k| k.ends_with("scaling_setup_once"))
+        .expect("the setup-once scaling benchmark registered")
+        .to_string();
+    assert!(
+        report.scaling(&persistent_scaling_key).is_some(),
+        "a scaling benchmark with a setup-once function should measure like any other",
+    );
+
+    let cached_scaling_key = report
+        .names()
+        .find(|k| k.ends_with("scales_by_caching"))
+        .expect("the setup-once + gen_input scaling benchmark registered")
+        .to_string();
+    assert!(
+        report.scaling(&cached_scaling_key).is_some(),
+        "setup-once should combine with gen_input just as well as without it",
     );
 
     let sorting = report.comparison("sorting").expect("the sorting group ran");
