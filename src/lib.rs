@@ -24,7 +24,7 @@ in your crate, next to the code they measure:
 fn fib_200() -> usize { fib(200) }
 
 // A benchmark that mutates state says where the state comes from.
-#[scaling::bench(gen_input = || vec![0i32; 100])]
+#[scaling::bench(make_input = || vec![0i32; 100])]
 fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
 
 // And one can measure how the cost grows with `N`.
@@ -175,7 +175,7 @@ Put an attribute on a function and it is part of the suite:
 #[scaling::bench]
 fn fib_200() -> usize { fib(200) }
 
-#[scaling::bench(gen_input = || vec![5i32, 3, 1, 4, 2])]
+#[scaling::bench(make_input = || vec![5i32, 3, 1, 4, 2])]
 fn sorting(v: &mut Vec<i32>) { v.sort() }
 ```
 
@@ -288,7 +288,7 @@ fn fib_1() -> usize { fib(500) }                      // fine
 #[scaling::bench]
 fn fib_2() { fib(500); }                              // spoiler: NOT fine
 
-#[scaling::bench(gen_input = || 0usize)]
+#[scaling::bench(make_input = || 0usize)]
 fn fib_3(x: &mut usize) { *x = fib(500); }            // also fine, but ugly
 ```
 
@@ -409,7 +409,7 @@ pub use self::bench::Stats;
 /// [`main!`] are, and unlike these they get an interleaved measurement, a
 /// name in the report, and a share of the multiple-comparison correction.
 #[doc(hidden)]
-pub use self::bench::{bench, bench_clone_input, bench_gen_input};
+pub use self::bench::{bench, bench_clone_input, bench_make_input};
 pub use self::compare::Comparison;
 pub use self::filter::Filter;
 pub use self::kway::Comparisons;
@@ -824,7 +824,7 @@ impl Running {
     }
 
     /// Mean, and the standard error *of that mean*, in nanoseconds. See
-    /// [`Config::bench_gen_input`] for why batching does not bias this.
+    /// [`Config::bench_make_input`] for why batching does not bias this.
     ///
     /// The error is absolute rather than relative because that is the
     /// primitive quantity: it needs nothing but the samples, whereas

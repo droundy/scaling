@@ -209,20 +209,20 @@ where
 /// Run a benchmark with a generated input, with default
 /// accuracy (see [`Config`]).
 ///
-/// See [`Config::bench_gen_input`] for the full documentation.
-pub fn bench_gen_input<G, F, I, O>(gen_input: G, f: F) -> Stats
+/// See [`Config::bench_make_input`] for the full documentation.
+pub fn bench_make_input<G, F, I, O>(make_input: G, f: F) -> Stats
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
-    Config::default().bench_gen_input(gen_input, f)
+    Config::default().bench_make_input(make_input, f)
 }
 
 impl Config {
     /// Run a benchmark.
     ///
     /// See [`bench`](fn@bench) for the default-accuracy version, and
-    /// [`Config::bench_gen_input`] for the algorithm.
+    /// [`Config::bench_make_input`] for the algorithm.
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
@@ -243,7 +243,7 @@ impl Config {
     /// Nb: it's very possible that we will end up allocating many (>10,000)
     /// copies of `input` at the same time. Probably best to keep it small.
     ///
-    /// See [`Config::bench_gen_input`] and the module docs for more, and its
+    /// See [`Config::bench_make_input`] and the module docs for more, and its
     /// "Overhead" section for what this costs beyond the function itself.
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
@@ -254,12 +254,12 @@ impl Config {
         F: FnMut(&mut I) -> O,
         I: Clone,
     {
-        self.bench_gen_input(move || input.clone(), f)
+        self.bench_make_input(move || input.clone(), f)
     }
 
     /// Run a benchmark with a generated input.
     ///
-    /// The function `gen_input` creates the input for the computation. Each
+    /// The function `make_input` creates the input for the computation. Each
     /// iteration receives a freshly-created one. The time taken to create
     /// them is not included in the results.
     ///
@@ -270,7 +270,7 @@ impl Config {
     ///
     /// ## Overhead
     ///
-    /// Every iteration, `bench_gen_input` performs a lookup into a big vector
+    /// Every iteration, `bench_make_input` performs a lookup into a big vector
     /// in order to get the input for that iteration. If your
     /// benchmark is memory-intensive then this could, in the worst case,
     /// amount to a systematic cache-miss (ie. this vector would have to be
@@ -312,20 +312,20 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench_gen_input<G, F, I, O>(&self, gen_input: G, f: F) -> Stats
+    pub fn bench_make_input<G, F, I, O>(&self, make_input: G, f: F) -> Stats
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
     {
         let _machine = Machine::claim();
         let clock = Clock::new(self.max_time);
-        block_on(&clock, self.bench_gen_input_async(&clock, gen_input, f))
+        block_on(&clock, self.bench_make_input_async(&clock, make_input, f))
     }
 
     /// The sampling loop itself, which yields to the scheduler between
     /// samples.
     ///
-    /// [`Config::bench_gen_input`] is this driven to completion by
+    /// [`Config::bench_make_input`] is this driven to completion by
     /// [`block_on`], and a [`Suite`] instead interleaves it with every other
     /// benchmark's. There is deliberately only the one loop: a synchronous
     /// copy alongside an asynchronous one is how a stopping rule and the
@@ -334,10 +334,10 @@ impl Config {
     /// Neither pinning nor the exclusive guard is taken here. The caller owns
     /// them, so that a suite claims the machine once for the whole session
     /// rather than once per benchmark.
-    pub(crate) async fn bench_gen_input_async<G, F, I, O>(
+    pub(crate) async fn bench_make_input_async<G, F, I, O>(
         &self,
         clock: &Clock,
-        mut gen_input: G,
+        mut make_input: G,
         mut f: F,
     ) -> Stats
     where
@@ -346,7 +346,7 @@ impl Config {
     {
         let mut xs: Vec<I> = Vec::new();
         let (unit, first_ns, probed) =
-            calibrate(&mut gen_input, &mut f, &mut xs, self, clock).await;
+            calibrate(&mut make_input, &mut f, &mut xs, self, clock).await;
         if clock.exhausted() {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
@@ -370,7 +370,7 @@ impl Config {
         let mut measured_ns = 0.0;
         let mut samples = Running::default();
         loop {
-            let (_, t) = time_batch(&mut gen_input, &mut f, &mut xs, unit);
+            let (_, t) = time_batch(&mut make_input, &mut f, &mut xs, unit);
             measured_ns += t;
             samples.push(t / unit as f64);
             let (mean, std_error) = samples.mean_and_stderr();
@@ -441,14 +441,19 @@ impl Config {
 /// one benchmark call can leave enough of a mark on process-wide allocator
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
-fn time_batch<G, F, I, O>(gen_input: &mut G, f: &mut F, xs: &mut Vec<I>, iters: usize) -> (f64, f64)
+fn time_batch<G, F, I, O>(
+    make_input: &mut G,
+    f: &mut F,
+    xs: &mut Vec<I>,
+    iters: usize,
+) -> (f64, f64)
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
 {
     let setup_start = Instant::now();
     xs.clear();
-    xs.extend(std::iter::repeat_with(&mut *gen_input).take(iters));
+    xs.extend(std::iter::repeat_with(&mut *make_input).take(iters));
     let setup_ns = setup_start.elapsed().as_secs_f64() * 1e9;
     (setup_ns, time_loop(f, xs))
 }
@@ -484,7 +489,7 @@ where
 /// benchmark's choice of batch size at the very start of the session, in the
 /// one thermal state interleaving exists to stop trusting.
 async fn calibrate<G, F, I, O>(
-    gen_input: &mut G,
+    make_input: &mut G,
     f: &mut F,
     xs: &mut Vec<I>,
     cfg: &Config,
@@ -530,7 +535,7 @@ where
     // `Stats::iterations` even though their timings are discarded.
     let mut probed = 0u64;
     loop {
-        let (setup_ns, t) = time_batch(gen_input, f, xs, unit);
+        let (setup_ns, t) = time_batch(make_input, f, xs, unit);
         probed += unit as u64;
         let total_ns = setup_ns + t;
         // Accept immediately, without ever retrying at this size, as soon

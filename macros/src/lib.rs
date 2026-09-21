@@ -46,10 +46,10 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// #[scaling::bench(input = vec![0u8; 1024])]
 /// fn hash(buf: &Vec<u8>) -> u64 { hash_of(buf) }
 ///
-/// #[scaling::bench(gen_input = || random_vec(1000))]
+/// #[scaling::bench(make_input = || random_vec(1000))]
 /// fn sort(v: &mut Vec<i32>) { v.sort() }
 ///
-/// #[scaling::bench(gen_input = || random_vec(1000))]
+/// #[scaling::bench(make_input = || random_vec(1000))]
 /// fn total(v: Vec<i32>) -> i32 { v.into_iter().sum() }
 /// ```
 ///
@@ -78,7 +78,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 ///
 /// The function itself runs once, to build the closure; every timed call
 /// after that calls the closure it returned. This is not a smaller version
-/// of `gen_input` - it costs nothing extra to have. `impl Trait` in return
+/// of `make_input` - it costs nothing extra to have. `impl Trait` in return
 /// position is a concrete type the compiler already knows at the call
 /// site, not a boxed one, so the generated shim holds it in a plain
 /// `Option` and calls it directly: no allocation, no dynamic dispatch, on
@@ -112,15 +112,15 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// state, not for every timed call after. Take `I` by value instead when the
 /// state genuinely needs to own what was borrowed.
 ///
-/// `gen_input` does not combine with this shape - a setup function whose
+/// `make_input` does not combine with this shape - a setup function whose
 /// returned closure itself takes an argument is rejected outright, in
 /// favor of a pattern that needs no special shape on the benchmark function
 /// at all and, unlike this one, composes with comparisons: build the
-/// expensive part once behind an `Arc` inside `gen_input`'s own closure,
+/// expensive part once behind an `Arc` inside `make_input`'s own closure,
 /// and pair it with a fresh per-call value as an ordinary tuple input.
 ///
 /// ```ignore
-/// #[scaling::bench(gen_input = {
+/// #[scaling::bench(make_input = {
 ///     let sorted: std::sync::Arc<Vec<u64>> = std::sync::Arc::new((0..1_000_000).collect());
 ///     move || (sorted.clone(), rand::random::<u64>() % 1_000_000)
 /// })]
@@ -129,18 +129,18 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// }
 /// ```
 ///
-/// `sorted` is built once, the moment `gen_input`'s own block runs, because
-/// `gen_input` accepts any expression - a block that builds something once
+/// `sorted` is built once, the moment `make_input`'s own block runs, because
+/// `make_input` accepts any expression - a block that builds something once
 /// and returns a closure capturing it is ordinary Rust, nothing this crate
-/// has to know about. `gen_input` itself is still called fresh on every
+/// has to know about. `make_input` itself is still called fresh on every
 /// timed call as it always is; cloning the `Arc` is cheap, and a
 /// comparison's every alternative sees the *same* clone, which a setup
 /// function's own returned closure - private to just that one benchmark -
 /// could never guarantee. Reach for the setup-once shape above instead
 /// when the thing that must vary per call is not an input at all but
 /// mutation whose own cost is what you are measuring - advancing an RNG's
-/// internal state, say: moving that into `gen_input` would exclude the
-/// very cost you wanted timed, since nothing `gen_input` does is on the
+/// internal state, say: moving that into `make_input` would exclude the
+/// very cost you wanted timed, since nothing `make_input` does is on the
 /// clock.
 ///
 /// Add `group = "name"` to make this one alternative of a comparison, and
@@ -152,7 +152,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 ///
 /// A group's members share one input, declared once with
 /// [`bench_input`](macro@bench_input) rather than with `input =` or
-/// `gen_input =` on each member - a group compiled with either of those is
+/// `make_input =` on each member - a group compiled with either of those is
 /// rejected, because a per-alternative input would break the pairing that
 /// makes a comparison's error bar narrower than two separate measurements:
 ///
@@ -206,12 +206,12 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// "allocate, fill, then parse", and the fitted power and constant answer
 /// for that combination rather than for parsing alone.
 ///
-/// `gen_input = |n: usize| -> I { ... }` moves that cost out of the timed
-/// region, the same idea as `#[bench(gen_input = ...)]` but handed the size
+/// `make_input = |n: usize| -> I { ... }` moves that cost out of the timed
+/// region, the same idea as `#[bench(make_input = ...)]` but handed the size
 /// so it can build an input of exactly that size:
 ///
 /// ```ignore
-/// #[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| random_n(n))]
+/// #[scaling::bench_scaling(nmin = 8, make_input = |n: usize| random_n(n))]
 /// fn sort_n(v: &mut Vec<i32>) -> usize {
 ///     v.sort();
 ///     v.len()
@@ -249,16 +249,16 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// `gen_input` does not combine with this shape, same as [`bench`]'s own
+/// `make_input` does not combine with this shape, same as [`bench`]'s own
 /// setup-once shape: a setup function whose returned closure takes an
-/// argument is rejected outright. `gen_input` already accepts any
+/// argument is rejected outright. `make_input` already accepts any
 /// expression, including a stateful closure that caches its own expensive
 /// part - keyed by `n`, since a scaling sweep asks for many different
 /// sizes - behind an `Arc`, ordinary Rust with nothing new for this crate
 /// to support:
 ///
 /// ```ignore
-/// #[scaling::bench_scaling(nmin = 1_000, gen_input = {
+/// #[scaling::bench_scaling(nmin = 1_000, make_input = {
 ///     let mut cache: HashMap<usize, std::sync::Arc<BigMap>> = HashMap::new();
 ///     move |n: usize| {
 ///         let map = cache.entry(n).or_insert_with(|| std::sync::Arc::new(build_big_map(n)));
@@ -272,13 +272,13 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The cache is bounded the same way [`bench_scaling`](macro@bench_scaling)'s own
 /// per-size cache is: by however many distinct sizes the sweep visits, a
-/// handful in practice. `gen_input` itself is still called fresh on every
+/// handful in practice. `make_input` itself is still called fresh on every
 /// timed call, exactly as it always is; cloning the `Arc` is cheap, and -
 /// unlike a setup function's own private, per-benchmark state - every
 /// alternative in a comparison sharing this input sees the same clone.
 /// Reach for the setup-once shape above instead only when what must vary
 /// per call is not an input but mutation whose own cost is the
-/// measurement: `gen_input`'s own work is never on the clock, so moving
+/// measurement: `make_input`'s own work is never on the clock, so moving
 /// such a mutation there would exclude the very cost you meant to time.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -292,7 +292,7 @@ pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Declare the shared input of a comparison group.
 ///
 /// Named to pair with [`bench`]: this is the group-wide counterpart of the
-/// per-benchmark `gen_input = ...` argument `#[bench]` itself takes - the
+/// per-benchmark `make_input = ...` argument `#[bench]` itself takes - the
 /// same idea, "build a fresh input", but shared by every alternative in a
 /// group rather than private to one benchmark.
 ///
@@ -306,7 +306,7 @@ pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// differences paired. Exactly one per group.
 ///
 /// A `group = "..."` on `#[bench]`/`#[bench_scaling]` itself cannot also
-/// take `input = ...` or `gen_input = ...`: an alternative's input always
+/// take `input = ...` or `make_input = ...`: an alternative's input always
 /// comes from its group's `#[bench_input]`, and per-alternative inputs
 /// would break the pairing the whole statistical model depends on. Use this
 /// attribute instead.
@@ -333,7 +333,7 @@ struct Args {
     matrix: Option<LitStr>,
     baseline: bool,
     input: Option<Expr>,
-    gen_input: Option<Expr>,
+    make_input: Option<Expr>,
     nmin: Option<LitInt>,
     /// `types(A, B)`: instantiate a generic candidate once per type.
     types: Vec<Type>,
@@ -399,9 +399,9 @@ impl syn::parse::Parse for Args {
                     input.parse::<syn::Token![=]>()?;
                     args.input = Some(input.parse()?);
                 }
-                "gen_input" => {
+                "make_input" => {
                     input.parse::<syn::Token![=]>()?;
-                    args.gen_input = Some(input.parse()?);
+                    args.make_input = Some(input.parse()?);
                 }
                 "nmin" => {
                     input.parse::<syn::Token![=]>()?;
@@ -412,7 +412,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, matrix, baseline, input, gen_input, \
+                             name, group, matrix, baseline, input, make_input, \
                              nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -514,13 +514,12 @@ enum Repeatable {
     /// `impl Fn() -> O` / `impl FnMut() -> O`: setup takes no further
     /// input, ever, after the one call that builds it.
     NoArg,
-    /// `impl Fn(K) -> O` / `impl FnMut(K) -> O`: setup builds state once,
-    /// but the returned closure still takes one argument on every call -
-    /// `K` is exactly what `gen_input` supplies, unchanged, still called
-    /// fresh every time. This is `gen_input`'s reason to combine with
-    /// setup-once at all: something that genuinely should vary per call
-    /// (a random lookup key, say) alongside something expensive that
-    /// should not (the structure being looked up in).
+    /// `impl Fn(K) -> O` / `impl FnMut(K) -> O`: not a supported shape -
+    /// detected only to give a clear rejection rather than silently
+    /// mistreating the returned closure as the benchmark's own output. See
+    /// the rejection message at each call site for what to write instead:
+    /// an ordinary input built from state cached behind an `Arc` inside
+    /// `make_input`'s own closure.
     OneArg,
 }
 
@@ -654,32 +653,32 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         return Err(syn::Error::new(
             input.span(),
             "`input` fixes one value regardless of size, but a scaling benchmark \
-             sweeps `n` - use `gen_input = |n: usize| ...` to build a size-dependent \
+             sweeps `n` - use `make_input = |n: usize| ...` to build a size-dependent \
              input instead",
         ));
     }
-    if args.input.is_some() && args.gen_input.is_some() {
+    if args.input.is_some() && args.make_input.is_some() {
         return Err(syn::Error::new(
             func.sig.span(),
-            "give either `input` or `gen_input`, not both: one clones a value per \
+            "give either `input` or `make_input`, not both: one clones a value per \
              iteration, the other builds a fresh one",
         ));
     }
     // `Flavour::Flat` only: a scaling benchmark in a group is rejected below,
-    // for its own, more specific reason, regardless of `input`/`gen_input`.
+    // for its own, more specific reason, regardless of `input`/`make_input`.
     if let Flavour::Flat = flavour {
-        if args.group.is_some() && (args.input.is_some() || args.gen_input.is_some()) {
+        if args.group.is_some() && (args.input.is_some() || args.make_input.is_some()) {
             let span = args
                 .input
                 .as_ref()
                 .map(|e| e.span())
-                .or_else(|| args.gen_input.as_ref().map(|e| e.span()))
+                .or_else(|| args.make_input.as_ref().map(|e| e.span()))
                 .unwrap_or_else(|| func.sig.span());
             return Err(syn::Error::new(
                 span,
                 "a comparison group's alternatives share one input, declared once with \
                  `#[scaling::bench_input(group = \"...\")]` - not `input =` or \
-                 `gen_input =` on each member, which would give every alternative its \
+                 `make_input =` on each member, which would give every alternative its \
                  own input and break the pairing a comparison's accuracy depends on",
             ));
         }
@@ -761,10 +760,10 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             let owned = matches!(kind, Input::Owned(_));
             let repeatable_kind = returns_repeatable_closure(&func.sig);
             let repeatable = repeatable_kind == Repeatable::NoArg;
-            if repeatable && args.gen_input.is_some() {
+            if repeatable && args.make_input.is_some() {
                 return Err(syn::Error::new(
                     func.sig.span(),
-                    "`gen_input` rebuilds its value for every timed call, but a setup \
+                    "`make_input` rebuilds its value for every timed call, but a setup \
                      function that returns `impl Fn()/FnMut() -> O` only ever runs \
                      once - use `input = <value>` instead, which this evaluates once, \
                      for exactly that reason",
@@ -776,7 +775,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     "a setup function whose returned closure takes an argument isn't \
                      supported - whatever that argument's own cost of generating a \
                      fresh value doesn't matter, so build the state once behind an \
-                     `Arc`, clone it inside a `gen_input` closure alongside a fresh \
+                     `Arc`, clone it inside a `make_input` closure alongside a fresh \
                      per-call value as an ordinary tuple, and let this benchmark take \
                      that tuple like any other input; if instead the argument's own \
                      generation *is* part of what you want measured, keep it out of \
@@ -785,10 +784,10 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                      Fn(K)/FnMut(K) -> O`",
                 ));
             }
-            let body = match (&args.input, &args.gen_input) {
+            let body = match (&args.input, &args.make_input) {
                 // The setup function itself runs once: `input` is given to
                 // it there, not cloned/regenerated per call the way
-                // `Adder::input`/`gen_input` would. Routing this through
+                // `Adder::input`/`make_input` would. Routing this through
                 // `Adder::input` instead would still type-check - the lazy
                 // `get_or_insert_with` below only ever uses the first of the
                 // many clones it would hand out - but it would pay to build
@@ -836,7 +835,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     quote!(__adder.input(__name, #input, |__v| #fname(__v)))
                 }
                 (None, Some(gen)) if !owned => {
-                    quote!(__adder.gen_input(__name, #gen, |__v| #fname(__v)))
+                    quote!(__adder.make_input(__name, #gen, |__v| #fname(__v)))
                 }
                 // The function consumes its input, so `Adder` - which only
                 // ever hands out `&mut I` - cannot call it directly. Wrap
@@ -861,7 +860,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 }
                 (None, Some(gen)) => {
                     quote! {
-                        __adder.gen_input(
+                        __adder.make_input(
                             __name,
                             {
                                 let mut __gen = #gen;
@@ -879,7 +878,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         return Err(syn::Error::new(
                             func.sig.inputs.span(),
                             "this benchmark takes an input, so say where it comes from: \
-                             `input = <value>` clones one per iteration, `gen_input = \
+                             `input = <value>` clones one per iteration, `make_input = \
                              <closure>` builds a fresh one",
                         ));
                     }
@@ -943,7 +942,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     "a setup function whose returned closure takes an argument isn't \
                      supported - whatever that argument's own cost of generating a \
                      fresh value doesn't matter, so build the state once behind an \
-                     `Arc`, clone it inside a `gen_input` closure alongside a fresh \
+                     `Arc`, clone it inside a `make_input` closure alongside a fresh \
                      per-call value as an ordinary tuple, and let this benchmark take \
                      that tuple like any other input; if instead the argument's own \
                      generation *is* part of what you want measured, keep it out of \
@@ -952,19 +951,19 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                      Fn(K)/FnMut(K) -> O`",
                 ));
             }
-            if repeatable == Repeatable::NoArg && args.gen_input.is_some() {
+            if repeatable == Repeatable::NoArg && args.make_input.is_some() {
                 return Err(syn::Error::new(
                     func.sig.span(),
                     "this setup function's returned closure takes no argument, so \
-                     `gen_input`'s value - rebuilt fresh on every timed call, unlike \
-                     setup itself - has nowhere to go. Drop `gen_input` if the setup \
+                     `make_input`'s value - rebuilt fresh on every timed call, unlike \
+                     setup itself - has nowhere to go. Drop `make_input` if the setup \
                      function alone (built from `n`) is everything the benchmark \
                      needs; if the input it builds needs to persist across calls at \
-                     the same size, cache it inside `gen_input`'s own closure - see \
+                     the same size, cache it inside `make_input`'s own closure - see \
                      the module docs for the pattern",
                 ));
             }
-            let body = match &args.gen_input {
+            let body = match &args.make_input {
                 // Wrapped for the same reason as the flat case above.
                 Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
                     quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
@@ -1226,7 +1225,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             (
                 quote! {
                     let mut __action = ::core::option::Option::None;
-                    __adder.gen_input(
+                    __adder.make_input(
                         __name,
                         __make,
                         move |__e: &mut ::scaling::registry::ErasedInput| #repeatable,
@@ -1240,7 +1239,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         } else {
             (
                 quote! {
-                    __adder.gen_input(
+                    __adder.make_input(
                         __name,
                         __make,
                         |__e: &mut ::scaling::registry::ErasedInput| #call,

@@ -76,7 +76,7 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 /// [`Suite`] instead, which sees them all before running any.
 pub(crate) struct ComparisonSet<'a, I> {
     cfg: &'a Config,
-    gen_input: Box<GenInput<'a, I>>,
+    make_input: Box<GenInput<'a, I>>,
     entries: Vec<Entry<'a, I>>,
 }
 
@@ -89,7 +89,7 @@ impl Config {
     /// Start gathering alternatives that take no input. A comparison is
     /// declared with `group = "..."` or a matrix, not built here.
     ///
-    /// Assembly only ever needs [`Config::comparison_gen_input`] - every
+    /// Assembly only ever needs [`Config::comparison_make_input`] - every
     /// registered alternative takes an (erased) input. This unit-input
     /// sibling exists so tests can exercise the k-way comparison algorithm
     /// directly, independent of registration - hence `allow(dead_code)`
@@ -99,7 +99,7 @@ impl Config {
     pub(crate) fn comparison(&self) -> ComparisonSet<'_, ()> {
         ComparisonSet {
             cfg: self,
-            gen_input: Box::new(|| ()),
+            make_input: Box::new(|| ()),
             entries: Vec::new(),
         }
     }
@@ -118,16 +118,16 @@ impl Config {
     ///
     /// Like [`Config::comparison`]: this is what assembles a registered
     /// comparison group or matrix lane.
-    pub(crate) fn comparison_gen_input<'a, G, I: Clone>(
+    pub(crate) fn comparison_make_input<'a, G, I: Clone>(
         &'a self,
-        gen_input: G,
+        make_input: G,
     ) -> ComparisonSet<'a, I>
     where
         G: FnMut() -> I + 'a,
     {
         ComparisonSet {
             cfg: self,
-            gen_input: Box::new(gen_input),
+            make_input: Box::new(make_input),
             entries: Vec::new(),
         }
     }
@@ -267,7 +267,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         );
         let ComparisonSet {
             cfg,
-            mut gen_input,
+            mut make_input,
             mut entries,
         } = self;
         let k = entries.len();
@@ -276,7 +276,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
         let mut master: Vec<I> = Vec::new();
         let mut xs: Vec<I> = Vec::new();
         let (unit, probed) =
-            calibrate(&mut gen_input, &mut entries, &mut master, &mut xs, clock).await;
+            calibrate(&mut make_input, &mut entries, &mut master, &mut xs, clock).await;
 
         let mut own = vec![Running::default(); k];
         let mut diffs = vec![Running::default(); k];
@@ -293,7 +293,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             flip ^= flip >> 7;
             flip ^= flip << 17;
             let offset = (flip % k as u64) as usize;
-            refill(&mut gen_input, &mut master, unit);
+            refill(&mut make_input, &mut master, unit);
             for step in 0..k {
                 let i = (offset + step) % k;
                 clone_into(&master, &mut xs);
@@ -360,11 +360,11 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
 }
 
 /// Generate a fresh batch of `unit` inputs, reusing `xs`'s allocation.
-fn refill<I>(gen_input: &mut GenInput<I>, xs: &mut Vec<I>, unit: usize) {
+fn refill<I>(make_input: &mut GenInput<I>, xs: &mut Vec<I>, unit: usize) {
     xs.clear();
     xs.reserve(unit);
     for _ in 0..unit {
-        xs.push(gen_input());
+        xs.push(make_input());
     }
 }
 
@@ -380,9 +380,9 @@ fn clone_into<I: Clone>(master: &[I], xs: &mut Vec<I>) {
 
 /// Find a batch size whose measured duration, summed over every alternative,
 /// reaches [`SAMPLE_TIME`]: the same extrapolation
-/// [`Config::bench_gen_input`] does, over a whole round.
+/// [`Config::bench_make_input`] does, over a whole round.
 async fn calibrate<'a, I: Clone>(
-    gen_input: &mut GenInput<'a, I>,
+    make_input: &mut GenInput<'a, I>,
     entries: &mut [Entry<'a, I>],
     master: &mut Vec<I>,
     xs: &mut Vec<I>,
@@ -402,7 +402,7 @@ async fn calibrate<'a, I: Clone>(
     loop {
         let mut timed_ns = 0.0;
         let probe_start = Instant::now();
-        refill(gen_input, master, unit);
+        refill(make_input, master, unit);
         for e in entries.iter_mut() {
             clone_into(master, xs);
             timed_ns += (e.batch)(xs);
@@ -544,7 +544,7 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(200));
         let mut n = 0u64;
         let r = cfg
-            .comparison_gen_input(move || {
+            .comparison_make_input(move || {
                 n += 1;
                 n
             })
@@ -630,7 +630,7 @@ mod tests {
         for r in 0..REPEATS {
             let mut rng = XorShift(0x243f_6a88_85a3_08d3u64.wrapping_mul(r + 1) | 1);
             let results = cfg
-                .comparison_gen_input(move || {
+                .comparison_make_input(move || {
                     // Lengths spread over 4000x, so what a batch costs is
                     // dominated by which lengths it happened to draw.
                     let n = 1 + (rng.next() as usize % 4000);

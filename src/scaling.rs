@@ -38,7 +38,7 @@ impl Config {
     }
 
     /// The scaling sweep, which yields to the scheduler between rounds. See
-    /// [`Config::bench_scaling`], and [`Config::bench_gen_input_async`] for
+    /// [`Config::bench_scaling`], and [`Config::bench_make_input_async`] for
     /// why the asynchronous form is the only one.
     pub(crate) async fn bench_scaling_async<F, O>(
         &self,
@@ -69,7 +69,7 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench_scaling_gen<G, F, I, O>(&self, gen_input: G, f: F, nmin: usize) -> ScalingStats
+    pub fn bench_scaling_gen<G, F, I, O>(&self, make_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,
         F: Fn(&mut I) -> O,
@@ -78,7 +78,7 @@ impl Config {
         let clock = Clock::new(self.max_time);
         block_on(
             &clock,
-            self.bench_scaling_gen_async(&clock, gen_input, f, nmin),
+            self.bench_scaling_gen_async(&clock, make_input, f, nmin),
         )
     }
 
@@ -87,7 +87,7 @@ impl Config {
     pub(crate) async fn bench_scaling_gen_async<G, F, I, O>(
         &self,
         clock: &Clock,
-        mut gen_input: G,
+        mut make_input: G,
         f: F,
         nmin: usize,
     ) -> ScalingStats
@@ -99,7 +99,7 @@ impl Config {
             // Build the input before the clock starts and drop it
             // after the clock stops, so neither generation nor drop lands
             // in the measurement.
-            let mut x = gen_input(n);
+            let mut x = make_input(n);
             let start = Instant::now();
             black_box(f(&mut x));
             let elapsed = start.elapsed();
@@ -443,12 +443,12 @@ async fn scaling_sweep(
 /// ```
 ///
 /// See [`Config::bench_scaling_gen`] to choose your own accuracy.
-pub fn bench_scaling_gen<G, F, I, O>(gen_input: G, f: F, nmin: usize) -> ScalingStats
+pub fn bench_scaling_gen<G, F, I, O>(make_input: G, f: F, nmin: usize) -> ScalingStats
 where
     G: FnMut(usize) -> I,
     F: Fn(&mut I) -> O,
 {
-    Config::default().bench_scaling_gen(gen_input, f, nmin)
+    Config::default().bench_scaling_gen(make_input, f, nmin)
 }
 
 /// A polynomial fit against sizes whose error bars were *measured* rather
@@ -808,14 +808,14 @@ async fn discover_sizes(
             // not have, and it reaches any size worth reaching in a
             // logarithmic number of steps, which `MAX_CLIMB_STEPS` bounds -
             // *for the cost this function can see*. `bench_scaling_gen`
-            // times only `f`, not `gen_input` (see `bench_scaling_gen_with`),
-            // so a `gen_input` that grows with `n` while `f` stays too fast to
+            // times only `f`, not `make_input` (see `bench_scaling_gen_with`),
+            // so a `make_input` that grows with `n` while `f` stays too fast to
             // time is invisible here: doubling will keep asking for larger
-            // `n` on `gen_input`'s behalf with nothing to weigh that cost
+            // `n` on `make_input`'s behalf with nothing to weigh that cost
             // against, up to `nmin · 2^MAX_CLIMB_STEPS`. Budgeting that
-            // properly needs `gen_input` in the clock, which is deliberately
+            // properly needs `make_input` in the clock, which is deliberately
             // excluded elsewhere for good reason (measurement purity), so
-            // this is a known gap rather than an oversight: keep `gen_input`
+            // this is a known gap rather than an oversight: keep `make_input`
             // cheap relative to `f`, the same assumption the crate already
             // asks of it for the timed region to mean anything.
             None if last_t <= 0.0 => last_n.saturating_mul(2),

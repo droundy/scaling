@@ -38,8 +38,8 @@ fn with_input(v: &mut Vec<i32>) {
 
 // ---- one whose input is built fresh ----
 
-#[scaling::bench(gen_input = || vec![9i32, 8, 7, 6, 5])]
-fn with_gen_input(v: &mut Vec<i32>) {
+#[scaling::bench(make_input = || vec![9i32, 8, 7, 6, 5])]
+fn with_make_input(v: &mut Vec<i32>) {
     v.sort_unstable();
 }
 
@@ -57,8 +57,8 @@ fn with_owned_input(v: Vec<i32>) -> i32 {
     v.into_iter().sum()
 }
 
-#[scaling::bench(gen_input = || vec![9i32, 8, 7, 6, 5])]
-fn with_owned_gen_input(v: Vec<i32>) -> i32 {
+#[scaling::bench(make_input = || vec![9i32, 8, 7, 6, 5])]
+fn with_owned_make_input(v: Vec<i32>) -> i32 {
     v.into_iter().sum()
 }
 
@@ -109,7 +109,7 @@ fn scales(n: usize) -> u64 {
 // ---- a scaling benchmark whose input is built fresh, outside the timed
 // call - `n` reaches the generator, not the timed function ----
 
-#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+#[scaling::bench_scaling(nmin = 8, make_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
 fn scales_with_fresh_input(v: &mut Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
 }
@@ -118,14 +118,14 @@ fn scales_with_fresh_input(v: &mut Vec<u64>) -> u64 {
 // suffix with any other registration here - see the comment on the
 // scales_with_fresh_input rename a few commits back for why that matters ----
 
-#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+#[scaling::bench_scaling(nmin = 8, make_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
 fn scales_by_reading(v: &Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
 }
 
 // ---- the same, but consuming its generated input by value ----
 
-#[scaling::bench_scaling(nmin = 8, gen_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
+#[scaling::bench_scaling(nmin = 8, make_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
 fn scales_by_consuming(v: Vec<u64>) -> u64 {
     v.into_iter().fold(0u64, |a, x| a.wrapping_add(x))
 }
@@ -222,10 +222,10 @@ fn every_written_benchmark_is_found_and_measured() {
     for name in [
         "plain",
         "with_input",
-        "with_gen_input",
+        "with_make_input",
         "with_ref_input",
         "with_owned_input",
-        "with_owned_gen_input",
+        "with_owned_make_input",
         "with_persistent_state",
         "with_input_and_persistent_state",
         "with_ref_input_and_persistent_state",
@@ -252,11 +252,11 @@ fn every_written_benchmark_is_found_and_measured() {
     let gen_scaling_key = report
         .names()
         .find(|k| k.ends_with("scales_with_fresh_input"))
-        .expect("the gen_input scaling benchmark registered")
+        .expect("the make_input scaling benchmark registered")
         .to_string();
     assert!(
         report.scaling(&gen_scaling_key).is_some(),
-        "a scaling benchmark with gen_input should measure just like one without",
+        "a scaling benchmark with make_input should measure just like one without",
     );
 
     let ref_scaling_key = report

@@ -1,7 +1,7 @@
 //! `#[scaling::bench]` on a function returning `impl Fn() -> O` / `impl
 //! FnMut() -> O`: setup runs once, and the returned closure is what gets
 //! timed repeatedly - the pattern an ordinary `input = <value>` /
-//! `gen_input = <closure>` benchmark can't express, since both rebuild the
+//! `make_input = <closure>` benchmark can't express, since both rebuild the
 //! input fresh every iteration (see [`scaling::bench`]'s own doc comment).
 //! Covers the zero-argument shape, both input-taking ones - `input` given to
 //! the setup function that one time instead, by value or by reference - and
@@ -333,7 +333,7 @@ fn scaling_setup_runs_at_most_once_per_distinct_size() {
 
 /// The recommended way to combine "an expensive size-`n` structure, built
 /// once" with "a cheap value that must differ every call": an ordinary
-/// `gen_input` closure that caches the expensive part behind an `Arc`,
+/// `make_input` closure that caches the expensive part behind an `Arc`,
 /// keyed by size, and returns a fresh cheap value alongside a clone of it
 /// each call - no special shape on the benchmark function at all, which is
 /// what makes this compose with comparisons (every alternative shares the
@@ -345,7 +345,7 @@ static GEN_SCALING_GEN_CALLS: AtomicU64 = AtomicU64::new(0);
 #[scaling::bench_scaling(
     name = "counts_gen_scaling_build_calls",
     nmin = 4,
-    gen_input = {
+    make_input = {
         let mut cache: HashMap<usize, ::std::sync::Arc<u64>> = HashMap::new();
         move |n: usize| {
             let call_num = GEN_SCALING_GEN_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -362,7 +362,7 @@ fn gen_scaling_shares_cached_state(input: &(::std::sync::Arc<u64>, u64)) -> u64 
 }
 
 #[test]
-fn gen_input_can_cache_state_per_size_entirely_in_user_code() {
+fn make_input_can_cache_state_per_size_entirely_in_user_code() {
     let options = Options {
         filter: Filter::everything().matching("counts_gen_scaling_build_calls"),
         cfg: Options::default()
@@ -393,7 +393,7 @@ fn gen_input_can_cache_state_per_size_entirely_in_user_code() {
     let gen_calls = GEN_SCALING_GEN_CALLS.load(Ordering::SeqCst);
     assert!(
         gen_calls > 10 * build_log.len() as u64,
-        "gen_input itself should still run fresh on every timed call, not be \
+        "make_input itself should still run fresh on every timed call, not be \
          cached the way the expensive part inside it is - got {gen_calls} \
          calls across {} sizes",
         build_log.len(),

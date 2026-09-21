@@ -600,14 +600,14 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add`], measured against `cfg` rather than the suite's own.
     ///
-    /// See [`Suite::add_gen_input_with`] for what a per-benchmark `Config`
+    /// See [`Suite::add_make_input_with`] for what a per-benchmark `Config`
     /// is for and what it does not change.
     pub fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F) -> Token<Stats>
     where
         F: FnMut() -> O + 'a,
         O: 'a,
     {
-        self.add_gen_input_with(cfg, name, || (), move |_: &mut ()| f())
+        self.add_make_input_with(cfg, name, || (), move |_: &mut ()| f())
     }
 
     /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
@@ -621,7 +621,7 @@ impl<'a> Suite<'a> {
     }
 
     /// [`Suite::add_input`], measured against `cfg` rather than the suite's
-    /// own. See [`Suite::add_gen_input_with`].
+    /// own. See [`Suite::add_make_input_with`].
     pub fn add_input_with<F, I, O>(
         &mut self,
         cfg: &'a Config,
@@ -634,22 +634,22 @@ impl<'a> Suite<'a> {
         I: Clone + 'a,
         O: 'a,
     {
-        self.add_gen_input_with(cfg, name, move || input.clone(), f)
+        self.add_make_input_with(cfg, name, move || input.clone(), f)
     }
 
-    /// Add a benchmark over generated inputs, as [`bench_gen_input`] would
+    /// Add a benchmark over generated inputs, as [`bench_make_input`] would
     /// run it.
-    pub fn add_gen_input<G, F, I, O>(&mut self, name: &str, gen_input: G, f: F) -> Token<Stats>
+    pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> Token<Stats>
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
         I: 'a,
         O: 'a,
     {
-        self.add_gen_input_with(self.cfg, name, gen_input, f)
+        self.add_make_input_with(self.cfg, name, make_input, f)
     }
 
-    /// [`Suite::add_gen_input`], measured against `cfg` rather than the
+    /// [`Suite::add_make_input`], measured against `cfg` rather than the
     /// suite's own.
     ///
     /// One benchmark in a suite may want a different accuracy goal or a
@@ -681,11 +681,11 @@ impl<'a> Suite<'a> {
     /// let report = suite.run();
     /// # let _ = (slow.get(), rest.get(), report);
     /// ```
-    pub fn add_gen_input_with<G, F, I, O>(
+    pub fn add_make_input_with<G, F, I, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
-        gen_input: G,
+        make_input: G,
         f: F,
     ) -> Token<Stats>
     where
@@ -696,7 +696,7 @@ impl<'a> Suite<'a> {
     {
         self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
-                let stats = cfg.bench_gen_input_async(&clock, gen_input, f).await;
+                let stats = cfg.bench_make_input_async(&clock, make_input, f).await;
                 *token.cell() = Some(stats);
             })
         })
@@ -712,7 +712,7 @@ impl<'a> Suite<'a> {
     }
 
     /// [`Suite::add_scaling`], measured against `cfg` rather than the suite's
-    /// own. See [`Suite::add_gen_input_with`].
+    /// own. See [`Suite::add_make_input_with`].
     pub fn add_scaling_with<F, O>(
         &mut self,
         cfg: &'a Config,
@@ -736,7 +736,7 @@ impl<'a> Suite<'a> {
     pub fn add_scaling_gen<G, F, I, O>(
         &mut self,
         name: &str,
-        gen_input: G,
+        make_input: G,
         f: F,
         nmin: usize,
     ) -> Token<ScalingStats>
@@ -746,16 +746,16 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        self.add_scaling_gen_with(self.cfg, name, gen_input, f, nmin)
+        self.add_scaling_gen_with(self.cfg, name, make_input, f, nmin)
     }
 
     /// [`Suite::add_scaling_gen`], measured against `cfg` rather than the
-    /// suite's own. See [`Suite::add_gen_input_with`].
+    /// suite's own. See [`Suite::add_make_input_with`].
     pub fn add_scaling_gen_with<G, F, I, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
-        gen_input: G,
+        make_input: G,
         f: F,
         nmin: usize,
     ) -> Token<ScalingStats>
@@ -768,7 +768,7 @@ impl<'a> Suite<'a> {
         self.add_task(name, cfg.max_time, |clock, token| {
             Box::pin(async move {
                 *token.cell() = Some(
-                    cfg.bench_scaling_gen_async(&clock, gen_input, f, nmin)
+                    cfg.bench_scaling_gen_async(&clock, make_input, f, nmin)
                         .await,
                 );
             })
@@ -992,7 +992,7 @@ impl<'a> Suite<'a> {
             // One generator for the whole group, cloned per alternative, which
             // is what makes the differences paired - see `ErasedInput`.
             let make = group.make_input();
-            let mut alt = Alternative(cfg.comparison_gen_input(make));
+            let mut alt = Alternative(cfg.comparison_make_input(make));
             for m in &group.members {
                 match m.reg.kind {
                     Kind::Alt { add, .. } => alt = add(alt, &m.name),
@@ -1034,7 +1034,7 @@ impl<'a> Suite<'a> {
                     continue;
                 }
                 let make = input.reg.make;
-                let mut alt = Alternative(cfg.comparison_gen_input(make));
+                let mut alt = Alternative(cfg.comparison_make_input(make));
                 for c in &lane.candidates {
                     alt = (c.reg.add_alt)(alt, &c.name);
                 }
@@ -2744,7 +2744,7 @@ mod versions_and_rivals {
         name: &str,
         make: fn() -> ErasedInput,
     ) -> Handle<Stats> {
-        adder.gen_input(name, make, |e: &mut ErasedInput| {
+        adder.make_input(name, make, |e: &mut ErasedInput| {
             mix_new(e.get_mut::<Vec<u64>>())
         })
     }
@@ -2753,7 +2753,7 @@ mod versions_and_rivals {
         name: &str,
         make: fn() -> ErasedInput,
     ) -> Handle<Stats> {
-        adder.gen_input(name, make, |e: &mut ErasedInput| {
+        adder.make_input(name, make, |e: &mut ErasedInput| {
             mix_old(e.get_mut::<Vec<u64>>())
         })
     }

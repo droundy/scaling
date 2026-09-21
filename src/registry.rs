@@ -44,16 +44,16 @@ impl<'a, 'b> Adder<'a, 'b> {
         Handle(self.0.add_input(name, input, f))
     }
 
-    /// Adds a benchmark over generated inputs, as [`Suite::add_gen_input`]
+    /// Adds a benchmark over generated inputs, as [`Suite::add_make_input`]
     /// would.
-    pub fn gen_input<G, F, I, O>(&mut self, name: &str, gen_input: G, f: F) -> Handle<Stats>
+    pub fn make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> Handle<Stats>
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
         I: 'a,
         O: 'a,
     {
-        Handle(self.0.add_gen_input(name, gen_input, f))
+        Handle(self.0.add_make_input(name, make_input, f))
     }
 
     /// Adds a scaling benchmark, as [`Suite::add_scaling`] would.
@@ -70,7 +70,7 @@ impl<'a, 'b> Adder<'a, 'b> {
     pub fn scaling_gen<G, F, I, O>(
         &mut self,
         name: &str,
-        gen_input: G,
+        make_input: G,
         f: F,
         nmin: usize,
     ) -> Handle<ScalingStats>
@@ -80,7 +80,7 @@ impl<'a, 'b> Adder<'a, 'b> {
         I: 'a,
         O: 'a,
     {
-        Handle(self.0.add_scaling_gen(name, gen_input, f, nmin))
+        Handle(self.0.add_scaling_gen(name, make_input, f, nmin))
     }
 }
 
@@ -219,7 +219,7 @@ pub struct Registered {
 /// [`Config::bench`]: crate::Config::bench
 pub enum Kind {
     /// Adds itself with [`Adder::flat`], [`Adder::input`] or
-    /// [`Adder::gen_input`] - which of the three, and any input generator, is
+    /// [`Adder::make_input`] - which of the three, and any input generator, is
     /// baked into the shim.
     ///
     /// Hands back the handle that `add` returned, so that a caller can still

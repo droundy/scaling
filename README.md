@@ -21,10 +21,10 @@ fn fib_200() -> usize { fib(200) }
 fn fib_500() -> usize { fib(500) }
 
 // A benchmark that mutates state says where the state comes from.
-#[scaling::bench(gen_input = || vec![0i32; 100])]
+#[scaling::bench(make_input = || vec![0i32; 100])]
 fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
 
-#[scaling::bench(gen_input = || vec![0i32; 100])]
+#[scaling::bench(make_input = || vec![0i32; 100])]
 fn sort(xs: &mut Vec<i32>) { xs.sort() }
 ```
 

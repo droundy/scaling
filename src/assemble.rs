@@ -508,13 +508,13 @@ pub struct Group {
     /// `None` means the group takes no input, and assembly will use
     /// `ErasedInput::new(())` - which is what makes a no-input group and a
     /// generated-input group one code path rather than two.
-    pub gen_input: Option<&'static BenchInputRegistration>,
+    pub shared_input: Option<&'static BenchInputRegistration>,
 }
 
 impl Group {
     /// A maker for this group's input, defaulting to the unit input.
     pub fn make_input(&self) -> crate::registry::MakeInput {
-        match self.gen_input {
+        match self.shared_input {
             Some(g) => g.make,
             None => || ErasedInput::new(()),
         }
@@ -1123,8 +1123,8 @@ pub fn plan(
 
         // The generator, and whether everyone agrees about its type. A group
         // with no generator takes `()`, and its members must expect `()`.
-        let gen_input = chosen_gen.get(name).copied();
-        let (gen_type, gen_name) = match gen_input {
+        let shared_input = chosen_gen.get(name).copied();
+        let (gen_type, gen_name) = match shared_input {
             Some(g) => ((g.type_id)(), g.type_name),
             None => (std::any::TypeId::of::<()>(), "()"),
         };
@@ -1153,7 +1153,7 @@ pub fn plan(
         groups.push(Group {
             name,
             members,
-            gen_input,
+            shared_input,
         });
     }
 
@@ -1543,7 +1543,7 @@ mod pairing {
         let cfg = Config::relative(0.5).with_max_time(Duration::from_millis(50));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let _ = cfg
-            .comparison_gen_input(move || {
+            .comparison_make_input(move || {
                 // Varying, so that "they saw the same thing" is a real
                 // claim rather than one a constant would satisfy.
                 let n = 4 + (rng.next() % 16) as usize;
@@ -1601,7 +1601,7 @@ mod pairing {
         let cfg = Config::relative(0.02).with_max_time(Duration::from_millis(300));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let results = cfg
-            .comparison_gen_input(move || {
+            .comparison_make_input(move || {
                 let n = 100 + (rng.next() % 8000) as usize;
                 ErasedInput::new((0..n as u64).collect::<Vec<u64>>())
             })
@@ -1631,7 +1631,7 @@ pub(crate) mod lane_tests {
         name: &str,
         make: fn() -> ErasedInput,
     ) -> Handle<Stats> {
-        adder.gen_input(name, make, |_: &mut ErasedInput| ())
+        adder.make_input(name, make, |_: &mut ErasedInput| ())
     }
 
     pub(crate) fn cand<I: 'static>(

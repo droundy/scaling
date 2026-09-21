@@ -24,7 +24,7 @@ fn hashing() -> u64 {
     work(200)
 }
 
-#[scaling::bench(gen_input = || (0..256u64).rev().collect::<Vec<u64>>())]
+#[scaling::bench(make_input = || (0..256u64).rev().collect::<Vec<u64>>())]
 fn sorting_a_fresh_vec(v: &mut Vec<u64>) {
     v.sort();
 }
