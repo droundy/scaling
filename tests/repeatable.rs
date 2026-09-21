@@ -214,6 +214,84 @@ fn group_member_setup_runs_exactly_once_despite_many_timed_calls() {
     );
 }
 
+// ---- `#[bench_input]` itself may use the setup-once shape too: unlike
+// `make_input = <closure>` on an ordinary benchmark, which is user code
+// free to capture whatever persistent state it likes, `#[bench_input]`'s
+// function becomes a plain `fn` once registered - no closure environment
+// of its own to hold anything in - so this is the one place the shape
+// needs crate support rather than being achievable with an ordinary
+// closure. The expensive part builds once, ever, for the group's whole
+// run; the returned closure still runs the same number of times an
+// ordinary #[bench_input] function would - once per batch entry, several
+// per round (see `refill`/`time_batch`) - and its result is shared,
+// cheaply cloned, by every member of that round ----
+
+static BENCH_INPUT_BUILD_CALLS: AtomicU64 = AtomicU64::new(0);
+static BENCH_INPUT_ROUND_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench_input(group = "counts_bench_input_build_calls")]
+fn setup_once_shared_data() -> impl FnMut() -> ::std::sync::Arc<Vec<u64>> {
+    let big = ::std::sync::Arc::new({
+        BENCH_INPUT_BUILD_CALLS.fetch_add(1, Ordering::SeqCst);
+        (0..1000u64).collect::<Vec<u64>>()
+    });
+    move || {
+        BENCH_INPUT_ROUND_CALLS.fetch_add(1, Ordering::SeqCst);
+        big.clone()
+    }
+}
+
+#[scaling::bench(group = "counts_bench_input_build_calls", baseline)]
+fn setup_once_sum_a(v: &mut ::std::sync::Arc<Vec<u64>>) -> u64 {
+    v.iter().sum()
+}
+
+#[scaling::bench(group = "counts_bench_input_build_calls")]
+fn setup_once_sum_b(v: &mut ::std::sync::Arc<Vec<u64>>) -> u64 {
+    v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
+}
+
+#[test]
+fn bench_input_setup_runs_once_ever_while_its_closure_keeps_running() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_bench_input_build_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let cmp = report
+        .comparison("counts_bench_input_build_calls")
+        .expect("the group should have run");
+    let rounds: Vec<usize> = cmp.stats().iter().map(|s| s.samples).collect();
+    assert!(
+        rounds.iter().all(|&n| n > 10),
+        "expected several rounds: {rounds:?}",
+    );
+
+    assert_eq!(
+        BENCH_INPUT_BUILD_CALLS.load(Ordering::SeqCst),
+        1,
+        "the expensive part must build exactly once, ever, regardless of how \
+         many rounds or timed calls follow"
+    );
+    // Each round refills a whole batch of `unit` entries - see
+    // `time_batch`/`refill` - and a group's generator supplies one entry at
+    // a time, so its closure runs `unit` times per round, not once; the
+    // cached expensive part is what makes that cheap. Rather than pin down
+    // `unit` exactly, this just checks the closure kept running throughout
+    // - at least once per round, and demonstrably more than that.
+    let round_calls = BENCH_INPUT_ROUND_CALLS.load(Ordering::SeqCst);
+    assert!(
+        round_calls >= rounds[0] as u64,
+        "the generator's returned closure should run at least once per \
+         round - got {round_calls} calls across {} rounds",
+        rounds[0],
+    );
+}
+
 // ---- the same, for a matrix candidate: `add_flat`/`add_alt` are each
 // called once per (candidate, input) pairing, so `__action` is correctly
 // scoped to that one pairing's whole run ----

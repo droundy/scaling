@@ -194,6 +194,26 @@ fn sum_it_stateful(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
     move || total
 }
 
+// ---- a group whose own shared input generator uses the setup-once shape:
+// the expensive part builds once, ever; the returned closure still runs as
+// often as an ordinary #[bench_input] function would ----
+
+#[scaling::bench_input(group = "caching")]
+fn caching_data() -> impl FnMut() -> Vec<u64> {
+    let base: Vec<u64> = (0..300u64).collect();
+    move || base.clone()
+}
+
+#[scaling::bench(group = "caching", baseline)]
+fn caching_sum_a(v: &mut Vec<u64>) -> u64 {
+    v.iter().sum()
+}
+
+#[scaling::bench(group = "caching")]
+fn caching_sum_b(v: &mut Vec<u64>) -> u64 {
+    v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
+}
+
 // ---- a group whose alternatives take no input at all ----
 
 #[scaling::bench(group = "summing", baseline)]
@@ -303,6 +323,12 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the group with a Design A member ran");
     assert_eq!(counting.stats().len(), 2);
     assert_eq!(counting.against_baseline().count(), 1);
+
+    let caching = report
+        .comparison("caching")
+        .expect("the group with a Design A bench_input ran");
+    assert_eq!(caching.stats().len(), 2);
+    assert_eq!(caching.against_baseline().count(), 1);
 
     let shown = format!("{report}");
     assert!(

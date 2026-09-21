@@ -301,15 +301,42 @@ pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// fn sort_data() -> Vec<i32> { random_vec(1000) }
 /// ```
 ///
-/// Called once per round, and the value cloned for each alternative, so that
-/// all of them are measured on the same input - which is what makes their
-/// differences paired. Exactly one per group.
+/// Called fresh for every timed call across the whole comparison - several
+/// times per round, in fact, since a round batches more than one call
+/// together - and the value cloned for each alternative, so that all of
+/// them are measured on the same input at that call, which is what makes
+/// their differences paired. Exactly one per group.
 ///
 /// A `group = "..."` on `#[bench]`/`#[bench_scaling]` itself cannot also
 /// take `input = ...` or `make_input = ...`: an alternative's input always
 /// comes from its group's `#[bench_input]`, and per-alternative inputs
 /// would break the pairing the whole statistical model depends on. Use this
 /// attribute instead.
+///
+/// # Setup that runs once, ever, not once per call
+///
+/// This function may also return `impl Fn()/FnMut() -> I` instead of `I`
+/// directly - [`bench`]'s setup-once shape. Unlike `make_input = <closure>`
+/// on an ordinary benchmark, which is user code free to capture whatever
+/// persistent state it wants, this function becomes a plain `fn` once
+/// registered, with no closure environment of its own to hold anything in,
+/// so this is the one place the shape needs support from this crate rather
+/// than being written by hand with an `Arc`:
+///
+/// ```ignore
+/// #[scaling::bench_input(group = "sort")]
+/// fn sort_data() -> impl FnMut() -> std::sync::Arc<Vec<i32>> {
+///     let big = std::sync::Arc::new(random_vec(1_000_000));
+///     move || big.clone()
+/// }
+/// ```
+///
+/// `random_vec` runs once, ever, for the group's whole comparison; the
+/// returned closure runs exactly as often as this function itself would
+/// without setup-once - every call the group's alternatives need a fresh
+/// input for - and cloning the `Arc` each time is cheap. Every alternative
+/// in a round still sees the same input, same as always: what changes is
+/// that building it now costs once, not every call.
 #[proc_macro_attribute]
 pub fn bench_input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -553,6 +580,45 @@ fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
         };
     }
     Repeatable::No
+}
+
+/// If `sig` is the `NoArg` setup-once shape - `impl Fn() -> O` or `impl
+/// FnMut() -> O` - the `O` it produces, unwrapped from the closure bound
+/// that names it. `None` otherwise, `OneArg` included: a caller wanting
+/// [`Repeatable`] itself should ask [`returns_repeatable_closure`], this is
+/// only for a caller that already knows it wants `NoArg` specifically and
+/// needs the type inside it - [`expand_bench_input`] and
+/// [`expand_input`], where the function itself always takes no
+/// arguments, so there is no `OneArg` shape to speak of.
+fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    let Type::ImplTrait(imp) = &**ty else {
+        return None;
+    };
+    for bound in &imp.bounds {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            continue;
+        };
+        let Some(last) = trait_bound.path.segments.last() else {
+            continue;
+        };
+        if last.ident != "Fn" && last.ident != "FnMut" {
+            continue;
+        }
+        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
+            continue;
+        };
+        if !p.inputs.is_empty() {
+            return None;
+        }
+        return match &p.output {
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+            syn::ReturnType::Default => None,
+        };
+    }
+    None
 }
 
 /// The input type, spelled the way a person would.
@@ -1039,15 +1105,6 @@ fn expand_bench_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
              so it needs `group = \"...\"` to say which",
         )
     })?;
-    let ty = match &func.sig.output {
-        ReturnType::Type(_, ty) => (**ty).clone(),
-        ReturnType::Default => {
-            return Err(syn::Error::new(
-                func.sig.span(),
-                "an input generator has to return the input it generates",
-            ))
-        }
-    };
     if !func.sig.inputs.is_empty() {
         return Err(syn::Error::new(
             func.sig.inputs.span(),
@@ -1057,13 +1114,55 @@ fn expand_bench_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     let fname = &func.sig.ident;
     let shim = format_ident!("__scaling_gen_{}", fname);
+    // A group generator may also use the setup-once shape, `impl
+    // Fn()/FnMut() -> I` instead of `I` directly: since a plain `fn` (what
+    // this generator is, once registered) has no closure environment of
+    // its own to hold state in - unlike `make_input = <closure>` on an
+    // ordinary benchmark, which is user code free to capture whatever it
+    // wants - the persistent state lives in a `thread_local!` inside the
+    // shim instead, checked and populated the first time this group's
+    // generator runs and reused every round after. Bounded, cheap
+    // bookkeeping: a `RefCell` check once per round, not once per timed
+    // call - `#fname` itself still only runs once, ever.
+    let (ty, shim_body) = if let Some(inner_ty) = repeatable_output(&func.sig) {
+        let body = quote! {
+            #[doc(hidden)]
+            fn #shim() -> ::scaling::registry::ErasedInput {
+                ::std::thread_local! {
+                    static __ACTION: ::core::cell::RefCell<
+                        ::core::option::Option<::std::boxed::Box<dyn FnMut() -> #inner_ty>>
+                    > = ::core::cell::RefCell::new(::core::option::Option::None);
+                }
+                __ACTION.with(|__cell| {
+                    let mut __guard = __cell.borrow_mut();
+                    let __action = __guard.get_or_insert_with(|| ::std::boxed::Box::new(#fname()));
+                    ::scaling::registry::ErasedInput::new(__action())
+                })
+            }
+        };
+        (inner_ty, body)
+    } else {
+        let ty = match &func.sig.output {
+            ReturnType::Type(_, ty) => (**ty).clone(),
+            ReturnType::Default => {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "an input generator has to return the input it generates",
+                ))
+            }
+        };
+        let body = quote! {
+            #[doc(hidden)]
+            fn #shim() -> ::scaling::registry::ErasedInput {
+                ::scaling::registry::ErasedInput::new(#fname())
+            }
+        };
+        (ty, body)
+    };
     let ty_name = type_name(&ty);
     Ok(quote! {
         #func
-        #[doc(hidden)]
-        fn #shim() -> ::scaling::registry::ErasedInput {
-            ::scaling::registry::ErasedInput::new(#fname())
-        }
+        #shim_body
         ::scaling::inventory::submit! {
             ::scaling::registry::BenchInputRegistration {
                 group: #group,
