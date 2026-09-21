@@ -156,6 +156,58 @@ fn ref_input_setup_runs_exactly_once_despite_many_timed_calls() {
     );
 }
 
+// ---- the same, but `gen_input` supplies the returned closure with a value
+// that must keep changing every timed call, which a setup function that
+// runs once cannot supply itself - the flat counterpart of what
+// `#[bench_scaling]`'s own combination with `gen_input` does per size ----
+
+static ONE_ARG_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
+static ONE_ARG_GEN_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[scaling::bench(
+    name = "counts_its_own_one_arg_setup_calls",
+    gen_input = || ONE_ARG_GEN_CALLS.fetch_add(1, Ordering::SeqCst) % 1000
+)]
+fn counts_its_own_one_arg_setup_calls() -> impl FnMut(u64) -> bool {
+    ONE_ARG_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
+    let sorted: Vec<u64> = (0..1000u64).collect();
+    move |target: u64| sorted.binary_search(&target).is_ok()
+}
+
+#[test]
+fn one_arg_setup_runs_once_but_gen_input_runs_every_timed_call() {
+    let options = Options {
+        filter: Filter::everything().matching("counts_its_own_one_arg_setup_calls"),
+        cfg: Options::default()
+            .cfg
+            .with_max_time(Duration::from_millis(200)),
+        ..Options::default()
+    };
+
+    let report = measure(&options).expect("the registrations compose");
+    let stats = report
+        .stats("counts_its_own_one_arg_setup_calls")
+        .expect("it should have measured");
+
+    assert!(
+        stats.iterations > 1000,
+        "expected many iterations, got {}",
+        stats.iterations
+    );
+    assert_eq!(
+        ONE_ARG_SETUP_CALLS.load(Ordering::SeqCst),
+        1,
+        "setup must run exactly once despite many timed calls"
+    );
+    let gen_calls = ONE_ARG_GEN_CALLS.load(Ordering::SeqCst);
+    assert!(
+        gen_calls >= stats.iterations,
+        "gen_input should run fresh on every timed call, not be cached like \
+         setup is - got {gen_calls} calls against {} iterations",
+        stats.iterations,
+    );
+}
+
 // ---- the same, inside a comparison group: a group's own alternative closure
 // is what gets called many times per round across many rounds (see
 // `ComparisonSet::add_input`), exactly like `Adder::flat`/`input` is for an

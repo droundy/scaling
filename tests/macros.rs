@@ -99,6 +99,16 @@ fn with_ref_input_and_persistent_state(v: &mut Vec<i32>) -> impl FnMut() -> i32 
     }
 }
 
+// ---- the same, but the returned closure takes an argument fed fresh by
+// `gen_input` on every timed call, rather than moving/borrowing anything
+// from setup itself ----
+
+#[scaling::bench(gen_input = || 3i32)]
+fn with_gen_arg_and_persistent_state() -> impl FnMut(i32) -> i32 {
+    let base = 100i32;
+    move |k: i32| base.wrapping_add(k)
+}
+
 // ---- a scaling benchmark ----
 
 #[scaling::bench_scaling(nmin = 32)]
@@ -239,6 +249,7 @@ fn every_written_benchmark_is_found_and_measured() {
         "with_persistent_state",
         "with_input_and_persistent_state",
         "with_ref_input_and_persistent_state",
+        "with_gen_arg_and_persistent_state",
     ] {
         let full = report
             .names()

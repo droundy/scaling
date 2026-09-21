@@ -112,10 +112,32 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// state, not for every timed call after. Take `I` by value instead when the
 /// state genuinely needs to own what was borrowed.
 ///
-/// `gen_input` does not combine with this shape - it exists to rebuild its
-/// value fresh per call, which a setup function that runs once never does;
-/// write whatever `gen_input`'s closure would have as `input`'s value
-/// directly instead.
+/// `gen_input` combines with the zero-argument form instead, for a
+/// different reason than `input` does: not to build the persistent state -
+/// a zero-argument setup function has none of its own to build it from -
+/// but to supply the *returned closure* with a value that must keep
+/// changing every timed call, which setup itself cannot, having already run
+/// once. Return `impl Fn(K)/FnMut(K) -> O` to accept it:
+///
+/// ```ignore
+/// #[scaling::bench(gen_input = || rand::random::<u64>() % 1_000_000)]
+/// fn search_in_sorted() -> impl FnMut(u64) -> bool {
+///     let sorted: Vec<u64> = (0..1_000_000).collect();
+///     move |target: u64| sorted.binary_search(&target).is_ok()
+/// }
+/// ```
+///
+/// `sorted` is built once; `gen_input` still runs fresh on every timed
+/// call, exactly as it always does, and its result becomes the argument the
+/// cached closure is called with each time. Building `sorted` inside
+/// `gen_input` instead - the shape without setup-once - would rebuild it on
+/// every single lookup, which dominates every measurement for anything
+/// sized to matter. A setup function combining `gen_input` this way takes
+/// no input of its own: `gen_input`'s value goes to the returned closure,
+/// which is what needs to vary per call, so `gen_input` cannot combine
+/// with `input`, or with a setup function returning `impl Fn()/FnMut() ->
+/// O` (no argument, nothing for the value to go to) - only with a
+/// zero-argument one returning `impl Fn(K)/FnMut(K) -> O`.
 ///
 /// Add `group = "name"` to make this one alternative of a comparison, and
 /// `baseline` on exactly one member of each group to say which the others
@@ -733,7 +755,8 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         (None, Flavour::Flat) => {
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
-            let repeatable = returns_repeatable_closure(&func.sig) == Repeatable::NoArg;
+            let repeatable_kind = returns_repeatable_closure(&func.sig);
+            let repeatable = repeatable_kind == Repeatable::NoArg;
             if repeatable && args.gen_input.is_some() {
                 return Err(syn::Error::new(
                     func.sig.span(),
@@ -743,7 +766,49 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                      for exactly that reason",
                 ));
             }
+            if repeatable_kind == Repeatable::OneArg {
+                if args.gen_input.is_none() {
+                    return Err(syn::Error::new(
+                        func.sig.span(),
+                        "this setup function's returned closure takes an argument, so \
+                         something has to supply it fresh on every timed call - add \
+                         `gen_input = || -> K { ... }` to build that value, or return \
+                         `impl Fn()/FnMut() -> O` (no argument) if nothing should vary \
+                         per call",
+                    ));
+                }
+                if !matches!(kind, Input::None) {
+                    return Err(syn::Error::new(
+                        func.sig.inputs.span(),
+                        "a setup function combined with `gen_input` this way takes no \
+                         input of its own - `gen_input`'s value goes to the *returned* \
+                         closure instead, which is what needs to vary per call, not to \
+                         this function, which still only ever runs once",
+                    ));
+                }
+            }
             let body = match (&args.input, &args.gen_input) {
+                // Setup takes nothing and runs once, same as the plain
+                // no-`gen_input` case below; `gen_input` is unchanged from
+                // what it always was - still called fresh on every timed
+                // call - except its result now feeds the *cached* closure
+                // as an argument instead of being handed to a function that
+                // would otherwise run every time. The fix for something
+                // expensive to build once (a big sorted `Vec`, say) that
+                // still needs a fresh per-call value (a random target to
+                // search for) fed into it.
+                (None, Some(gen)) if repeatable_kind == Repeatable::OneArg => {
+                    quote! {
+                        {
+                            let mut __gen = #gen;
+                            let mut __action = ::core::option::Option::None;
+                            __adder.flat(__name, move || {
+                                let __k = __gen();
+                                (__action.get_or_insert_with(#fname))(__k)
+                            })
+                        }
+                    }
+                }
                 // The setup function itself runs once: `input` is given to
                 // it there, not cloned/regenerated per call the way
                 // `Adder::input`/`gen_input` would. Routing this through
@@ -841,7 +906,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                              <closure>` builds a fresh one",
                         ));
                     }
-                    if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
+                    if repeatable {
                         // Setup runs once, lazily - on first call, which is
                         // also the first time `Adder::flat`'s own filter
                         // check has already passed, so a filtered-out
