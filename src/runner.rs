@@ -70,7 +70,11 @@
 //! for the full behavior.
 
 use crate::assemble::Lane;
-use crate::{Comparisons, Config, Filter, RegisteredTokens, Report, ScalingStats, Stats, Suite};
+use crate::{Config, Filter, RegisteredTokens, Report, Suite};
+// Only for test mocks - the `json` module (below) brings in its own copy
+// of `Stats`, along with `Comparisons`/`ScalingStats`, for its own use.
+#[cfg(test)]
+use crate::Stats;
 use auto_args::AutoArgs;
 
 /// The four assembly types a caller actually touches, re-exported here
@@ -133,7 +137,9 @@ pub enum Format {
     /// outright when a difference was too small to call. Use this when the
     /// question is "is that number real", rather than "which of these wins".
     List,
-    /// Machine-readable, for tracking results between runs.
+    /// Machine-readable, for tracking results between runs. Only with the
+    /// `json` feature - see [`crate::runner`]'s "Flags" section.
+    #[cfg(feature = "json")]
     Json,
 }
 
@@ -142,9 +148,16 @@ impl Format {
         match s {
             "table" => Ok(Format::Table),
             "list" => Ok(Format::List),
+            #[cfg(feature = "json")]
             "json" => Ok(Format::Json),
+            #[cfg(feature = "json")]
             other => Err(format!(
                 "`{other}` is not a format; try table, list or json"
+            )),
+            #[cfg(not(feature = "json"))]
+            other => Err(format!(
+                "`{other}` is not a format; try table or list \
+                 (json needs the `json` feature)"
             )),
         }
     }
@@ -506,6 +519,7 @@ pub fn run(options: Options) -> Outcome {
     match format {
         Format::List => println!("{report}"),
         Format::Table => print!("{}", table(&report, &tokens)),
+        #[cfg(feature = "json")]
         Format::Json => print!("{}", json(&report)),
     }
 
@@ -806,139 +820,123 @@ fn short_time(ns: f64) -> String {
 
 /// The whole report as JSON, on one array of objects.
 ///
-/// Hand-rolled: every field is a number, a bool or a string, so `serde`
-/// would earn nothing here but a dependency. The one thing that does need
-/// care is that JSON has no `NaN` and no infinity, and this crate produces
-/// both - an error bar from fewer than two samples is `NaN`, and a relative
-/// figure against a zero baseline is infinite. Those are written `null`,
-/// which every parser reads, rather than a bare `NaN`, which none does.
+/// Built from [`Stats`]/[`ScalingStats`]/[`Scaling`] themselves - `Serialize`
+/// derived directly on them, behind the `json` feature - rather than
+/// separate JSON-only types kept in step by hand. See [`json::Kind`] for
+/// the one place that shape is assembled, and this module's own "Flags"
+/// section for what that buys.
+#[cfg(feature = "json")]
 fn json(report: &Report) -> String {
-    let mut out = String::from("{\n  \"benchmarks\": [\n");
-    let mut first = true;
-    for name in report.names() {
-        let object = if let Some(s) = report.stats(name) {
-            json_stats(name, &s)
-        } else if let Some(s) = report.scaling(name) {
-            json_scaling(name, &s)
-        } else if let Some(c) = report.comparison(name) {
-            json_comparison(name, &c)
-        } else {
-            continue;
-        };
-        if !first {
-            out.push_str(",\n");
-        }
-        first = false;
-        out.push_str(&object);
+    let benchmarks: Vec<json::Entry> = report
+        .names()
+        .filter_map(|name| {
+            let kind = if let Some(s) = report.stats(name) {
+                json::Kind::Flat { stats: s }
+            } else if let Some(s) = report.scaling(name) {
+                json::Kind::Scaling { stats: s }
+            } else {
+                let c = report.comparison(name)?;
+                json::Kind::Comparison {
+                    comparison: json::Comparison::from(&c),
+                }
+            };
+            Some(json::Entry {
+                name: name.to_string(),
+                kind,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&json::Report { benchmarks })
+        .expect("Stats/ScalingStats/Comparisons contain nothing serde_json can fail on")
+}
+
+/// The types `--format json` actually writes, kept apart from everything
+/// else in this module because every one of them exists only to be
+/// `Serialize`d - nothing here has a caller outside [`json`](super::json).
+#[cfg(feature = "json")]
+mod json {
+    use crate::{Comparisons, ScalingStats, Stats};
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub(super) struct Report {
+        pub(super) benchmarks: Vec<Entry>,
     }
-    out.push_str("\n  ]\n}\n");
-    out
-}
 
-fn json_stats(name: &str, s: &Stats) -> String {
-    format!(
-        "    {{\"name\": {}, \"kind\": \"flat\", {}}}",
-        string(name),
-        stats_fields(s)
-    )
-}
-
-/// The fields of a [`Stats`], shared between a flat benchmark and one
-/// alternative of a comparison - they are the same measurement, and a
-/// consumer should not have to learn two spellings of it.
-fn stats_fields(s: &Stats) -> String {
-    format!(
-        "\"ns_per_iter\": {}, \"std_error\": {}, \"iterations\": {}, \"samples\": {}, \
-         \"hit_limit\": {}, \"untrustworthy\": {}",
-        number(s.ns_per_iter),
-        number(s.std_error),
-        s.iterations,
-        s.samples,
-        s.hit_limit,
-        s.untrustworthy,
-    )
-}
-
-fn json_scaling(name: &str, s: &ScalingStats) -> String {
-    let (power, ns_per_scale) = match s.scaling {
-        // `null` rather than zero, which is what this used to report and
-        // what a function that really is free reports too.
-        None => ("null".to_string(), "null".to_string()),
-        Some(scaling) => (scaling.power.to_string(), number(scaling.ns_per_scale)),
-    };
-    format!(
-        "    {{\"name\": {}, \"kind\": \"scaling\", \"power\": {power}, \
-         \"ns_per_scale\": {ns_per_scale}, \"std_error\": {}, \"rel_std_error\": {}, \
-         \"goodness_of_fit\": {}, \"iterations\": {}, \"hit_limit\": {}}}",
-        string(name),
-        number(s.std_error()),
-        number(s.rel_std_error),
-        number(s.goodness_of_fit),
-        s.iterations,
-        s.hit_limit,
-    )
-}
-
-fn json_comparison(name: &str, c: &Comparisons) -> String {
-    let mut alternatives = Vec::new();
-    let stats = c.stats();
-    alternatives.push(format!(
-        "      {{\"name\": {}, \"baseline\": true, {}, \"difference_ns\": null, \
-         \"difference_std_error\": null, \"changed\": null, \"min_detectable_ns\": null}}",
-        string(c.baseline_name()),
-        stats_fields(&stats[0]),
-    ));
-    for (alt, comparison) in c.against_baseline() {
-        alternatives.push(format!(
-            "      {{\"name\": {}, \"baseline\": false, {}, \"difference_ns\": {}, \
-             \"difference_std_error\": {}, \"changed\": {}, \"min_detectable_ns\": {}}}",
-            string(alt),
-            stats_fields(&comparison.candidate),
-            number(comparison.difference_ns()),
-            number(comparison.std_error()),
-            comparison.is_changed(),
-            number(comparison.min_detectable_difference()),
-        ));
+    #[derive(Serialize)]
+    pub(super) struct Entry {
+        pub(super) name: String,
+        #[serde(flatten)]
+        pub(super) kind: Kind,
     }
-    format!(
-        "    {{\"name\": {}, \"kind\": \"comparison\", \"baseline\": {}, \
-         \"alternatives\": [\n{}\n    ]}}",
-        string(name),
-        string(c.baseline_name()),
-        alternatives.join(",\n"),
-    )
-}
 
-/// A float as JSON, which has no way to spell the two this crate produces.
-fn number(x: f64) -> String {
-    if x.is_finite() {
-        // Rust's `Display` for `f64` never uses exponent notation and always
-        // round-trips, both of which JSON is happy with.
-        format!("{x}")
-    } else {
-        "null".to_string()
+    /// `#[serde(flatten)]` rejects a newtype variant (`Flat(Stats)`)
+    /// outright - "cannot be used on newtype structs" - but accepts a
+    /// struct variant with one named, flattened field, which serializes
+    /// identically. `#[serde(tag = "kind")]` still puts `"kind": "flat"` (etc)
+    /// alongside whatever `stats`/`comparison` flatten in as ordinary keys.
+    #[derive(Serialize)]
+    #[serde(tag = "kind", rename_all = "lowercase")]
+    pub(super) enum Kind {
+        Flat {
+            #[serde(flatten)]
+            stats: Stats,
+        },
+        Scaling {
+            #[serde(flatten)]
+            stats: ScalingStats,
+        },
+        Comparison {
+            #[serde(flatten)]
+            comparison: Comparison,
+        },
     }
-}
 
-/// A string as JSON. Benchmark names are Rust paths and would survive
-/// without this, but they are not all this writes - a `types(...)`
-/// disambiguator carries whatever the source spelled.
-fn string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+    #[derive(Serialize)]
+    pub(super) struct Comparison {
+        pub(super) baseline: String,
+        pub(super) alternatives: Vec<Alternative>,
+    }
+
+    impl From<&Comparisons> for Comparison {
+        fn from(c: &Comparisons) -> Self {
+            let stats = c.stats();
+            let mut alternatives = vec![Alternative {
+                name: c.baseline_name().to_string(),
+                baseline: true,
+                stats: stats[0].clone(),
+                difference_ns: None,
+                difference_std_error: None,
+                changed: None,
+                min_detectable_ns: None,
+            }];
+            alternatives.extend(c.against_baseline().map(|(name, comparison)| Alternative {
+                name: name.to_string(),
+                baseline: false,
+                stats: comparison.candidate.clone(),
+                difference_ns: Some(comparison.difference_ns()),
+                difference_std_error: Some(comparison.std_error()),
+                changed: Some(comparison.is_changed()),
+                min_detectable_ns: Some(comparison.min_detectable_difference()),
+            }));
+            Comparison {
+                baseline: c.baseline_name().to_string(),
+                alternatives,
+            }
         }
     }
-    out.push('"');
-    out
+
+    #[derive(Serialize)]
+    pub(super) struct Alternative {
+        pub(super) name: String,
+        pub(super) baseline: bool,
+        #[serde(flatten)]
+        pub(super) stats: Stats,
+        pub(super) difference_ns: Option<f64>,
+        pub(super) difference_std_error: Option<f64>,
+        pub(super) changed: Option<bool>,
+        pub(super) min_detectable_ns: Option<f64>,
+    }
 }
 
 #[cfg(test)]
@@ -971,6 +969,14 @@ mod tests {
 
     #[test]
     fn the_flags_reach_the_options_they_name() {
+        // "list" stands in for "json" when the `json` feature is off, so
+        // this test still exercises every other flag either way - only the
+        // one assertion right below differs.
+        let format_flag = if cfg!(feature = "json") {
+            "json"
+        } else {
+            "list"
+        };
         let options = Options::from_arg_iter([
             "bench",
             "--filter",
@@ -979,7 +985,7 @@ mod tests {
             "slow",
             "--exact",
             "--format",
-            "json",
+            format_flag,
             "--rel-error",
             "0.005",
             "--max-time",
@@ -993,7 +999,10 @@ mod tests {
         .unwrap();
         assert!(options.filter.matches("sort"));
         assert!(!options.filter.matches("mymod::sort"), "--exact");
+        #[cfg(feature = "json")]
         assert_eq!(options.format, Format::Json);
+        #[cfg(not(feature = "json"))]
+        assert_eq!(options.format, Format::List);
         assert_eq!(options.cfg.target_rel_error, 0.005);
         assert_eq!(options.cfg.max_time, Duration::from_millis(250));
         assert_eq!(options.registry.versions, VersionPolicy::LatestPerCrate);
@@ -1043,6 +1052,9 @@ mod tests {
     fn an_unknown_format_says_what_the_formats_are() {
         let e = Options::from_arg_iter(["bench", "--format", "yaml"]).unwrap_err();
         assert!(e.contains("table"), "{e}");
+        assert!(e.contains("list"), "{e}");
+        // Mentioned either way: what to install to get it, without the
+        // `json` feature; what to ask for, with it.
         assert!(e.contains("json"), "{e}");
     }
 
@@ -1060,24 +1072,86 @@ mod tests {
         assert!(parse_baseline("whenever").is_err());
     }
 
-    /// JSON has no `NaN` and no infinity; this crate produces both. Writing
-    /// them literally makes the whole document unparseable, which is worse
-    /// than losing one field.
+    /// `ScalingStats::scaling` is `#[serde(flatten)]`ed, and flatten's
+    /// documented behavior for `Option<T>` is: `Some` flattens `T`'s own
+    /// fields in as usual, `None` adds no keys at all - not `power: null,
+    /// ns_per_scale: null`. Guards that behavior directly, since it is easy
+    /// to get backwards by reasoning about it rather than checking.
+    #[cfg(feature = "json")]
     #[test]
-    fn what_json_cannot_spell_becomes_null() {
-        assert_eq!(number(1.5), "1.5");
-        assert_eq!(number(f64::NAN), "null");
-        assert_eq!(number(f64::INFINITY), "null");
-        assert_eq!(number(f64::NEG_INFINITY), "null");
+    fn no_scaling_law_omits_its_two_fields_rather_than_nulling_them() {
+        use crate::{Scaling, ScalingStats};
+        let some = ScalingStats {
+            scaling: Some(Scaling {
+                power: 2,
+                ns_per_scale: 3.5,
+            }),
+            rel_std_error: 0.01,
+            goodness_of_fit: 0.9,
+            iterations: 1000,
+            hit_limit: false,
+        };
+        let none = ScalingStats {
+            scaling: None,
+            rel_std_error: f64::NAN,
+            goodness_of_fit: 0.0,
+            iterations: 5,
+            hit_limit: true,
+        };
+        let s = serde_json::to_string(&some).unwrap();
+        assert!(s.contains("\"power\":2"), "{s}");
+        assert!(s.contains("\"ns_per_scale\":3.5"), "{s}");
+        let s = serde_json::to_string(&none).unwrap();
+        assert!(!s.contains("power"), "{s}");
+        assert!(!s.contains("ns_per_scale"), "{s}");
     }
 
+    /// JSON has no `NaN` and no infinity; this crate produces both, in
+    /// `std_error` above all - "fewer than two samples" is the ordinary
+    /// case for an extremely slow benchmark. `serde_json` writes `null` for
+    /// either automatically; this only guards that the crate's own types
+    /// still route through that behavior rather than, say, a
+    /// `serialize_with` someone forgot to carry over.
+    #[cfg(feature = "json")]
     #[test]
-    fn strings_are_escaped() {
-        assert_eq!(string("plain"), "\"plain\"");
-        assert_eq!(string("a\"b"), "\"a\\\"b\"");
-        assert_eq!(string("a\\b"), "\"a\\\\b\"");
-        assert_eq!(string("a\nb"), "\"a\\nb\"");
-        assert_eq!(string("a\u{1}b"), "\"a\\u0001b\"");
+    fn non_finite_numbers_become_null() {
+        let stats = Stats {
+            ns_per_iter: 1.5,
+            std_error: f64::NAN,
+            iterations: 10,
+            samples: 1,
+            hit_limit: true,
+            untrustworthy: true,
+        };
+        let s = serde_json::to_string(&stats).unwrap();
+        assert!(s.contains("\"ns_per_iter\":1.5"), "{s}");
+        assert!(s.contains("\"std_error\":null"), "{s}");
+    }
+
+    /// Benchmark names are Rust paths and would round-trip without any
+    /// escaping - but a `name = "..."` override or a `types(...)`
+    /// disambiguator carries whatever the source spelled, quotes and all.
+    /// Not re-testing `serde_json`'s own escaping in detail - only that
+    /// this crate's names actually flow through it rather than around it.
+    #[cfg(feature = "json")]
+    #[test]
+    fn names_with_the_usual_troublemakers_round_trip() {
+        let entry = json::Entry {
+            name: "a\"b\\c\nd\u{1}e".to_string(),
+            kind: json::Kind::Flat {
+                stats: Stats {
+                    ns_per_iter: 1.0,
+                    std_error: 0.1,
+                    iterations: 1,
+                    samples: 1,
+                    hit_limit: false,
+                    untrustworthy: false,
+                },
+            },
+        };
+        let s = serde_json::to_string(&entry).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["name"], "a\"b\\c\nd\u{1}e");
     }
 
     #[test]
