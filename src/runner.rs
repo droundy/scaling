@@ -17,6 +17,11 @@
 //! cargo bench --bench bench -- --filter sort --format json
 //! ```
 //!
+//! `--format json` needs the `json` feature (`scaling = { version = "...",
+//! features = ["json"] }`) - without it, `json` is not even an accepted
+//! value for `--format`, since [`crate::runner::Format`] itself has no
+//! `Json` variant to compile in.
+//!
 //! # What it prints where
 //!
 //! Results go to stdout, everything else to stderr: how many benchmarks are
@@ -38,7 +43,8 @@
 //!   `--filter` and `--skip`.
 //! * `--list` - print what would run, and measure nothing.
 //! * `--format <table|list|json>` - how to print results; see
-//!   [`crate::runner::Format`]. Table is the default.
+//!   [`crate::runner::Format`]. Table is the default. `json` needs the
+//!   `json` feature - see above.
 //! * `--rel-error <fraction>` - stop once the standard error is this
 //!   fraction of the measurement, e.g. `0.01` for 1%.
 //! * `--abs-error <duration>` - stop once the standard error is below this,
@@ -120,6 +126,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 /// How to print the results.
+///
+/// A third variant, `Json`, exists behind the `json` feature - visible here
+/// only when this documentation was built with it enabled. Without it,
+/// `--format json` is rejected outright at the command line rather than
+/// silently falling back to something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
     /// A group with several inputs as a grid, everything else as one line
@@ -823,8 +834,9 @@ fn short_time(ns: f64) -> String {
 
 /// The whole report as JSON, on one array of objects.
 ///
-/// Built from [`Stats`]/[`ScalingStats`]/[`Scaling`] themselves - `Serialize`
-/// derived directly on them, behind the `json` feature - rather than
+/// Built from [`crate::Stats`]/[`crate::ScalingStats`]/[`crate::Scaling`]
+/// themselves - `Serialize` derived directly on them, behind the `json`
+/// feature - rather than
 /// separate JSON-only types kept in step by hand. See [`json::Kind`] for
 /// the one place that shape is assembled, and this module's own "Flags"
 /// section for what that buys.
@@ -852,7 +864,7 @@ fn json(report: &Report) -> String {
 
 /// The types `--format json` actually writes, kept apart from everything
 /// else in this module because every one of them exists only to be
-/// `Serialize`d - nothing here has a caller outside [`json`](super::json).
+/// `Serialize`d - nothing here has a caller outside [`mod@json`].
 #[cfg(feature = "json")]
 mod json {
     use crate::{Comparisons, ScalingStats, Stats};

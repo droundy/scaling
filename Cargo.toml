@@ -48,6 +48,13 @@ serde_json = { version = "1", optional = true }
 [features]
 json = ["dep:serde", "dep:serde_json"]
 
+# Without this, docs.rs builds with default features only, and everything
+# behind `json` - `Format::Json`, the JSON schema, the "json" feature note
+# in `runner`'s own flag reference - is silently absent from the published
+# docs with no indication anything was left out.
+[package.metadata.docs.rs]
+all-features = true
+
 [workspace]
 members = [".", "macros"]
 
