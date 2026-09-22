@@ -74,6 +74,23 @@ defined that exact feature - worse than an explicit gate you chose
 yourself. The cost of this route is a `#[cfg]` to remember on every
 benchmark you write this way.
 
+This route also buys something the other one cannot: benchmarks that
+cross crate boundaries. `#[scaling::bench]` in `src/` becomes part of the
+crate's own compiled output, the same as any other item behind a feature -
+and registration is collected from *everything linked into one binary*,
+regardless of which crate contributed it. So a family of related crates -
+`rand_core`, `rand_chacha`, `rand_pcg`, and the like - can each register
+their own benchmarks behind their own feature, and a single downstream
+binary that depends on several of them with those features enabled gets
+one combined, interleaved run spanning the whole family, with no crate
+having to know about any of the others' benchmarks in advance. This is
+exactly why every registration carries `crate_name`/`crate_version`: two
+crates - or two versions of one - registering into the same binary is an
+intended scenario, not an edge case; see [`crate::runner::VersionPolicy`]
+for how a name they happen to share is resolved. `#[cfg(test)]` code
+never leaves the crate that defines it, so the dev-only route below cannot
+do this at all.
+
 **Dev-only, no feature at all**, if you would rather not annotate every
 benchmark individually. Put `scaling` in `[dev-dependencies]` only -
 nothing under `[dependencies]` - and wrap the whole module in
