@@ -14,9 +14,8 @@
 //! measuring nothing. That makes every diagnostic below testable without a
 //! benchmark, a machine claim, or a linker.
 
-use crate::registry::{
-    BenchInputRegistration, ErasedInput, Kind, MatrixCandidate, MatrixInput, Registered,
-};
+use crate::registry::{Candidate, ErasedInput, Input, Registered};
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 
@@ -307,23 +306,12 @@ pub enum Diagnostic {
         /// Where each came from, as `crate@version (module)`.
         sources: Vec<String>,
     },
-    /// A comparison group with fewer than two alternatives. There is nothing
-    /// to compare a lone alternative against, and assembling it would panic.
-    LonelyGroup { group: String, members: Vec<String> },
-    /// A comparison group where nobody is the baseline.
-    ///
-    /// A hand-built comparison set takes its first alternative as the
-    /// baseline, but registrations have no order, so one of them has to say.
-    NoBaseline { group: String, members: Vec<String> },
     /// A comparison group where more than one alternative claims to be the
     /// baseline.
     ManyBaselines {
         group: String,
         claimants: Vec<String>,
     },
-    /// More than one input generator declared for one group. They cannot
-    /// both be the group's shared input.
-    ManyGenerators { group: String, sources: Vec<String> },
     /// A [`BaselinePolicy::Exact`] naming something that is not among the
     /// claimants.
     NoSuchBaseline {
@@ -354,25 +342,11 @@ pub enum Diagnostic {
         what: &'static str,
         name: String,
     },
-    /// Two types spelled alike in one matrix lane are not the same type.
+    /// Two types spelled alike in one lane are not the same type.
     MatrixTypeMismatch {
         matrix: String,
         candidate: String,
         type_name: &'static str,
-    },
-    /// An alternative expects a different input type from the one its
-    /// group's generator produces.
-    ///
-    /// Caught here so that it is a named error rather than a downcast panic
-    /// from somewhere inside the scheduler.
-    InputTypeMismatch {
-        group: String,
-        member: String,
-        /// What the generator makes, and what this member wanted. Type
-        /// *names* rather than `TypeId`s, since a `TypeId` says nothing to a
-        /// reader.
-        generator_type: &'static str,
-        member_type: &'static str,
     },
 }
 
@@ -404,25 +378,10 @@ impl Display for Diagnostic {
                     list(sources)
                 )
             }
-            Diagnostic::LonelyGroup { group, members } => write!(
-                f,
-                "comparison group `{group}` has only {}; a comparison needs at least two",
-                list(members),
-            ),
-            Diagnostic::NoBaseline { group, members } => write!(
-                f,
-                "comparison group `{group}` has no baseline; mark one of {} as the baseline",
-                list(members),
-            ),
             Diagnostic::ManyBaselines { group, claimants } => write!(
                 f,
-                "comparison group `{group}` has more than one baseline: {}",
+                "group `{group}` has more than one baseline: {}",
                 list(claimants),
-            ),
-            Diagnostic::ManyGenerators { group, sources } => write!(
-                f,
-                "comparison group `{group}` has more than one input generator: {}",
-                list(sources),
             ),
             Diagnostic::NoSuchBaseline {
                 group,
@@ -435,44 +394,38 @@ impl Display for Diagnostic {
                 list(claimants),
             ),
             Diagnostic::OrphanCandidate {
-                matrix,
+                matrix: group,
                 name,
                 type_name,
             } => write!(
                 f,
-                "in matrix `{matrix}`, `{name}` takes `{type_name}` but no input of \
+                "in group `{group}`, `{name}` takes `{type_name}` but no input of \
                  that type is registered, so it was measured on nothing",
             ),
             Diagnostic::OrphanInput {
-                matrix,
+                matrix: group,
                 name,
                 type_name,
             } => write!(
                 f,
-                "in matrix `{matrix}`, the input `{name}` produces `{type_name}` but no \
+                "in group `{group}`, the input `{name}` produces `{type_name}` but no \
                  candidate takes that type, so nothing was measured on it",
             ),
-            Diagnostic::DuplicateMatrixEntry { matrix, what, name } => {
-                write!(f, "matrix `{matrix}` has two {what}s called `{name}`",)
+            Diagnostic::DuplicateMatrixEntry {
+                matrix: group,
+                what,
+                name,
+            } => {
+                write!(f, "group `{group}` has two {what}s called `{name}`",)
             }
             Diagnostic::MatrixTypeMismatch {
-                matrix,
+                matrix: group,
                 candidate,
                 type_name,
             } => write!(
                 f,
-                "in matrix `{matrix}`, `{candidate}` takes a different `{type_name}` from \
+                "in group `{group}`, `{candidate}` takes a different `{type_name}` from \
                  the one the inputs produce - two types of the same name are still two types",
-            ),
-            Diagnostic::InputTypeMismatch {
-                group,
-                member,
-                generator_type,
-                member_type,
-            } => write!(
-                f,
-                "in comparison group `{group}`, `{member}` takes `{member_type}` \
-                 but the group's input generator produces `{generator_type}`",
             ),
         }
     }
@@ -490,57 +443,33 @@ fn list(items: &[String]) -> String {
 pub struct Plan {
     /// Benchmarks that stand alone, sorted by name.
     pub flat: Vec<Named<Registered>>,
-    /// Comparison groups, sorted by group name, each with its baseline
-    /// first.
-    pub groups: Vec<Group>,
+    /// Comparison lanes, sorted by group name and then by type name.
+    pub lanes: Vec<Lane>,
 }
 
-/// One comparison group, ready to become a comparison set.
-#[derive(Debug)]
-pub struct Group {
-    pub name: &'static str,
-    /// The baseline first, then the rest sorted by name. `ComparisonSet`
-    /// takes its first alternative as the baseline, so this ordering is what
-    /// carries the decision made here into the set built later.
-    pub members: Vec<Named<Registered>>,
-    /// The group's shared input generator, if one was declared.
-    ///
-    /// `None` means the group takes no input, and assembly will use
-    /// `ErasedInput::new(())` - which is what makes a no-input group and a
-    /// generated-input group one code path rather than two.
-    pub shared_input: Option<&'static BenchInputRegistration>,
-}
-
-impl Group {
-    /// A maker for this group's input, defaulting to the unit input.
-    pub fn make_input(&self) -> crate::registry::MakeInput {
-        match self.shared_input {
-            Some(g) => g.make,
-            None => || ErasedInput::new(()),
-        }
-    }
-}
-
-/// One matrix's candidates and inputs of a single type, paired up.
+/// One group's candidates and inputs of a single type, paired up.
 ///
-/// A matrix partitions into lanes rather than being one grid, because
+/// A group partitions into lanes rather than being one grid, because
 /// candidates and inputs are registered independently and need not all agree
-/// about the type. Pairing within a lane is what lets one matrix hold
-/// several unrelated type families and still be correct - a `String`
-/// candidate is simply never handed a `Vec<u8>`.
+/// about the type. Pairing within a lane is what lets one group hold several
+/// unrelated type families and still be correct - a `String` candidate is
+/// simply never handed a `Vec<u8>`.
+///
+/// A lane with fewer than two candidates has nothing to compare against and
+/// becomes a plain benchmark instead; that decision is made by whoever
+/// consumes a `Lane`, not here - see [`Lane::flat_name`].
 #[derive(Debug)]
 pub struct Lane {
-    /// The matrix this lane belongs to.
-    pub matrix: &'static str,
+    /// The group this lane belongs to.
+    pub group: &'static str,
     /// The input type shared by everything in it, as the source spells it.
     pub type_name: &'static str,
-    /// Candidates, baseline first, then sorted by name - the same ordering,
-    /// and for the same reason, as a comparison group's members.
+    /// Candidates, baseline first, then sorted by name.
     ///
     /// Named rather than bare registrations, because when several crates or
     /// versions register one name they have to be told apart, and the name
     /// that distinguishes them is worked out from what else is present.
-    pub candidates: Vec<Named<MatrixCandidate>>,
+    pub candidates: Vec<Named<Candidate>>,
     /// Inputs, sorted by name, one per name.
     ///
     /// Unlike candidates, inputs are *deduplicated* across versions rather
@@ -550,14 +479,25 @@ pub struct Lane {
     /// the work to no end - and worse, an old generator paired with new
     /// implementations quietly changes what is being measured if the
     /// generator itself has changed since.
-    pub inputs: Vec<Named<MatrixInput>>,
+    ///
+    /// A group with candidates but no registered input at all gets a single
+    /// synthetic entry here whose `name` is empty - the unit input every
+    /// no-input group has always implicitly taken. `comparison_name` and
+    /// `flat_name` both recognise that empty name and omit the `@input`
+    /// suffix it would otherwise produce, which is what keeps a plain
+    /// `group = "sort"` declaration, with no `#[input]` anywhere, printing
+    /// as `sort` rather than `sort@`. A group with a real, named
+    /// `#[input]` - even just the one - is named `group@input` regardless,
+    /// the same convention a matrix's lanes have always used: only the
+    /// implicit unit input is special-cased away.
+    pub inputs: Vec<Named<Input>>,
     /// Whether this lane shares an input name with another lane of the same
-    /// matrix - two different types, both with an input called `small`,
+    /// group - two different types, both with an input called `small`,
     /// say - which `comparison_name` needs to know: it disambiguates only
     /// when that has actually happened, the same "carries only what
     /// distinguishes them" rule `resolve_versions` follows for names that
     /// collide across crates or versions. Set once, after every lane of a
-    /// matrix is known, by comparing input names across them.
+    /// group is known, by comparing input names across them.
     pub needs_type_suffix: bool,
 }
 
@@ -565,37 +505,69 @@ impl Lane {
     /// What a cell of this lane is called.
     ///
     /// A lane with two or more candidates becomes one comparison per input,
-    /// so the comparison is named for the matrix and the input and the
+    /// so the comparison is named for the group and the input and the
     /// candidates are its alternatives. A lone candidate has nothing to
-    /// compare against and is a plain benchmark, which needs its own name.
+    /// compare against and is a plain benchmark, which needs its own name -
+    /// see [`Lane::flat_name`].
     ///
     /// The type is appended only when [`Lane::needs_type_suffix`] says
-    /// another lane of this matrix has an input of the same name - two
-    /// lanes each with a `small` input, say. Without that, `matrix@small`
-    /// from one lane collides with `matrix@small` from the other: both
-    /// resolve to the same report entry, and the second silently overwrites
-    /// the first's result.
-    pub fn comparison_name(&self, input: &Named<MatrixInput>) -> String {
-        if self.needs_type_suffix {
-            format!("{}@{} ({})", self.matrix, input.name, self.type_name)
+    /// another lane of this group has an input of the same name - two lanes
+    /// each with a `small` input, say. Without that, `group@small` from one
+    /// lane collides with `group@small` from the other: both resolve to the
+    /// same report entry, and the second silently overwrites the first's
+    /// result.
+    pub fn comparison_name(&self, input: &Named<Input>) -> String {
+        if input.name.is_empty() {
+            if self.needs_type_suffix {
+                format!("{} ({})", self.group, self.type_name)
+            } else {
+                self.group.to_string()
+            }
+        } else if self.needs_type_suffix {
+            format!("{}@{} ({})", self.group, input.name, self.type_name)
         } else {
-            format!("{}@{}", self.matrix, input.name)
+            format!("{}@{}", self.group, input.name)
         }
     }
 
-    pub fn flat_name(
-        &self,
-        candidate: &Named<MatrixCandidate>,
-        input: &Named<MatrixInput>,
-    ) -> String {
-        format!("{}::{}@{}", self.matrix, candidate.name, input.name)
+    pub fn flat_name(&self, candidate: &Named<Candidate>, input: &Named<Input>) -> String {
+        if input.name.is_empty() {
+            format!("{}::{}", self.group, candidate.name)
+        } else {
+            format!("{}::{}@{}", self.group, candidate.name, input.name)
+        }
     }
 }
 
-/// Partition a matrix's registrations into lanes and pair them up.
+/// The unit input every group with candidates but no declared `#[input]`
+/// implicitly takes - see [`Lane::inputs`].
+fn unit_input() -> Named<Input> {
+    static UNIT: Input = Input {
+        groups: &[],
+        name: "",
+        crate_name: "",
+        crate_version: "",
+        type_id: TypeId::of::<()>,
+        type_name: "()",
+        make: || ErasedInput::new(()),
+    };
+    Named {
+        name: String::new(),
+        reg: &UNIT,
+        origin: Origin {
+            crate_name: "",
+            crate_version: "",
+        },
+    }
+}
+
+/// Partition one group's candidates and inputs into lanes and pair them up.
 ///
 /// Pure, like [`plan`], and for the same reason: everything that can be
-/// wrong is decided before the machine is claimed.
+/// wrong is decided before the machine is claimed. `group` is fixed for the
+/// whole call - [`plan`] calls this once per group name, having already
+/// exploded every candidate and input across the (possibly several) groups
+/// it belongs to.
 ///
 /// # Orphans are warnings, not errors
 ///
@@ -603,10 +575,14 @@ impl Lane {
 /// candidates, is almost always a typo or a type that does not match what
 /// the writer thought - but it is not a contradiction, and rejecting the
 /// whole run over it would be unhelpful when the rest is fine. So orphans
-/// are reported and skipped.
-pub fn lanes(
-    candidates: &[&'static MatrixCandidate],
-    inputs: &[&'static MatrixInput],
+/// are reported and skipped. The one exception is a candidate lane with no
+/// input at all whose type is `()`: that is not an orphan, it is a group
+/// with nothing to say about its input, which has always meant "the unit
+/// input" - see [`unit_input`].
+fn lanes_for_group(
+    group: &'static str,
+    candidates: &[&'static Candidate],
+    inputs: &[&'static Input],
     options: RegistryOptions,
 ) -> (Vec<Lane>, Vec<Diagnostic>) {
     let mut problems = Vec::new();
@@ -619,7 +595,7 @@ pub fn lanes(
         |c| {
             (
                 Key {
-                    scope: c.matrix,
+                    scope: group,
                     type_name: c.input_type_name,
                     name: c.name,
                 },
@@ -638,7 +614,7 @@ pub fn lanes(
         |i| {
             (
                 Key {
-                    scope: i.matrix,
+                    scope: group,
                     type_name: i.type_name,
                     name: i.name,
                 },
@@ -653,14 +629,13 @@ pub fn lanes(
     // `LatestPerCrate` leaves one per crate; an input registered by two
     // different crates is still redundant, so keep the newest of those too.
     // Keyed on the type as well as the name, matching the lane key. Inputs
-    // get named for their character - "small", "large" - so one matrix
+    // get named for their character - "small", "large" - so one group
     // holding two type lanes very naturally has an input called `small` in
     // each. Keyed on the name alone those two look redundant, and dropping
     // one orphans a whole lane.
-    let mut best: BTreeMap<(&'static str, &'static str, &'static str), Named<MatrixInput>> =
-        BTreeMap::new();
+    let mut best: BTreeMap<(&'static str, &'static str), Named<Input>> = BTreeMap::new();
     for n in named_i {
-        let key = (n.reg.matrix, n.reg.type_name, n.reg.name);
+        let key = (n.reg.type_name, n.reg.name);
         match best.get(&key) {
             // Same crate, same version: not redundancy, a genuine
             // duplicate - two registrations of one input, from the same
@@ -675,7 +650,7 @@ pub fn lanes(
                         == Version::parse(n.origin.crate_version) =>
             {
                 problems.push(Diagnostic::DuplicateMatrixEntry {
-                    matrix: key.0.to_string(),
+                    matrix: group.to_string(),
                     what: "input",
                     name: n.reg.name.to_string(),
                 });
@@ -691,30 +666,25 @@ pub fn lanes(
             }
         }
     }
-    let named_i: Vec<Named<MatrixInput>> = best.into_values().collect();
+    let named_i: Vec<Named<Input>> = best.into_values().collect();
 
-    // (matrix, input type) is the lane key. `TypeId` is not `Ord`, so bucket
-    // by the type's name, which the macro takes from the source: two
-    // different types cannot spell themselves the same way within one crate,
-    // and the id is checked below in any case.
-    let mut cands: BTreeMap<(&str, &str), Vec<Named<MatrixCandidate>>> = BTreeMap::new();
-    let mut ins: BTreeMap<(&str, &str), Vec<Named<MatrixInput>>> = BTreeMap::new();
+    // Input type is the lane key. `TypeId` is not `Ord`, so bucket by the
+    // type's name, which the macro takes from the source: two different
+    // types cannot spell themselves the same way within one crate, and the
+    // id is checked below in any case.
+    let mut cands: BTreeMap<&'static str, Vec<Named<Candidate>>> = BTreeMap::new();
+    let mut ins: BTreeMap<&'static str, Vec<Named<Input>>> = BTreeMap::new();
     for c in named_c {
-        cands
-            .entry((c.reg.matrix, c.reg.input_type_name))
-            .or_default()
-            .push(c);
+        cands.entry(c.reg.input_type_name).or_default().push(c);
     }
     for i in named_i {
-        ins.entry((i.reg.matrix, i.reg.type_name))
-            .or_default()
-            .push(i);
+        ins.entry(i.reg.type_name).or_default().push(i);
     }
 
     // Names that are still shared after version resolution really are
     // duplicates - two registrations of one name from one crate at one
     // version - and would make two rows indistinguishable.
-    for (key, cs) in &cands {
+    for cs in cands.values() {
         // Counted on the resolved name, since that is what would actually
         // collide in a report - but *reported* under the registered one,
         // which is what the writer typed. A message about `same@1.0.0` when
@@ -728,7 +698,7 @@ pub fn lanes(
         for (_, (n, registered)) in seen {
             if n > 1 {
                 problems.push(Diagnostic::DuplicateMatrixEntry {
-                    matrix: key.0.to_string(),
+                    matrix: group.to_string(),
                     what: "candidate",
                     name: registered.to_string(),
                 });
@@ -737,29 +707,37 @@ pub fn lanes(
     }
 
     let mut lanes = Vec::new();
-    let mut keys: Vec<&(&str, &str)> = cands.keys().chain(ins.keys()).collect();
+    let mut keys: Vec<&'static str> = cands.keys().chain(ins.keys()).copied().collect();
     keys.sort_unstable();
     keys.dedup();
-    let keys: Vec<(&str, &str)> = keys.into_iter().copied().collect();
 
-    for key in keys {
-        let mut cs = cands.remove(&key).unwrap_or_default();
-        let mut is = ins.remove(&key).unwrap_or_default();
+    for type_name in keys {
+        let mut cs = cands.remove(type_name).unwrap_or_default();
+        let mut is = ins.remove(type_name).unwrap_or_default();
 
         if is.is_empty() {
-            for c in &cs {
-                problems.push(Diagnostic::OrphanCandidate {
-                    matrix: key.0.to_string(),
-                    name: c.name.clone(),
-                    type_name: c.reg.input_type_name,
-                });
+            // No input was registered for this (group, type) at all. When
+            // the type is `()` that is not a mistake - it is what a group
+            // with nothing to say about its input has always meant - so the
+            // unit input is synthesized rather than treating every candidate
+            // as an orphan.
+            if type_name == "()" {
+                is.push(unit_input());
+            } else {
+                for c in &cs {
+                    problems.push(Diagnostic::OrphanCandidate {
+                        matrix: group.to_string(),
+                        name: c.name.clone(),
+                        type_name: c.reg.input_type_name,
+                    });
+                }
+                continue;
             }
-            continue;
         }
         if cs.is_empty() {
             for i in &is {
                 problems.push(Diagnostic::OrphanInput {
-                    matrix: key.0.to_string(),
+                    matrix: group.to_string(),
                     name: i.name.clone(),
                     type_name: i.reg.type_name,
                 });
@@ -782,7 +760,7 @@ pub fn lanes(
         for i in &is {
             if (i.reg.type_id)() != want {
                 problems.push(Diagnostic::MatrixTypeMismatch {
-                    matrix: key.0.to_string(),
+                    matrix: group.to_string(),
                     candidate: i.name.clone(),
                     type_name: i.reg.type_name,
                 });
@@ -792,7 +770,7 @@ pub fn lanes(
         for c in &cs {
             if (c.reg.input_type)() != want {
                 problems.push(Diagnostic::MatrixTypeMismatch {
-                    matrix: key.0.to_string(),
+                    matrix: group.to_string(),
                     candidate: c.name.clone(),
                     type_name: c.reg.input_type_name,
                 });
@@ -834,7 +812,7 @@ pub fn lanes(
             1 => cs[claimants[0]].name.clone(),
             _ if contradicts_itself => {
                 problems.push(Diagnostic::ManyBaselines {
-                    group: key.0.to_string(),
+                    group: group.to_string(),
                     claimants: claimants
                         .iter()
                         .map(|i| {
@@ -851,7 +829,7 @@ pub fn lanes(
                 Some(i) => cs[i].name.clone(),
                 None => {
                     problems.push(Diagnostic::NoSuchBaseline {
-                        group: key.0.to_string(),
+                        group: group.to_string(),
                         wanted: describe_baseline_policy(options.baseline),
                         claimants: cs
                             .iter()
@@ -871,36 +849,15 @@ pub fn lanes(
         cs.sort_by(|a, b| (a.name != baseline, &a.name).cmp(&(b.name != baseline, &b.name)));
 
         lanes.push(Lane {
-            matrix: key.0,
-            type_name: key.1,
+            group,
+            type_name,
             candidates: cs,
             inputs: is,
-            // Set below, once every lane of every matrix is known - a
-            // lane cannot tell by itself whether another lane of its
-            // matrix shares one of its input names.
+            // Set in `plan`, once every lane of every group is known - a
+            // lane cannot tell by itself whether another lane of its group
+            // shares one of its input names.
             needs_type_suffix: false,
         });
-    }
-
-    // A lane's input names can collide with another lane's in the same
-    // matrix - two different types, each with an input called `small`, say.
-    // Disambiguate only the lanes where that has actually happened, the
-    // same rule `resolve_versions` follows for names that collide across
-    // crates or versions: carry only what distinguishes them.
-    // Owned `String` keys in the inner map, not `&str` borrowed from
-    // `lanes` itself - a name lives inside `lane.inputs`, which lives
-    // inside `lanes`, so borrowing it here would keep `lanes` immutably
-    // borrowed right through the `&mut lanes` pass below.
-    let mut counts_by_matrix: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
-    for lane in &lanes {
-        let counts = counts_by_matrix.entry(lane.matrix).or_default();
-        for i in &lane.inputs {
-            *counts.entry(i.name.clone()).or_insert(0) += 1;
-        }
-    }
-    for lane in &mut lanes {
-        let counts = &counts_by_matrix[lane.matrix];
-        lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
     }
 
     (lanes, problems)
@@ -959,25 +916,30 @@ fn source(r: &Registered) -> String {
 /// the only ordering that is reproducible across builds and machines, and so
 /// the only one whose report can be diffed against yesterday's. This does
 /// not affect measurement: the scheduler reshuffles every round regardless.
+///
+/// # Multi-group membership
+///
+/// A candidate or input can name several groups - `quicksort` compared
+/// under both `"small_sort"` and `"big_sort"`, say, or one shared input
+/// feeding `"sort"`, `"dedup"` and `"contains"` without those being compared
+/// with each other. So the first step here explodes every candidate and
+/// input across each group it names, before anything is paired up; from
+/// that point on, each group name is handled entirely independently.
 pub fn plan(
     regs: &[&'static Registered],
-    gens: &[&'static BenchInputRegistration],
+    candidates: &[&'static Candidate],
+    inputs: &[&'static Input],
     options: RegistryOptions,
-) -> Result<Plan, Vec<Diagnostic>> {
+) -> (Plan, Vec<Diagnostic>) {
     let mut problems = Vec::new();
 
-    // Version resolution first, exactly as a matrix gets it. Without this a
-    // plain `#[scaling::bench]` registered by two versions of one crate -
-    // which is what pulling an old copy in as a dev-dependency produces -
-    // collides with itself and the whole run is refused, so the documented
-    // way of comparing against an older version worked only for matrices.
     let named = resolve_versions(
         regs,
         |r| {
             (
                 Key {
-                    scope: r.group.unwrap_or(""),
-                    type_name: r.kind.input_type_name(),
+                    scope: "",
+                    type_name: "",
                     name: r.name,
                 },
                 Origin {
@@ -1008,166 +970,70 @@ pub fn plan(
         }
     }
 
-    // Generators, bucketed by group, so a group can be asked for its one.
-    // Deduplicated across versions the way a matrix input is, and for the
-    // same reason: two versions of one generator are meant to build the same
-    // thing, so keeping both would be redundant rather than a comparison.
-    let mut gens_by_group: BTreeMap<&str, Vec<&'static BenchInputRegistration>> = BTreeMap::new();
-    for g in gens {
-        gens_by_group.entry(g.group).or_default().push(g);
-    }
-    let mut chosen_gen: BTreeMap<&str, &'static BenchInputRegistration> = BTreeMap::new();
-    for (group, gs) in &gens_by_group {
-        // Two from one crate at one version is a contradiction: they cannot
-        // both be the group's one shared input. Two from different origins
-        // is the redundant case - the same generator a version apart, or a
-        // rival's - so the newest is kept, as a matrix input would be.
-        let mut per_origin: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-        for g in gs {
-            *per_origin
-                .entry((g.crate_name, g.crate_version))
-                .or_insert(0) += 1;
-        }
-        if per_origin.values().any(|n| *n > 1) {
-            problems.push(Diagnostic::ManyGenerators {
-                group: (*group).to_string(),
-                // A generator has no name of its own, so say where each came
-                // from and what it makes.
-                sources: gs
-                    .iter()
-                    .map(|g| format!("{}@{} ({})", g.crate_name, g.crate_version, g.type_name))
-                    .collect(),
-            });
-            continue;
-        }
-        let newest = gs
-            .iter()
-            .copied()
-            .max_by_key(|g| Version::parse(g.crate_version))
-            .expect("a group in this map has at least one generator");
-        chosen_gen.insert(group, newest);
-    }
-
-    let mut flat: Vec<Named<Registered>> = Vec::new();
-    let mut grouped: BTreeMap<&'static str, Vec<Named<Registered>>> = BTreeMap::new();
-    for r in named {
-        match r.reg.group {
-            None => flat.push(r),
-            Some(g) => grouped.entry(g).or_default().push(r),
-        }
-    }
+    let mut flat: Vec<Named<Registered>> = named;
     flat.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut groups = Vec::new();
-    for (name, mut members) in grouped {
-        members.sort_by(|a, b| a.name.cmp(&b.name));
-        let names: Vec<String> = members.iter().map(|r| r.name.clone()).collect();
-
-        if members.len() < 2 {
-            problems.push(Diagnostic::LonelyGroup {
-                group: name.to_string(),
-                members: names,
-            });
-            continue;
+    // Explode by group membership: one candidate or input registered under
+    // several groups lands in every one of those groups' buckets.
+    let mut cands_by_group: BTreeMap<&'static str, Vec<&'static Candidate>> = BTreeMap::new();
+    for c in candidates {
+        for g in c.groups {
+            cands_by_group.entry(g).or_default().push(c);
         }
-
-        // Several claimants is expected once one declaration is registered
-        // at several versions - they all say `baseline` because they are the
-        // same line of source - and a policy settles it. Two *different*
-        // members claiming it within one crate at one version is not that,
-        // and resolving it by version would pick one and hide the mistake.
-        let claimants: Vec<usize> = members
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.reg.is_baseline)
-            .map(|(i, _)| i)
-            .collect();
-        let mut per_origin: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-        for i in &claimants {
-            *per_origin
-                .entry((
-                    members[*i].origin.crate_name,
-                    members[*i].origin.crate_version,
-                ))
-                .or_insert(0) += 1;
+    }
+    let mut inputs_by_group: BTreeMap<&'static str, Vec<&'static Input>> = BTreeMap::new();
+    for i in inputs {
+        for g in i.groups {
+            inputs_by_group.entry(g).or_default().push(i);
         }
-        let contradicts_itself = per_origin.values().any(|n| *n > 1);
-        let baseline: String = match claimants.len() {
-            1 => members[claimants[0]].name.clone(),
-            0 => {
-                problems.push(Diagnostic::NoBaseline {
-                    group: name.to_string(),
-                    members: names,
-                });
-                continue;
-            }
-            _ if contradicts_itself => {
-                problems.push(Diagnostic::ManyBaselines {
-                    group: name.to_string(),
-                    claimants: claimants.iter().map(|i| source(members[*i].reg)).collect(),
-                });
-                continue;
-            }
-            _ => match pick_baseline(&members, &claimants, options.baseline) {
-                Some(i) => members[i].name.clone(),
-                None => {
-                    problems.push(Diagnostic::NoSuchBaseline {
-                        group: name.to_string(),
-                        wanted: describe_baseline_policy(options.baseline),
-                        claimants: claimants.iter().map(|i| source(members[*i].reg)).collect(),
-                    });
-                    continue;
-                }
-            },
-        };
+    }
+    let mut group_names: Vec<&'static str> = cands_by_group
+        .keys()
+        .chain(inputs_by_group.keys())
+        .copied()
+        .collect();
+    group_names.sort_unstable();
+    group_names.dedup();
 
-        // The generator, and whether everyone agrees about its type. A group
-        // with no generator takes `()`, and its members must expect `()`.
-        let shared_input = chosen_gen.get(name).copied();
-        let (gen_type, gen_name) = match shared_input {
-            Some(g) => ((g.type_id)(), g.type_name),
-            None => (std::any::TypeId::of::<()>(), "()"),
-        };
-        let mut mismatched = false;
-        for m in &members {
-            if let Kind::Alt { input_type, .. } = &m.reg.kind {
-                if input_type() != gen_type {
-                    problems.push(Diagnostic::InputTypeMismatch {
-                        group: name.to_string(),
-                        member: m.name.clone(),
-                        generator_type: gen_name,
-                        member_type: m.reg.kind.input_type_name(),
-                    });
-                    mismatched = true;
-                }
-            }
-        }
-        if mismatched {
-            continue;
-        }
-
-        // Baseline first: `ComparisonSet` takes its first alternative as the
-        // baseline, so this is where the decision above becomes the order the
-        // set is built in.
-        members.sort_by(|a, b| (a.name != baseline, &a.name).cmp(&(b.name != baseline, &b.name)));
-        groups.push(Group {
-            name,
-            members,
-            shared_input,
-        });
+    let mut lanes = Vec::new();
+    for group in group_names {
+        let group_cands = cands_by_group.remove(group).unwrap_or_default();
+        let group_inputs = inputs_by_group.remove(group).unwrap_or_default();
+        let (group_lanes, group_problems) =
+            lanes_for_group(group, &group_cands, &group_inputs, options);
+        lanes.extend(group_lanes);
+        problems.extend(group_problems);
     }
 
-    if problems.is_empty() {
-        Ok(Plan { flat, groups })
-    } else {
-        Err(problems)
+    // A lane's input names can collide with another lane's in the same
+    // group - two different types, each with an input called `small`, say.
+    // Disambiguate only the lanes where that has actually happened, the
+    // same rule `resolve_versions` follows for names that collide across
+    // crates or versions: carry only what distinguishes them.
+    // Owned `String` keys in the inner map, not `&str` borrowed from
+    // `lanes` itself - a name lives inside `lane.inputs`, which lives
+    // inside `lanes`, so borrowing it here would keep `lanes` immutably
+    // borrowed right through the `&mut lanes` pass below.
+    let mut counts_by_group: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
+    for lane in &lanes {
+        let counts = counts_by_group.entry(lane.group).or_default();
+        for i in &lane.inputs {
+            *counts.entry(i.name.clone()).or_insert(0) += 1;
+        }
     }
+    for lane in &mut lanes {
+        let counts = &counts_by_group[lane.group];
+        lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
+    }
+
+    (Plan { flat, lanes }, problems)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::lane_tests::*;
     use super::*;
-    use crate::registry::{noop_alt, Adder, Handle};
+    use crate::registry::{Adder, Handle, Kind};
     use crate::Stats;
     use std::any::TypeId;
 
@@ -1184,44 +1050,7 @@ mod tests {
             name,
             crate_name: "testcrate",
             crate_version: "1.0.0",
-            group: None,
-            is_baseline: false,
             kind: Kind::Flat(noop_flat),
-        }
-    }
-
-    /// One alternative of `group`, expecting input of type `I`.
-    fn alt<I: 'static>(
-        name: &'static str,
-        group: &'static str,
-        is_baseline: bool,
-        type_name: &'static str,
-    ) -> Registered {
-        Registered {
-            name,
-            crate_name: "testcrate",
-            crate_version: "1.0.0",
-            group: Some(group),
-            is_baseline,
-            kind: Kind::Alt {
-                add: noop_alt,
-                input_type: TypeId::of::<I>,
-                input_type_name: type_name,
-            },
-        }
-    }
-
-    fn generator<I: 'static>(
-        group: &'static str,
-        type_name: &'static str,
-    ) -> BenchInputRegistration {
-        BenchInputRegistration {
-            group,
-            crate_name: "testcrate",
-            crate_version: "1.0.0",
-            type_id: TypeId::of::<I>,
-            type_name,
-            make: || ErasedInput::new(()),
         }
     }
 
@@ -1232,20 +1061,17 @@ mod tests {
         rs.into_iter().map(|r| &*Box::leak(Box::new(r))).collect()
     }
 
-    fn leak_gens(gs: Vec<BenchInputRegistration>) -> Vec<&'static BenchInputRegistration> {
-        gs.into_iter().map(|g| &*Box::leak(Box::new(g))).collect()
-    }
-
     /// Registrations arrive in whatever order the linker chose, so a report
     /// built from them must impose its own - or two runs of the same
     /// benchmarks could not be diffed.
     #[test]
     fn flat_benchmarks_come_out_sorted() {
         let regs = leak(vec![flat("zebra"), flat("apple"), flat("middle")]);
-        let plan = plan(&regs, &[], RegistryOptions::default()).expect("nothing wrong with these");
+        let (plan, problems) = plan(&regs, &[], &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
         let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["apple", "middle", "zebra"]);
-        assert!(plan.groups.is_empty());
+        assert!(plan.lanes.is_empty());
     }
 
     /// Reversing the input must not change the plan: that is what "sorted"
@@ -1255,8 +1081,8 @@ mod tests {
     fn the_order_registrations_arrive_in_does_not_matter() {
         let forward = leak(vec![flat("a"), flat("b"), flat("c")]);
         let backward = leak(vec![flat("c"), flat("b"), flat("a")]);
-        let one = plan(&forward, &[], RegistryOptions::default()).unwrap();
-        let two = plan(&backward, &[], RegistryOptions::default()).unwrap();
+        let (one, _) = plan(&forward, &[], &[], RegistryOptions::default());
+        let (two, _) = plan(&backward, &[], &[], RegistryOptions::default());
         let names =
             |p: &Plan| -> Vec<String> { p.flat.iter().map(|r| r.name.to_string()).collect() };
         assert_eq!(names(&one), names(&two));
@@ -1267,17 +1093,18 @@ mod tests {
     /// here reaches the set built later.
     #[test]
     fn the_baseline_is_placed_first() {
-        let regs = leak(vec![
-            alt::<()>("a_first_alphabetically", "g", false, "()"),
-            alt::<()>("z_the_baseline", "g", true, "()"),
-            alt::<()>("m_middle", "g", false, "()"),
+        let cs = leak_c(vec![
+            cand::<()>("g", "a_first_alphabetically", "()", false),
+            cand::<()>("g", "z_the_baseline", "()", true),
+            cand::<()>("g", "m_middle", "()", false),
         ]);
-        let plan = plan(&regs, &[], RegistryOptions::default()).expect("a well-formed group");
-        assert_eq!(plan.groups.len(), 1);
-        let names: Vec<&str> = plan.groups[0]
-            .members
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 1);
+        let names: Vec<&str> = plan.lanes[0]
+            .candidates
             .iter()
-            .map(|r| r.name.as_str())
+            .map(|c| c.name.as_str())
             .collect();
         assert_eq!(
             names,
@@ -1292,8 +1119,7 @@ mod tests {
     #[test]
     fn duplicate_names_are_rejected_and_name_their_sources() {
         let regs = leak(vec![flat("same"), flat("same"), flat("fine")]);
-        let problems =
-            plan(&regs, &[], RegistryOptions::default()).expect_err("a duplicate is an error");
+        let (_, problems) = plan(&regs, &[], &[], RegistryOptions::default());
         assert_eq!(problems.len(), 1);
         match &problems[0] {
             Diagnostic::DuplicateName { name, sources } => {
@@ -1305,45 +1131,40 @@ mod tests {
         }
     }
 
-    /// A lone alternative has nothing to compare against, and
-    /// `Suite::add_comparison` would panic on it. Say so here instead, where
-    /// the message can name the group.
+    /// A lone candidate has nothing to compare against, but that is no
+    /// longer an error - unlike today's groups, it degrades to a plain
+    /// benchmark. Whoever consumes the lane decides that, not `plan` itself,
+    /// so all this checks is that the lane survives.
     #[test]
-    fn a_group_of_one_is_rejected() {
-        let regs = leak(vec![alt::<()>("only", "lonely", true, "()")]);
-        let problems = plan(&regs, &[], RegistryOptions::default())
-            .expect_err("one alternative is not a comparison");
-        assert!(
-            matches!(&problems[0], Diagnostic::LonelyGroup { group, .. } if group == "lonely"),
-            "{problems:?}",
-        );
+    fn a_lone_candidate_is_kept_not_rejected() {
+        let cs = leak_c(vec![cand::<()>("lonely", "only", "()", true)]);
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 1);
+        assert_eq!(plan.lanes[0].candidates.len(), 1);
     }
 
-    /// Registrations have no order, so nothing can be the baseline by
-    /// arriving first. One of them has to say, and if none does that is an
-    /// error rather than an arbitrary pick.
+    /// With nobody marked, the first by name is the baseline - a group
+    /// should be writable without ceremony, matching a matrix's behaviour.
     #[test]
-    fn a_group_with_no_baseline_is_rejected() {
-        let regs = leak(vec![
-            alt::<()>("a", "g", false, "()"),
-            alt::<()>("b", "g", false, "()"),
+    fn an_unmarked_group_takes_the_first_name_as_baseline() {
+        let cs = leak_c(vec![
+            cand::<()>("g", "b", "()", false),
+            cand::<()>("g", "a", "()", false),
         ]);
-        let problems = plan(&regs, &[], RegistryOptions::default())
-            .expect_err("somebody must be the baseline");
-        assert!(
-            matches!(&problems[0], Diagnostic::NoBaseline { group, .. } if group == "g"),
-            "{problems:?}",
-        );
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes[0].candidates[0].name, "a");
     }
 
     #[test]
     fn a_group_with_two_baselines_is_rejected() {
-        let regs = leak(vec![
-            alt::<()>("a", "g", true, "()"),
-            alt::<()>("b", "g", true, "()"),
+        let cs = leak_c(vec![
+            cand::<()>("g", "a", "()", true),
+            cand::<()>("g", "b", "()", true),
         ]);
-        let problems =
-            plan(&regs, &[], RegistryOptions::default()).expect_err("only one may be the baseline");
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(plan.lanes.is_empty(), "the lane cannot be trusted");
         match &problems[0] {
             Diagnostic::ManyBaselines { group, claimants } => {
                 assert_eq!(group, "g");
@@ -1353,70 +1174,45 @@ mod tests {
         }
     }
 
-    /// A group's alternatives all get the same generated input, so one that
-    /// expects a different type cannot be handed it. Caught here, named, and
-    /// before anything runs - otherwise it is a downcast panic from inside
-    /// the scheduler.
+    /// A candidate expecting a different input type from the rest of its
+    /// group is not a hard error the way it was for today's groups - it
+    /// simply lands in its own, orphaned, lane. This is the behaviour
+    /// change unifying with matrices brings.
     #[test]
-    fn an_alternative_expecting_the_wrong_input_type_is_rejected() {
-        let regs = leak(vec![
-            alt::<Vec<i32>>("right", "g", true, "Vec<i32>"),
-            alt::<String>("wrong", "g", false, "String"),
+    fn candidates_expecting_different_input_types_auto_split() {
+        let cs = leak_c(vec![
+            cand::<Vec<i32>>("g", "right", "Vec<i32>", true),
+            cand::<String>("g", "wrong", "String", false),
         ]);
-        let gens = leak_gens(vec![generator::<Vec<i32>>("g", "Vec<i32>")]);
-        let problems =
-            plan(&regs, &gens, RegistryOptions::default()).expect_err("types must agree");
-        match &problems[0] {
-            Diagnostic::InputTypeMismatch {
-                group,
-                member,
-                generator_type,
-                member_type,
-            } => {
-                assert_eq!(group, "g");
-                assert_eq!(member, "wrong");
-                assert_eq!(*generator_type, "Vec<i32>");
-                assert_eq!(*member_type, "String");
-            }
-            other => panic!("wrong diagnostic: {other:?}"),
-        }
-    }
-
-    /// A group with no declared generator takes `()`, so its alternatives
-    /// must expect `()` - and one that does not is the same mistake as
-    /// above, not a special case.
-    #[test]
-    fn a_group_without_a_generator_expects_the_unit_input() {
-        let ok = leak(vec![
-            alt::<()>("a", "g", true, "()"),
-            alt::<()>("b", "g", false, "()"),
-        ]);
-        assert!(plan(&ok, &[], RegistryOptions::default()).is_ok());
-
-        let bad = leak(vec![
-            alt::<()>("a", "h", true, "()"),
-            alt::<Vec<i32>>("b", "h", false, "Vec<i32>"),
-        ]);
-        let problems = plan(&bad, &[], RegistryOptions::default())
-            .expect_err("b wants an input this group does not make");
+        let is = leak_i(vec![inp::<Vec<i32>>("g", "data", "Vec<i32>")]);
+        let (plan, problems) = plan(&[], &cs, &is, RegistryOptions::default());
+        assert_eq!(plan.lanes.len(), 1, "only the matching type forms a lane");
+        assert_eq!(plan.lanes[0].candidates[0].name, "right");
         assert!(
-            matches!(&problems[0], Diagnostic::InputTypeMismatch { member, .. } if member == "b"),
+            problems
+                .iter()
+                .any(|p| matches!(p, Diagnostic::OrphanCandidate { name, .. } if name == "wrong")),
             "{problems:?}",
         );
     }
 
+    /// A group with no declared input takes the unit input implicitly, and
+    /// keeps the plain name a no-input group has always had.
     #[test]
-    fn two_generators_for_one_group_are_rejected() {
-        let regs = leak(vec![
-            alt::<()>("a", "g", true, "()"),
-            alt::<()>("b", "g", false, "()"),
+    fn a_group_without_an_input_takes_the_unit_input() {
+        let cs = leak_c(vec![
+            cand::<()>("g", "a", "()", true),
+            cand::<()>("g", "b", "()", false),
         ]);
-        let gens = leak_gens(vec![generator::<()>("g", "()"), generator::<()>("g", "()")]);
-        let problems = plan(&regs, &gens, RegistryOptions::default())
-            .expect_err("a group has one shared input");
-        assert!(
-            matches!(&problems[0], Diagnostic::ManyGenerators { group, .. } if group == "g"),
-            "{problems:?}",
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 1);
+        assert_eq!(plan.lanes[0].inputs.len(), 1);
+        assert_eq!((plan.lanes[0].inputs[0].reg.type_id)(), TypeId::of::<()>());
+        assert_eq!(
+            plan.lanes[0].comparison_name(&plan.lanes[0].inputs[0]),
+            "g",
+            "a no-input group keeps its plain name",
         );
     }
 
@@ -1424,65 +1220,108 @@ mod tests {
     /// not mean one rebuild per mistake.
     #[test]
     fn every_problem_is_reported_not_just_the_first() {
-        let regs = leak(vec![
-            flat("dup"),
-            flat("dup"),
-            alt::<()>("lonely", "one", true, "()"),
-            alt::<()>("x", "none", false, "()"),
-            alt::<()>("y", "none", false, "()"),
+        let regs = leak(vec![flat("dup"), flat("dup")]);
+        let cs = leak_c(vec![
+            cand::<()>("one", "a", "()", true),
+            cand::<()>("one", "b", "()", true),
         ]);
-        let problems =
-            plan(&regs, &[], RegistryOptions::default()).expect_err("three separate mistakes");
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        let (_, problems) = plan(&regs, &cs, &[], RegistryOptions::default());
+        assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems
             .iter()
             .any(|p| matches!(p, Diagnostic::DuplicateName { .. })));
         assert!(problems
             .iter()
-            .any(|p| matches!(p, Diagnostic::LonelyGroup { .. })));
-        assert!(problems
-            .iter()
-            .any(|p| matches!(p, Diagnostic::NoBaseline { .. })));
+            .any(|p| matches!(p, Diagnostic::ManyBaselines { .. })));
     }
 
     /// Groups are sorted too, for the same reason the flat ones are.
     #[test]
     fn groups_come_out_sorted() {
-        let regs = leak(vec![
-            alt::<()>("a", "zebra", true, "()"),
-            alt::<()>("b", "zebra", false, "()"),
-            alt::<()>("c", "apple", true, "()"),
-            alt::<()>("d", "apple", false, "()"),
+        let cs = leak_c(vec![
+            cand::<()>("zebra", "a", "()", true),
+            cand::<()>("zebra", "b", "()", false),
+            cand::<()>("apple", "c", "()", true),
+            cand::<()>("apple", "d", "()", false),
         ]);
-        let plan = plan(&regs, &[], RegistryOptions::default()).unwrap();
-        let names: Vec<&str> = plan.groups.iter().map(|g| g.name).collect();
+        let (plan, _) = plan(&[], &cs, &[], RegistryOptions::default());
+        let names: Vec<&str> = plan.lanes.iter().map(|l| l.group).collect();
         assert_eq!(names, ["apple", "zebra"]);
-    }
-
-    /// A group with no generator still yields a usable input maker, so that
-    /// assembly has one code path rather than two.
-    #[test]
-    fn a_group_without_a_generator_still_makes_input() {
-        let regs = leak(vec![
-            alt::<()>("a", "g", true, "()"),
-            alt::<()>("b", "g", false, "()"),
-        ]);
-        let plan = plan(&regs, &[], RegistryOptions::default()).unwrap();
-        let make = plan.groups[0].make_input();
-        assert_eq!(make().type_id(), TypeId::of::<()>());
     }
 
     /// Diagnostics are read by someone who has to go and find the
     /// registration, so they must name it.
     #[test]
     fn diagnostics_name_what_they_are_about() {
-        let regs = leak(vec![alt::<()>("only", "lonely", true, "()")]);
-        let shown = format!(
-            "{}",
-            plan(&regs, &[], RegistryOptions::default()).unwrap_err()[0]
+        let cs = leak_c(vec![
+            cand::<()>("g", "a", "()", true),
+            cand::<()>("g", "b", "()", true),
+        ]);
+        let (_, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let shown = format!("{}", problems[0]);
+        assert!(shown.contains('g'), "{shown}");
+    }
+
+    /// A candidate can belong to several groups at once - `quicksort`
+    /// compared under both `small_sort` and `big_sort`, say - without those
+    /// groups sharing anything else. This is the multi-membership case
+    /// nothing before this redesign exercised.
+    #[test]
+    fn a_candidate_can_belong_to_more_than_one_group() {
+        let quicksort = cand_in::<()>(&["small_sort", "big_sort"], "quicksort", "()", false);
+        let insertion = cand::<()>("small_sort", "insertion", "()", true);
+        let cs = leak_c(vec![quicksort, insertion]);
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 2);
+
+        let small = plan
+            .lanes
+            .iter()
+            .find(|l| l.group == "small_sort")
+            .expect("quicksort named this group");
+        assert_eq!(
+            small.candidates.len(),
+            2,
+            "quicksort is compared against insertion here",
         );
-        assert!(shown.contains("lonely"), "{shown}");
-        assert!(shown.contains("only"), "{shown}");
+
+        let big = plan
+            .lanes
+            .iter()
+            .find(|l| l.group == "big_sort")
+            .expect("quicksort named this group too");
+        assert_eq!(
+            big.candidates.len(),
+            1,
+            "quicksort has nothing to compare against here",
+        );
+        assert_eq!(big.candidates[0].name, "quicksort");
+    }
+
+    /// One input can feed several groups at once without those groups being
+    /// compared with each other - a shared sorted `Vec` used by `sort` and
+    /// `dedup`, say.
+    #[test]
+    fn an_input_can_feed_more_than_one_group() {
+        let shared = inp_in::<Vec<i32>>(&["sort", "dedup"], "sorted_vec", "Vec<i32>");
+        let cs = leak_c(vec![
+            cand::<Vec<i32>>("sort", "std_sort", "Vec<i32>", true),
+            cand::<Vec<i32>>("dedup", "std_dedup", "Vec<i32>", true),
+        ]);
+        let is = leak_i(vec![shared]);
+        let (plan, problems) = plan(&[], &cs, &is, RegistryOptions::default());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 2);
+        for lane in &plan.lanes {
+            assert_eq!(lane.inputs.len(), 1);
+            assert_eq!(lane.inputs[0].name, "sorted_vec");
+            assert_eq!(
+                lane.candidates.len(),
+                1,
+                "sort and dedup share an input, not a comparison",
+            );
+        }
     }
 }
 
@@ -1622,37 +1461,39 @@ mod pairing {
 #[cfg(test)]
 pub(crate) mod lane_tests {
     use super::*;
-    use crate::registry::{noop_alt, Adder, ErasedInput, Handle, MatrixCandidate, MatrixInput};
+    use crate::registry::{noop_alt, Adder, ErasedInput, Handle, MakeInput};
     use crate::Stats;
     use std::any::TypeId;
 
-    fn noop_flat(
-        adder: &mut Adder<'_, '_>,
-        name: &str,
-        make: fn() -> ErasedInput,
-    ) -> Handle<Stats> {
+    fn noop_flat(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
         adder.make_input(name, make, |_: &mut ErasedInput| ())
     }
 
-    pub(crate) fn cand<I: 'static>(
-        matrix: &'static str,
+    /// Leaks a one-element group list, for the (common) single-group test
+    /// helpers below.
+    pub(crate) fn one_group(g: &'static str) -> &'static [&'static str] {
+        Box::leak(vec![g].into_boxed_slice())
+    }
+
+    pub(crate) fn cand_in<I: 'static>(
+        groups: &'static [&'static str],
         name: &'static str,
         ty: &'static str,
         is_baseline: bool,
-    ) -> MatrixCandidate {
-        cand_from::<I>(matrix, name, ty, is_baseline, "testcrate", "1.0.0")
+    ) -> Candidate {
+        cand_in_from::<I>(groups, name, ty, is_baseline, "testcrate", "1.0.0")
     }
 
-    pub(crate) fn cand_from<I: 'static>(
-        matrix: &'static str,
+    pub(crate) fn cand_in_from<I: 'static>(
+        groups: &'static [&'static str],
         name: &'static str,
         ty: &'static str,
         is_baseline: bool,
         crate_name: &'static str,
         crate_version: &'static str,
-    ) -> MatrixCandidate {
-        MatrixCandidate {
-            matrix,
+    ) -> Candidate {
+        Candidate {
+            groups,
             name,
             input_type: TypeId::of::<I>,
             input_type_name: ty,
@@ -1664,23 +1505,50 @@ pub(crate) mod lane_tests {
         }
     }
 
-    pub(crate) fn inp<I: 'static>(
-        matrix: &'static str,
+    pub(crate) fn cand<I: 'static>(
+        group: &'static str,
         name: &'static str,
         ty: &'static str,
-    ) -> MatrixInput {
-        inp_from::<I>(matrix, name, ty, "testcrate", "1.0.0")
+        is_baseline: bool,
+    ) -> Candidate {
+        cand_in::<I>(one_group(group), name, ty, is_baseline)
     }
 
-    pub(crate) fn inp_from<I: 'static>(
-        matrix: &'static str,
+    pub(crate) fn cand_from<I: 'static>(
+        group: &'static str,
+        name: &'static str,
+        ty: &'static str,
+        is_baseline: bool,
+        crate_name: &'static str,
+        crate_version: &'static str,
+    ) -> Candidate {
+        cand_in_from::<I>(
+            one_group(group),
+            name,
+            ty,
+            is_baseline,
+            crate_name,
+            crate_version,
+        )
+    }
+
+    pub(crate) fn inp_in<I: 'static>(
+        groups: &'static [&'static str],
+        name: &'static str,
+        ty: &'static str,
+    ) -> Input {
+        inp_in_from::<I>(groups, name, ty, "testcrate", "1.0.0")
+    }
+
+    pub(crate) fn inp_in_from<I: 'static>(
+        groups: &'static [&'static str],
         name: &'static str,
         ty: &'static str,
         crate_name: &'static str,
         crate_version: &'static str,
-    ) -> MatrixInput {
-        MatrixInput {
-            matrix,
+    ) -> Input {
+        Input {
+            groups,
             name,
             crate_name,
             crate_version,
@@ -1690,11 +1558,41 @@ pub(crate) mod lane_tests {
         }
     }
 
-    pub(crate) fn leak_c(v: Vec<MatrixCandidate>) -> Vec<&'static MatrixCandidate> {
+    pub(crate) fn inp<I: 'static>(
+        group: &'static str,
+        name: &'static str,
+        ty: &'static str,
+    ) -> Input {
+        inp_in::<I>(one_group(group), name, ty)
+    }
+
+    pub(crate) fn inp_from<I: 'static>(
+        group: &'static str,
+        name: &'static str,
+        ty: &'static str,
+        crate_name: &'static str,
+        crate_version: &'static str,
+    ) -> Input {
+        inp_in_from::<I>(one_group(group), name, ty, crate_name, crate_version)
+    }
+
+    pub(crate) fn leak_c(v: Vec<Candidate>) -> Vec<&'static Candidate> {
         v.into_iter().map(|x| &*Box::leak(Box::new(x))).collect()
     }
-    pub(crate) fn leak_i(v: Vec<MatrixInput>) -> Vec<&'static MatrixInput> {
+    pub(crate) fn leak_i(v: Vec<Input>) -> Vec<&'static Input> {
         v.into_iter().map(|x| &*Box::leak(Box::new(x))).collect()
+    }
+
+    /// Test-only convenience matching the old, single-call `lanes()`'s
+    /// shape: builds a full plan from candidates and inputs alone, with no
+    /// flat benchmarks, and hands back just the lanes and diagnostics.
+    pub(crate) fn lanes(
+        candidates: &[&'static Candidate],
+        inputs: &[&'static Input],
+        options: RegistryOptions,
+    ) -> (Vec<Lane>, Vec<Diagnostic>) {
+        let (p, problems) = plan(&[], candidates, inputs, options);
+        (p.lanes, problems)
     }
 
     /// The cross-product forms from declarations that never mention each
@@ -1973,7 +1871,7 @@ pub(crate) mod lane_tests {
         ]);
         let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
         assert_eq!(
-            lanes.iter().map(|l| l.matrix).collect::<Vec<_>>(),
+            lanes.iter().map(|l| l.group).collect::<Vec<_>>(),
             ["apple", "zebra"],
         );
     }
@@ -2239,7 +2137,7 @@ mod version_tests {
             assert!(
                 names.contains(&"sort"),
                 "unrenamed in {}: {names:?}",
-                lane.matrix
+                lane.group
             );
         }
     }
@@ -2387,8 +2285,6 @@ mod review_regressions {
             name,
             crate_name: "mycrate",
             crate_version: version,
-            group: None,
-            is_baseline: false,
             kind: Kind::Flat(|a, n| a.flat(n, || ())),
         }
     }
@@ -2403,8 +2299,11 @@ mod review_regressions {
     #[test]
     fn a_plain_benchmark_can_come_from_two_versions() {
         let regs = leak_r(vec![flat_at("fib", "0.9.0"), flat_at("fib", "0.8.0")]);
-        let plan = plan(&regs, &[], RegistryOptions::default())
-            .expect("two versions of one benchmark is not a duplicate");
+        let (plan, problems) = plan(&regs, &[], &[], RegistryOptions::default());
+        assert!(
+            problems.is_empty(),
+            "two versions of one benchmark is not a duplicate: {problems:?}",
+        );
         let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"fib@0.8.0"), "{names:?}");
         assert!(names.contains(&"fib@0.9.0"), "{names:?}");
@@ -2414,18 +2313,18 @@ mod review_regressions {
     /// `baseline` says so - which is what the policy is for.
     #[test]
     fn a_group_can_span_two_versions() {
-        let mut a = flat_at("sort", "0.9.0");
-        a.group = Some("g");
-        a.is_baseline = true;
-        let mut b = flat_at("sort", "0.8.0");
-        b.group = Some("g");
-        b.is_baseline = true;
-        let regs = leak_r(vec![a, b]);
-        let plan = plan(&regs, &[], RegistryOptions::default())
-            .expect("a group spanning two versions is the point");
-        assert_eq!(plan.groups.len(), 1);
+        let cs = leak_c(vec![
+            cand_from::<()>("g", "sort", "()", true, "mycrate", "0.9.0"),
+            cand_from::<()>("g", "sort", "()", true, "mycrate", "0.8.0"),
+        ]);
+        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        assert!(
+            problems.is_empty(),
+            "a group spanning two versions is the point: {problems:?}",
+        );
+        assert_eq!(plan.lanes.len(), 1);
         assert_eq!(
-            plan.groups[0].members[0].name, "sort@0.8.0",
+            plan.lanes[0].candidates[0].name, "sort@0.8.0",
             "the older version is the baseline by default",
         );
     }
@@ -2435,15 +2334,11 @@ mod review_regressions {
     /// it by version would pick one and hide the mistake.
     #[test]
     fn two_members_claiming_baseline_in_one_version_is_still_an_error() {
-        let mut a = flat_at("a", "1.0.0");
-        a.group = Some("g");
-        a.is_baseline = true;
-        let mut b = flat_at("b", "1.0.0");
-        b.group = Some("g");
-        b.is_baseline = true;
-        let regs = leak_r(vec![a, b]);
-        let problems =
-            plan(&regs, &[], RegistryOptions::default()).expect_err("both cannot be the baseline");
+        let cs = leak_c(vec![
+            cand_from::<()>("g", "a", "()", true, "mycrate", "1.0.0"),
+            cand_from::<()>("g", "b", "()", true, "mycrate", "1.0.0"),
+        ]);
+        let (_, problems) = plan(&[], &cs, &[], RegistryOptions::default());
         assert!(
             problems
                 .iter()

@@ -54,9 +54,7 @@
 
 use super::*;
 use crate::assemble::RegistryOptions;
-use crate::registry::{
-    Adder, Alternative, BenchInputRegistration, Kind, MatrixCandidate, MatrixInput, Registered,
-};
+use crate::registry::{Adder, Alternative, Candidate, Input, Kind, Registered};
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -898,28 +896,24 @@ pub(crate) struct RegisteredTokens {
     pub flat: BTreeMap<String, Token<Stats>>,
     /// Scaling benchmarks, by name.
     pub scaling: BTreeMap<String, Token<ScalingStats>>,
-    /// Comparison groups, by group name. A matrix contributes one per input,
-    /// named `matrix@input`.
+    /// Comparisons, by the name they were reported under. A group sharing
+    /// several inputs contributes one per input, named `group@input`.
     pub comparisons: BTreeMap<String, Token<Comparisons>>,
-    /// Things worth saying that did not stop the run - a matrix candidate no
-    /// input matches, say. Errors come back through
+    /// Things worth saying that did not stop the run - a candidate no input
+    /// matches, say. Errors come back through
     /// [`Suite::try_add_registered_with`] instead; these are the complaints
     /// that leave the rest of the run perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
-    /// The comparison groups as they were assembled, in the order they were
+    /// The comparison lanes as they were assembled, in the order they were
     /// added.
     ///
     /// Here because a comparison reaches the report under one name while
     /// holding several alternatives, and nothing else can say what they
     /// were. A caller listing what would run - which is the only way to find
-    /// out what a binary registered - would otherwise print the group and
-    /// leave the reader guessing what is in it.
-    pub groups: Vec<crate::assemble::Group>,
-    /// The matrix lanes as they were assembled.
-    ///
-    /// Same reason as [`RegisteredTokens::groups`], plus one more: a matrix
-    /// is a grid, and the grid is only recoverable from the lane. The report
-    /// holds one comparison per input under a flattened `matrix@input` name,
+    /// out what a binary registered - would otherwise print the comparison
+    /// and leave the reader guessing what is in it. A lane with more than
+    /// one input is also a grid, recoverable only from here: the report
+    /// holds one comparison per input under a flattened `group@input` name,
     /// which is the right thing to *measure* and the wrong shape to read.
     pub lanes: Vec<crate::assemble::Lane>,
 }
@@ -947,11 +941,9 @@ impl<'a> Suite<'a> {
         options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
-        let gens: Vec<&'static BenchInputRegistration> =
-            inventory::iter::<BenchInputRegistration>().collect();
-        let cands: Vec<&'static MatrixCandidate> = inventory::iter::<MatrixCandidate>().collect();
-        let mins: Vec<&'static MatrixInput> = inventory::iter::<MatrixInput>().collect();
-        self.assemble_registered(&regs, &gens, &cands, &mins, options)
+        let cands: Vec<&'static Candidate> = inventory::iter::<Candidate>().collect();
+        let inputs: Vec<&'static Input> = inventory::iter::<Input>().collect();
+        self.assemble_registered(&regs, &cands, &inputs, options)
     }
 
     /// [`Suite::try_add_registered_with`], taking the registrations as
@@ -962,15 +954,26 @@ impl<'a> Suite<'a> {
     fn assemble_registered(
         &mut self,
         regs: &[&'static Registered],
-        gens: &[&'static BenchInputRegistration],
-        cands: &[&'static MatrixCandidate],
-        mins: &[&'static MatrixInput],
+        cands: &[&'static Candidate],
+        inputs: &[&'static Input],
         options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
-        let plan = crate::assemble::plan(regs, gens, options)?;
+        let (plan, problems) = crate::assemble::plan(regs, cands, inputs, options);
+        // A contradiction inside a lane discards that lane, so benchmarks
+        // that were written measure nothing - that has to be as loud as any
+        // other error, not a field on the returned value that a caller
+        // discarding the result never sees. An orphan is different: it means
+        // something registered went unused, and everything else still ran.
+        let (fatal, warnings): (Vec<_>, Vec<_>) = problems.into_iter().partition(|p| p.is_fatal());
+        if !fatal.is_empty() {
+            return Err(fatal);
+        }
 
         let cfg = self.cfg;
-        let mut tokens = RegisteredTokens::default();
+        let mut tokens = RegisteredTokens {
+            warnings,
+            ..RegisteredTokens::default()
+        };
 
         for r in plan.flat {
             match r.reg.kind {
@@ -982,47 +985,10 @@ impl<'a> Suite<'a> {
                     let handle = add(&mut Adder(&mut *self), &r.name);
                     tokens.scaling.insert(r.name, handle.into_token());
                 }
-                // `plan` puts anything with a group in `groups`, so a bare
-                // alternative cannot reach here.
-                Kind::Alt { .. } => unreachable!("an alternative without a group"),
             }
         }
 
-        for group in &plan.groups {
-            // One generator for the whole group, cloned per alternative, which
-            // is what makes the differences paired - see `ErasedInput`.
-            let make = group.make_input();
-            let mut alt = Alternative(cfg.comparison_make_input(make));
-            for m in &group.members {
-                match m.reg.kind {
-                    Kind::Alt { add, .. } => alt = add(alt, &m.name),
-                    // `plan` only puts alternatives in a group.
-                    _ => unreachable!("a group member that is not an alternative"),
-                }
-            }
-            tokens.comparisons.insert(
-                group.name.to_string(),
-                self.add_comparison(group.name, alt.0),
-            );
-        }
-        tokens.groups = plan.groups;
-
-        // Matrices: candidates and inputs registered apart from each other,
-        // paired by type into lanes, every pairing measured.
-        let (lanes, lane_problems) = crate::assemble::lanes(cands, mins, options);
-        // A contradiction inside a lane discards that lane, so benchmarks
-        // that were written measure nothing - that has to be as loud as any
-        // other error, not a field on the returned value that a caller
-        // discarding the result never sees. An orphan is different: it means
-        // something registered went unused, and everything else still ran.
-        let (fatal, warnings): (Vec<_>, Vec<_>) =
-            lane_problems.into_iter().partition(|p| p.is_fatal());
-        if !fatal.is_empty() {
-            return Err(fatal);
-        }
-        tokens.warnings = warnings;
-
-        for lane in &lanes {
+        for lane in &plan.lanes {
             for input in &lane.inputs {
                 if lane.candidates.len() < 2 {
                     // Nothing to compare against, so this is a plain
@@ -1033,6 +999,8 @@ impl<'a> Suite<'a> {
                     tokens.flat.insert(name, handle.into_token());
                     continue;
                 }
+                // One generator per input, cloned per candidate, which is
+                // what makes the differences paired - see `ErasedInput`.
                 let make = input.reg.make;
                 let mut alt = Alternative(cfg.comparison_make_input(make));
                 for c in &lane.candidates {
@@ -1043,7 +1011,7 @@ impl<'a> Suite<'a> {
                 tokens.comparisons.insert(name, token);
             }
         }
-        tokens.lanes = lanes;
+        tokens.lanes = plan.lanes;
 
         Ok(tokens)
     }
@@ -1059,7 +1027,7 @@ impl Report {
     ///
     /// The way to find out what a run produced when the names were not
     /// written by hand - a registered benchmark is called after its module
-    /// and function, and a matrix cell after its matrix and input.
+    /// and function, and a group's cell after its group and input.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(name, _)| name.as_str())
     }
@@ -1116,8 +1084,9 @@ impl Report {
 
     /// A comparison's results, by name.
     ///
-    /// For a matrix, the name is `matrix@input`; for a group, the group's
-    /// name. What comes back carries every alternative's own measurement as
+    /// A group sharing several inputs is reported under `group@input`; one
+    /// with just the one, under its own plain name. What comes back carries
+    /// every alternative's own measurement as
     /// well as its difference from the baseline, so this is what a script
     /// asking "which of these is actually fastest here" wants.
     pub fn comparison(&self, name: &str) -> Option<Comparisons> {
@@ -2290,7 +2259,7 @@ mod per_benchmark_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Adder, Alternative, BenchInputRegistration, ErasedInput, Handle};
+    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, Input, MakeInput};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -2307,8 +2276,6 @@ mod registered_by_hand {
             name: "e2e::flat",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: None,
-            is_baseline: false,
             kind: Kind::Flat(add_flat),
         }
     }
@@ -2325,13 +2292,11 @@ mod registered_by_hand {
             name: "e2e::scaling",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: None,
-            is_baseline: false,
             kind: Kind::Scaling(add_scaling),
         }
     }
 
-    // A comparison group: three alternatives and one shared input, each
+    // A comparison group: three candidates and one shared input, each
     // registered independently and none of them naming the others.
 
     fn make_input() -> ErasedInput {
@@ -2339,14 +2304,23 @@ mod registered_by_hand {
     }
 
     inventory::submit! {
-        BenchInputRegistration {
-            group: "e2e-sort",
+        Input {
+            groups: &["e2e-sort"],
+            name: "data",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_input,
         }
+    }
+
+    fn flat_baseline(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
+        adder.make_input(name, make, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort();
+            v.len()
+        })
     }
 
     fn alt_baseline<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
@@ -2357,10 +2331,28 @@ mod registered_by_hand {
         })
     }
 
+    fn flat_unstable(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
+        adder.make_input(name, make, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort_unstable();
+            v.len()
+        })
+    }
+
     fn alt_unstable<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
         set.add(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort_unstable();
+            v.len()
+        })
+    }
+
+    fn flat_slow(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
+        adder.make_input(name, make, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort();
+            v.sort_unstable();
+            v.sort();
             v.len()
         })
     }
@@ -2377,47 +2369,44 @@ mod registered_by_hand {
     }
 
     inventory::submit! {
-        Registered {
+        Candidate {
+            groups: &["e2e-sort"],
             name: "e2e::sort_stable",
-            crate_name: env!("CARGO_PKG_NAME"),
-            crate_version: env!("CARGO_PKG_VERSION"),
-            group: Some("e2e-sort"),
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
             is_baseline: true,
-            kind: Kind::Alt {
-                add: alt_baseline,
-                input_type: TypeId::of::<Vec<u64>>,
-                input_type_name: "Vec<u64>",
-            },
+            crate_name: env!("CARGO_PKG_NAME"),
+            crate_version: env!("CARGO_PKG_VERSION"),
+            add_flat: flat_baseline,
+            add_alt: alt_baseline,
         }
     }
 
     inventory::submit! {
-        Registered {
+        Candidate {
+            groups: &["e2e-sort"],
             name: "e2e::sort_unstable",
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
+            is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: Some("e2e-sort"),
-            is_baseline: false,
-            kind: Kind::Alt {
-                add: alt_unstable,
-                input_type: TypeId::of::<Vec<u64>>,
-                input_type_name: "Vec<u64>",
-            },
+            add_flat: flat_unstable,
+            add_alt: alt_unstable,
         }
     }
 
     inventory::submit! {
-        Registered {
+        Candidate {
+            groups: &["e2e-sort"],
             name: "e2e::sort_thrice",
+            input_type: TypeId::of::<Vec<u64>>,
+            input_type_name: "Vec<u64>",
+            is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: Some("e2e-sort"),
-            is_baseline: false,
-            kind: Kind::Alt {
-                add: alt_slow,
-                input_type: TypeId::of::<Vec<u64>>,
-                input_type_name: "Vec<u64>",
-            },
+            add_flat: flat_slow,
+            add_alt: alt_slow,
         }
     }
 
@@ -2446,7 +2435,7 @@ mod registered_by_hand {
             .expect("the scaling benchmark ran");
         assert!(scaling.iterations > 0);
 
-        let cmps = tokens.comparisons["e2e-sort"]
+        let cmps = tokens.comparisons["e2e-sort@data"]
             .get()
             .expect("the comparison ran");
         // Three alternatives, two of them reported against the baseline.
@@ -2455,7 +2444,7 @@ mod registered_by_hand {
 
         // Everything appears in the report, under the name it registered with.
         let shown = format!("{report}");
-        for name in ["e2e::flat", "e2e::scaling", "e2e-sort"] {
+        for name in ["e2e::flat", "e2e::scaling", "e2e-sort@data"] {
             assert!(shown.contains(name), "{name} missing from report:\n{shown}");
         }
     }
@@ -2478,7 +2467,7 @@ mod registered_by_hand {
             .unwrap();
         suite.run();
 
-        let cmps = tokens.comparisons["e2e-sort"].get().unwrap();
+        let cmps = tokens.comparisons["e2e-sort@data"].get().unwrap();
         let against: Vec<&str> = cmps.against_baseline().map(|(name, _)| name).collect();
         assert!(
             !against.contains(&"e2e::sort_stable"),
@@ -2540,7 +2529,7 @@ mod registered_by_hand {
         assert!(stats.ns_per_iter > 0.0);
 
         let cmp = report
-            .comparison("e2e-sort")
+            .comparison("e2e-sort@data")
             .expect("the comparison comes back too");
         assert_eq!(cmp.stats().len(), 3);
 
@@ -2567,7 +2556,7 @@ mod registered_by_hand {
 
         let (_, cmp) = report
             .all_comparisons()
-            .find(|(name, _)| *name == "e2e-sort")
+            .find(|(name, _)| *name == "e2e-sort@data")
             .expect("the sorting comparison");
 
         let slowest = cmp
@@ -2598,10 +2587,14 @@ mod registered_by_hand {
 #[cfg(test)]
 mod bad_registrations {
     use super::*;
-    use crate::registry::{Adder, Alternative, Handle};
+    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, MakeInput};
 
     fn add(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
         adder.flat(name, || (0..16u64).sum::<u64>())
+    }
+
+    fn flat(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
+        adder.make_input(name, make, |_: &mut ErasedInput| ())
     }
 
     fn alt<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
@@ -2613,44 +2606,38 @@ mod bad_registrations {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        group: None,
-        is_baseline: false,
         kind: Kind::Flat(add),
     };
     static COLLIDES_2: Registered = Registered {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        group: None,
-        is_baseline: false,
         kind: Kind::Flat(add),
     };
 
-    // A comparison group nobody claimed the baseline of. Order cannot decide
-    // this, since registrations have none.
-    static ORPHAN_A: Registered = Registered {
-        name: "orphan_a",
+    // A comparison group where two different candidates both claim the
+    // baseline. Order cannot decide this, since registrations have none.
+    static TWO_BASELINES_A: Candidate = Candidate {
+        groups: &["two-baselines"],
+        name: "two_baselines_a",
+        input_type: std::any::TypeId::of::<()>,
+        input_type_name: "()",
+        is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        group: Some("no-baseline"),
-        is_baseline: false,
-        kind: Kind::Alt {
-            add: alt,
-            input_type: std::any::TypeId::of::<()>,
-            input_type_name: "()",
-        },
+        add_flat: flat,
+        add_alt: alt,
     };
-    static ORPHAN_B: Registered = Registered {
-        name: "orphan_b",
+    static TWO_BASELINES_B: Candidate = Candidate {
+        groups: &["two-baselines"],
+        name: "two_baselines_b",
+        input_type: std::any::TypeId::of::<()>,
+        input_type_name: "()",
+        is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        group: Some("no-baseline"),
-        is_baseline: false,
-        kind: Kind::Alt {
-            add: alt,
-            input_type: std::any::TypeId::of::<()>,
-            input_type_name: "()",
-        },
+        add_flat: flat,
+        add_alt: alt,
     };
 
     /// Both problems are reported together, and nothing is added.
@@ -2662,9 +2649,10 @@ mod bad_registrations {
     fn bad_registrations_are_reported_together_and_nothing_is_added() {
         let cfg = Config::default();
         let mut suite = cfg.suite();
-        let regs = [&COLLIDES_1, &COLLIDES_2, &ORPHAN_A, &ORPHAN_B];
+        let regs = [&COLLIDES_1, &COLLIDES_2];
+        let cands = [&TWO_BASELINES_A, &TWO_BASELINES_B];
         let problems = suite
-            .assemble_registered(&regs, &[], &[], &[], RegistryOptions::default())
+            .assemble_registered(&regs, &cands, &[], RegistryOptions::default())
             .expect_err("these registrations contradict each other");
 
         assert_eq!(problems.len(), 2, "{problems:?}");
@@ -2676,7 +2664,7 @@ mod bad_registrations {
         );
         assert!(
             problems.iter().any(
-                |p| matches!(p, crate::assemble::Diagnostic::NoBaseline { group, .. } if group == "no-baseline")
+                |p| matches!(p, crate::assemble::Diagnostic::ManyBaselines { group, .. } if group == "two-baselines")
             ),
             "{problems:?}",
         );
@@ -2708,8 +2696,8 @@ mod bad_registrations {
 #[cfg(test)]
 mod versions_and_rivals {
     // These registrations are written by hand, so they do not get the
-    // `allow(clippy::ptr_arg)` that `#[scaling::candidate]` puts on what it
-    // emits. The reason for it is the same: a benchmark's argument type is
+    // `allow(clippy::ptr_arg)` that a `group`-bearing `#[scaling::bench]`
+    // puts on what it emits. The reason for it is the same: a benchmark's argument type is
     // the input type the registry keys it on, not a borrow chosen for
     // convenience, so taking `&mut [u64]` instead would change what is
     // registered.
@@ -2717,7 +2705,7 @@ mod versions_and_rivals {
 
     use super::*;
     use crate::assemble::BaselinePolicy;
-    use crate::registry::{Adder, Alternative, ErasedInput, Handle};
+    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, Input};
     use std::any::TypeId;
 
     fn work(v: &[u64], rounds: usize) -> u64 {
@@ -2771,8 +2759,8 @@ mod versions_and_rivals {
     // Both versions call the function `mix`, and both call themselves the
     // baseline - because they are the same line of source, a version apart.
     inventory::submit! {
-        MatrixCandidate {
-            matrix: "mixing",
+        Candidate {
+            groups: &["mixing"],
             name: "mix",
             input_type: TypeId::of::<Vec<u64>>,
             input_type_name: "Vec<u64>",
@@ -2785,8 +2773,8 @@ mod versions_and_rivals {
     }
 
     inventory::submit! {
-        MatrixCandidate {
-            matrix: "mixing",
+        Candidate {
+            groups: &["mixing"],
             name: "mix",
             input_type: TypeId::of::<Vec<u64>>,
             input_type_name: "Vec<u64>",
@@ -2800,8 +2788,8 @@ mod versions_and_rivals {
 
     // A rival crate, on a *lower* version number than ours.
     inventory::submit! {
-        MatrixCandidate {
-            matrix: "mixing",
+        Candidate {
+            groups: &["mixing"],
             name: "mix",
             input_type: TypeId::of::<Vec<u64>>,
             input_type_name: "Vec<u64>",
@@ -2816,8 +2804,8 @@ mod versions_and_rivals {
     // And both versions of our crate register the same input, which is
     // redundant: they are meant to build the same data.
     inventory::submit! {
-        MatrixInput {
-            matrix: "mixing",
+        Input {
+            groups: &["mixing"],
             name: "data",
             crate_name: "mycrate",
             crate_version: "0.9.0",
@@ -2828,8 +2816,8 @@ mod versions_and_rivals {
     }
 
     inventory::submit! {
-        MatrixInput {
-            matrix: "mixing",
+        Input {
+            groups: &["mixing"],
             name: "data",
             crate_name: "mycrate",
             crate_version: "0.8.0",

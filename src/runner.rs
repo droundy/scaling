@@ -122,15 +122,17 @@ use std::time::Duration;
 /// How to print the results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
-    /// Matrices as grids, everything else as one line each.
+    /// A group with several inputs as a grid, everything else as one line
+    /// each.
     ///
-    /// The default. A matrix is a grid of candidates against inputs, and it
-    /// reaches the report as one comparison per input under a flattened
-    /// `matrix@input` name - which is the right thing to measure and the
-    /// wrong shape to read.
+    /// The default. A group sharing several inputs reaches the report as one
+    /// comparison per input under a flattened `group@input` name - which is
+    /// the right thing to measure and the wrong shape to read, so it is
+    /// gridded back together here. A group with only one input has no grid
+    /// worth drawing and prints as an ordinary comparison instead.
     #[default]
     Table,
-    /// Every entry as one line, matrices included.
+    /// Every entry as one line, grids included.
     ///
     /// What the grid gives up is precision: a cell shows a time and a
     /// percentage, where the line form shows the error bar on both and says
@@ -585,12 +587,6 @@ fn listing(suite: &Suite<'_>, tokens: &RegisteredTokens) -> String {
 /// comparison itself is reported under.
 fn alternatives(tokens: &RegisteredTokens) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
-    for group in &tokens.groups {
-        out.insert(
-            group.name.to_string(),
-            group.members.iter().map(|m| m.name.clone()).collect(),
-        );
-    }
     for lane in &tokens.lanes {
         // A lane with one candidate has nothing to compare against, so its
         // cells are plain benchmarks and their names say what they are.
@@ -625,7 +621,15 @@ fn nothing_to_run(tokens: &RegisteredTokens) -> String {
     }
 }
 
-/// Matrices as grids, everything else as the report prints it.
+/// Lanes with more than one input as grids, everything else as the report
+/// prints it.
+///
+/// A lane with only one input - the common case, and the only shape a plain
+/// `group = "..."` comparison with no declared `#[input]` ever has - is a
+/// one-column grid, which says nothing a grid is for. So only a lane with
+/// several inputs earns one; a lane with one falls through to the plain
+/// per-name rendering below, same as a flat benchmark or a lone comparison
+/// always has.
 fn table(report: &Report, tokens: &RegisteredTokens) -> String {
     if tokens.lanes.is_empty() {
         return format!("{report}\n");
@@ -633,13 +637,16 @@ fn table(report: &Report, tokens: &RegisteredTokens) -> String {
     let mut out = String::new();
     let mut gridded = BTreeSet::new();
     for lane in &tokens.lanes {
+        if lane.inputs.len() < 2 {
+            continue;
+        }
         if let Some(grid) = grid(report, lane, &mut gridded) {
             out.push_str(&grid);
             out.push('\n');
         }
     }
-    // Whatever was not part of a grid - benchmarks and comparison groups
-    // added alongside the matrices - printed the way the report would.
+    // Whatever was not part of a grid - flat benchmarks, lone comparisons,
+    // and single-input lanes alike - printed the way the report would.
     let rest: Vec<&str> = report.names().filter(|n| !gridded.contains(*n)).collect();
     let width = rest.iter().map(|n| n.len()).max().unwrap_or(0);
     for name in rest {
@@ -765,7 +772,7 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
 
     let mut out = format!(
         "{}  ({})  baseline: {}\n",
-        lane.matrix,
+        lane.group,
         lane.type_name,
         rows.first().map_or("-", |r| r.as_str()),
     );
@@ -1173,9 +1180,7 @@ mod tests {
 mod grids {
     use super::*;
     use crate::assemble::{Named, Origin};
-    use crate::registry::{
-        noop_alt, Adder, ErasedInput, Handle, MakeInput, MatrixCandidate, MatrixInput,
-    };
+    use crate::registry::{noop_alt, Adder, Candidate, ErasedInput, Handle, Input, MakeInput};
     use std::any::TypeId;
 
     // Never called: `grid` pairs and prints, it does not measure. They exist
@@ -1187,8 +1192,8 @@ mod grids {
         ErasedInput::new(0u64)
     }
 
-    static STABLE: MatrixCandidate = MatrixCandidate {
-        matrix: "sorting",
+    static STABLE: Candidate = Candidate {
+        groups: &["sorting"],
         name: "stable",
         input_type: TypeId::of::<Vec<u64>>,
         input_type_name: "Vec<u64>",
@@ -1198,13 +1203,13 @@ mod grids {
         add_flat: unused_flat,
         add_alt: noop_alt,
     };
-    static UNSTABLE: MatrixCandidate = MatrixCandidate {
+    static UNSTABLE: Candidate = Candidate {
         name: "unstable",
         is_baseline: false,
         ..STABLE
     };
-    static REVERSED: MatrixInput = MatrixInput {
-        matrix: "sorting",
+    static REVERSED: Input = Input {
+        groups: &["sorting"],
         name: "reversed",
         crate_name: "scaling",
         crate_version: "0.9.0",
@@ -1222,7 +1227,7 @@ mod grids {
 
     fn lane() -> Lane {
         Lane {
-            matrix: "sorting",
+            group: "sorting",
             type_name: "Vec<u64>",
             candidates: vec![
                 Named {

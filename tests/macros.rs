@@ -152,7 +152,7 @@ fn some_long_internal_name() -> u64 {
 
 // ---- a comparison group: one shared input, three alternatives ----
 
-#[scaling::bench_input(group = "sorting")]
+#[scaling::input(group = "sorting")]
 fn sorting_data() -> Vec<u64> {
     (0..500u64).rev().collect()
 }
@@ -178,7 +178,7 @@ fn thrice(v: &mut Vec<u64>) {
 // though the group's shared input is still regenerated and cloned every
 // round like any other member's ----
 
-#[scaling::bench_input(group = "counting")]
+#[scaling::input(group = "counting")]
 fn counting_data() -> Vec<u64> {
     (0..300u64).collect()
 }
@@ -198,7 +198,7 @@ fn sum_it_stateful(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
 // the expensive part builds once, ever; the returned closure still runs as
 // often as an ordinary #[bench_input] function would ----
 
-#[scaling::bench_input(group = "caching")]
+#[scaling::input(group = "caching")]
 fn caching_data() -> impl FnMut() -> Vec<u64> {
     let base: Vec<u64> = (0..300u64).collect();
     move || base.clone()
@@ -309,7 +309,9 @@ fn every_written_benchmark_is_found_and_measured() {
         "a scaling benchmark with a setup-once function should measure like any other",
     );
 
-    let sorting = report.comparison("sorting").expect("the sorting group ran");
+    let sorting = report
+        .comparison("sorting@sorting_data")
+        .expect("the sorting group ran");
     assert_eq!(sorting.stats().len(), 3);
     assert_eq!(sorting.against_baseline().count(), 2);
 
@@ -319,13 +321,13 @@ fn every_written_benchmark_is_found_and_measured() {
     assert_eq!(summing.stats().len(), 2);
 
     let counting = report
-        .comparison("counting")
+        .comparison("counting@counting_data")
         .expect("the group with a Design A member ran");
     assert_eq!(counting.stats().len(), 2);
     assert_eq!(counting.against_baseline().count(), 1);
 
     let caching = report
-        .comparison("caching")
+        .comparison("caching@caching_data")
         .expect("the group with a Design A bench_input ran");
     assert_eq!(caching.stats().len(), 2);
     assert_eq!(caching.against_baseline().count(), 1);
@@ -364,7 +366,7 @@ fn names_default_to_the_module_path() {
 fn the_declared_baseline_is_used() {
     let report = measure(&options(20)).expect("these registrations compose");
 
-    let cmps = report.comparison("sorting").unwrap();
+    let cmps = report.comparison("sorting@sorting_data").unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
     assert_eq!(against.len(), 2);
     assert!(

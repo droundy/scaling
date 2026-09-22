@@ -166,7 +166,7 @@ fn ref_input_setup_runs_exactly_once_despite_many_timed_calls() {
 
 static GROUP_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
 
-#[scaling::bench_input(group = "counts_group_setup_calls")]
+#[scaling::input(group = "counts_group_setup_calls")]
 fn group_setup_data() -> u64 {
     3
 }
@@ -199,7 +199,7 @@ fn group_member_setup_runs_exactly_once_despite_many_timed_calls() {
 
     let report = measure(&options).expect("the registrations compose");
     let cmp = report
-        .comparison("counts_group_setup_calls")
+        .comparison("counts_group_setup_calls@group_setup_data")
         .expect("the group should have run");
     assert!(
         cmp.stats().iter().all(|s| s.iterations > 1000),
@@ -229,7 +229,7 @@ fn group_member_setup_runs_exactly_once_despite_many_timed_calls() {
 static BENCH_INPUT_BUILD_CALLS: AtomicU64 = AtomicU64::new(0);
 static BENCH_INPUT_ROUND_CALLS: AtomicU64 = AtomicU64::new(0);
 
-#[scaling::bench_input(group = "counts_bench_input_build_calls")]
+#[scaling::input(group = "counts_bench_input_build_calls")]
 fn setup_once_shared_data() -> impl FnMut() -> ::std::sync::Arc<Vec<u64>> {
     let big = ::std::sync::Arc::new({
         BENCH_INPUT_BUILD_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -263,7 +263,7 @@ fn bench_input_setup_runs_once_ever_while_its_closure_keeps_running() {
 
     let report = measure(&options).expect("the registrations compose");
     let cmp = report
-        .comparison("counts_bench_input_build_calls")
+        .comparison("counts_bench_input_build_calls@setup_once_shared_data")
         .expect("the group should have run");
     let rounds: Vec<usize> = cmp.stats().iter().map(|s| s.samples).collect();
     assert!(
@@ -298,12 +298,12 @@ fn bench_input_setup_runs_once_ever_while_its_closure_keeps_running() {
 
 static CANDIDATE_SETUP_CALLS: AtomicU64 = AtomicU64::new(0);
 
-#[scaling::candidate(matrix = "counts_candidate_setup_calls", baseline)]
+#[scaling::bench(group = "counts_candidate_setup_calls", baseline)]
 fn candidate_setup_plain(v: &mut u64) -> u64 {
     *v
 }
 
-#[scaling::candidate(matrix = "counts_candidate_setup_calls")]
+#[scaling::bench(group = "counts_candidate_setup_calls")]
 fn candidate_setup_stateful(v: &mut u64) -> impl FnMut() -> u64 {
     CANDIDATE_SETUP_CALLS.fetch_add(1, Ordering::SeqCst);
     let base = *v;
@@ -314,7 +314,7 @@ fn candidate_setup_stateful(v: &mut u64) -> impl FnMut() -> u64 {
     }
 }
 
-#[scaling::input(matrix = "counts_candidate_setup_calls", name = "seed")]
+#[scaling::input(group = "counts_candidate_setup_calls", name = "seed")]
 fn candidate_setup_seed() -> u64 {
     5
 }

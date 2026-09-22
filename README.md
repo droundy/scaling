@@ -136,14 +136,16 @@ script that wants to look at the numbers rather than show them - reached by
 name, since nobody wrote those names down: they come from the module and
 function each benchmark was declared in. `--list` prints them.
 
-## Comparisons and matrices
+## Comparisons
 
-A comparison is declared the same way — `group` makes a function one
-alternative of one, and exactly one of them is the `baseline` the others are
-reported against:
+`group` makes a function one candidate of a comparison — a bare
+`group = "name"` for one group, or `group("a", "b")` to belong to several at
+once without those groups being compared with each other. `baseline` says
+which candidate the others are reported against; with none marked, the
+first by name is used, and the report says which it was.
 
 ```rust
-#[scaling::bench_input(group = "sorting")]
+#[scaling::input(group = "sorting")]
 fn sorting_data() -> Vec<u64> { (0..400).rev().collect() }
 
 #[scaling::bench(group = "sorting", baseline)]
@@ -153,33 +155,38 @@ fn stable(v: &mut Vec<u64>) { v.sort() }
 fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
 ```
 
-All the alternatives are measured in one interleaved round on the *same*
+All the candidates are measured in one interleaved round on the *same*
 generated input, which is what lets the difference between them be reported
 with its own error bar rather than by subtracting two independent numbers.
 
-A **matrix** goes further: implementations and inputs are declared
-separately, and every pairing is measured, with no list of the pairings
-anywhere.
+Candidates and inputs are registered independently and neither names the
+other - a candidate says what type it takes, an input says what type it
+makes, and every pairing sharing a group and a type is measured, with no
+list of the pairings anywhere. That is what lets one input feed several
+candidates, and one candidate be compared against several others, just by
+adding declarations:
 
 ```rust
-#[scaling::candidate(matrix = "sorting", baseline)]
+#[scaling::bench(group = "sorting", baseline)]
 fn stable(v: &mut Vec<u64>) { v.sort() }
 
-#[scaling::candidate(matrix = "sorting")]
+#[scaling::bench(group = "sorting")]
 fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
 
-#[scaling::input(matrix = "sorting", name = "sorted")]
+#[scaling::input(group = "sorting", name = "sorted")]
 fn already_sorted() -> Vec<u64> { (0..400).collect() }
 
-#[scaling::input(matrix = "sorting", name = "reversed")]
+#[scaling::input(group = "sorting", name = "reversed")]
 fn reversed() -> Vec<u64> { (0..400).rev().collect() }
 ```
 
 Four declarations, four cells; a third input would make six without touching
-anything already written. Candidates are paired with inputs by *type*, so
-one matrix can hold several unrelated type families and a `String` candidate
-is never handed a `Vec<u8>`. Each input's cells are a comparison, printed as
-a grid:
+anything already written. One group can hold several unrelated type
+families, since candidates are paired only with inputs of their own type - a
+`String` candidate is never handed a `Vec<u8>`; if a group's candidates
+disagree on type, it simply splits into one comparison per type rather than
+refusing to run. Each input's cells are a comparison; sharing a group with
+more than one input, they print together as a grid:
 
 ```none
 sorting  (Vec<u64>)  baseline: stable
@@ -188,6 +195,10 @@ sorting  (Vec<u64>)  baseline: stable
   unstable  393.989ns  291.241ns
                 -7.0%     -3.9%
 ```
+
+A group with just one input - the common case, and the only shape a plain
+`group = "..."` with no `#[input]` at all ever has - prints as an ordinary
+comparison instead, with no grid to read.
 
 ## Why measuring them together matters
 

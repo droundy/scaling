@@ -20,7 +20,7 @@ fn work(n: usize) -> u64 {
 // is far outside anything the machine's noise reaches, and the test does not
 // depend on a quiet machine.
 
-#[scaling::bench_input(group = "regressing")]
+#[scaling::input(group = "regressing")]
 fn regressing_input() -> Vec<u64> {
     (0..64u64).collect()
 }
@@ -45,7 +45,7 @@ fn slow(v: &mut Vec<u64>) -> u64 {
 // detects a change is not a regression unless the change is a slowdown, and
 // this is what says so.
 
-#[scaling::bench_input(group = "improving")]
+#[scaling::input(group = "improving")]
 fn improving_input() -> Vec<u64> {
     (0..64u64).collect()
 }
@@ -72,17 +72,17 @@ fn flat() -> u64 {
     work(64)
 }
 
-#[scaling::candidate(matrix = "sorting", baseline, name = "stable")]
+#[scaling::bench(group = "sorting", baseline, name = "stable")]
 fn stable(v: &mut Vec<u64>) {
     v.sort();
 }
 
-#[scaling::candidate(matrix = "sorting", name = "unstable")]
+#[scaling::bench(group = "sorting", name = "unstable")]
 fn unstable(v: &mut Vec<u64>) {
     v.sort_unstable();
 }
 
-#[scaling::input(matrix = "sorting", name = "reversed")]
+#[scaling::input(group = "sorting", name = "reversed")]
 fn reversed() -> Vec<u64> {
     (0..128u64).rev().collect()
 }
@@ -194,7 +194,7 @@ fn a_script_can_read_the_numbers_it_measured() {
     .expect("these registrations compose");
 
     let comparison = report
-        .comparison("regressing")
+        .comparison("regressing@regressing_input")
         .expect("the group was measured");
     assert_eq!(comparison.baseline_name(), "fast");
 

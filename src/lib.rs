@@ -203,10 +203,12 @@ See [`main!`] for the whole of it, [`runner`] for what the flags do, and
 [`runner::measure`] for reading the numbers in a script rather than printing
 them.
 
-Comparisons are declared the same way. `group = "..."` makes a function one
-alternative of a comparison, and `#[scaling::candidate]` with
-`#[scaling::input]` builds a matrix of implementations against inputs -
-paired by type, with no list of the pairings anywhere.
+Comparisons are declared the same way. `group = "..."` (or `group("a",
+"b")`, to belong to several at once) makes a function one candidate of a
+comparison, and [`scaling::input`](macro@input) declares a shared input -
+candidates and inputs are registered independently and paired by type, with
+no list of the pairings anywhere, so adding one new input is picked up by
+every candidate that shares its group and type.
 
 ## Why they are measured together
 
@@ -431,7 +433,7 @@ pub use inventory;
 
 /// Attribute macros that register a benchmark where it is written, rather
 /// than requiring it be added to a suite by hand.
-pub use scaling_macros::{bench, bench_input, bench_scaling, candidate, input};
+pub use scaling_macros::{bench, bench_scaling, input};
 
 /// A whole benchmark binary, in one line.
 ///

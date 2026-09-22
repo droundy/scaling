@@ -14,17 +14,17 @@ use std::time::Duration;
 
 // ---- three implementations of the same thing ----
 
-#[scaling::candidate(matrix = "sorting", baseline)]
+#[scaling::bench(group = "sorting", baseline)]
 fn stable(v: &mut Vec<u64>) {
     v.sort();
 }
 
-#[scaling::candidate(matrix = "sorting")]
+#[scaling::bench(group = "sorting")]
 fn unstable(v: &mut Vec<u64>) {
     v.sort_unstable();
 }
 
-#[scaling::candidate(matrix = "sorting")]
+#[scaling::bench(group = "sorting")]
 fn thrice(v: &mut Vec<u64>) {
     v.sort();
     v.sort_unstable();
@@ -33,53 +33,53 @@ fn thrice(v: &mut Vec<u64>) {
 
 // ---- two inputs, written somewhere else entirely ----
 
-#[scaling::input(matrix = "sorting", name = "reversed")]
+#[scaling::input(group = "sorting", name = "reversed")]
 fn reversed() -> Vec<u64> {
     (0..400u64).rev().collect()
 }
 
-#[scaling::input(matrix = "sorting", name = "sorted")]
+#[scaling::input(group = "sorting", name = "sorted")]
 fn already_sorted() -> Vec<u64> {
     (0..400u64).collect()
 }
 
 // ---- a second matrix, of a different type, to show lanes keep apart ----
 
-#[scaling::candidate(matrix = "hashing", baseline)]
+#[scaling::bench(group = "hashing", baseline)]
 fn sum_bytes(s: &mut String) -> u64 {
     s.bytes().map(u64::from).sum()
 }
 
-#[scaling::candidate(matrix = "hashing")]
+#[scaling::bench(group = "hashing")]
 fn fold_bytes(s: &mut String) -> u64 {
     s.bytes().fold(0u64, |a, b| a.wrapping_add(u64::from(b)))
 }
 
-#[scaling::input(matrix = "hashing", name = "short")]
+#[scaling::input(group = "hashing", name = "short")]
 fn short_text() -> String {
     "the quick brown fox".repeat(4)
 }
 
 // ---- an input registered at several sizes from one function ----
 
-#[scaling::input(matrix = "sized", sizes(64, 256))]
+#[scaling::input(group = "sized", sizes(64, 256))]
 fn ramp(n: usize) -> Vec<u64> {
     (0..n as u64).collect()
 }
 
 // ---- and one with `name` overriding the bare function name too ----
 
-#[scaling::input(matrix = "sized", name = "flat", sizes(32, 128))]
+#[scaling::input(group = "sized", name = "flat", sizes(32, 128))]
 fn flat_of_len(n: usize) -> Vec<u64> {
     vec![7u64; n]
 }
 
-#[scaling::candidate(matrix = "sized", baseline)]
+#[scaling::bench(group = "sized", baseline)]
 fn total(v: &mut Vec<u64>) -> u64 {
     v.iter().sum()
 }
 
-#[scaling::candidate(matrix = "sized")]
+#[scaling::bench(group = "sized")]
 fn total_folded(v: &mut Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, b| a.wrapping_add(*b))
 }
@@ -186,18 +186,18 @@ fn the_declared_baseline_wins_over_alphabetical_order() {
 // ---- a matrix with a Design A candidate: setup runs once per (candidate,
 // input) pairing, not every timed call ----
 
-#[scaling::candidate(matrix = "stateful", baseline)]
+#[scaling::bench(group = "stateful", baseline)]
 fn plain_sum(v: &mut Vec<u64>) -> u64 {
     v.iter().sum()
 }
 
-#[scaling::candidate(matrix = "stateful")]
+#[scaling::bench(group = "stateful")]
 fn cached_sum(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
     let total: u64 = v.iter().sum();
     move || total
 }
 
-#[scaling::input(matrix = "stateful", name = "data")]
+#[scaling::input(group = "stateful", name = "data")]
 fn stateful_data() -> Vec<u64> {
     (0..300u64).collect()
 }
@@ -221,24 +221,24 @@ fn a_design_a_candidate_is_measured_like_any_other() {
 // the types are listed. It is still one annotation rather than one wrapper
 // function per type.
 
-#[scaling::candidate(matrix = "generic", types(String, Vec<u8>))]
+#[scaling::bench(group = "generic", types(String, Vec<u8>))]
 fn byte_sum<T: AsRef<[u8]>>(x: &mut T) -> u64 {
     x.as_ref().iter().map(|b| u64::from(*b)).sum()
 }
 
-#[scaling::candidate(matrix = "generic", types(String, Vec<u8>))]
+#[scaling::bench(group = "generic", types(String, Vec<u8>))]
 fn byte_fold<T: AsRef<[u8]>>(x: &mut T) -> u64 {
     x.as_ref()
         .iter()
         .fold(0u64, |a, b| a.wrapping_add(u64::from(*b)))
 }
 
-#[scaling::input(matrix = "generic", name = "text")]
+#[scaling::input(group = "generic", name = "text")]
 fn generic_text() -> String {
     "abcdefghij".repeat(8)
 }
 
-#[scaling::input(matrix = "generic", name = "bytes")]
+#[scaling::input(group = "generic", name = "bytes")]
 fn generic_bytes() -> Vec<u8> {
     (0..80u8).collect()
 }

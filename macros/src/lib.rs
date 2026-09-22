@@ -143,21 +143,30 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// very cost you wanted timed, since nothing `make_input` does is on the
 /// clock.
 ///
-/// Add `group = "name"` to make this one alternative of a comparison, and
-/// `baseline` on exactly one member of each group to say which the others
-/// are reported against - registrations have no order, so it cannot be the
-/// first one added as it is for a hand-built `ComparisonSet`. `name = "..."`
-/// overrides the reported name, which defaults to the module-qualified path
-/// of the function.
+/// Add `group = "name"` to make this one candidate of a comparison - or
+/// `group("a", "b")` to belong to several at once, none of them compared
+/// with each other: `quicksort` might enter both `"small_sort"` and
+/// `"big_sort"`, say, while a poor-scaling algorithm is left out of the
+/// latter. `baseline` says which candidate of a group the others are
+/// reported against, and applies in every group the candidate belongs to;
+/// with none marked in a group, the first by name is used, and the report
+/// says which it was. `name = "..."` overrides the reported name, which
+/// otherwise defaults to the bare function name - the group already gives it
+/// context, so nothing here needs the module-qualified path a standalone
+/// benchmark's name defaults to.
 ///
-/// A group's members share one input, declared once with
-/// [`bench_input`](macro@bench_input) rather than with `input =` or
-/// `make_input =` on each member - a group compiled with either of those is
-/// rejected, because a per-alternative input would break the pairing that
-/// makes a comparison's error bar narrower than two separate measurements:
+/// Candidates and inputs are registered independently and neither names the
+/// other: a candidate says what type it takes, [`input`](macro@input) says
+/// what type it makes, and every pairing sharing a group and a type is
+/// measured - which is what lets one input feed several candidates, and one
+/// candidate be compared against several others, without a list of the
+/// pairings anywhere. A candidate compiled with `input =` or `make_input =`
+/// as well as a `group` is rejected: a per-candidate input would break the
+/// pairing that makes a comparison's error bar narrower than two separate
+/// measurements.
 ///
 /// ```ignore
-/// #[scaling::bench_input(group = "sort")]
+/// #[scaling::input(group = "sort")]
 /// fn sort_data() -> Vec<i32> { random_vec(1000) }
 ///
 /// #[scaling::bench(group = "sort", baseline)]
@@ -167,9 +176,10 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
 /// ```
 ///
-/// A group whose members all take nothing needs no
-/// [`bench_input`](macro@bench_input) at all - comparing two ways of doing
-/// the same fixed-cost work, say:
+/// A group whose candidates all take nothing needs no
+/// [`input`](macro@input) at all - comparing two ways of doing the same
+/// fixed-cost work, say - and prints under its own plain name rather than
+/// one qualified by an input:
 ///
 /// ```ignore
 /// #[scaling::bench(group = "summing", baseline)]
@@ -179,17 +189,30 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// fn iter_sum() -> u64 { (0..200u64).sum() }
 /// ```
 ///
-/// A group's members must currently take `&I` or `&mut I`, not `I` by
-/// value - not a fundamental restriction, just not yet taught to a group's
-/// shared, cloned-per-round input.
+/// A candidate whose declared input type matches no group input, or whose
+/// group has no other candidate of that type, is not an error - it is
+/// reported as unused and simply measured on nothing, or on its own as a
+/// plain benchmark, respectively. `types(A, B, ...)` registers the same
+/// generic candidate once per listed type, which is the one place
+/// monomorphisation has to be spelled out - the function itself is generic
+/// in the type its input argument names, and each listed type becomes its
+/// own registration:
 ///
-/// A member may also use the setup-once shape above, returning `impl
+/// ```ignore
+/// #[scaling::bench(group = "contains", types(Vec<u64>, std::collections::HashSet<u64>))]
+/// fn contains<T: Container>(c: &T) -> bool { c.contains(&0) }
+/// ```
+///
+/// A candidate must currently take `&I` or `&mut I`, not `I` by value - not
+/// a fundamental restriction, just not yet taught to a group's shared,
+/// cloned-per-round input.
+///
+/// A candidate may also use the setup-once shape above, returning `impl
 /// Fn()/FnMut() -> O` instead of `O` directly: setup runs once for that
-/// member, not once per timed call, exactly as it would outside a group.
-/// The group's shared input is still regenerated and cloned every round
-/// regardless - a comparison's pairing depends on every member seeing that
-/// round's input, setup-once member included - so this saves the setup
-/// function's own work, not the input machinery's.
+/// candidate, not once per timed call. The group's input is still
+/// regenerated - and, in a comparison of two or more candidates, cloned -
+/// every round regardless, so this saves the setup function's own work, not
+/// the input machinery's.
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -301,63 +324,6 @@ pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Declare the shared input of a comparison group.
-///
-/// Named to pair with [`bench`]: this is the group-wide counterpart of the
-/// per-benchmark `make_input = ...` argument `#[bench]` itself takes - the
-/// same idea, "build a fresh input", but shared by every alternative in a
-/// group rather than private to one benchmark.
-///
-/// ```ignore
-/// #[scaling::bench_input(group = "sort")]
-/// fn sort_data() -> Vec<i32> { random_vec(1000) }
-/// ```
-///
-/// Called fresh for every timed call across the whole comparison - several
-/// times per round, in fact, since a round batches more than one call
-/// together - and the value cloned for each alternative, so that all of
-/// them are measured on the same input at that call, which is what makes
-/// their differences paired. Exactly one per group.
-///
-/// A `group = "..."` on `#[bench]`/`#[bench_scaling]` itself cannot also
-/// take `input = ...` or `make_input = ...`: an alternative's input always
-/// comes from its group's `#[bench_input]`, and per-alternative inputs
-/// would break the pairing the whole statistical model depends on. Use this
-/// attribute instead.
-///
-/// # Setup that runs once, ever, not once per call
-///
-/// This function may also return `impl Fn()/FnMut() -> I` instead of `I`
-/// directly - [`bench`]'s setup-once shape. Unlike `make_input = <closure>`
-/// on an ordinary benchmark, which is user code free to capture whatever
-/// persistent state it wants, this function becomes a plain `fn` once
-/// registered, with no closure environment of its own to hold anything in,
-/// so this is the one place the shape needs support from this crate rather
-/// than being written by hand with an `Arc`:
-///
-/// ```ignore
-/// #[scaling::bench_input(group = "sort")]
-/// fn sort_data() -> impl FnMut() -> std::sync::Arc<Vec<i32>> {
-///     let big = std::sync::Arc::new(random_vec(1_000_000));
-///     move || big.clone()
-/// }
-/// ```
-///
-/// `random_vec` runs once, ever, for the group's whole comparison; the
-/// returned closure runs exactly as often as this function itself would
-/// without setup-once - every call the group's alternatives need a fresh
-/// input for - and cloning the `Arc` each time is cheap. Every alternative
-/// in a round still sees the same input, same as always: what changes is
-/// that building it now costs once, not every call.
-#[proc_macro_attribute]
-pub fn bench_input(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as Args);
-    let func = parse_macro_input!(item as ItemFn);
-    expand_bench_input(args, func)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
 /// Which of the registry's kinds is being written.
 enum Flavour {
     Flat,
@@ -368,13 +334,15 @@ enum Flavour {
 #[derive(Default)]
 struct Args {
     name: Option<LitStr>,
-    group: Option<LitStr>,
-    matrix: Option<LitStr>,
+    /// `group = "a"` or `group("a", "b", ...)`: every group this belongs
+    /// to. Empty means none - a plain standalone registration.
+    groups: Vec<LitStr>,
     baseline: bool,
     input: Option<Expr>,
     make_input: Option<Expr>,
     nmin: Option<LitInt>,
-    /// `types(A, B)`: instantiate a generic candidate once per type.
+    /// `types(A, B)`: instantiate a generic candidate or input once per
+    /// type.
     types: Vec<Type>,
     /// `sizes(1, 2)`: register an input once per size.
     sizes: Vec<LitInt>,
@@ -392,13 +360,27 @@ impl syn::parse::Parse for Args {
                     input.parse::<syn::Token![=]>()?;
                     args.name = Some(input.parse()?);
                 }
+                // Either `group = "a"` (the common, single-group case) or
+                // `group("a", "b", ...)` (belongs to several at once) -
+                // both accepted, so the common case stays as light as it
+                // was before groups could be a list.
                 "group" => {
-                    input.parse::<syn::Token![=]>()?;
-                    args.group = Some(input.parse()?);
-                }
-                "matrix" => {
-                    input.parse::<syn::Token![=]>()?;
-                    args.matrix = Some(input.parse()?);
+                    if input.peek(syn::token::Paren) {
+                        let inner;
+                        syn::parenthesized!(inner in input);
+                        let listed = syn::punctuated::Punctuated::<LitStr, syn::Token![,]>::parse_terminated(&inner)?;
+                        if listed.is_empty() {
+                            return Err(syn::Error::new(
+                                key.span(),
+                                "`group(..)` lists the groups this belongs to, so it needs at \
+                                 least one",
+                            ));
+                        }
+                        args.groups.extend(listed);
+                    } else {
+                        input.parse::<syn::Token![=]>()?;
+                        args.groups.push(input.parse()?);
+                    }
                 }
                 // These two take a parenthesised list rather than a value,
                 // since each stands for several registrations.
@@ -451,7 +433,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, matrix, baseline, input, make_input, \
+                             name, group, baseline, input, make_input, \
                              nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -466,12 +448,11 @@ impl syn::parse::Parse for Args {
     }
 }
 
-/// The input type a benchmark function takes, read off its own signature.
+/// What a benchmark function's own signature declares its input to be.
 ///
 /// `None` means it takes nothing, which the registry represents as `()` -
-/// so a group of no-input alternatives and a group of generated-input ones
-/// are one code path rather than two.
-/// What a benchmark function's own signature declares its input to be.
+/// so a group whose candidates take nothing and a group whose candidates
+/// take a generated input are one code path rather than two.
 enum Input {
     /// No argument: the benchmark takes nothing.
     None,
@@ -599,9 +580,9 @@ fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
 /// that names it. `None` otherwise, `OneArg` included: a caller wanting
 /// [`Repeatable`] itself should ask [`returns_repeatable_closure`], this is
 /// only for a caller that already knows it wants `NoArg` specifically and
-/// needs the type inside it - [`expand_bench_input`] and
-/// [`expand_input`], where the function itself always takes no
-/// arguments, so there is no `OneArg` shape to speak of.
+/// needs the type inside it - [`expand_input`], where a non-generic input
+/// function always takes no arguments, so there is no `OneArg` shape to
+/// speak of.
 fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         return None;
@@ -742,98 +723,52 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
              iteration, the other builds a fresh one",
         ));
     }
-    // `Flavour::Flat` only: a scaling benchmark in a group is rejected below,
-    // for its own, more specific reason, regardless of `input`/`make_input`.
-    if let Flavour::Flat = flavour {
-        if args.group.is_some() && (args.input.is_some() || args.make_input.is_some()) {
-            let span = args
-                .input
-                .as_ref()
-                .map(|e| e.span())
-                .or_else(|| args.make_input.as_ref().map(|e| e.span()))
-                .unwrap_or_else(|| func.sig.span());
-            return Err(syn::Error::new(
-                span,
-                "a comparison group's alternatives share one input, declared once with \
-                 `#[scaling::bench_input(group = \"...\")]` - not `input =` or \
-                 `make_input =` on each member, which would give every alternative its \
-                 own input and break the pairing a comparison's accuracy depends on",
-            ));
-        }
+    // A scaling benchmark measures how one function grows with N, which is
+    // not something a comparison compares - so it never takes a group,
+    // regardless of `input`/`make_input`.
+    if let (Flavour::Scaling, Some(g)) = (&flavour, args.groups.first()) {
+        return Err(syn::Error::new(
+            g.span(),
+            "a scaling benchmark measures how one function grows with N, which is \
+             not something a comparison compares",
+        ));
     }
-    if args.baseline && args.group.is_none() {
+    if !args.groups.is_empty() && (args.input.is_some() || args.make_input.is_some()) {
+        let span = args
+            .input
+            .as_ref()
+            .map(|e| e.span())
+            .or_else(|| args.make_input.as_ref().map(|e| e.span()))
+            .unwrap_or_else(|| func.sig.span());
+        return Err(syn::Error::new(
+            span,
+            "a comparison's candidates share their input with whatever \
+             `#[scaling::input(group = \"...\")]` names the same group - not \
+             `input =` or `make_input =` here, which would give this one its own \
+             input and break the pairing a comparison's accuracy depends on",
+        ));
+    }
+    if args.baseline && args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
-            "`baseline` says which alternative of a comparison the others are \
+            "`baseline` says which candidate of a comparison the others are \
              reported against, so it needs a `group` to be the baseline of",
         ));
+    }
+
+    // `Flavour::Scaling` was already rejected above, so any group here
+    // belongs to a `#[bench]`, which is a candidate rather than a
+    // standalone registration.
+    if !args.groups.is_empty() {
+        return expand_candidate(args, func);
     }
 
     let name = reported_name(&args, &func);
     let fname = &func.sig.ident;
     let shim = format_ident!("__scaling_shim_{}", fname);
 
-    let registration = match (&args.group, &flavour) {
-        // An alternative in a comparison group.
-        (Some(group), Flavour::Flat) => {
-            let kind = input_kind(&func)?;
-            if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
-                return Err(e);
-            }
-            let baseline = args.baseline;
-            // The call, and the type the group's input must have.
-            let call = call_expr(fname, kind.ty());
-            let (ty_id, ty_name) = ty_id_and_name(kind.ty());
-            // A setup function runs once, lazily, on the first of the many
-            // calls a comparison makes to this alternative - see
-            // `repeatable_call`. The group's shared input still gets
-            // regenerated and cloned every round regardless, same as for
-            // any other alternative; only the setup function's own work is
-            // saved.
-            let add = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
-                let call = repeatable_call(call);
-                quote! {
-                    let mut __action = ::core::option::Option::None;
-                    __set.add(__name, move |__e: &mut ::scaling::registry::ErasedInput| #call)
-                }
-            } else {
-                quote! {
-                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
-                }
-            };
-            quote! {
-                #[doc(hidden)]
-                fn #shim<'__s>(
-                    __set: ::scaling::registry::Alternative<'__s>,
-                    __name: &str,
-                ) -> ::scaling::registry::Alternative<'__s> {
-                    #add
-                }
-                ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered {
-                        name: #name,
-                        crate_name: ::core::env!("CARGO_PKG_NAME"),
-                        crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        group: ::core::option::Option::Some(#group),
-                        is_baseline: #baseline,
-                        kind: ::scaling::registry::Kind::Alt {
-                            add: #shim,
-                            input_type: #ty_id,
-                            input_type_name: #ty_name,
-                        },
-                    }
-                }
-            }
-        }
-        (Some(g), Flavour::Scaling) => {
-            return Err(syn::Error::new(
-                g.span(),
-                "a scaling benchmark measures how one function grows with N, which is \
-                 not something a comparison group compares",
-            ))
-        }
-        // A standalone benchmark.
-        (None, Flavour::Flat) => {
+    let registration = match flavour {
+        Flavour::Flat => {
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
             let repeatable_kind = returns_repeatable_closure(&func.sig);
@@ -998,14 +933,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         name: #name,
                         crate_name: ::core::env!("CARGO_PKG_NAME"),
                         crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        group: ::core::option::Option::None,
-                        is_baseline: false,
                         kind: ::scaling::registry::Kind::Flat(#shim),
                     }
                 }
             }
         }
-        (None, Flavour::Scaling) => {
+        Flavour::Scaling => {
             let nmin = args.nmin.as_ref().ok_or_else(|| {
                 syn::Error::new(
                     func.sig.span(),
@@ -1087,8 +1020,6 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         name: #name,
                         crate_name: ::core::env!("CARGO_PKG_NAME"),
                         crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        group: ::core::option::Option::None,
-                        is_baseline: false,
                         kind: ::scaling::registry::Kind::Scaling(#shim),
                     }
                 }
@@ -1109,138 +1040,65 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     })
 }
 
-fn expand_bench_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
-    let group = args.group.as_ref().ok_or_else(|| {
-        syn::Error::new(
-            func.sig.span(),
-            "`#[scaling::bench_input]` declares the shared input of a comparison group, \
-             so it needs `group = \"...\"` to say which",
-        )
-    })?;
-    if !func.sig.inputs.is_empty() {
-        return Err(syn::Error::new(
-            func.sig.inputs.span(),
-            "an input generator takes no arguments: it is called once per round to \
-             build the input the group shares",
-        ));
-    }
-    let fname = &func.sig.ident;
-    let shim = format_ident!("__scaling_gen_{}", fname);
-    // A group generator may also use the setup-once shape, `impl
-    // Fn()/FnMut() -> I` instead of `I` directly: since a plain `fn` (what
-    // this generator is, once registered) has no closure environment of
-    // its own to hold state in - unlike `make_input = <closure>` on an
-    // ordinary benchmark, which is user code free to capture whatever it
-    // wants - the persistent state lives in a `thread_local!` inside the
-    // shim instead, checked and populated the first time this group's
-    // generator runs and reused every round after. Bounded, cheap
-    // bookkeeping: a `RefCell` check once per round, not once per timed
-    // call - `#fname` itself still only runs once, ever.
-    let (ty, shim_body) = if let Some(inner_ty) = repeatable_output(&func.sig) {
-        let body = quote! {
-            #[doc(hidden)]
-            fn #shim() -> ::scaling::registry::ErasedInput {
-                ::std::thread_local! {
-                    static __ACTION: ::core::cell::RefCell<
-                        ::core::option::Option<::std::boxed::Box<dyn FnMut() -> #inner_ty>>
-                    > = ::core::cell::RefCell::new(::core::option::Option::None);
-                }
-                __ACTION.with(|__cell| {
-                    let mut __guard = __cell.borrow_mut();
-                    let __action = __guard.get_or_insert_with(|| ::std::boxed::Box::new(#fname()));
-                    ::scaling::registry::ErasedInput::new(__action())
-                })
-            }
-        };
-        (inner_ty, body)
-    } else {
-        let ty = match &func.sig.output {
-            ReturnType::Type(_, ty) => (**ty).clone(),
-            ReturnType::Default => {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "an input generator has to return the input it generates",
-                ))
-            }
-        };
-        let body = quote! {
-            #[doc(hidden)]
-            fn #shim() -> ::scaling::registry::ErasedInput {
-                ::scaling::registry::ErasedInput::new(#fname())
-            }
-        };
-        (ty, body)
-    };
-    let ty_name = type_name(&ty);
-    Ok(quote! {
-        #func
-        #shim_body
-        ::scaling::inventory::submit! {
-            ::scaling::registry::BenchInputRegistration {
-                group: #group,
-                crate_name: ::core::env!("CARGO_PKG_NAME"),
-                crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                type_id: ::core::any::TypeId::of::<#ty>,
-                type_name: #ty_name,
-                make: #shim,
-            }
-        }
-    })
-}
-
-/// Register one implementation of a matrix.
+/// Register one input, shared by every candidate of a matching type in one
+/// or more of the named groups.
 ///
 /// ```ignore
-/// #[scaling::candidate(matrix = "sort", baseline)]
-/// fn std_sort(v: &mut Vec<i32>) { v.sort() }
-///
-/// #[scaling::candidate(matrix = "sort")]
-/// fn unstable(v: &mut Vec<i32>) { v.sort_unstable() }
-/// ```
-///
-/// Candidates and inputs are registered independently and neither names the
-/// other: a candidate says what type it takes, an input says what type it
-/// makes, and every pairing of the two is measured. Adding an input is one
-/// new function, and every candidate picks it up.
-///
-/// A matrix with two or more candidates of a type becomes one comparison per
-/// input of that type - a comparison carries each candidate's own timing as
-/// well as its difference from the baseline, so nothing is lost by always
-/// comparing. `baseline` says which one the others are reported against; with
-/// none marked the first by name is used, and the report says which it was.
-///
-/// `types(A, B, ...)` registers the same generic function once per listed
-/// type, which is the one place monomorphisation has to be spelled out.
-///
-/// A candidate may also return `impl Fn()/FnMut() -> O` instead of `O`
-/// directly - the same setup-once shape [`bench`] documents. Setup runs once
-/// per (candidate, input) pairing this matrix measures, not once per timed
-/// call. The matrix's own input machinery still regenerates - and, in a
-/// comparison of two or more candidates, clones - a fresh input every round
-/// regardless, same as for any other candidate; this saves the setup
-/// function's own work on top of that, not the input machinery's.
-#[proc_macro_attribute]
-pub fn candidate(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as Args);
-    let func = parse_macro_input!(item as ItemFn);
-    expand_candidate(args, func)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-/// Register one input of a matrix.
-///
-/// ```ignore
-/// #[scaling::input(matrix = "sort", name = "reversed")]
+/// #[scaling::input(group = "sort", name = "reversed")]
 /// fn reversed() -> Vec<i32> { (0..10_000).rev().collect() }
 ///
-/// #[scaling::input(matrix = "sort", sizes(100, 10_000))]
+/// #[scaling::input(group = "sort", sizes(100, 10_000))]
 /// fn random(n: usize) -> Vec<i32> { random_of_len(n) }
+///
+/// // Feeds three groups at once, without those groups being compared with
+/// // each other.
+/// #[scaling::input(group("dedup", "sort", "contains"))]
+/// fn sorted_vec() -> Vec<i32> { random_sorted_vec(10_000) }
 /// ```
+///
+/// Called fresh for every timed call across a comparison it feeds - several
+/// times per round, since a round batches more than one call together - and
+/// the value cloned for each candidate, so that all of them are measured on
+/// the same input at that call, which is what makes their differences
+/// paired.
 ///
 /// With `sizes(..)` the function takes the size and is registered once per
 /// listed size, named `fn_name@size` - which covers wanting the same input
-/// large and small without writing it twice.
+/// large and small without writing it twice. With `types(A, B, ...)` the
+/// function is generic in the type it returns and is registered once per
+/// listed type - the generic counterpart of a candidate's own `types(..)`:
+///
+/// ```ignore
+/// #[scaling::input(group = "contains", types(u8, u64, String))]
+/// fn one<T: Arbitrary>() -> T { T::arbitrary() }
+/// ```
+///
+/// `types(..)` and `sizes(..)` do not combine - one instantiates a generic
+/// input once per type, the other registers a fixed input once per size.
+///
+/// # Setup that runs once, ever, not once per call
+///
+/// This function may also return `impl Fn()/FnMut() -> I` instead of `I`
+/// directly - [`bench`]'s setup-once shape. Unlike `make_input = <closure>`
+/// on an ordinary benchmark, which is user code free to capture whatever
+/// persistent state it wants, this function becomes a plain `fn` once
+/// registered, with no closure environment of its own to hold anything in,
+/// so this is one of the few places the shape needs support from this crate
+/// rather than being written by hand with an `Arc`:
+///
+/// ```ignore
+/// #[scaling::input(group = "sort")]
+/// fn sort_data() -> impl FnMut() -> std::sync::Arc<Vec<i32>> {
+///     let big = std::sync::Arc::new(random_vec(1_000_000));
+///     move || big.clone()
+/// }
+/// ```
+///
+/// `random_vec` runs once, ever; the returned closure runs exactly as often
+/// as this function itself would without setup-once, and cloning the `Arc`
+/// each time is cheap. Every candidate in a round still sees the same
+/// input, same as always: what changes is that building it now costs once,
+/// not every call. Not yet supported together with `types(..)`.
 #[proc_macro_attribute]
 pub fn input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -1250,14 +1108,17 @@ pub fn input(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// The `&'static [&'static str]` expression naming every group a
+/// registration belongs to - `groups` is checked non-empty by every caller
+/// before this is reached.
+fn groups_array(groups: &[LitStr]) -> TokenStream2 {
+    quote!(&[#(#groups),*])
+}
+
+/// A `#[bench]` naming one or more groups - see `expand`, which dispatches
+/// here once it has confirmed as much.
 fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
-    let matrix = args.matrix.as_ref().ok_or_else(|| {
-        syn::Error::new(
-            func.sig.span(),
-            "`#[scaling::candidate]` needs `matrix = \"...\"` to say which matrix it is \
-             one implementation of",
-        )
-    })?;
+    let groups = groups_array(&args.groups);
     let fname = &func.sig.ident;
     let reported = name_or_bare(&args.name, fname);
     let baseline = args.baseline;
@@ -1378,8 +1239,8 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 #alt_body
             }
             ::scaling::inventory::submit! {
-                ::scaling::registry::MatrixCandidate {
-                    matrix: #matrix,
+                ::scaling::registry::Candidate {
+                    groups: #groups,
                     name: #name,
                     input_type: #ty_id,
                     input_type_name: #ty_name,
@@ -1396,83 +1257,168 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 }
 
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
-    let matrix = args.matrix.as_ref().ok_or_else(|| {
-        syn::Error::new(
-            func.sig.span(),
-            "`#[scaling::input]` needs `matrix = \"...\"` to say which matrix it is an \
-             input of",
-        )
-    })?;
-    let ty = match &func.sig.output {
-        ReturnType::Type(_, ty) => (**ty).clone(),
-        ReturnType::Default => {
-            return Err(syn::Error::new(
-                func.sig.span(),
-                "an input has to return the input it makes",
-            ))
-        }
-    };
-    let fname = &func.sig.ident;
-    let ty_name = type_name(&ty);
-
-    if args.sizes.is_empty() {
-        if !func.sig.inputs.is_empty() {
-            return Err(syn::Error::new(
-                func.sig.inputs.span(),
-                "an input takes no arguments unless it is registered at several `sizes(..)`, \
-                 in which case it takes the size",
-            ));
-        }
-        let name = name_or_bare(&args.name, fname);
-        let shim = format_ident!("__scaling_minput_{}", fname);
-        return Ok(quote! {
-            #func
-            #[doc(hidden)]
-            fn #shim() -> ::scaling::registry::ErasedInput {
-                ::scaling::registry::ErasedInput::new(#fname())
-            }
-            ::scaling::inventory::submit! {
-                ::scaling::registry::MatrixInput {
-                    matrix: #matrix,
-                    name: #name,
-                    crate_name: ::core::env!("CARGO_PKG_NAME"),
-                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    type_id: ::core::any::TypeId::of::<#ty>,
-                    type_name: #ty_name,
-                    make: #shim,
-                }
-            }
-        });
-    }
-
-    if func.sig.inputs.len() != 1 {
+    if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
-            "an input registered at several `sizes(..)` takes the size as its one argument",
+            "`#[scaling::input]` needs `group = \"...\"` (or `group(\"a\", \"b\", ...)`) \
+             to say which group or groups it feeds",
         ));
     }
-    // `name = "..."` overrides the bare function name here exactly as it
-    // does in the no-`sizes` branch above - previously only that branch
-    // honored it, so `#[scaling::input(name = "...", sizes(..))]` silently
-    // registered under the function's own name instead.
+    if !args.types.is_empty() && !args.sizes.is_empty() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "give either `types(..)` or `sizes(..)`, not both - one instantiates a \
+             generic input once per type, the other registers a fixed input once per \
+             size",
+        ));
+    }
+    let repeatable = returns_repeatable_closure(&func.sig);
+    if repeatable == Repeatable::OneArg {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "a setup function whose returned closure takes an argument isn't \
+             supported - see `#[scaling::bench]`'s docs for the pattern to use \
+             instead",
+        ));
+    }
+    if !args.types.is_empty() && repeatable == Repeatable::NoArg {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "the setup-once shape (`impl Fn()/FnMut() -> T`) is not yet supported \
+             together with `types(..)` - write a plain `-> T` input, or register one \
+             non-generic `#[scaling::input]` per type instead",
+        ));
+    }
+    match (args.sizes.is_empty(), func.sig.inputs.len()) {
+        (true, 0) => {}
+        (true, _) => {
+            return Err(syn::Error::new(
+                func.sig.inputs.span(),
+                "an input takes no arguments, unless it is registered at several \
+                 `sizes(..)`, in which case it takes the size",
+            ))
+        }
+        (false, 1) => {}
+        (false, _) => {
+            return Err(syn::Error::new(
+                func.sig.span(),
+                "an input registered at several `sizes(..)` takes the size as its one \
+                 argument",
+            ))
+        }
+    }
+
+    let groups = groups_array(&args.groups);
+    let fname = &func.sig.ident;
+    // `name = "..."` overrides the bare function name, the same default
+    // every registration derived from this crate uses.
     let bare = args
         .name
         .as_ref()
         .map(|lit| lit.value())
         .unwrap_or_else(|| fname.to_string());
-    let mut out = quote! { #func };
-    for (n, size) in args.sizes.iter().enumerate() {
-        let shim = format_ident!("__scaling_minput_{}_{}", fname, n);
-        let size_txt = size.base10_digits().to_string();
-        let name = format!("{bare}@{size_txt}");
-        out.extend(quote! {
-            #[doc(hidden)]
-            fn #shim() -> ::scaling::registry::ErasedInput {
-                ::scaling::registry::ErasedInput::new(#fname(#size))
+
+    // The type a non-generic instantiation produces - unused by a
+    // `types(..)` instantiation, which already has its own listed type and,
+    // being generic, cannot be read off this function's own signature.
+    let base_ty: Type = if repeatable == Repeatable::NoArg {
+        repeatable_output(&func.sig).expect("just matched Repeatable::NoArg")
+    } else {
+        match &func.sig.output {
+            ReturnType::Type(_, ty) => (**ty).clone(),
+            ReturnType::Default => {
+                return Err(syn::Error::new(
+                    func.sig.span(),
+                    "an input has to return the input it makes",
+                ))
             }
+        }
+    };
+
+    // What each instantiation is called, the type it produces, and the
+    // expression that calls the underlying function - directly for a plain
+    // input, or to build the setup-once closure once for the setup-once
+    // shape (see below).
+    struct Instantiation {
+        name: TokenStream2,
+        ty: Type,
+        call: TokenStream2,
+    }
+    let instantiations: Vec<Instantiation> = if !args.types.is_empty() {
+        // Turbofish, not argument-type inference: unlike a candidate, which
+        // infers its type parameter from the erased input it is handed, an
+        // input generator takes nothing to infer from.
+        args.types
+            .iter()
+            .map(|ty| Instantiation {
+                name: quote!(#bare),
+                ty: ty.clone(),
+                call: quote!(#fname::<#ty>()),
+            })
+            .collect()
+    } else if !args.sizes.is_empty() {
+        args.sizes
+            .iter()
+            .map(|size| {
+                let size_txt = size.base10_digits().to_string();
+                let name = format!("{bare}@{size_txt}");
+                Instantiation {
+                    name: quote!(#name),
+                    ty: base_ty.clone(),
+                    call: quote!(#fname(#size)),
+                }
+            })
+            .collect()
+    } else {
+        vec![Instantiation {
+            name: quote!(#bare),
+            ty: base_ty.clone(),
+            call: quote!(#fname()),
+        }]
+    };
+
+    let mut out = quote! { #func };
+    for (n, Instantiation { name, ty, call }) in instantiations.into_iter().enumerate() {
+        let shim = format_ident!("__scaling_input_{}_{}", fname, n);
+        let ty_name = type_name(&ty);
+        // The setup-once shape: since a plain `fn` (what this generator is,
+        // once registered) has no closure environment of its own to hold
+        // state in - unlike `make_input = <closure>` on an ordinary
+        // benchmark, which is user code free to capture whatever it wants -
+        // the persistent state lives in a `thread_local!` inside the shim
+        // instead, checked and populated the first time this particular
+        // instantiation's generator runs and reused every round after.
+        // Bounded, cheap bookkeeping: a `RefCell` check once per round, not
+        // once per timed call - `#call` itself still only runs once, ever.
+        let shim_body = if repeatable == Repeatable::NoArg {
+            quote! {
+                #[doc(hidden)]
+                fn #shim() -> ::scaling::registry::ErasedInput {
+                    ::std::thread_local! {
+                        static __ACTION: ::core::cell::RefCell<
+                            ::core::option::Option<::std::boxed::Box<dyn FnMut() -> #ty>>
+                        > = ::core::cell::RefCell::new(::core::option::Option::None);
+                    }
+                    __ACTION.with(|__cell| {
+                        let mut __guard = __cell.borrow_mut();
+                        let __action = __guard.get_or_insert_with(|| ::std::boxed::Box::new(#call));
+                        ::scaling::registry::ErasedInput::new(__action())
+                    })
+                }
+            }
+        } else {
+            quote! {
+                #[doc(hidden)]
+                fn #shim() -> ::scaling::registry::ErasedInput {
+                    ::scaling::registry::ErasedInput::new(#call)
+                }
+            }
+        };
+        out.extend(quote! {
+            #shim_body
             ::scaling::inventory::submit! {
-                ::scaling::registry::MatrixInput {
-                    matrix: #matrix,
+                ::scaling::registry::Input {
+                    groups: #groups,
                     name: #name,
                     crate_name: ::core::env!("CARGO_PKG_NAME"),
                     crate_version: ::core::env!("CARGO_PKG_VERSION"),

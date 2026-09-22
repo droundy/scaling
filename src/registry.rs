@@ -170,16 +170,6 @@ pub struct Registered {
     /// versions of one crate - an old one pulled in as a dev-dependency to
     /// compare against.
     pub crate_version: &'static str,
-    /// The comparison group this belongs to, if any. Members of a group are
-    /// timed against each other rather than reported separately.
-    pub group: Option<&'static str>,
-    /// Whether this is its group's baseline, which every other member is
-    /// reported against.
-    ///
-    /// Order cannot say this, as it does for a hand-built comparison set
-    /// where the first alternative added is the baseline, because
-    /// registrations have no order. It has to be declared.
-    pub is_baseline: bool,
     /// How to add this benchmark to a suite.
     pub kind: Kind,
 }
@@ -190,6 +180,11 @@ pub struct Registered {
 /// registrable: a `fn` item captures nothing and is `'static`, and `'static`
 /// outlives any `'a`, so one of these satisfies a suite's bounds whatever
 /// borrow the caller ends up with.
+///
+/// Always standalone - a function naming one or more `group`s registers a
+/// [`Candidate`] instead, never a `Registered`, so nothing here needs to
+/// carry group membership or baseline status. See [`Candidate`] for that
+/// side.
 ///
 /// # Why these add rather than run
 ///
@@ -210,13 +205,13 @@ pub struct Registered {
 /// not need to: the macro that writes a shim knows the concrete types at the
 /// point it writes it, so `F`, `I` and `O` are resolved there and the shim
 /// that comes out has a fixed signature. What crosses the boundary is a
-/// function pointer, and the three result types a benchmark can produce -
-/// [`Stats`], [`ScalingStats`], [`Comparisons`] - are concrete already.
+/// function pointer, and the two result types a standalone benchmark can
+/// produce - [`Stats`], [`ScalingStats`] - are concrete already.
 ///
 /// [`Stats`]: crate::Stats
 /// [`ScalingStats`]: crate::ScalingStats
-/// [`Comparisons`]: crate::Comparisons
 /// [`Config::bench`]: crate::Config::bench
+#[derive(Debug)]
 pub enum Kind {
     /// Adds itself with [`Adder::flat`], [`Adder::input`] or
     /// [`Adder::make_input`] - which of the three, and any input generator, is
@@ -229,71 +224,6 @@ pub enum Kind {
     /// Adds itself with [`Adder::scaling`] or [`Adder::scaling_gen`]. `nmin`
     /// is baked in too, since this signature has nowhere to pass it.
     Scaling(AddScaling),
-    /// Adds itself to a comparison group's comparison set.
-    Alt {
-        /// Takes the set and gives it back because a comparison set is a
-        /// consuming builder. The `for<'a>` is what lets one registration
-        /// serve whatever `Config` borrow assembly ends up with, rather than
-        /// being tied to a lifetime chosen at registration time - which,
-        /// being a `static`, would have to be `'static`.
-        add: AddAlt,
-        /// The input type this alternative expects, before erasure.
-        ///
-        /// Carried so that assembly can check every member of a group agrees
-        /// with the group's generator *before* anything runs. Without it the
-        /// first mismatched downcast would panic from inside the scheduler,
-        /// naming nothing useful.
-        ///
-        /// A function returning the id rather than the id itself, because a
-        /// registration is a `static` and so must be built in a `const`
-        /// context - where `TypeId::of` only became usable in Rust 1.91. A
-        /// `fn` pointer is const-constructible on every version, and calling
-        /// it during assembly costs nothing worth counting.
-        input_type: TypeIdOf,
-        /// The same type, spelled the way the source spells it, because a
-        /// `TypeId` says nothing to a reader and a diagnostic has to.
-        ///
-        /// Written by the registering macro with `stringify!`, which is a
-        /// literal and so usable in the `static` a registration becomes.
-        input_type_name: &'static str,
-    },
-}
-
-impl fmt::Debug for Kind {
-    /// Written out rather than derived, because a derived one prints the
-    /// shims as bare addresses and an address tells a reader nothing; what
-    /// is worth seeing about an alternative is the input type it wants.
-    ///
-    /// It was once necessary as well as nicer - deriving over the
-    /// higher-ranked `AddAlt` does not compile before 1.71, so while this
-    /// crate supported 1.66 the derive silently raised the floor for
-    /// everyone, feature or no feature. That is no longer the reason, but it
-    /// is worth knowing that this derive is not free on older compilers.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Kind::Flat(_) => f.write_str("Flat"),
-            Kind::Scaling(_) => f.write_str("Scaling"),
-            Kind::Alt {
-                input_type_name, ..
-            } => f
-                .debug_struct("Alt")
-                .field("input_type_name", input_type_name)
-                .finish(),
-        }
-    }
-}
-
-impl Kind {
-    /// How this spells its input type, for a diagnostic to quote. `"()"` for
-    /// the kinds that take no input.
-    pub fn input_type_name(&self) -> &'static str {
-        match self {
-            Kind::Alt {
-                input_type_name, ..
-            } => input_type_name,
-            _ => "()",
-        }
-    }
 }
 
 inventory::collect!(Registered);
@@ -382,68 +312,43 @@ impl Clone for ErasedInput {
     }
 }
 
-/// The input generator shared by one comparison group.
-///
-/// Registered separately from the group's alternatives, and exactly once per
-/// group, because there is exactly one generator per group - see
-/// [`ErasedInput`] for why the alternatives cannot each bring their own.
-#[derive(Debug)]
-pub struct BenchInputRegistration {
-    /// The group this generates input for.
-    pub group: &'static str,
-    /// Which crate registered it, and at what version.
-    ///
-    /// A group's generator registered by two versions of one crate is the
-    /// redundant case, exactly as a matrix input is: both build the same
-    /// thing, so one is kept. Two registered by one crate at one version is
-    /// a contradiction instead, and without the origin the two cannot be
-    /// told apart.
-    pub crate_name: &'static str,
-    pub crate_version: &'static str,
-    /// The generated input's type, so assembly can check the group's
-    /// alternatives agree with it. A function for the same reason
-    /// [`Kind::Alt`]'s is: a registration is built in a `const` context.
-    pub type_id: TypeIdOf,
-    /// The same type as the source spells it, for diagnostics. See
-    /// [`Kind::Alt::input_type_name`](Kind#variant.Alt.field.input_type_name).
-    pub type_name: &'static str,
-    /// Called once per round.
-    pub make: MakeInput,
-}
-
-inventory::collect!(BenchInputRegistration);
-
-/// One implementation to be measured against the others in a matrix.
+/// One implementation to be measured against whatever candidates and inputs
+/// share one of its groups and its input type.
 ///
 /// # Why candidates and inputs are registered separately
 ///
-/// The point of a matrix is to write each implementation once and each input
+/// The point of a group is to write each implementation once and each input
 /// once, and have every pairing measured. Writing an entry per pairing would
 /// put the cross-product back in the source - and worse, back in one place,
 /// which is the central list this whole design exists to remove. Adding an
 /// input would then mean editing every implementation, or a list somewhere
 /// else.
 ///
-/// So neither side names the other. A candidate says what type of input it
-/// wants, an input says what type it is, and assembly pairs them up.
+/// So neither side names the other, beyond the group name(s) both declare.
+/// A candidate says what type of input it wants, an input says what type it
+/// is, and assembly pairs them up within each shared group.
 ///
 /// "Candidate" rather than "row" because it is already this crate's word for
 /// one side of a measured difference - [`crate::Comparison`] holds a baseline
-/// and a candidate - and every cell of a matrix ends up in exactly that role.
-pub struct MatrixCandidate {
-    /// Which matrix this belongs to.
-    pub matrix: &'static str,
+/// and a candidate.
+pub struct Candidate {
+    /// Every group this belongs to. A candidate with no groups is not
+    /// constructed in practice - a function with nothing to compare against
+    /// is written as a plain `#[bench]`, which registers a [`Registered`]
+    /// instead - but an empty slice is not itself invalid here, just inert.
+    pub groups: &'static [&'static str],
     /// What to call this candidate in the report.
     pub name: &'static str,
     /// The type of input it takes, which is what it is paired on. A function
-    /// for the same reason [`Kind::Alt`]'s is: a registration is a `static`.
+    /// rather than the id itself, because a registration is a `static` and
+    /// so must be built in a `const` context.
     pub input_type: TypeIdOf,
     /// That type as the source spells it, for diagnostics.
     pub input_type_name: &'static str,
-    /// Whether this is the one the others are reported against. If nobody in
-    /// a lane says so, assembly picks the first by name; adding a candidate
-    /// sorting earlier then moves the baseline, which is why the report
-    /// names it.
+    /// Whether this is the one the others are reported against, in every
+    /// group it belongs to. If nobody in a lane says so, assembly picks the
+    /// first by name; adding a candidate sorting earlier then moves the
+    /// baseline, which is why the report names it.
     pub is_baseline: bool,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
@@ -457,13 +362,13 @@ pub struct MatrixCandidate {
     pub add_alt: AddAlt,
 }
 
-impl fmt::Debug for MatrixCandidate {
-    /// Hand-written for the same reason as [`Kind`]'s: the shims are noise
-    /// as addresses, and what is worth seeing is what this candidate is and
-    /// where it came from.
+impl fmt::Debug for Candidate {
+    /// Hand-written for the same reason as [`Kind`]'s used to be: the shims
+    /// are noise as addresses, and what is worth seeing is what this
+    /// candidate is and where it came from.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MatrixCandidate")
-            .field("matrix", &self.matrix)
+        f.debug_struct("Candidate")
+            .field("groups", &self.groups)
             .field("name", &self.name)
             .field("input_type_name", &self.input_type_name)
             .field("is_baseline", &self.is_baseline)
@@ -473,13 +378,18 @@ impl fmt::Debug for MatrixCandidate {
     }
 }
 
-inventory::collect!(MatrixCandidate);
+inventory::collect!(Candidate);
 
-/// One input every candidate of its type in a matrix is measured on.
+/// One input every candidate of its type, in a group this shares with it, is
+/// measured on.
 #[derive(Debug)]
-pub struct MatrixInput {
-    /// Which matrix this belongs to.
-    pub matrix: &'static str,
+pub struct Input {
+    /// Every group this feeds. One input function can feed several groups
+    /// at once - a shared sorted `Vec` used by `"sort"`, `"dedup"` and
+    /// `"contains"`, say - without those groups' candidates being compared
+    /// with each other: pairing only ever happens within one shared group
+    /// name at a time.
+    pub groups: &'static [&'static str],
     /// What to call this input in the report.
     pub name: &'static str,
     /// Which crate registered it, and at what version.
@@ -498,7 +408,7 @@ pub struct MatrixInput {
     pub make: MakeInput,
 }
 
-inventory::collect!(MatrixInput);
+inventory::collect!(Input);
 
 #[cfg(test)]
 mod tests {
@@ -618,8 +528,6 @@ mod tests {
             name: "registry-selftest::alpha",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: None,
-            is_baseline: false,
             kind: Kind::Flat(add_alpha),
         }
     }
@@ -629,8 +537,6 @@ mod tests {
             name: "registry-selftest::beta",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            group: None,
-            is_baseline: false,
             kind: Kind::Flat(add_beta),
         }
     }

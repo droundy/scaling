@@ -36,7 +36,7 @@ fn hashing_scales(n: usize) -> u64 {
 
 // ---- a comparison: one shared input, three ways of using it ----
 
-#[scaling::bench_input(group = "summing")]
+#[scaling::input(group = "summing")]
 fn summing_data() -> Vec<u64> {
     (0..256u64).collect()
 }
@@ -65,27 +65,27 @@ fn by_sum(v: &mut Vec<u64>) -> u64 {
 // Nothing here lists a pairing. Six cells come from five declarations, and a
 // fourth input would make eight from six.
 
-#[scaling::candidate(matrix = "sorting", baseline)]
+#[scaling::bench(group = "sorting", baseline)]
 fn stable(v: &mut Vec<u64>) {
     v.sort();
 }
 
-#[scaling::candidate(matrix = "sorting")]
+#[scaling::bench(group = "sorting")]
 fn unstable(v: &mut Vec<u64>) {
     v.sort_unstable();
 }
 
-#[scaling::input(matrix = "sorting", name = "sorted")]
+#[scaling::input(group = "sorting", name = "sorted")]
 fn already_sorted() -> Vec<u64> {
     (0..400u64).collect()
 }
 
-#[scaling::input(matrix = "sorting", name = "reversed")]
+#[scaling::input(group = "sorting", name = "reversed")]
 fn reversed() -> Vec<u64> {
     (0..400u64).rev().collect()
 }
 
-#[scaling::input(matrix = "sorting", name = "sawtooth")]
+#[scaling::input(group = "sorting", name = "sawtooth")]
 fn sawtooth() -> Vec<u64> {
     (0..400u64).map(|i| (i * 7) % 64).collect()
 }
