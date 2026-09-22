@@ -20,6 +20,13 @@ jobs:
         with:
           command: test
           args: --all
+      # serde_json's own declared MSRV is 1.71, matching this crate's own
+      # floor exactly - so the `json` feature is checked at that floor too,
+      # not just on whatever `stable` happens to be when CI runs.
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --features json
 
   check:
     name: Check
@@ -39,6 +46,10 @@ jobs:
         with:
           command: check
           args: --all
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --all --features json
 
   test:
     name: Test Suite
@@ -54,11 +65,16 @@ jobs:
           profile: minimal
           toolchain: ${{ matrix.rust }}
           override: true
-      # One invocation, because there is now one way to build this. It used
-      # to run twice, with and without the `registry` feature, to hold the
-      # dependency-free default build honest; stage 8 removed the feature
-      # along with the path it gated.
+      # Twice, default features and then `json` - `json` is optional
+      # precisely so a caller who never asks for `--format json` pays for
+      # neither `serde` nor `serde_json`, and only running the default
+      # build here would leave that path, and the promise that its shape
+      # tracks this crate's own semver, unverified by anything.
       - uses: actions-rs/cargo@v1
         with:
           command: test
           args: --all
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --features json
