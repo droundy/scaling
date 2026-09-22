@@ -1328,21 +1328,11 @@ mod tests {
 #[cfg(test)]
 mod pairing {
     use crate::registry::ErasedInput;
-    use crate::testutil::quiesced;
+    use crate::testutil::{quiesced, XorShift};
     use crate::Config;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
-
-    struct XorShift(u64);
-    impl XorShift {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-    }
 
     fn sum(v: &[u64]) -> u64 {
         v.iter().fold(0u64, |a, x| a.wrapping_add(*x))

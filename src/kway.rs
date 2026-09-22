@@ -1,8 +1,8 @@
 //! Comparing more than two alternatives at once: [`ComparisonSet`].
 //!
 //! The reason to time k things together rather than k-1 times in pairs is
-//! the reason [`Config::compare`] beats two separate [`bench`] calls.
-//! Whatever the machine does slowly - a clock drifting, a package warming -
+//! the same reason a comparison's alternatives beat two separate [`bench`]
+//! calls. Whatever the machine does slowly - a clock drifting, a package warming -
 //! lands on every alternative within the same round and cancels out of the
 //! differences between them. Measured one after another instead, each would
 //! sample a different stretch of that drift, and the differences would carry
@@ -655,8 +655,8 @@ mod tests {
         assert!(mean < 0.8, "paired error is not buying anything: {mean:.3}");
     }
 
-    /// The headline promise, as [`Config::compare`] makes it: a difference
-    /// twice the goal is caught nearly always.
+    /// The headline promise a comparison makes: a difference twice the goal
+    /// is caught nearly always.
     #[test]
     fn twice_the_goal_is_caught() {
         println!();

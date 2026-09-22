@@ -355,6 +355,15 @@ be weighed on its own.
 
 ### Grammar
 
+`gen_input` below is this stage's own name for the argument, kept as
+originally written since this is a historical record of what stage 4
+specified - it was later renamed `make_input`, and `#[scaling::gen_input]`
+itself was renamed `#[scaling::bench_input]` and then folded into
+`#[scaling::input]`. `#[candidate]`/`matrix = "M"` (stage 5) were
+themselves later unified into `#[bench(group = "M")]`/`#[input(group =
+"M")]`, a function belonging to any number of groups. See the crate's own
+docs and README for the syntax as it stands today.
+
 | attribute | wraps |
 | --- | --- |
 | `#[scaling::bench]` | `Suite::add` |

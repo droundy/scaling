@@ -1,8 +1,9 @@
 //! Interleaving a whole suite of benchmarks.
 //!
 //! The reason to run fifty benchmarks together rather than one after another
-//! is the reason [`Config::compare`] beats two separate [`bench`] calls, and
-//! the reason [`ComparisonSet`] beats k-1 comparisons in pairs. Run in
+//! is the same reason a comparison's alternatives beat two separate
+//! [`bench`] calls, and the reason [`ComparisonSet`] beats k-1 comparisons
+//! in pairs. Run in
 //! sequence, benchmark #1 samples the machine at t=0 and #50 samples it at
 //! t=500s, by which time the package is warmer and the clock has drifted;
 //! their numbers are then not comparable, and neither is either of them
@@ -398,8 +399,9 @@ impl<T> fmt::Debug for Token<T> {
 /// Rendering was once all this had to do, because a caller who wanted the
 /// measurement rather than its text held a [`Token`] for it. That stops
 /// being true as soon as the caller did not write the `add` call:
-/// [`Suite::add_registered`] adds benchmarks nobody named, so nobody holds
-/// their tokens, and a script wanting to *ask* something of the results -
+/// [`Suite::try_add_registered_with`] adds benchmarks nobody named, so
+/// nobody holds their tokens, and a script wanting to *ask* something of the
+/// results -
 /// which of these is fastest, is the one we ship still the best - has only
 /// the [`Report`]. Recovering the value from it needs the type back, and
 /// that means a downcast.
@@ -420,6 +422,26 @@ impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
     fn as_any(&self) -> &(dyn Any + 'static) {
         self
     }
+}
+
+/// Recover a cell's value as `T`, or `None` if it holds something else - the
+/// one place the downcast [`Report::get`] and [`Report::find`] both need
+/// happens.
+fn downcast<T: Clone + 'static>(cell: &Arc<dyn Reportable>) -> Option<T> {
+    let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
+    typed
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+}
+
+/// One measurement, as [`Report::find`] hands it back - whichever of the
+/// three concrete kinds a report can hold this one turned out to be.
+pub(crate) enum Found {
+    Stats(Stats),
+    Scaling(ScalingStats),
+    Comparison(Comparisons),
 }
 
 /// A set of benchmarks measured together, their samples interleaved.
@@ -863,7 +885,7 @@ impl<'a> Suite<'a> {
     /// be done at this point - the count is not known until the last one is
     /// added - and it is only possible at all because a suite collects
     /// everything before running anything, which is exactly what a caller
-    /// invoking [`Config::compare`] in a loop cannot do.
+    /// running comparisons one at a time in a loop cannot do.
     ///
     /// Nothing is promised in advance and nothing is checked afterwards: the
     /// scheduler runs every entry that was added, so the number corrected for
@@ -992,8 +1014,17 @@ impl<'a> Suite<'a> {
             for input in &lane.inputs {
                 if lane.candidates.len() < 2 {
                     // Nothing to compare against, so this is a plain
-                    // benchmark rather than a one-sided comparison.
-                    let c = &lane.candidates[0];
+                    // benchmark rather than a one-sided comparison. A lane
+                    // with zero candidates never reaches here - `assemble`
+                    // reports it as an orphaned input and drops the lane
+                    // before it is ever built - but that invariant lives in
+                    // a different file with no type to enforce it, so name
+                    // it here rather than let a violation surface as a bare
+                    // out-of-bounds index.
+                    let c = lane
+                        .candidates
+                        .first()
+                        .expect("assemble never builds a lane with no candidates");
                     let name = lane.flat_name(c, input);
                     let handle = (c.reg.add_flat)(&mut Adder(&mut *self), &name, input.reg.make);
                     tokens.flat.insert(name, handle.into_token());
@@ -1061,12 +1092,26 @@ impl Report {
     /// ```
     pub fn get<T: Clone + 'static>(&self, name: &str) -> Option<T> {
         let (_, cell) = self.entries.iter().find(|(n, _)| n == name)?;
-        let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
-        typed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .cloned()
+        downcast(cell)
+    }
+
+    /// One measurement, whichever concrete kind it turns out to be - a
+    /// single scan over the report's entries, for a caller (formatting
+    /// output, say) that would otherwise need one scan per kind it tries in
+    /// turn, as [`Report::stats`]/[`Report::scaling`]/[`Report::comparison`]
+    /// each do their own.
+    pub(crate) fn find(&self, name: &str) -> Option<Found> {
+        let (_, cell) = self.entries.iter().find(|(n, _)| n == name)?;
+        if let Some(v) = downcast(cell) {
+            return Some(Found::Stats(v));
+        }
+        if let Some(v) = downcast(cell) {
+            return Some(Found::Scaling(v));
+        }
+        if let Some(v) = downcast(cell) {
+            return Some(Found::Comparison(v));
+        }
+        None
     }
 
     /// A flat benchmark's measurement, by name.
@@ -1868,9 +1913,9 @@ mod report_lookup {
     /// A measurement can be had from a finished report by name, without
     /// having kept the token that was handed out when it was added.
     ///
-    /// Which is the whole point: under `add_registered` nobody wrote the
-    /// `add` call, so nobody holds those tokens, and a script that wants to
-    /// ask something of the results has only the report.
+    /// Which is the whole point: under `try_add_registered_with` nobody
+    /// wrote the `add` call, so nobody holds those tokens, and a script that
+    /// wants to ask something of the results has only the report.
     #[test]
     fn a_measurement_can_be_had_by_name_without_its_token() {
         let cfg = cfg();
@@ -2506,8 +2551,9 @@ mod registered_by_hand {
     }
 
     /// Results are recoverable from the report even when nobody ever held a
-    /// token - which is the situation `add_registered` always creates, since
-    /// nothing wrote the `add` call that would have returned one.
+    /// token - which is the situation `try_add_registered_with` always
+    /// creates, since nothing wrote the `add` call that would have returned
+    /// one.
     #[test]
     fn registered_results_are_recoverable_from_the_report_alone() {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
@@ -2583,7 +2629,8 @@ mod registered_by_hand {
 /// a registry covers everything linked into one binary, and every
 /// `#[cfg(test)]` module in this crate shares that binary, so deliberately
 /// broken registrations cannot go through the real global registry without
-/// poisoning every other test that calls `add_registered` unfiltered.
+/// poisoning every other test that calls `try_add_registered_with`
+/// unfiltered.
 #[cfg(test)]
 mod bad_registrations {
     use super::*;
@@ -2831,7 +2878,7 @@ mod versions_and_rivals {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
         // Every `#[cfg(test)]` module in this crate shares one process-wide
         // `inventory` registry - restricted to this module's own names, so
-        // `add_registered_with` does not also assemble and measure
+        // `try_add_registered_with` does not also assemble and measure
         // `registered_by_hand`'s benchmarks on every call here.
         let mut suite = cfg
             .suite()

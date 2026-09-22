@@ -614,6 +614,25 @@ fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
     None
 }
 
+/// The rejection for a setup function whose returned closure itself takes an
+/// argument (`Repeatable::OneArg`) - not supported anywhere it is checked,
+/// so one message rather than one per call site.
+fn one_arg_rejected(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "a setup function whose returned closure takes an argument isn't \
+         supported - whatever that argument's own cost of generating a \
+         fresh value doesn't matter, so build the state once behind an \
+         `Arc`, clone it inside a `make_input` closure alongside a fresh \
+         per-call value as an ordinary tuple, and let this benchmark take \
+         that tuple like any other input; if instead the argument's own \
+         generation *is* part of what you want measured, keep it out of \
+         the closure's signature and mutate captured state inside the \
+         closure body instead - `impl Fn()/FnMut() -> O`, not `impl \
+         Fn(K)/FnMut(K) -> O`",
+    )
+}
+
 /// The input type, spelled the way a person would.
 ///
 /// Not `stringify!`: that keeps the spacing of the tokens it was handed, and
@@ -661,6 +680,22 @@ fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
     match ty {
         Some(ty) => quote!(#fname(__e.get_mut::<#ty>())),
         None => quote!(#fname()),
+    }
+}
+
+/// `|__v| #fname(__v.take().expect(...))`: the closure a shim uses when the
+/// benchmark consumes its input by value. `Adder`/`ComparisonSet` only ever
+/// hand out `&mut I`, so the stored value is wrapped in `Option<I>` and taken
+/// out of it right before the call - exactly the trick this crate's own
+/// documentation would otherwise have to tell a caller to write by hand.
+/// `.take()` can only ever see `None` if something else already emptied this
+/// slot, which nothing does: each slot is visited once per round, by this
+/// closure alone.
+fn take_and_call(fname: &syn::Ident) -> TokenStream2 {
+    quote! {
+        |__v| #fname(__v.take().expect(
+            "scaling: input slot was already empty - please report this bug"
+        ))
     }
 }
 
@@ -783,19 +818,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 ));
             }
             if repeatable_kind == Repeatable::OneArg {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "a setup function whose returned closure takes an argument isn't \
-                     supported - whatever that argument's own cost of generating a \
-                     fresh value doesn't matter, so build the state once behind an \
-                     `Arc`, clone it inside a `make_input` closure alongside a fresh \
-                     per-call value as an ordinary tuple, and let this benchmark take \
-                     that tuple like any other input; if instead the argument's own \
-                     generation *is* part of what you want measured, keep it out of \
-                     the closure's signature and mutate captured state inside the \
-                     closure body instead - `impl Fn()/FnMut() -> O`, not `impl \
-                     Fn(K)/FnMut(K) -> O`",
-                ));
+                return Err(one_arg_rejected(func.sig.span()));
             }
             let body = match (&args.input, &args.make_input) {
                 // The setup function itself runs once: `input` is given to
@@ -851,27 +874,21 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     quote!(__adder.make_input(__name, #gen, |__v| #fname(__v)))
                 }
                 // The function consumes its input, so `Adder` - which only
-                // ever hands out `&mut I` - cannot call it directly. Wrap
-                // the stored value in `Option`, hand out `&mut Option<I>`
-                // as always, and `.take()` the real value out of it right
-                // before the call: exactly the trick this crate's own
-                // documentation would otherwise have to tell a caller to
-                // write by hand. `.take()` can only ever see `None` if
-                // something else already emptied this slot, which nothing
-                // does - each slot is visited once per round, by this
-                // closure alone.
+                // ever hands out `&mut I` - cannot call it directly. See
+                // `take_and_call` for the `Option`/`.take()` trick that
+                // works around that.
                 (Some(input), None) => {
+                    let take = take_and_call(fname);
                     quote! {
                         __adder.input(
                             __name,
                             ::core::option::Option::Some(#input),
-                            |__v| #fname(__v.take().expect(
-                                "scaling: input slot was already empty - please report this bug"
-                            )),
+                            #take,
                         )
                     }
                 }
                 (None, Some(gen)) => {
+                    let take = take_and_call(fname);
                     quote! {
                         __adder.make_input(
                             __name,
@@ -879,9 +896,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                                 let mut __gen = #gen;
                                 move || ::core::option::Option::Some(__gen())
                             },
-                            |__v| #fname(__v.take().expect(
-                                "scaling: input slot was already empty - please report this bug"
-                            )),
+                            #take,
                         )
                     }
                 }
@@ -948,19 +963,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             })?;
             let repeatable = returns_repeatable_closure(&func.sig);
             if repeatable == Repeatable::OneArg {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "a setup function whose returned closure takes an argument isn't \
-                     supported - whatever that argument's own cost of generating a \
-                     fresh value doesn't matter, so build the state once behind an \
-                     `Arc`, clone it inside a `make_input` closure alongside a fresh \
-                     per-call value as an ordinary tuple, and let this benchmark take \
-                     that tuple like any other input; if instead the argument's own \
-                     generation *is* part of what you want measured, keep it out of \
-                     the closure's signature and mutate captured state inside the \
-                     closure body instead - `impl Fn()/FnMut() -> O`, not `impl \
-                     Fn(K)/FnMut(K) -> O`",
-                ));
+                return Err(one_arg_rejected(func.sig.span()));
             }
             if repeatable == Repeatable::NoArg && args.make_input.is_some() {
                 return Err(syn::Error::new(
@@ -980,6 +983,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
                 }
                 Some(gen) => {
+                    let take = take_and_call(fname);
                     quote! {
                         __adder.scaling_gen(
                             __name,
@@ -987,9 +991,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                                 let mut __gen = #gen;
                                 move |__n: usize| ::core::option::Option::Some(__gen(__n))
                             },
-                            |__v| #fname(__v.take().expect(
-                                "scaling: input slot was already empty - please report this bug"
-                            )),
+                            #take,
                             #nmin,
                         )
                     }
@@ -1274,12 +1276,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     let repeatable = returns_repeatable_closure(&func.sig);
     if repeatable == Repeatable::OneArg {
-        return Err(syn::Error::new(
-            func.sig.span(),
-            "a setup function whose returned closure takes an argument isn't \
-             supported - see `#[scaling::bench]`'s docs for the pattern to use \
-             instead",
-        ));
+        return Err(one_arg_rejected(func.sig.span()));
     }
     if !args.types.is_empty() && repeatable == Repeatable::NoArg {
         return Err(syn::Error::new(

@@ -55,6 +55,16 @@ pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
 /// `flock` as well would be waiting on a lock its own parent is holding,
 /// which never comes free - so this exists to make "the lock is held" and
 /// "*we* hold the lock" different questions.
+///
+/// This assumes the launched command is one benchmark process tree, not a
+/// test runner that itself forks several *concurrent* benchmark processes
+/// (`cargo nextest`, say, or a script backgrounding more than one binary):
+/// every child inherits this variable and so every one of them skips the
+/// `flock`, which is correct only if they never actually run alongside each
+/// other. `quiet-bench run cargo test` is fine - the standard single-process
+/// test harness still serialises its own threads through the in-process
+/// mutex - but wrapping a genuinely parallel multi-process runner this way
+/// gives up the exclusivity the reservation is for.
 pub const LOCK_HELD_VAR: &str = "SCALING_BENCH_LOCKED";
 
 /// Is the machine-wide lock already held on our behalf by an ancestor?
@@ -72,6 +82,16 @@ fn lock_held_by_ancestor() -> bool {
 #[cfg(target_os = "linux")]
 fn lock_is_available() -> bool {
     lock_held_by_ancestor() || std::fs::File::open(CPUS_PATH).is_ok()
+}
+
+/// Always `false` on non-Linux platforms, which have no reservation record
+/// to lock - and so nothing that could make pinning safe. Unreachable in
+/// practice, since [`pin_if_reserved`]'s own platform check returns before
+/// calling this, but it still has to exist: `cfg!()` is a runtime check, not
+/// an attribute, so the call site is compiled on every platform regardless.
+#[cfg(not(target_os = "linux"))]
+fn lock_is_available() -> bool {
+    false
 }
 
 /// Where `quiet-bench` records the reserved CPUs. On `/run`, which is a

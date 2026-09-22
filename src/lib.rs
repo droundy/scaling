@@ -424,7 +424,7 @@ pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
 pub(crate) use self::kway::ComparisonSet;
-pub(crate) use self::suite::{RegisteredTokens, Suite, Token};
+pub(crate) use self::suite::{Found, RegisteredTokens, Suite, Token};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.
@@ -688,10 +688,10 @@ impl Config {
     /// The Bonferroni limit for a family of `comparisons` comparisons.
     ///
     /// Each entry point works this out for the family it can see:
-    /// [`Config::compare`] for one, [`ComparisonSet::run`] for its `k - 1`,
-    /// and a [`Suite`] for its total, which it knows once its last entry is
-    /// added and before it runs anything. Nothing is promised in advance, so
-    /// there is nothing to verify afterwards.
+    /// [`ComparisonSet::run`] for its own `k - 1`, and a [`Suite`] for its
+    /// total, which it knows once its last entry is added and before it runs
+    /// anything. Nothing is promised in advance, so there is nothing to
+    /// verify afterwards.
     ///
     /// # Only a suite sees a whole family
     ///

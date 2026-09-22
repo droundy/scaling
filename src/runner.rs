@@ -70,7 +70,7 @@
 //! for the full behavior.
 
 use crate::assemble::Lane;
-use crate::{Config, Filter, RegisteredTokens, Report, Suite};
+use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
 // Only for test mocks - the `json` module (below) brings in its own copy
 // of `Stats`, along with `Comparisons`/`ScalingStats`, for its own use.
 #[cfg(test)]
@@ -662,16 +662,12 @@ fn table(report: &Report, tokens: &RegisteredTokens) -> String {
 
 /// One entry, as its own type prints it.
 fn render(report: &Report, name: &str) -> String {
-    if let Some(s) = report.stats(name) {
-        return s.to_string();
+    match report.find(name) {
+        Some(Found::Stats(s)) => s.to_string(),
+        Some(Found::Scaling(s)) => s.to_string(),
+        Some(Found::Comparison(c)) => c.to_string(),
+        None => "(not measured)".to_string(),
     }
-    if let Some(s) = report.scaling(name) {
-        return s.to_string();
-    }
-    if let Some(c) = report.comparison(name) {
-        return c.to_string();
-    }
-    "(not measured)".to_string()
 }
 
 /// One cell of a matrix: what it measured, and how that compares.
@@ -837,15 +833,12 @@ fn json(report: &Report) -> String {
     let benchmarks: Vec<json::Entry> = report
         .names()
         .filter_map(|name| {
-            let kind = if let Some(s) = report.stats(name) {
-                json::Kind::Flat { stats: s }
-            } else if let Some(s) = report.scaling(name) {
-                json::Kind::Scaling { stats: s }
-            } else {
-                let c = report.comparison(name)?;
-                json::Kind::Comparison {
+            let kind = match report.find(name)? {
+                Found::Stats(stats) => json::Kind::Flat { stats },
+                Found::Scaling(stats) => json::Kind::Scaling { stats },
+                Found::Comparison(c) => json::Kind::Comparison {
                     comparison: json::Comparison::from(&c),
-                }
+                },
             };
             Some(json::Entry {
                 name: name.to_string(),
