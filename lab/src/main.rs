@@ -1008,20 +1008,37 @@ fn composition_of(path: &str) -> String {
 /// Sampled between rounds, never inside a timed batch: these are three file
 /// reads and a few microseconds, which is nothing against a round but a
 /// large fraction of a 100 us sample.
-/// Where to read the clock of a core we are actually measuring on.
+/// Where to read the clock of the core we are running on *right now*.
 ///
-/// This read `cpu0` for the life of the lab, and cpu0 is a housekeeping
-/// core: idle, parked at its floor, and reporting 0.40 GHz while the
-/// reserved cores ran at whatever they ran at. The column exists to explain
-/// drift in the timings, and an idle core's clock is the one number
-/// guaranteed not to.
+/// Two earlier versions of this were wrong in the same direction. It first
+/// read `cpu0`, a housekeeping core, idle and parked at 0.40 GHz while the
+/// reserved cores did the work. The fix read the first CPU named in
+/// `SCALING_BENCH_CPUS` - but quiet-bench reserves two, a single-threaded
+/// benchmark sits on one of them, and reading the other gives an idle core
+/// again. That showed up as a clean bimodal 0.400/1.700 GHz: the right
+/// answer half the time and an idle core's floor the rest.
 ///
-/// `quiet-bench` puts the reserved set in `SCALING_BENCH_CPUS`; take the
-/// first of them.
+/// So ask the kernel which CPU this thread is on. Field 39 of
+/// `/proc/self/stat` is `processor`, which avoids taking a dependency on
+/// libc for `sched_getcpu`; it costs a read, and this happens once a second.
+///
+/// The parenthesised comm field can contain spaces and brackets, so the
+/// fields are counted from the last `)` rather than by splitting the line.
+fn current_cpu() -> Option<u32> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // After the comm field, `state` is field 3, so `processor` (39) is the
+    // 36th whitespace-separated token here.
+    rest.split_whitespace().nth(36)?.parse().ok()
+}
+
 fn bench_cpu_freq_path() -> String {
-    let cpu = std::env::var("SCALING_BENCH_CPUS")
-        .ok()
-        .and_then(|v| v.split(',').next().and_then(|c| c.trim().parse::<u32>().ok()))
+    let cpu = current_cpu()
+        .or_else(|| {
+            std::env::var("SCALING_BENCH_CPUS")
+                .ok()
+                .and_then(|v| v.split(',').next().and_then(|c| c.trim().parse().ok()))
+        })
         .unwrap_or(0);
     format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq")
 }

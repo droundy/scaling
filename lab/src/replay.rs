@@ -771,6 +771,30 @@ pub fn report(paths: &[String]) {
             "===== {} =====  truth {:.4} ns/iter +- {:.2}%",
             tape.workload, truth_ns, 100.0 * truth_se / truth_ns
         );
+        // Did the machine hold still while this was recorded?
+        //
+        // Sample order survives even though timestamps do not, and samples
+        // arrive at a steady rate, so position stands in for time. If the
+        // cost at the end differs from the cost at the start, the pooled
+        // truth is an average of two different machines and no short trial
+        // can match it - which would look exactly like every estimator
+        // failing at once.
+        //
+        // Per rung, so a change in which rungs were drawn cannot masquerade
+        // as a change in speed, and the median across rungs, so one noisy
+        // rung cannot carry it.
+        let drift = drift_of(tape);
+        if drift.is_finite() {
+            println!(
+                "  drift start to end: {:+.2}%{}",
+                drift,
+                if drift.abs() > 1.0 {
+                    "   <- exceeds the tightest accuracy goal"
+                } else {
+                    ""
+                }
+            );
+        }
         println!(
             "  recorded rungs: n={}..{} ({}), longest batch {:.1}us,              overhead {:.0}ns/sample",
             tape.rungs[0].n,
@@ -1172,6 +1196,32 @@ pub fn compositions(paths: &[String]) {
         }
         println!();
     }
+}
+
+/// How much a workload's cost changed between the start and end of a
+/// recording, as a percentage, median over its rungs.
+fn drift_of(tape: &Tape) -> f64 {
+    let mut per_rung: Vec<f64> = Vec::new();
+    for r in &tape.rungs {
+        let n = r.batch_ns.len();
+        if n < 60 {
+            continue;
+        }
+        let third = n / 3;
+        let trimmed = |v: &[f64]| -> f64 {
+            let mut w = v.to_vec();
+            w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let cut = w.len() / 4;
+            let s = &w[cut..w.len() - cut];
+            s.iter().sum::<f64>() / s.len() as f64
+        };
+        let first = trimmed(&r.batch_ns[..third]);
+        let last = trimmed(&r.batch_ns[n - third..]);
+        if first > 0.0 {
+            per_rung.push(100.0 * (last - first) / first);
+        }
+    }
+    median_of(&per_rung)
 }
 
 fn median_of(v: &[f64]) -> f64 {
