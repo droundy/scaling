@@ -121,6 +121,59 @@ bench` on stable Rust, so this route goes through `cargo test` instead
 unoptimised) and calls [`crate::runner::run`] by hand rather than through
 [`main!`].
 
+### Comparing against your own history
+
+The same `group`/`baseline` machinery any other comparison in this crate
+uses also answers "did this get slower since the last release" - and more
+accurately than storing a number from a past run and diffing today's
+against it later, because two runs a day apart do not share a machine
+state: a warmer package, a different mix of interrupts, a CPU that has
+since settled into a lower clock step, all shift a *stored* number without
+shifting today's result to match. Comparing against your own history this
+way never stores a number at all - it measures the *old* code itself,
+fresh, in the very same interleaved round as the new code, so whatever the
+machine happens to be doing shifts both equally and cancels out of the
+difference, exactly as it does for any other pairing here.
+
+Pin the old release as a dev-dependency, under a name of your own that is
+not the crate's own:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", version = "=1.2.0" }
+```
+
+or, to compare against the tip of your default branch rather than a
+tagged release, a git dependency naming no `branch`/`tag`/`rev` tracks
+`origin`'s `HEAD`:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", git = "https://github.com/you/my-crate" }
+```
+
+Either way, what you get is the *actual function definitions* of that
+version, not a cached timing - so write the comparison the ordinary way,
+the released crate's public API on one side and your own on the other:
+
+```ignore
+#[scaling::bench(group = "sort", baseline)]
+fn released(v: &mut Vec<u64>) { my_crate_previous::sort(v) }
+
+#[scaling::bench(group = "sort")]
+fn current(v: &mut Vec<u64>) { my_crate::sort(v) }
+```
+
+`baseline` names the released version, so the report reads the way a
+regression check should: the code being written is measured *against* what
+already shipped, not the other way around. See [`crate::runner`]'s module
+docs - "What `--versions`/`--baseline` are actually for" - for the one
+sharp edge this has: it stops working if two different versions of
+`scaling` itself ever end up anywhere in the dependency graph, since
+registration is keyed on the literal monomorphized type `inventory`
+collects, and two `scaling` versions split the registry silently rather
+than erroring.
+
 The binary that runs them is one line, and [`main!`] is the whole of it:
 
 ```ignore
