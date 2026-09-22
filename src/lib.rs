@@ -32,6 +32,78 @@ fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
 fn fib_scaling(n: usize) -> usize { fib(n) }
 ```
 
+## Keeping a `src/`-resident benchmark out of ordinary builds
+
+Nothing here wraps the function in a `#[cfg]` for you: a `#[cfg]` written
+above the attribute strips the whole item, macro included, before it ever
+expands. A benchmark placed in `benches/` is already fine as it is -
+`cargo` only builds that directory for `cargo bench` - but one placed in
+`src/`, to sit next to the code it measures, compiles into *every* build by
+default: an ordinary `cargo build`, and every crate depending on yours.
+Gate it yourself, one of two ways.
+
+**A feature of your own**, if you are also going to publish this crate and
+want `cargo bench --features my-benchmarks` to keep working the ordinary
+way. Make `scaling` an *optional* dependency tied to that feature, and add
+it a second time, plainly, as a dev-dependency - so `benches/bench.rs`
+itself always has it, feature or not:
+
+```toml
+[dependencies]
+scaling = { version = "...", optional = true }
+[dev-dependencies]
+scaling = "..."
+[features]
+my-benchmarks = ["dep:scaling"]
+```
+
+then write every `src/`-resident benchmark under that same `#[cfg]`:
+
+```
+# fn fib(_: usize) -> usize { 0 }
+#[cfg(feature = "my-benchmarks")]
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
+```
+
+and run with `cargo bench --features my-benchmarks`. `scaling` ships no
+feature of its own for this: a fixed name baked into the macro, say
+`#[cfg(feature = "scaling-bench")]`, would be a convention nobody asked
+for, and would compile silently to nothing for a crate that had never
+defined that exact feature - worse than an explicit gate you chose
+yourself. The cost of this route is a `#[cfg]` to remember on every
+benchmark you write this way.
+
+**Dev-only, no feature at all**, if you would rather not annotate every
+benchmark individually. Put `scaling` in `[dev-dependencies]` only -
+nothing under `[dependencies]` - and wrap the whole module in
+`#[cfg(test)]` instead of one attribute per function:
+
+```ignore
+#[cfg(test)]
+mod benches {
+    #[scaling::bench]
+    fn fib_200() -> usize { super::fib(200) }
+
+    #[test]
+    #[ignore] // a real run needs --release; plain `cargo test` should not pay for it
+    fn run() {
+        scaling::runner::run(Default::default());
+    }
+}
+```
+
+and run with `cargo test --release -- --ignored run`. An ordinary `cargo
+build` never sees `#[cfg(test)]` code at all, so it never touches
+`scaling`, `inventory`, or anything either depends on - the same zero cost
+to a normal build the feature route buys, bought instead by `#[cfg(test)]`,
+something every Rust crate already uses, at the cost of [`main!`] and the
+ordinary `cargo bench` CLI: `#[test]` functions are not run by `cargo
+bench` on stable Rust, so this route goes through `cargo test` instead
+(hence `--release`, since `cargo test`'s own default profile is
+unoptimised) and calls [`crate::runner::run`] by hand rather than through
+[`main!`].
+
 The binary that runs them is one line, and [`main!`] is the whole of it:
 
 ```ignore
