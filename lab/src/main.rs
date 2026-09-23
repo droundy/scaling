@@ -773,7 +773,7 @@ fn run(
         .ok();
     if let (true, Some(f)) = (fresh, mach.as_mut()) {
         use std::io::Write as _;
-        let _ = writeln!(f, "t_ns,composition,pass,round,khz,temp_mC,procs_running");
+        let _ = writeln!(f, "t_ns,composition,pass,round,cpu,khz,temp_mC,procs_running");
     }
     let composition = composition_of(&out);
 
@@ -1032,15 +1032,14 @@ fn current_cpu() -> Option<u32> {
     rest.split_whitespace().nth(36)?.parse().ok()
 }
 
-fn bench_cpu_freq_path() -> String {
-    let cpu = current_cpu()
+fn bench_cpu() -> u32 {
+    current_cpu()
         .or_else(|| {
             std::env::var("SCALING_BENCH_CPUS")
                 .ok()
                 .and_then(|v| v.split(',').next().and_then(|c| c.trim().parse().ok()))
         })
-        .unwrap_or(0);
-    format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq")
+        .unwrap_or(0)
 }
 
 fn machine_state() -> String {
@@ -1074,9 +1073,17 @@ fn machine_state() -> String {
             })
         })
         .unwrap_or_else(|| "-".to_string());
+    // The core comes with the clock, because a clock without one is
+    // ambiguous: 1.7 GHz on a P-core and 1.7 GHz on an E-core are different
+    // machines. On this box the same workload reads 29.5us on a P-core and
+    // 62.8us on an E-core, so which core ran it swamps what speed it ran at.
+    let cpu = bench_cpu();
     format!(
-        "{},{},{}",
-        read(&bench_cpu_freq_path()),
+        "{},{},{},{}",
+        cpu,
+        read(&format!(
+            "/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq"
+        )),
         temp,
         procs
     )
