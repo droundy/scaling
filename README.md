@@ -112,18 +112,31 @@ it exactly.
 ## Running them
 
 Every benchmark declared anywhere in the crate is discovered, measured
-together, and printed. There is no `Config` to build, no list to add to and
-no printing to write: all of that is asked for on the command line.
+together with the default accuracy and budget, and printed as a table -
+that is what `scaling::main!()` above gives you. There is no `Config` to
+build, no list to add to and no printing to write.
 
-```none
-cargo bench --bench bench -- --list
-cargo bench --bench bench -- --filter sort --max-time 30s
+Filtering to one benchmark, a tighter budget, or list output instead of a
+table is a [`runner::Options`] built by hand in your own `main`:
+
+```rust,no_run
+use scaling::runner::{run, Options};
+use scaling::Filter;
+
+fn main() -> std::process::ExitCode {
+    let options = Options {
+        filter: Filter::everything().matching("sort"),
+        ..Options::default()
+    };
+    run(options).into()
+}
 ```
 
 `runner::measure` hands back the results instead of printing them, for a
 script that wants to look at the numbers rather than show them - reached by
 name, since nobody wrote those names down: they come from the module and
-function each benchmark was declared in. `--list` prints them.
+function each benchmark was declared in. `Filter::everything().listing(true)`
+lists them instead of measuring.
 
 ## Comparisons
 

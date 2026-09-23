@@ -329,18 +329,14 @@ scaling::main!();
 ```
 
 which discovers every registered benchmark, measures them together, and
-prints them. What used to be written out - an accuracy, a budget, which
-benchmarks to run, how to print them - is asked for on the command line
-instead:
+prints them with the default accuracy and budget. What used to be written
+out - which benchmarks to run, how to print them, a tighter budget - is a
+[`runner::Options`] built by hand and passed to [`runner::run`] from your
+own `main`, instead of using this macro.
 
-```none
-cargo bench --bench bench -- --list
-cargo bench --bench bench -- --filter sort --max-time 30s
-```
-
-See [`main!`] for the whole of it, [`runner`] for what the flags do, and
-[`runner::measure`] for reading the numbers in a script rather than printing
-them.
+See [`main!`] for the whole of it, [`runner`] for the `Options` a hand-
+written `main` builds, and [`runner::measure`] for reading the numbers in
+a script rather than printing them.
 
 Comparisons are declared the same way. `group = "..."` (or `group("a",
 "b")`, to belong to several at once) makes a function one candidate of a
@@ -580,10 +576,9 @@ pub use scaling_macros::{bench, bench_scaling, input};
 /// ```
 ///
 /// Every benchmark registered anywhere in this binary is discovered,
-/// measured together, and printed. What used to be written out - a
-/// [`Config`], a suite, the `add` calls, the printing - is either decided by
-/// the attributes on the benchmarks themselves or asked for on the command
-/// line:
+/// measured together with the default [`Config`], and printed as a table.
+/// What used to be written out - a `Config`, a suite, the `add` calls, the
+/// printing - is decided by the attributes on the benchmarks themselves.
 ///
 /// "This binary" means it literally: everything `#[scaling::bench]` and its
 /// siblings mark, anywhere in your crate's own `src/` - which the compiler
@@ -596,16 +591,13 @@ pub use scaling_macros::{bench, bench_scaling, input};
 /// other;` from a `benches/bench/main.rs`, in Cargo's usual shape for a
 /// multi-file target, rather than one bare file per benchmark binary.
 ///
-/// ```none
-/// cargo bench --bench bench -- --list
-/// cargo bench --bench bench -- --filter sort
-/// cargo bench --bench bench -- --max-time 30s --rel-error 0.002
-/// ```
-///
 /// This is sugar, not machinery: it expands to a `main` calling
-/// [`runner::main`], which is public and can be called from a `main` of your
-/// own. [`runner::run`] takes [`runner::Options`] built however you like,
-/// for a crate that wants one thing different.
+/// [`runner::main`], which just calls [`runner::run`] with
+/// [`runner::Options::default`]. A crate that wants one thing different -
+/// filtering to one benchmark, a tighter budget, list output - builds an
+/// [`runner::Options`] by hand and calls [`runner::run`] or
+/// [`runner::measure`] from a `main` of its own instead of using this
+/// macro; see [`runner::Options`] for an example.
 ///
 /// # Its exit status means something
 ///
@@ -683,9 +675,8 @@ const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// A benchmark uses [`Config::default`] unless the run says otherwise;
-/// [`crate::runner`] builds one from `--rel-error`, `--abs-error` and
-/// `--max-time`, and the methods below build one directly.
+/// A benchmark uses [`Config::default`] unless [`crate::runner::Options::cfg`]
+/// says otherwise; the methods below build one by hand.
 ///
 /// ```
 /// use scaling::Config;

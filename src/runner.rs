@@ -7,62 +7,47 @@
 //! choosing which ones to run, and choosing how to print them stop being
 //! things a caller writes and start being things this asks for.
 //!
+//! [`crate::main!`] runs every registered benchmark with the default
+//! [`Config`] and prints a table:
+//!
 //! ```ignore
 //! // benches/bench.rs, in its entirety
 //! scaling::main!();
 //! ```
 //!
-//! ```none
-//! cargo bench --bench bench -- --list
-//! cargo bench --bench bench -- --filter sort --format list
+//! Anything else - filtering to one benchmark, a tighter budget, list
+//! output - is a [`Options`] built by hand and passed to [`run`] or
+//! [`measure`] from your own `main`:
+//!
+//! ```no_run
+//! use scaling::runner::{run, Format, Options};
+//! use scaling::Filter;
+//!
+//! fn main() -> std::process::ExitCode {
+//!     let options = Options {
+//!         filter: Filter::everything().matching("sort"),
+//!         format: Format::List,
+//!         ..Options::default()
+//!     };
+//!     run(options).into()
+//! }
 //! ```
+//!
+//! See [`Options`] for every field, [`Filter`] for what a name matches and
+//! how patterns combine, and [`Config`] for the accuracy/budget knobs.
 //!
 //! # What it prints where
 //!
 //! Results go to stdout, everything else to stderr: how many benchmarks are
 //! about to run, warnings about registrations that went unused, the reason a
-//! run measured nothing. So `--format list > results.txt` gives a file
-//! holding results and nothing else, without anybody having to remember to
-//! silence the rest.
-//!
-//! # Flags
-//!
-//! * `--filter <pattern>` - measure only names containing this. Repeatable;
-//!   several are an *or*. See [`Filter`] for what "name" means for a
-//!   comparison or a matrix cell, and what `--exact` changes about the
-//!   match.
-//! * `--skip <pattern>` - drop names containing this from what `--filter`
-//!   already matched. Repeatable, and independent of `--filter`: a `--skip`
-//!   with no `--filter` narrows the whole suite.
-//! * `--exact` - match the whole name rather than any part of it, for both
-//!   `--filter` and `--skip`.
-//! * `--list` - print what would run, and measure nothing.
-//! * `--format <table|list>` - how to print results; see
-//!   [`crate::runner::Format`]. Table is the default.
-//! * `--rel-error <fraction>` - stop once the standard error is this
-//!   fraction of the measurement, e.g. `0.01` for 1%.
-//! * `--abs-error <duration>` - stop once the standard error is below this,
-//!   e.g. `50ns`.
-//! * `--max-time <duration>` - give up on each benchmark after roughly this
-//!   long, e.g. `30s`.
-//!
-//! `--filter`, `--skip`, `--exact` and `--list` also read from the
-//! environment - `SCALING_FILTER`, `SCALING_SKIP`, `SCALING_EXACT`,
-//! `SCALING_LIST` - which survives a wrapper that does not pass arguments
-//! through on its own: `make bench`, a CI step, `cargo bench --workspace`
-//! fanning out over several crates. `SCALING_FILTER`/`SCALING_SKIP` hold
-//! whitespace-separated patterns; `SCALING_EXACT`/`SCALING_LIST` count if
-//! set to anything. The command line wins wherever it says anything, so
-//! `SCALING_SKIP=slow cargo bench -- --filter sort` means both. The
-//! remaining flags have no environment counterpart - see [`Filter::from_env`]
-//! for the full behavior.
+//! run measured nothing. So redirecting only stdout captures the results and
+//! nothing else, without anybody having to remember to silence the rest.
 
 use crate::assemble::Lane;
 use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
 // Only for test mocks.
 #[cfg(test)]
 use crate::Stats;
-use auto_args::AutoArgs;
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
@@ -96,6 +81,8 @@ use auto_args::AutoArgs;
 pub use crate::assemble::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
+// Only for test mocks.
+#[cfg(test)]
 use std::time::Duration;
 
 /// How to print the results.
@@ -120,22 +107,26 @@ pub enum Format {
     List,
 }
 
-impl Format {
-    fn parse(s: &str) -> Result<Format, String> {
-        match s {
-            "table" => Ok(Format::Table),
-            "list" => Ok(Format::List),
-            other => Err(format!("`{other}` is not a format; try table or list")),
-        }
-    }
-}
-
 /// Everything the runner needs, which is everything a caller would otherwise
 /// have written a `main` to decide.
 ///
-/// Public and plainly built so that a crate wanting one thing different -
-/// its own default budget, say - can build one of these and call [`run`],
-/// rather than being pushed out of the runner entirely.
+/// Public and plainly built: a crate wanting anything other than every
+/// benchmark, table output and the default budget builds one of these by
+/// hand and calls [`run`] or [`measure`] from its own `main`, rather than
+/// using [`crate::main!`] and being pushed out of the runner entirely.
+///
+/// ```no_run
+/// use scaling::runner::{run, Options};
+/// use scaling::Filter;
+///
+/// fn main() -> std::process::ExitCode {
+///     let options = Options {
+///         filter: Filter::everything().matching("sort"),
+///         ..Options::default()
+///     };
+///     run(options).into()
+/// }
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Accuracy and budget, as [`Config`] describes them.
@@ -144,109 +135,6 @@ pub struct Options {
     pub filter: Filter,
     /// How to print what they measured.
     pub format: Format,
-}
-
-/// The flags, as `auto-args` reads them.
-///
-/// The four filtering flags are flattened in from [`Filter`]'s own set
-/// rather than restated, so there is one list of them rather than two to
-/// keep in step.
-#[derive(AutoArgs, Debug, Default)]
-struct Flags {
-    _filter: crate::filter::cli::Flags,
-    /// How to print results: table (default) or list.
-    format: Option<String>,
-    /// Stop once the standard error is this fraction of the measurement.
-    rel_error: Option<f64>,
-    /// Stop once the standard error is below this, eg 50ns.
-    abs_error: Option<String>,
-    /// Give up on each benchmark after roughly this long, eg 5s.
-    max_time: Option<String>,
-}
-
-impl Options {
-    /// Read the command line, then fill in from the environment what it did
-    /// not say.
-    ///
-    /// The environment half is what survives a wrapper: `make bench`, a CI
-    /// step, `cargo bench --workspace` fanning out over several crates -
-    /// none of those pass arguments through without being taught to, and
-    /// `SCALING_FILTER=sort` needs nobody's cooperation. See
-    /// [`Filter::from_env`].
-    pub fn from_env_and_args() -> Result<Options, String> {
-        let mut options = Options::from_arg_iter(std::env::args())?;
-        options.filter = options.filter.or(Filter::from_env());
-        Ok(options)
-    }
-
-    /// [`Options::from_env_and_args`] from an iterator, and without the
-    /// environment.
-    ///
-    /// The first item is the program name and is discarded, as it is in
-    /// `std::env::args`.
-    pub fn from_arg_iter<I, S>(args: I) -> Result<Options, String>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let kept = crate::filter::cli::without_cargo_adds(args);
-        let flags = Flags::from_iter(kept).map_err(|e| e.to_string())?;
-
-        let mut cfg = Config::default();
-        if let Some(f) = flags.rel_error {
-            if !(f.is_finite() && f > 0.0) {
-                return Err(format!("--rel-error wants a positive fraction, not {f}"));
-            }
-            cfg.target_rel_error = f;
-        }
-        if let Some(d) = &flags.abs_error {
-            cfg.target_abs_error = parse_duration(d).map_err(|e| format!("--abs-error: {e}"))?;
-        }
-        if let Some(d) = &flags.max_time {
-            cfg.max_time = parse_duration(d).map_err(|e| format!("--max-time: {e}"))?;
-        }
-
-        Ok(Options {
-            cfg,
-            filter: flags._filter.to_filter(),
-            format: match &flags.format {
-                Some(f) => Format::parse(f)?,
-                None => Format::default(),
-            },
-        })
-    }
-}
-
-/// Parse `5s`, `500ms`, `50ns`, `1.5m`. A bare number is seconds.
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    let t = s.trim();
-    let split = t.find(|c: char| c.is_alphabetic()).unwrap_or(t.len());
-    let (number, unit) = t.split_at(split);
-    let value: f64 = number
-        .trim()
-        .parse()
-        .map_err(|_| format!("`{s}` is not a duration: `{number}` is not a number"))?;
-    let seconds = match unit.trim() {
-        "ns" => 1e-9,
-        "us" | "µs" => 1e-6,
-        "ms" => 1e-3,
-        "s" | "" => 1.0,
-        "m" => 60.0,
-        other => {
-            return Err(format!(
-                "`{s}` is not a duration: `{other}` is not a unit (try ns, us, ms, s, m)"
-            ))
-        }
-    };
-    let seconds = value * seconds;
-    // `try_from_secs_f64` rather than `from_secs_f64`: the latter panics on
-    // anything it cannot represent, and a mistyped flag is not a reason to
-    // abort with a backtrace. A hand-rolled bound here would have to
-    // reproduce `Duration`'s own overflow check exactly - `u64::MAX as f64`
-    // rounds up to 2^64, one past what `Duration` can actually hold, so a
-    // bound written that way would accept a value that still panics.
-    Duration::try_from_secs_f64(seconds)
-        .map_err(|_| format!("`{s}` is not a duration this can represent"))
 }
 
 /// What a run came to.
@@ -272,45 +160,14 @@ impl From<Outcome> for ExitCode {
     }
 }
 
-/// Every flag that takes the argument after it as a value, so `-h`/`--help`
-/// right after one of these is that value - `--filter -h`, say, filtering
-/// for a benchmark whose name contains "-h" - not a help request.
-const VALUE_FLAGS: &[&str] = &[
-    "--filter",
-    "--skip",
-    "--format",
-    "--rel-error",
-    "--abs-error",
-    "--max-time",
-];
-
-/// Whether `args` asks for help, in the sense `main` intercepts: a bare
-/// `-h`/`--help` not itself the value of a preceding flag.
-fn wants_help(args: &[String]) -> bool {
-    args.iter().enumerate().any(|(i, a)| {
-        (a == "--help" || a == "-h")
-            && !i
-                .checked_sub(1)
-                .is_some_and(|prev| VALUE_FLAGS.contains(&args[prev].as_str()))
-    })
-}
-
 /// The whole of a benchmark binary. See [`crate::main!`].
+///
+/// Every registered benchmark, table output, the default budget. A crate
+/// wanting anything else builds its own [`Options`] and calls [`run`] or
+/// [`measure`] from a hand-written `main` instead - see [`Options`]'s own
+/// docs for that.
 pub fn main() -> ExitCode {
-    // Intercepted before parsing: `auto-args` has no idea what `-h` is, and
-    // its own `--help` handling belongs to a code path this does not use.
-    let args: Vec<String> = std::env::args().collect();
-    if wants_help(&args) {
-        println!("{}", Flags::help());
-        return ExitCode::SUCCESS;
-    }
-    match Options::from_env_and_args() {
-        Ok(options) => run(options).into(),
-        Err(e) => {
-            eprintln!("error: {e}\n\n{}", Flags::usage());
-            Outcome::NotRun.into()
-        }
-    }
+    run(Options::default()).into()
 }
 
 /// Discover everything registered and assemble it into a suite, ready to
@@ -381,7 +238,7 @@ pub fn run(options: Options) -> Outcome {
     }
 
     // Before `is_listing`: an empty suite has nothing to list either, and
-    // `--list` on one - nothing registered at all, or a filter that matched
+    // listing one - nothing registered at all, or a filter that matched
     // nothing - should say so rather than print zero bytes and exit clean.
     if suite.is_empty() {
         eprintln!("{}", nothing_to_run(&tokens));
@@ -460,7 +317,7 @@ fn nothing_to_run(tokens: &RegisteredTokens) -> String {
     } else {
         format!(
             "the filter matched none of the {registered} registered benchmarks; \
-             --list shows what there is"
+             Filter::everything().listing(true) shows what there is"
         )
     }
 }
@@ -668,98 +525,6 @@ fn short_time(ns: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn durations_parse_in_the_units_people_write() {
-        assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
-        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
-        assert_eq!(parse_duration("50ns").unwrap(), Duration::from_nanos(50));
-        assert_eq!(parse_duration("10us").unwrap(), Duration::from_micros(10));
-        assert_eq!(parse_duration("10µs").unwrap(), Duration::from_micros(10));
-        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
-        assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
-        assert_eq!(parse_duration(" 3 ").unwrap(), Duration::from_secs(3));
-    }
-
-    /// A mistyped flag must come back as a message, not a panic:
-    /// `Duration::from_secs_f64` aborts on anything it cannot represent.
-    #[test]
-    fn a_duration_that_is_not_one_is_an_error() {
-        for bad in ["", "fast", "5 fortnights", "-1s", "1e400s", "nans"] {
-            assert!(
-                parse_duration(bad).is_err(),
-                "`{bad}` should not parse as a duration",
-            );
-        }
-    }
-
-    #[test]
-    fn the_flags_reach_the_options_they_name() {
-        let options = Options::from_arg_iter([
-            "bench",
-            "--filter",
-            "sort",
-            "--skip",
-            "slow",
-            "--exact",
-            "--format",
-            "list",
-            "--rel-error",
-            "0.005",
-            "--max-time",
-            "250ms",
-        ])
-        .unwrap();
-        assert!(options.filter.matches("sort"));
-        assert!(!options.filter.matches("mymod::sort"), "--exact");
-        assert_eq!(options.format, Format::List);
-        assert_eq!(options.cfg.target_rel_error, 0.005);
-        assert_eq!(options.cfg.max_time, Duration::from_millis(250));
-    }
-
-    fn s(args: &[&str]) -> Vec<String> {
-        args.iter().map(|a| a.to_string()).collect()
-    }
-
-    #[test]
-    fn a_bare_help_flag_is_a_help_request() {
-        assert!(wants_help(&s(&["bench", "-h"])));
-        assert!(wants_help(&s(&["bench", "--help"])));
-        assert!(wants_help(&s(&["bench", "--filter", "sort", "--help"])));
-    }
-
-    /// The bug this guards: `--filter -h` means "filter for a benchmark
-    /// whose name contains -h", not "show help". Scanning every argument
-    /// for a literal `-h` cannot tell these apart; only knowing which flags
-    /// consume the next argument as their value can.
-    #[test]
-    fn a_help_flag_used_as_a_value_is_not_a_help_request() {
-        assert!(!wants_help(&s(&["bench", "--filter", "-h"])));
-        assert!(!wants_help(&s(&["bench", "--skip", "--help"])));
-    }
-
-    #[test]
-    fn no_help_flag_is_not_a_help_request() {
-        assert!(!wants_help(&s(&["bench", "--filter", "sort"])));
-        assert!(!wants_help(&s(&["bench"])));
-    }
-
-    /// The plainest invocation there is: `cargo bench` appends `--bench` on
-    /// its own account, having been given nothing by anybody.
-    #[test]
-    fn what_cargo_appends_is_not_an_error() {
-        let options = Options::from_arg_iter(["bench", "--bench"]).unwrap();
-        assert_eq!(options.format, Format::Table);
-        assert!(options.filter.matches("anything"));
-    }
-
-    #[test]
-    fn an_unknown_format_says_what_the_formats_are() {
-        let e = Options::from_arg_iter(["bench", "--format", "yaml"]).unwrap_err();
-        assert!(e.contains("table"), "{e}");
-        assert!(e.contains("list"), "{e}");
-    }
-
 
     #[test]
     fn a_grid_cell_shows_one_number_in_a_readable_unit() {

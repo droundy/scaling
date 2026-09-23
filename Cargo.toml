@@ -20,9 +20,6 @@ rust-version = "1.71"
 libc = "0.2"
 
 [dependencies]
-# Parses the command line for the runner - `--filter`, `--format`, the
-# accuracy and budget flags. See `scaling::runner`.
-auto-args = "0.3.2"
 # Collects benchmarks registered anywhere in a crate, through linker
 # sections, so that they need not be assembled into one list by hand. This is
 # what makes `#[scaling::bench]` work from wherever it is written.
@@ -30,11 +27,11 @@ inventory = "0.3.21"
 # The attribute macros themselves.
 scaling-macros = { version = "0.9.0", path = "macros" }
 
-# These three were optional, behind `registry` and `cli` features, while the
+# These two were optional, behind a `registry` feature, while the
 # hand-assembled `Suite` was still a supported way to write benchmarks - a
 # crate using only that path paid for neither. There is no such path now:
 # registration is how a benchmark is declared and `scaling::runner` is how it
-# is run, so every build needs all three and a feature to turn them off would
+# is run, so every build needs both and a feature to turn them off would
 # only turn the crate off.
 
 [workspace]
