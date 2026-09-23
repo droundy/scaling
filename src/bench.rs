@@ -765,10 +765,8 @@ mod tests {
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();
-        // Compare workloads with the same mean but very different shape: if the
-        // estimator is reporting the mean, their ratio should stay near one even
-        // when the machine drifts. A single long run would be sensitive to the
-        // current thermal and clock regime instead.
+        // Use paired workloads with the same mean but different shape; the ratio
+        // should stay near one even if the machine drifts.
         const REPEATS: usize = 4;
         for r in 0..REPEATS {
             let seed = seed_for(r);
@@ -796,11 +794,8 @@ mod tests {
             return;
         }
         const REPEATS: usize = 10;
-        // Wide gap between targets, and the tight one well below the noise
-        // a single calibrated batch already has on its own: with only a
-        // small gap, both targets get satisfied as soon as `MIN_SAMPLES` is
-        // reached and the test can't distinguish "tighter target costs
-        // more" from "both stopped at the same floor".
+        // A larger gap keeps the test meaningful: a small gap often stops at the
+        // same floor for both targets.
         let loose: Vec<Stats> = (0..REPEATS)
             .map(|r| Config::relative(0.05).bench(variable_cost(seed_for(r))))
             .collect();
@@ -937,19 +932,8 @@ mod tests {
             stats.std_error
         );
 
-        // A tighter absolute ask must cost more - the target is doing the
-        // work, not some fixed amount of sampling.
-        //
-        // The comparison is 25ns against 5ns rather than 500ns against 25ns,
-        // because `MIN_SAMPLE_TIME` now sets a floor that 25ns already meets:
-        // asking for 500ns instead buys nothing, both runs stop at the floor
-        // having taken the same iterations, and the old form of this test
-        // compared two numbers that the floor had made equal. To show the
-        // target governing, the expensive side has to want more than the
-        // floor supplies. 5ns is not reachable on every machine - it may set
-        // `hit_limit` - which is fine here: a run that spends its whole
-        // budget chasing 5ns has still spent more than one that stopped at
-        // the floor.
+        // A tighter target should cost more; the floor means the 25ns case is not
+        // comparable to an even larger threshold that stops at the same floor.
         let dear = only_absolute(5).bench(variable_cost(7));
         println!("absolute 5ns: {dear}");
         assert!(
@@ -963,10 +947,8 @@ mod tests {
     #[test]
     fn a_slow_function_on_a_short_budget_still_gets_an_error_bar() {
         println!();
-        // ~100ms per iteration against a 350ms budget: calibration takes one
-        // iteration and each sample takes another, so only a handful fit -
-        // fewer than MIN_SAMPLES. We should still get a real error bar out
-        // of the samples we managed, rather than NaN.
+        // Short budgets can stop before the minimum sample count; the error bar
+        // should still be reported rather than turning into NaN.
         let cfg = Config::default().with_max_time(Duration::from_millis(350));
         let stats = cfg.bench(|| thread::sleep(Duration::from_millis(100)));
         println!("{stats}");
@@ -980,9 +962,8 @@ mod tests {
             "a standard error exists from {} samples and should be reported",
             stats.samples
         );
-        // Both marks: the clock ran out (hit_limit) *and* there were too
-        // few samples to believe the error bar (untrustworthy). The error
-        // bar is still reported - a wide honest one beats none.
+        // The run hit the budget and the sample count is too small to trust the
+        // bar, but the reported error is still honest.
         assert!(stats.hit_limit);
         assert!(stats.untrustworthy);
         assert!(stats.ns_per_iter > 99.0e6);
@@ -991,18 +972,15 @@ mod tests {
     #[test]
     fn unreachable_target_is_flagged() {
         println!();
-        // An accuracy no amount of sampling will reach, and a budget far too
-        // short to try: the benchmark must say it fell short rather than
-        // return a confident-looking number.
+        // An impossible target plus a short budget should be reported as a short
+        // run, not a confident result.
         let cfg = Config::relative(1e-9).with_max_time(Duration::from_millis(50));
         let stats = cfg.bench(variable_cost(1));
         println!("{stats}");
         assert!(stats.hit_limit);
         assert!(!cfg.accuracy_met(stats.ns_per_iter, stats.std_error));
-        // This one collected plenty of samples, it just needed longer than
-        // the budget allowed: the error bar is wider than asked for but
-        // perfectly believable, which is exactly the case `hit_limit`
-        // covers and `untrustworthy` does not.
+        // Plenty of samples were collected; the budget simply ran out before the
+        // target was reached.
         assert!(!stats.untrustworthy);
     }
 
@@ -1030,12 +1008,8 @@ mod tests {
                 100.0 * observed,
                 ratio
             );
-            // `rel_std_error` should describe the spread that actually
-            // occurs, not merely shrink on demand: an estimator that just
-            // claimed whatever the caller asked for would pass every other
-            // test in this module. On a quiesced machine this ratio runs
-            // 0.8-1.0x; on a shared/noisy one, outlier samples inflate the
-            // observed side, so this bound is generous rather than tight.
+            // The reported error should track the observed spread rather than just
+            // shrinking to the requested target.
             assert!(
                 ratio < 3.0,
                 "claimed {:.2}% but observed spread was {:.2}% ({:.1}x overconfident)",

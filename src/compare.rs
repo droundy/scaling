@@ -261,9 +261,6 @@ mod tests {
         assert!(one.is_finite() && ten.is_finite());
         assert!(ten > one, "ten comparisons must be judged harder than one");
 
-        // A `Config` is now plain data: no shared state, so cloning shares
-        // nothing and dropping asserts nothing. Clippy enforces the second
-        // half - `drop(cfg)` here would warn that there is no `Drop` to run.
         let cfg = Config::relative(0.02);
         let clone = cfg.clone();
         assert_eq!(clone.target_rel_error, cfg.target_rel_error);
