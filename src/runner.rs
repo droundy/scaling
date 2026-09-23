@@ -45,12 +45,6 @@
 //!   e.g. `50ns`.
 //! * `--max-time <duration>` - give up on each benchmark after roughly this
 //!   long, e.g. `30s`.
-//! * `--versions <all|latest>` - measure every registered version of a
-//!   colliding benchmark, or only the newest per crate; see
-//!   [`crate::runner::VersionPolicy`].
-//! * `--baseline <oldest|newest|NAME@VERSION>` - which claimant a version
-//!   collision's regression is judged against; see
-//!   [`crate::runner::BaselinePolicy`].
 //!
 //! `--filter`, `--skip`, `--exact` and `--list` also read from the
 //! environment - `SCALING_FILTER`, `SCALING_SKIP`, `SCALING_EXACT`,
@@ -70,32 +64,24 @@ use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
 use crate::Stats;
 use auto_args::AutoArgs;
 
-/// The four assembly types a caller actually touches, re-exported here
-/// because here is where they are used.
+/// What a failure to assemble the registered benchmarks comes back as.
 ///
 /// [`crate::assemble`] is not documented - most of what is in it is the
 /// pairing and version-resolution machinery, which nobody outside writes
-/// against. These four are different: two are what `--versions` and
-/// `--baseline` set, one is what a failure to assemble comes back as, and
-/// one is what those two are carried in.
-///
-/// # What `--versions`/`--baseline` are actually for
-///
-/// They resolve a collision, not set one up: if two registrations of one
-/// name, type and matrix arrive from different crates or versions -
-/// something else in the dependency graph happening to register a
-/// benchmark under a name yours also uses - `VersionPolicy` says whether
-/// to keep every one (the default) or only the newest per crate, and
-/// `BaselinePolicy` says which claimant a regression is judged against.
+/// against. When two registrations of one name, type and matrix arrive
+/// from different crates or versions - something else in the dependency
+/// graph happening to register a benchmark under a name yours also uses -
+/// every version is kept, told apart by where it came from, and the
+/// oldest claimant of a comparison's baseline wins: the one that makes a
+/// regression read the right way round.
 ///
 /// Deliberately comparing your current code against a past release is a
-/// different question, and the recommended way to ask it does not involve
-/// either of these: add the old release as a dev-dependency under a
-/// renamed package, and write a `#[scaling::bench(group = "...")]`
-/// wrapper in `benches/` that calls straight into its public API,
-/// alongside one that calls your current code - the same `group`/
-/// `baseline` machinery any other comparison uses, sidestepping version
-/// resolution entirely.
+/// different question, and the recommended way to ask it is not to rely on
+/// that: add the old release as a dev-dependency under a renamed package,
+/// and write a `#[scaling::bench(group = "...")]` wrapper in `benches/`
+/// that calls straight into its public API, alongside one that calls your
+/// current code - the same `group`/`baseline` machinery any other
+/// comparison uses, sidestepping version resolution entirely.
 ///
 /// A crate can also be set up so an old release's own registrations are
 /// picked up automatically, without a wrapper, once it is pulled in the
@@ -107,7 +93,7 @@ use auto_args::AutoArgs;
 /// the old registrations compile fine and simply never appear. That risk
 /// is why the manual wrapper above is the recommended default rather
 /// than this automatic path.
-pub use crate::assemble::{BaselinePolicy, Diagnostic, RegistryOptions, VersionPolicy};
+pub use crate::assemble::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -158,8 +144,6 @@ pub struct Options {
     pub filter: Filter,
     /// How to print what they measured.
     pub format: Format,
-    /// What to do about registrations from more than one crate or version.
-    pub registry: RegistryOptions,
 }
 
 /// The flags, as `auto-args` reads them.
@@ -178,10 +162,6 @@ struct Flags {
     abs_error: Option<String>,
     /// Give up on each benchmark after roughly this long, eg 5s.
     max_time: Option<String>,
-    /// Measure `all` registered versions, or only the `latest` of each crate.
-    versions: Option<String>,
-    /// Baseline among several claimants: oldest, newest, or NAME@VERSION.
-    baseline: Option<String>,
 }
 
 impl Options {
@@ -226,18 +206,6 @@ impl Options {
             cfg.max_time = parse_duration(d).map_err(|e| format!("--max-time: {e}"))?;
         }
 
-        let mut registry = RegistryOptions::default();
-        if let Some(v) = &flags.versions {
-            registry.versions = match v.as_str() {
-                "all" => VersionPolicy::All,
-                "latest" => VersionPolicy::LatestPerCrate,
-                other => return Err(format!("--versions wants all or latest, not `{other}`")),
-            };
-        }
-        if let Some(b) = &flags.baseline {
-            registry.baseline = parse_baseline(b)?;
-        }
-
         Ok(Options {
             cfg,
             filter: flags._filter.to_filter(),
@@ -245,33 +213,7 @@ impl Options {
                 Some(f) => Format::parse(f)?,
                 None => Format::default(),
             },
-            registry,
         })
-    }
-}
-
-/// What `--baseline` accepts.
-///
-/// `Exact` holds `&'static str`, because a registration does; a name read
-/// from the command line is leaked to match. That is a bounded leak of two
-/// short strings, once, in a process whose whole job is the run that
-/// follows - the alternative is threading a lifetime through the assembly
-/// types to buy back a few bytes at exit.
-fn parse_baseline(s: &str) -> Result<BaselinePolicy, String> {
-    match s {
-        "oldest" => Ok(BaselinePolicy::Oldest),
-        "newest" => Ok(BaselinePolicy::Newest),
-        other => match other.split_once('@') {
-            Some((name, version)) if !name.is_empty() && !version.is_empty() => {
-                Ok(BaselinePolicy::Exact {
-                    crate_name: Box::leak(name.to_string().into_boxed_str()),
-                    crate_version: Box::leak(version.to_string().into_boxed_str()),
-                })
-            }
-            _ => Err(format!(
-                "--baseline wants oldest, newest, or NAME@VERSION, not `{other}`"
-            )),
-        },
     }
 }
 
@@ -340,8 +282,6 @@ const VALUE_FLAGS: &[&str] = &[
     "--rel-error",
     "--abs-error",
     "--max-time",
-    "--versions",
-    "--baseline",
 ];
 
 /// Whether `args` asks for help, in the sense `main` intercepts: a bare
@@ -381,7 +321,7 @@ pub fn main() -> ExitCode {
 /// same code under the same options.
 fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diagnostic>> {
     let mut suite = options.cfg.suite().with_filter(options.filter.clone());
-    let tokens = suite.try_add_registered_with(options.registry)?;
+    let tokens = suite.try_add_registered()?;
     Ok((suite, tokens))
 }
 
@@ -768,10 +708,6 @@ mod tests {
             "0.005",
             "--max-time",
             "250ms",
-            "--versions",
-            "latest",
-            "--baseline",
-            "newest",
         ])
         .unwrap();
         assert!(options.filter.matches("sort"));
@@ -779,8 +715,6 @@ mod tests {
         assert_eq!(options.format, Format::List);
         assert_eq!(options.cfg.target_rel_error, 0.005);
         assert_eq!(options.cfg.max_time, Duration::from_millis(250));
-        assert_eq!(options.registry.versions, VersionPolicy::LatestPerCrate);
-        assert_eq!(options.registry.baseline, BaselinePolicy::Newest);
     }
 
     fn s(args: &[&str]) -> Vec<String> {
@@ -802,7 +736,6 @@ mod tests {
     fn a_help_flag_used_as_a_value_is_not_a_help_request() {
         assert!(!wants_help(&s(&["bench", "--filter", "-h"])));
         assert!(!wants_help(&s(&["bench", "--skip", "--help"])));
-        assert!(!wants_help(&s(&["bench", "--baseline", "-h"])));
     }
 
     #[test]
@@ -827,19 +760,6 @@ mod tests {
         assert!(e.contains("list"), "{e}");
     }
 
-    #[test]
-    fn a_baseline_can_name_a_crate_and_version() {
-        let policy = parse_baseline("scaling@0.8.1").unwrap();
-        assert_eq!(
-            policy,
-            BaselinePolicy::Exact {
-                crate_name: "scaling",
-                crate_version: "0.8.1",
-            }
-        );
-        assert!(parse_baseline("scaling@").is_err());
-        assert!(parse_baseline("whenever").is_err());
-    }
 
     #[test]
     fn a_grid_cell_shows_one_number_in_a_readable_unit() {

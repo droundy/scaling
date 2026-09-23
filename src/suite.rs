@@ -54,7 +54,6 @@
 //!   nothing at all.
 
 use super::*;
-use crate::assemble::RegistryOptions;
 use crate::registry::{Adder, Alternative, Candidate, Input, Kind, Registered};
 use std::any::Any;
 use std::cell::Cell;
@@ -399,7 +398,7 @@ impl<T> fmt::Debug for Token<T> {
 /// Rendering was once all this had to do, because a caller who wanted the
 /// measurement rather than its text held a [`Token`] for it. That stops
 /// being true as soon as the caller did not write the `add` call:
-/// [`Suite::try_add_registered_with`] adds benchmarks nobody named, so
+/// [`Suite::try_add_registered`] adds benchmarks nobody named, so
 /// nobody holds their tokens, and a script wanting to *ask* something of the
 /// results -
 /// which of these is fastest, is the one we ship still the best - has only
@@ -922,9 +921,9 @@ pub(crate) struct RegisteredTokens {
     /// several inputs contributes one per input, named `group@input`.
     pub comparisons: BTreeMap<String, Token<Comparisons>>,
     /// Things worth saying that did not stop the run - a candidate no input
-    /// matches, say. Errors come back through
-    /// [`Suite::try_add_registered_with`] instead; these are the complaints
-    /// that leave the rest of the run perfectly good.
+    /// matches, say. Errors come back through [`Suite::try_add_registered`]
+    /// instead; these are the complaints that leave the rest of the run
+    /// perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
     /// The comparison lanes as they were assembled, in the order they were
     /// added.
@@ -943,8 +942,7 @@ pub(crate) struct RegisteredTokens {
 impl<'a> Suite<'a> {
     /// Add every benchmark registered anywhere in this binary, handing back
     /// what is wrong rather than panicking - what a runner printing
-    /// diagnostics of its own should do. See [`RegistryOptions`] for what to
-    /// do about registrations that come from more than one crate or version.
+    /// diagnostics of its own should do.
     ///
     /// Discovery only; the suite is otherwise unchanged, and benchmarks added
     /// by hand before or after this call sit alongside the discovered ones
@@ -958,29 +956,27 @@ impl<'a> Suite<'a> {
     /// Nothing is added when this returns `Err`: the registrations are
     /// checked in full before the first one is added, so a suite is never
     /// left holding half of a set that did not check out.
-    pub fn try_add_registered_with(
+    pub fn try_add_registered(
         &mut self,
-        options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let cands: Vec<&'static Candidate> = inventory::iter::<Candidate>().collect();
         let inputs: Vec<&'static Input> = inventory::iter::<Input>().collect();
-        self.assemble_registered(&regs, &cands, &inputs, options)
+        self.assemble_registered(&regs, &cands, &inputs)
     }
 
-    /// [`Suite::try_add_registered_with`], taking the registrations as
-    /// explicit slices rather than reading them off `inventory` - which is
-    /// what they really are outside a test, but reading them there would mean
-    /// a set built to test one contradiction shares a process-wide registry
-    /// with every other test's registrations.
+    /// [`Suite::try_add_registered`], taking the registrations as explicit
+    /// slices rather than reading them off `inventory` - which is what they
+    /// really are outside a test, but reading them there would mean a set
+    /// built to test one contradiction shares a process-wide registry with
+    /// every other test's registrations.
     fn assemble_registered(
         &mut self,
         regs: &[&'static Registered],
         cands: &[&'static Candidate],
         inputs: &[&'static Input],
-        options: RegistryOptions,
     ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
-        let (plan, problems) = crate::assemble::plan(regs, cands, inputs, options);
+        let (plan, problems) = crate::assemble::plan(regs, cands, inputs);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
         // other error, not a field on the returned value that a caller
@@ -1913,7 +1909,7 @@ mod report_lookup {
     /// A measurement can be had from a finished report by name, without
     /// having kept the token that was handed out when it was added.
     ///
-    /// Which is the whole point: under `try_add_registered_with` nobody
+    /// Which is the whole point: under `try_add_registered` nobody
     /// wrote the `add` call, so nobody holds those tokens, and a script that
     /// wants to ask something of the results has only the report.
     #[test]
@@ -2466,7 +2462,7 @@ mod registered_by_hand {
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
         let tokens = suite
-            .try_add_registered_with(RegistryOptions::default())
+            .try_add_registered()
             .unwrap();
         let report = suite.run();
 
@@ -2508,7 +2504,7 @@ mod registered_by_hand {
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
         let tokens = suite
-            .try_add_registered_with(RegistryOptions::default())
+            .try_add_registered()
             .unwrap();
         suite.run();
 
@@ -2533,7 +2529,7 @@ mod registered_by_hand {
             .with_filter(Filter::everything().matching("e2e"));
         let by_hand = suite.add("e2e::by_hand", || work(150));
         let tokens = suite
-            .try_add_registered_with(RegistryOptions::default())
+            .try_add_registered()
             .unwrap();
         let after = suite.add("e2e::after", || work(150));
         let report = suite.run();
@@ -2551,7 +2547,7 @@ mod registered_by_hand {
     }
 
     /// Results are recoverable from the report even when nobody ever held a
-    /// token - which is the situation `try_add_registered_with` always
+    /// token - which is the situation `try_add_registered` always
     /// creates, since nothing wrote the `add` call that would have returned
     /// one.
     #[test]
@@ -2564,7 +2560,7 @@ mod registered_by_hand {
         // way to get hold of these.
         drop(
             suite
-                .try_add_registered_with(RegistryOptions::default())
+                .try_add_registered()
                 .unwrap(),
         );
         let report = suite.run();
@@ -2595,7 +2591,7 @@ mod registered_by_hand {
             .with_filter(Filter::everything().matching("e2e"));
         drop(
             suite
-                .try_add_registered_with(RegistryOptions::default())
+                .try_add_registered()
                 .unwrap(),
         );
         let report = suite.run();
@@ -2629,7 +2625,7 @@ mod registered_by_hand {
 /// a registry covers everything linked into one binary, and every
 /// `#[cfg(test)]` module in this crate shares that binary, so deliberately
 /// broken registrations cannot go through the real global registry without
-/// poisoning every other test that calls `try_add_registered_with`
+/// poisoning every other test that calls `try_add_registered`
 /// unfiltered.
 #[cfg(test)]
 mod bad_registrations {
@@ -2699,7 +2695,7 @@ mod bad_registrations {
         let regs = [&COLLIDES_1, &COLLIDES_2];
         let cands = [&TWO_BASELINES_A, &TWO_BASELINES_B];
         let problems = suite
-            .assemble_registered(&regs, &cands, &[], RegistryOptions::default())
+            .assemble_registered(&regs, &cands, &[])
             .expect_err("these registrations contradict each other");
 
         assert_eq!(problems.len(), 2, "{problems:?}");
@@ -2751,7 +2747,6 @@ mod versions_and_rivals {
     #![allow(clippy::ptr_arg)]
 
     use super::*;
-    use crate::assemble::BaselinePolicy;
     use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, Input};
     use std::any::TypeId;
 
@@ -2874,16 +2869,16 @@ mod versions_and_rivals {
         }
     }
 
-    fn run(options: RegistryOptions) -> RegisteredTokens {
+    fn run() -> RegisteredTokens {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
         // Every `#[cfg(test)]` module in this crate shares one process-wide
         // `inventory` registry - restricted to this module's own names, so
-        // `try_add_registered_with` does not also assemble and measure
+        // `try_add_registered` does not also assemble and measure
         // `registered_by_hand`'s benchmarks on every call here.
         let mut suite = cfg
             .suite()
             .with_filter(Filter::everything().matching("mixing"));
-        let tokens = suite.try_add_registered_with(options).unwrap();
+        let tokens = suite.try_add_registered().unwrap();
         suite.run();
         tokens
     }
@@ -2892,7 +2887,7 @@ mod versions_and_rivals {
     /// other - and told apart, rather than colliding as duplicates.
     #[test]
     fn versions_and_rivals_are_all_measured_and_distinguished() {
-        let tokens = run(RegistryOptions::default());
+        let tokens = run();
         assert!(
             tokens.warnings.is_empty(),
             "a well-formed set of registrations should warn about nothing: {:?}",
@@ -2917,7 +2912,7 @@ mod versions_and_rivals {
     /// the generator.
     #[test]
     fn the_redundant_input_is_measured_once() {
-        let tokens = run(RegistryOptions::default());
+        let tokens = run();
         let matrix_entries: Vec<&String> = tokens
             .comparisons
             .keys()
@@ -2934,7 +2929,7 @@ mod versions_and_rivals {
     /// the right way round: the new code is reported *against* the old.
     #[test]
     fn the_old_version_is_what_the_new_one_is_measured_against() {
-        let tokens = run(RegistryOptions::default());
+        let tokens = run();
         let cmps = tokens.comparisons["mixing@data"].get().unwrap();
         let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
         assert!(
@@ -2942,32 +2937,5 @@ mod versions_and_rivals {
             "the old version is the baseline, not a candidate: {against:?}",
         );
         assert!(against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
-    }
-
-    /// `Newest` flips which end the comparison is anchored at.
-    #[test]
-    fn the_baseline_policy_can_anchor_on_the_newest_instead() {
-        let tokens = run(RegistryOptions::default().with_baseline(BaselinePolicy::Newest));
-        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
-        let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
-        assert!(!against.contains(&"mix@mycrate-0.9.0"), "{against:?}");
-        assert!(against.contains(&"mix@mycrate-0.8.0"), "{against:?}");
-    }
-
-    /// Asking for only the latest of each crate drops our old copy but keeps
-    /// the rival, whose version number is lower than ours.
-    #[test]
-    fn latest_per_crate_keeps_the_rival_and_drops_our_old_copy() {
-        let tokens = run(RegistryOptions::latest_per_crate());
-        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
-        let names: Vec<&str> = cmps.names().collect();
-        assert_eq!(names.len(), 2, "one per crate: {names:?}");
-        assert!(names.contains(&"mix@mycrate"), "{names:?}");
-        assert!(
-            names.contains(&"mix@theircrate"),
-            "a rival on a lower version number must survive: {names:?}",
-        );
-        // Only the crate tells them apart now, so the version is not in the name.
-        assert!(!names.iter().any(|n| n.contains("0.")), "{names:?}");
     }
 }

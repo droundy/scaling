@@ -86,10 +86,10 @@ one combined, interleaved run spanning the whole family, with no crate
 having to know about any of the others' benchmarks in advance. This is
 exactly why every registration carries `crate_name`/`crate_version`: two
 crates - or two versions of one - registering into the same binary is an
-intended scenario, not an edge case; see [`crate::runner::VersionPolicy`]
-for how a name they happen to share is resolved. `#[cfg(test)]` code
-never leaves the crate that defines it, so the dev-only route below cannot
-do this at all.
+intended scenario, not an edge case, and a name they happen to share is
+resolved by keeping every version, told apart by where it came from.
+`#[cfg(test)]` code never leaves the crate that defines it, so the
+dev-only route below cannot do this at all.
 
 **Dev-only, no feature at all**, if you would rather not annotate every
 benchmark individually. Put `scaling` in `[dev-dependencies]` only -
@@ -167,10 +167,9 @@ fn current(v: &mut Vec<u64>) { my_crate::sort(v) }
 `baseline` names the released version, so the report reads the way a
 regression check should: the code being written is measured *against* what
 already shipped, not the other way around. See [`crate::runner`]'s module
-docs - "What `--versions`/`--baseline` are actually for" - for the one
-sharp edge this has: it stops working if two different versions of
-`scaling` itself ever end up anywhere in the dependency graph, since
-registration is keyed on the literal monomorphized type `inventory`
+docs for the one sharp edge this has: it stops working if two different
+versions of `scaling` itself ever end up anywhere in the dependency graph,
+since registration is keyed on the literal monomorphized type `inventory`
 collects, and two `scaling` versions split the registry silently rather
 than erroring.
 

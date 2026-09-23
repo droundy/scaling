@@ -66,78 +66,6 @@ impl Version {
     }
 }
 
-/// Which versions of one function to benchmark, when several are registered.
-///
-/// This arises when a crate pulls in an older copy of itself, or a rival
-/// crate, as a dev-dependency with registrations enabled: both register, and
-/// both may use the same name for the same idea.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VersionPolicy {
-    /// Benchmark every version, telling them apart by where they came from.
-    ///
-    /// The default, because it is what comparing against an older version is
-    /// *for*, and because it discards nothing.
-    #[default]
-    All,
-    /// Benchmark only the newest version **of each crate**.
-    ///
-    /// Per crate, not overall: when the point is to measure against other
-    /// crates, dropping a rival's implementation because your own version
-    /// number happens to be higher would be exactly wrong. So this keeps the
-    /// newest of yours and the newest of each of theirs.
-    LatestPerCrate,
-}
-
-/// Which of several claimants is a comparison's baseline.
-///
-/// Only consulted when more than one says it is. One version of a function
-/// that calls itself the baseline stays the baseline however many other
-/// versions are registered alongside it - they inherit the claim, because
-/// they are the same source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BaselinePolicy {
-    /// The oldest claimant.
-    ///
-    /// The default, and the one that makes a regression read the right way
-    /// round: "is the new code faster than the old code" wants the old code
-    /// as the thing being measured against. Picking the newest would report
-    /// every older version as a change *from* the code being written, which
-    /// is backwards.
-    #[default]
-    Oldest,
-    /// The newest claimant.
-    Newest,
-    /// A named crate at a named version; an error if it is not among them.
-    Exact {
-        crate_name: &'static str,
-        crate_version: &'static str,
-    },
-}
-
-/// How to treat registrations that come from more than one crate or version.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RegistryOptions {
-    pub versions: VersionPolicy,
-    pub baseline: BaselinePolicy,
-}
-
-impl RegistryOptions {
-    /// Benchmark only the newest version of each crate. See
-    /// [`VersionPolicy::LatestPerCrate`].
-    pub fn latest_per_crate() -> Self {
-        RegistryOptions {
-            versions: VersionPolicy::LatestPerCrate,
-            ..Default::default()
-        }
-    }
-
-    /// Choose the baseline differently when several claim it.
-    pub fn with_baseline(mut self, baseline: BaselinePolicy) -> Self {
-        self.baseline = baseline;
-        self
-    }
-}
-
 /// Where one registration came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Origin {
@@ -185,11 +113,19 @@ pub struct Named<T: 'static> {
 /// Decide what to keep and what to call it, when a name is registered more
 /// than once.
 ///
+/// This arises when a crate pulls in an older copy of itself, or a rival
+/// crate, as a dev-dependency with registrations enabled: both register,
+/// and both may use the same name for the same idea. Every version is
+/// kept, told apart by where it came from - `latest_per_crate` narrows
+/// that to the newest per crate, which is what inputs are always
+/// deduplicated with (see the call in `lanes_for_group`), regardless of
+/// how candidates are treated.
+///
 /// Returns the survivors in the input's order; callers sort afterwards.
 pub(crate) fn resolve_versions<T: 'static>(
     items: &[&'static T],
     key_of: impl Fn(&'static T) -> (Key, Origin),
-    policy: VersionPolicy,
+    latest_per_crate: bool,
 ) -> Vec<Named<T>> {
     // Group on the whole key, not the name alone. Two things sharing a name
     // are versions of each other only if everything *else* about what they
@@ -216,7 +152,7 @@ pub(crate) fn resolve_versions<T: 'static>(
             continue;
         }
 
-        if policy == VersionPolicy::LatestPerCrate {
+        if latest_per_crate {
             // Newest of each crate, so rivals all survive and only a crate's
             // own strictly older copies are dropped. Ties within one crate -
             // two registrations at the same version - are kept rather than
@@ -225,7 +161,8 @@ pub(crate) fn resolve_versions<T: 'static>(
             // is not that, it is the same crate registering one name twice.
             // Collapsing it here, the same way an older copy is dropped,
             // would hide precisely the duplicate the fallthrough below - and
-            // the ordinary `VersionPolicy::All` path - exists to report.
+            // the ordinary "keep every version" path below - exists to
+            // report.
             let mut newest: BTreeMap<&'static str, Vec<(&'static T, Origin)>> = BTreeMap::new();
             for (reg, origin) in sharers {
                 let held = newest.entry(origin.crate_name).or_default();
@@ -312,13 +249,6 @@ pub enum Diagnostic {
         group: String,
         claimants: Vec<String>,
     },
-    /// A [`BaselinePolicy::Exact`] naming something that is not among the
-    /// claimants.
-    NoSuchBaseline {
-        group: String,
-        wanted: String,
-        claimants: Vec<String>,
-    },
     /// A matrix candidate whose lane holds no inputs, or vice versa.
     ///
     /// Not a contradiction, so not an error - but almost always a typo or a
@@ -381,16 +311,6 @@ impl Display for Diagnostic {
             Diagnostic::ManyBaselines { group, claimants } => write!(
                 f,
                 "group `{group}` has more than one baseline: {}",
-                list(claimants),
-            ),
-            Diagnostic::NoSuchBaseline {
-                group,
-                wanted,
-                claimants,
-            } => write!(
-                f,
-                "`{group}` was told to use {wanted} as its baseline, but the ones \
-                 claiming to be it are {}",
                 list(claimants),
             ),
             Diagnostic::OrphanCandidate {
@@ -583,13 +503,13 @@ fn lanes_for_group(
     group: &'static str,
     candidates: &[&'static Candidate],
     inputs: &[&'static Input],
-    options: RegistryOptions,
 ) -> (Vec<Lane>, Vec<Diagnostic>) {
     let mut problems = Vec::new();
 
     // Decide what survives and what each is called, before anything else, so
     // that two versions of one implementation stop looking like a duplicate
-    // and start looking like the comparison they are.
+    // and start looking like the comparison they are. Every version is
+    // kept - see `resolve_versions`.
     let named_c = resolve_versions(
         candidates,
         |c| {
@@ -605,10 +525,10 @@ fn lanes_for_group(
                 },
             )
         },
-        options.versions,
+        false,
     );
     // Inputs are deduplicated rather than disambiguated - see `Lane::inputs`
-    // - so the policy for them is always to keep one per name.
+    // - so they are always narrowed to the newest per crate.
     let named_i = resolve_versions(
         inputs,
         |i| {
@@ -624,10 +544,10 @@ fn lanes_for_group(
                 },
             )
         },
-        VersionPolicy::LatestPerCrate,
+        true,
     );
-    // `LatestPerCrate` leaves one per crate; an input registered by two
-    // different crates is still redundant, so keep the newest of those too.
+    // That leaves one per crate; an input registered by two different
+    // crates is still redundant, so keep the newest of those too.
     // Keyed on the type as well as the name, matching the lane key. Inputs
     // get named for their character - "small", "large" - so one group
     // holding two type lanes very naturally has an input called `small` in
@@ -825,26 +745,7 @@ fn lanes_for_group(
                 });
                 continue;
             }
-            _ => match pick_baseline(&cs, &claimants, options.baseline) {
-                Some(i) => cs[i].name.clone(),
-                None => {
-                    problems.push(Diagnostic::NoSuchBaseline {
-                        group: group.to_string(),
-                        wanted: describe_baseline_policy(options.baseline),
-                        claimants: cs
-                            .iter()
-                            .filter(|c| c.reg.is_baseline)
-                            .map(|c| {
-                                format!(
-                                    "{}@{} ({})",
-                                    c.origin.crate_name, c.origin.crate_version, c.name
-                                )
-                            })
-                            .collect(),
-                    });
-                    continue;
-                }
-            },
+            _ => cs[oldest_claimant(&cs, &claimants)].name.clone(),
         };
         cs.sort_by(|a, b| (a.name != baseline, &a.name).cmp(&(b.name != baseline, &b.name)));
 
@@ -863,40 +764,16 @@ fn lanes_for_group(
     (lanes, problems)
 }
 
-/// How a diagnostic should name the baseline `policy` asked for.
-fn describe_baseline_policy(policy: BaselinePolicy) -> String {
-    match policy {
-        BaselinePolicy::Exact {
-            crate_name,
-            crate_version,
-        } => format!("{crate_name}@{crate_version}"),
-        other => format!("{other:?}"),
-    }
-}
-
-/// Which claimant the policy picks, or `None` if it names one that is not
-/// there.
-fn pick_baseline<T: 'static>(
-    cs: &[Named<T>],
-    claimants: &[usize],
-    policy: BaselinePolicy,
-) -> Option<usize> {
-    match policy {
-        BaselinePolicy::Oldest => claimants
-            .iter()
-            .copied()
-            .min_by_key(|i| Version::parse(cs[*i].origin.crate_version)),
-        BaselinePolicy::Newest => claimants
-            .iter()
-            .copied()
-            .max_by_key(|i| Version::parse(cs[*i].origin.crate_version)),
-        BaselinePolicy::Exact {
-            crate_name,
-            crate_version,
-        } => claimants.iter().copied().find(|i| {
-            cs[*i].origin.crate_name == crate_name && cs[*i].origin.crate_version == crate_version
-        }),
-    }
+/// The oldest of several claimants to a comparison's baseline - the one
+/// that makes a regression read the right way round: "is the new code
+/// faster than the old code" wants the old code as the thing being measured
+/// against. `claimants` is never empty where this is called.
+fn oldest_claimant<T: 'static>(cs: &[Named<T>], claimants: &[usize]) -> usize {
+    claimants
+        .iter()
+        .copied()
+        .min_by_key(|i| Version::parse(cs[*i].origin.crate_version))
+        .expect("claimants is non-empty")
 }
 
 /// Where a registration came from, for a diagnostic to name.
@@ -929,7 +806,6 @@ pub fn plan(
     regs: &[&'static Registered],
     candidates: &[&'static Candidate],
     inputs: &[&'static Input],
-    options: RegistryOptions,
 ) -> (Plan, Vec<Diagnostic>) {
     let mut problems = Vec::new();
 
@@ -948,7 +824,7 @@ pub fn plan(
                 },
             )
         },
-        options.versions,
+        false,
     );
 
     // Names still shared afterwards are genuine duplicates. Checked first
@@ -1000,7 +876,7 @@ pub fn plan(
         let group_cands = cands_by_group.remove(group).unwrap_or_default();
         let group_inputs = inputs_by_group.remove(group).unwrap_or_default();
         let (group_lanes, group_problems) =
-            lanes_for_group(group, &group_cands, &group_inputs, options);
+            lanes_for_group(group, &group_cands, &group_inputs);
         lanes.extend(group_lanes);
         problems.extend(group_problems);
     }
@@ -1067,7 +943,7 @@ mod tests {
     #[test]
     fn flat_benchmarks_come_out_sorted() {
         let regs = leak(vec![flat("zebra"), flat("apple"), flat("middle")]);
-        let (plan, problems) = plan(&regs, &[], &[], RegistryOptions::default());
+        let (plan, problems) = plan(&regs, &[], &[]);
         assert!(problems.is_empty(), "{problems:?}");
         let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["apple", "middle", "zebra"]);
@@ -1081,8 +957,8 @@ mod tests {
     fn the_order_registrations_arrive_in_does_not_matter() {
         let forward = leak(vec![flat("a"), flat("b"), flat("c")]);
         let backward = leak(vec![flat("c"), flat("b"), flat("a")]);
-        let (one, _) = plan(&forward, &[], &[], RegistryOptions::default());
-        let (two, _) = plan(&backward, &[], &[], RegistryOptions::default());
+        let (one, _) = plan(&forward, &[], &[]);
+        let (two, _) = plan(&backward, &[], &[]);
         let names =
             |p: &Plan| -> Vec<String> { p.flat.iter().map(|r| r.name.to_string()).collect() };
         assert_eq!(names(&one), names(&two));
@@ -1098,7 +974,7 @@ mod tests {
             cand::<()>("g", "z_the_baseline", "()", true),
             cand::<()>("g", "m_middle", "()", false),
         ]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes.len(), 1);
         let names: Vec<&str> = plan.lanes[0]
@@ -1119,7 +995,7 @@ mod tests {
     #[test]
     fn duplicate_names_are_rejected_and_name_their_sources() {
         let regs = leak(vec![flat("same"), flat("same"), flat("fine")]);
-        let (_, problems) = plan(&regs, &[], &[], RegistryOptions::default());
+        let (_, problems) = plan(&regs, &[], &[]);
         assert_eq!(problems.len(), 1);
         match &problems[0] {
             Diagnostic::DuplicateName { name, sources } => {
@@ -1138,7 +1014,7 @@ mod tests {
     #[test]
     fn a_lone_candidate_is_kept_not_rejected() {
         let cs = leak_c(vec![cand::<()>("lonely", "only", "()", true)]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes.len(), 1);
         assert_eq!(plan.lanes[0].candidates.len(), 1);
@@ -1152,7 +1028,7 @@ mod tests {
             cand::<()>("g", "b", "()", false),
             cand::<()>("g", "a", "()", false),
         ]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes[0].candidates[0].name, "a");
     }
@@ -1163,7 +1039,7 @@ mod tests {
             cand::<()>("g", "a", "()", true),
             cand::<()>("g", "b", "()", true),
         ]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(plan.lanes.is_empty(), "the lane cannot be trusted");
         match &problems[0] {
             Diagnostic::ManyBaselines { group, claimants } => {
@@ -1185,7 +1061,7 @@ mod tests {
             cand::<String>("g", "wrong", "String", false),
         ]);
         let is = leak_i(vec![inp::<Vec<i32>>("g", "data", "Vec<i32>")]);
-        let (plan, problems) = plan(&[], &cs, &is, RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &is);
         assert_eq!(plan.lanes.len(), 1, "only the matching type forms a lane");
         assert_eq!(plan.lanes[0].candidates[0].name, "right");
         assert!(
@@ -1204,7 +1080,7 @@ mod tests {
             cand::<()>("g", "a", "()", true),
             cand::<()>("g", "b", "()", false),
         ]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes.len(), 1);
         assert_eq!(plan.lanes[0].inputs.len(), 1);
@@ -1225,7 +1101,7 @@ mod tests {
             cand::<()>("one", "a", "()", true),
             cand::<()>("one", "b", "()", true),
         ]);
-        let (_, problems) = plan(&regs, &cs, &[], RegistryOptions::default());
+        let (_, problems) = plan(&regs, &cs, &[]);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems
             .iter()
@@ -1244,7 +1120,7 @@ mod tests {
             cand::<()>("apple", "c", "()", true),
             cand::<()>("apple", "d", "()", false),
         ]);
-        let (plan, _) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, _) = plan(&[], &cs, &[]);
         let names: Vec<&str> = plan.lanes.iter().map(|l| l.group).collect();
         assert_eq!(names, ["apple", "zebra"]);
     }
@@ -1257,7 +1133,7 @@ mod tests {
             cand::<()>("g", "a", "()", true),
             cand::<()>("g", "b", "()", true),
         ]);
-        let (_, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (_, problems) = plan(&[], &cs, &[]);
         let shown = format!("{}", problems[0]);
         assert!(shown.contains('g'), "{shown}");
     }
@@ -1271,7 +1147,7 @@ mod tests {
         let quicksort = cand_in::<()>(&["small_sort", "big_sort"], "quicksort", "()", false);
         let insertion = cand::<()>("small_sort", "insertion", "()", true);
         let cs = leak_c(vec![quicksort, insertion]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes.len(), 2);
 
@@ -1310,7 +1186,7 @@ mod tests {
             cand::<Vec<i32>>("dedup", "std_dedup", "Vec<i32>", true),
         ]);
         let is = leak_i(vec![shared]);
-        let (plan, problems) = plan(&[], &cs, &is, RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(plan.lanes.len(), 2);
         for lane in &plan.lanes {
@@ -1579,9 +1455,8 @@ pub(crate) mod lane_tests {
     pub(crate) fn lanes(
         candidates: &[&'static Candidate],
         inputs: &[&'static Input],
-        options: RegistryOptions,
     ) -> (Vec<Lane>, Vec<Diagnostic>) {
-        let (p, problems) = plan(&[], candidates, inputs, options);
+        let (p, problems) = plan(&[], candidates, inputs);
         (p.lanes, problems)
     }
 
@@ -1597,7 +1472,7 @@ pub(crate) mod lane_tests {
             inp::<Vec<u8>>("m", "big", "Vec<u8>"),
             inp::<Vec<u8>>("m", "small", "Vec<u8>"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].candidates.len(), 2);
@@ -1637,7 +1512,7 @@ pub(crate) mod lane_tests {
             inp::<Vec<u8>>("m", "buf", "Vec<u8>"),
             inp::<String>("m", "words", "String"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 2);
         for lane in &lanes {
@@ -1672,7 +1547,7 @@ pub(crate) mod lane_tests {
             // Unrelated third lane, name shared with nothing.
             inp::<u8>("m", "one", "u8"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 3);
 
@@ -1705,7 +1580,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "alpha", "u8", false),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes[0].candidates[0].name.as_str(), "alpha");
     }
@@ -1721,7 +1596,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "charlie", "u8", false),
         ]);
         assert_eq!(
-            lanes(&before, &is, RegistryOptions::default()).0[0].candidates[0].name,
+            lanes(&before, &is).0[0].candidates[0].name,
             "bravo"
         );
 
@@ -1731,7 +1606,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "alpha", "u8", false),
         ]);
         assert_eq!(
-            lanes(&after, &is, RegistryOptions::default()).0[0].candidates[0].name,
+            lanes(&after, &is).0[0].candidates[0].name,
             "alpha",
             "an unmarked baseline is whichever name sorts first, so adding one \
              ahead of it re-bases every reported difference",
@@ -1747,7 +1622,7 @@ pub(crate) mod lane_tests {
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
         assert_eq!(
-            lanes(&cs, &is, RegistryOptions::default()).0[0].candidates[0].name,
+            lanes(&cs, &is).0[0].candidates[0].name,
             "zulu"
         );
     }
@@ -1760,7 +1635,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "b", "u8", true),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(lanes.is_empty(), "the lane is skipped");
         assert!(
             matches!(&problems[0], Diagnostic::ManyBaselines { .. }),
@@ -1775,7 +1650,7 @@ pub(crate) mod lane_tests {
     fn a_candidate_with_no_matching_input_warns() {
         let cs = leak_c(vec![cand::<String>("m", "lonely", "String", true)]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(lanes.is_empty());
         assert!(
             problems
@@ -1798,7 +1673,7 @@ pub(crate) mod lane_tests {
     fn a_lane_with_one_candidate_is_kept_for_plain_measurement() {
         let cs = leak_c(vec![cand::<u8>("m", "only", "u8", false)]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].candidates.len(), 1);
@@ -1815,7 +1690,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "same", "u8", false),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (_, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (_, problems) = lanes(&cs, &is);
         assert!(
             problems.iter().any(|p| matches!(
                 p,
@@ -1836,7 +1711,7 @@ pub(crate) mod lane_tests {
             cand::<u16>("m", "b", "Thing", false),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "Thing")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(lanes.is_empty(), "the lane cannot be trusted");
         assert!(
             problems.iter().any(
@@ -1859,7 +1734,7 @@ pub(crate) mod lane_tests {
             inp::<u8>("zebra", "i", "u8"),
             inp::<u8>("apple", "i", "u8"),
         ]);
-        let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, _) = lanes(&cs, &is);
         assert_eq!(
             lanes.iter().map(|l| l.group).collect::<Vec<_>>(),
             ["apple", "zebra"],
@@ -1909,7 +1784,7 @@ mod version_tests {
             cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.8.0"),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         let names: Vec<&str> = lanes[0]
             .candidates
@@ -1929,60 +1804,10 @@ mod version_tests {
             cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.8.0"),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, _) = lanes(&cs, &is);
         assert_eq!(
             lanes[0].candidates[0].name, "sort@0.8.0",
             "the old version is what the new one is compared against",
-        );
-    }
-
-    #[test]
-    fn the_baseline_policy_can_pick_the_newest_instead() {
-        let cs = leak_c(vec![
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.9.0"),
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.8.0"),
-        ]);
-        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let opts = RegistryOptions::default().with_baseline(BaselinePolicy::Newest);
-        let (lanes, _) = lanes(&cs, &is, opts);
-        assert_eq!(lanes[0].candidates[0].name, "sort@0.9.0");
-    }
-
-    #[test]
-    fn the_baseline_policy_can_name_one_exactly() {
-        let cs = leak_c(vec![
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.9.0"),
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.8.0"),
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.7.0"),
-        ]);
-        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let opts = RegistryOptions::default().with_baseline(BaselinePolicy::Exact {
-            crate_name: "mycrate",
-            crate_version: "0.8.0",
-        });
-        let (lanes, _) = lanes(&cs, &is, opts);
-        assert_eq!(lanes[0].candidates[0].name, "sort@0.8.0");
-    }
-
-    /// Naming one that is not there is an error rather than a silent
-    /// fallback: the caller asked for a specific comparison and did not get
-    /// it.
-    #[test]
-    fn an_exact_baseline_that_is_absent_is_an_error() {
-        let cs = leak_c(vec![
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.9.0"),
-            cand_from::<u8>("m", "sort", "u8", true, "mycrate", "0.8.0"),
-        ]);
-        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let opts = RegistryOptions::default().with_baseline(BaselinePolicy::Exact {
-            crate_name: "mycrate",
-            crate_version: "0.1.0",
-        });
-        let (lanes, problems) = lanes(&cs, &is, opts);
-        assert!(lanes.is_empty());
-        assert!(
-            matches!(&problems[0], Diagnostic::NoSuchBaseline { .. }),
-            "{problems:?}",
         );
     }
 
@@ -2003,7 +1828,7 @@ mod version_tests {
             inp_from::<u8>("m", "data", "u8", "mycrate", "0.9.0"),
             inp_from::<u8>("m", "data", "u8", "mycrate", "0.8.0"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes[0].inputs.len(), 1, "one input, not one per version");
         assert_eq!(
@@ -2022,7 +1847,7 @@ mod version_tests {
             inp_from::<u8>("m", "data", "u8", "mycrate", "0.9.0"),
             inp_from::<u8>("m", "data", "u8", "mycrate", "0.9.0"),
         ]);
-        let (_lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (_lanes, problems) = lanes(&cs, &is);
         assert!(
             problems.iter().any(|p| matches!(
                 p,
@@ -2031,40 +1856,6 @@ mod version_tests {
             )),
             "{problems:?}",
         );
-    }
-
-    /// `LatestPerCrate` keeps the newest of *each* crate.
-    ///
-    /// Per crate rather than overall, because the point of measuring against
-    /// other crates is to measure against them: dropping a rival's
-    /// implementation because your own version number is higher would be
-    /// exactly wrong.
-    #[test]
-    fn latest_per_crate_keeps_every_crate_and_drops_only_old_copies() {
-        let cs = leak_c(vec![
-            cand_from::<u8>("m", "sort", "u8", true, "mine", "2.0.0"),
-            cand_from::<u8>("m", "sort", "u8", true, "mine", "1.0.0"),
-            // A rival, on a lower version number than mine.
-            cand_from::<u8>("m", "sort", "u8", false, "theirs", "0.3.0"),
-            cand_from::<u8>("m", "sort", "u8", false, "theirs", "0.2.0"),
-        ]);
-        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::latest_per_crate());
-        assert!(problems.is_empty(), "{problems:?}");
-        let names: Vec<&str> = lanes[0]
-            .candidates
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
-        assert_eq!(names.len(), 2, "one per crate: {names:?}");
-        assert!(names.contains(&"sort@mine"), "{names:?}");
-        assert!(
-            names.contains(&"sort@theirs"),
-            "the rival must survive its lower version number: {names:?}",
-        );
-        // Only the crate distinguishes them now, so the version is not in
-        // the name - the least that tells them apart is what is used.
-        assert!(!names.iter().any(|n| n.contains("2.0.0")), "{names:?}");
     }
 
     /// With versions kept, a name has to carry both crate and version when
@@ -2077,7 +1868,7 @@ mod version_tests {
             cand_from::<u8>("m", "sort", "u8", false, "theirs", "0.3.0"),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, _) = lanes(&cs, &is);
         let names: Vec<&str> = lanes[0]
             .candidates
             .iter()
@@ -2097,7 +1888,7 @@ mod version_tests {
             cand_from::<u8>("m", "b", "u8", true, "mycrate", "1.0.0"),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(lanes.is_empty(), "the lane cannot be trusted");
         assert!(
             matches!(&problems[0], Diagnostic::ManyBaselines { .. }),
@@ -2119,7 +1910,7 @@ mod version_tests {
             inp::<u8>("apple", "i", "u8"),
             inp::<u8>("zebra", "i", "u8"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 2, "both matrices survive");
         for lane in &lanes {
@@ -2143,8 +1934,9 @@ mod review_regressions {
     use crate::registry::Kind;
 
     /// `types(A, B)` makes several registrations of one name that differ in
-    /// type. They are instantiations, not versions of each other, so asking
-    /// for only the latest of each crate must not drop all but one.
+    /// type. They are instantiations, not versions of each other, so
+    /// narrowing to the latest of each crate - the policy `resolve_versions`
+    /// always applies to inputs - must not drop all but one.
     ///
     /// It did: the whole `Vec<u8>` half of a generic matrix disappeared and
     /// its input was reported as an orphan.
@@ -2153,24 +1945,25 @@ mod review_regressions {
         let cs = leak_c(vec![
             cand::<String>("m", "byte_sum", "String", true),
             cand::<Vec<u8>>("m", "byte_sum", "Vec<u8>", true),
-            cand::<String>("m", "byte_fold", "String", false),
-            cand::<Vec<u8>>("m", "byte_fold", "Vec<u8>", false),
         ]);
-        let is = leak_i(vec![
-            inp::<String>("m", "text", "String"),
-            inp::<Vec<u8>>("m", "bytes", "Vec<u8>"),
-        ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::latest_per_crate());
-        assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(lanes.len(), 2, "both instantiations keep their lane");
-        for lane in &lanes {
-            assert_eq!(
-                lane.candidates.len(),
-                2,
-                "lane {} lost a candidate",
-                lane.type_name,
-            );
-        }
+        let named = resolve_versions(
+            &cs,
+            |c| {
+                (
+                    Key {
+                        scope: "m",
+                        type_name: c.input_type_name,
+                        name: c.name,
+                    },
+                    Origin {
+                        crate_name: c.crate_name,
+                        crate_version: c.crate_version,
+                    },
+                )
+            },
+            true,
+        );
+        assert_eq!(named.len(), 2, "both instantiations must survive");
     }
 
     /// And under the default policy they are not renamed either: one crate
@@ -2185,7 +1978,7 @@ mod review_regressions {
             inp::<String>("m", "text", "String"),
             inp::<Vec<u8>>("m", "bytes", "Vec<u8>"),
         ]);
-        let (lanes, _) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, _) = lanes(&cs, &is);
         for lane in &lanes {
             assert_eq!(
                 lane.candidates[0].name, "byte_sum",
@@ -2211,7 +2004,7 @@ mod review_regressions {
             inp::<String>("m", "small", "String"),
             inp::<Vec<u8>>("m", "small", "Vec<u8>"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 2, "neither lane may be orphaned");
         for lane in &lanes {
@@ -2237,7 +2030,7 @@ mod review_regressions {
             inp::<u8>("m", "first", "Thing"),
             inp::<u16>("m", "second", "Thing"),
         ]);
-        let (lanes, problems) = lanes(&cs, &is, RegistryOptions::default());
+        let (lanes, problems) = lanes(&cs, &is);
         assert!(lanes.is_empty(), "the lane cannot be trusted");
         assert!(
             problems.iter().any(
@@ -2289,7 +2082,7 @@ mod review_regressions {
     #[test]
     fn a_plain_benchmark_can_come_from_two_versions() {
         let regs = leak_r(vec![flat_at("fib", "0.9.0"), flat_at("fib", "0.8.0")]);
-        let (plan, problems) = plan(&regs, &[], &[], RegistryOptions::default());
+        let (plan, problems) = plan(&regs, &[], &[]);
         assert!(
             problems.is_empty(),
             "two versions of one benchmark is not a duplicate: {problems:?}",
@@ -2307,7 +2100,7 @@ mod review_regressions {
             cand_from::<()>("g", "sort", "()", true, "mycrate", "0.9.0"),
             cand_from::<()>("g", "sort", "()", true, "mycrate", "0.8.0"),
         ]);
-        let (plan, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (plan, problems) = plan(&[], &cs, &[]);
         assert!(
             problems.is_empty(),
             "a group spanning two versions is the point: {problems:?}",
@@ -2328,7 +2121,7 @@ mod review_regressions {
             cand_from::<()>("g", "a", "()", true, "mycrate", "1.0.0"),
             cand_from::<()>("g", "b", "()", true, "mycrate", "1.0.0"),
         ]);
-        let (_, problems) = plan(&[], &cs, &[], RegistryOptions::default());
+        let (_, problems) = plan(&[], &cs, &[]);
         assert!(
             problems
                 .iter()
