@@ -338,13 +338,34 @@ const MIN_SWEEPS: usize = 8;
 /// taking the spread of the block means divides out whatever is correlated
 /// within a block, so the number degrades gracefully as autocorrelation grows
 /// instead of being confidently too small.
+fn fixed_blocks() -> Option<usize> {
+    static B: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("LAB_BLOCKS").ok().and_then(|v| v.parse().ok()))
+}
+
 pub fn batch_se(v: &[f64]) -> f64 {
     if v.len() < MIN_SAMPLES {
         return f64::INFINITY;
     }
-    // Square-root rule, for the reason given in `slope_se`: blocks have to
-    // lengthen as samples accumulate or they never outlast the correlation.
-    let b = ((v.len() as f64).sqrt() as usize).clamp(4, 20);
+    // How many blocks: `LAB_BLOCKS=k` for a fixed count, otherwise the
+    // square-root rule. A fixed count makes each block's length grow in
+    // proportion to the samples rather than their square root, so the bar
+    // sees correlation out to a longer scale - at the price of estimating a
+    // spread from fewer numbers.
+    //
+    // Tried as a fix for the slow workloads' overconfident bars, and it is
+    // not one. Summed over all three passes of the quiet deep run, passes
+    // at the 2% and 1% goals out of 36: sqrt 23, six blocks 24, four 20,
+    // three 13. copy_64mb fails every cell at every setting. It stops at
+    // the floor after about twenty pairs, so no block can be long, and its
+    // wander lives on timescales longer than the whole trial - which no
+    // block drawn from inside the trial can see, however it is cut. Fewer
+    // blocks meanwhile give the stopping rule a noisier bar to exploit,
+    // which is why three blocks loses str_find entirely.
+    let b = match fixed_blocks() {
+        Some(k) => k.min(v.len() / 2).max(2),
+        None => ((v.len() as f64).sqrt() as usize).clamp(4, 20),
+    };
     let per = v.len() / b;
     if per == 0 {
         return f64::INFINITY;
