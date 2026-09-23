@@ -1087,31 +1087,15 @@ struct ScalingFit {
 ///
 /// The power comes from the log-log slope over the measured sizes: if cost
 /// goes as `Nᵖ` then `log t` is linear in `log N` with gradient `p`, and
-/// rounding that gradient gives the integer power. The coefficient then
-/// comes from a polynomial refit at that degree, so it means what its units
-/// say - `ns` per `N^power`, with the lower-order terms carried alongside
-/// rather than folded in.
+/// rounding that gradient gives the integer power. The coefficient comes from a
+/// polynomial refit at that degree, so it is reported in the units of the fit
+/// (`ns` per `N^power`, with lower-order terms carried alongside instead of
+/// folded in).
 ///
-/// Chi-squared reports on the fit; it does not choose it. That separation
-/// is the point. It used to choose - walk the degrees, keep the first the
-/// threshold accepted - and the answer then swung with the threshold in
-/// both directions. Loose, and a *constant* was accepted as the shape of a
-/// linear cost whenever the measurements were noisy. Tight, and summing
-/// integers came out `O(N²)`: it is not exactly linear, because per-element
-/// cost changes as the vector outgrows cache, so at high precision a
-/// straight line is genuinely rejected and a parabola genuinely fits
-/// better. Both answers were defensible from the residuals and both were
-/// wrong, because "which model survives a threshold" is not the question
-/// anyone asked.
-///
-/// The slope answers the question that was asked - how fast does this grow
-/// - and it does not care that a parabola could be drawn through the
-/// points. It also needs no separate rule for a term too small to matter: a
-/// cubic contributing a billionth of the runtime moves the slope by a
-/// billionth, so it is ignored by arithmetic rather than by a threshold.
-///
-/// What chi-squared still does, and only it can do, is say whether *any*
-/// polynomial describes the data. That is reported, not acted on.
+/// The slope answers the question we actually care about - how fast does this
+/// grow? Chi-squared only checks whether a polynomial fit is plausible; it does
+/// not choose the model by thresholding the residuals. That keeps the degree
+/// decision tied to the data's growth rate rather than to an arbitrary cutoff.
 fn scaling_fit(ns: &[f64], means: &[f64], ses: &[f64], max_degree: usize) -> Option<ScalingFit> {
     let slope = power_fit(ns, means, ses)?.exponent;
     if !slope.is_finite() {

@@ -1,12 +1,9 @@
 //! Running only some of a suite's benchmarks.
 //!
-//! A binary that registers every benchmark in a crate measures every
-//! benchmark in the crate, and [`Suite`] gives each entry its own
-//! [`Config::max_time`], so the cost of a run grows with how many there are.
-//! That is the wrong shape for working on one function.
+//! A benchmark suite can contain many entries, and filtering lets a run focus
+//! on one function or subset without changing the benchmark definitions.
 //!
-//! Built by hand and set on [`crate::runner::Options::filter`] in your own
-//! `main`, the same as any other field of [`crate::runner::Options`].
+//! Build one by hand and pass it through [`crate::runner::Options::filter`].
 //!
 //! [`Suite`]: crate::Suite
 //! [`Config::max_time`]: crate::Config::max_time

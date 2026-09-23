@@ -247,14 +247,12 @@ mod tests {
         assert_eq!("+30.0% \u{b1} 0.1% (limit)", format!("{changed}"));
     }
 
-    /// Each entry point corrects for the family it can see, with nothing
-    /// promised in advance.
+    /// Each entry point corrects for the family it can see, with no shared
+    /// promise to keep.
     ///
-    /// This is what replaced `Plan`: `Config` used to carry a promised count
-    /// and a `Drop` that asserted the promise was kept. The count was only
-    /// ever needed because a threshold was computed somewhere other than
-    /// where the comparisons were made - so now each computes its own, and
-    /// there is no promise left to break.
+    /// The threshold is computed where the comparisons are assembled, so each
+    /// family makes its own correction from the comparisons it actually
+    /// contains.
     #[test]
     fn each_family_gets_its_own_threshold() {
         // More comparisons in the family means a stricter threshold.

@@ -765,18 +765,10 @@ mod tests {
     #[test]
     fn estimates_the_mean_not_the_minimum() {
         println!();
-        // This used to compare one long tight-target run against many short
-        // ones, and measured the machine rather than the estimator: twenty
-        // seconds flat out on a core is a different frequency and thermal
-        // regime than a run lasting milliseconds. The bias it reported
-        // swung between -14% and +17% on a *quiesced* machine, against a
-        // 10% bound - and its sign flipped run to run, which is the tell.
-        //
-        // Two workloads of the same mean and very different shape settle it
-        // without a reference run at all. Both are measured back to back in
-        // the same regime, so drift lands on both and divides out, and the
-        // ratio holds to about 1% whether or not the machine is quiesced -
-        // which is why this one no longer skips itself.
+        // Compare workloads with the same mean but very different shape: if the
+        // estimator is reporting the mean, their ratio should stay near one even
+        // when the machine drifts. A single long run would be sensitive to the
+        // current thermal and clock regime instead.
         const REPEATS: usize = 4;
         for r in 0..REPEATS {
             let seed = seed_for(r);

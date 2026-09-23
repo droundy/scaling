@@ -1,12 +1,6 @@
 //! Discover every benchmark registered in this binary, measure them, and
 //! print the results.
 //!
-//! This is the half of the registry that is not about registration. Once
-//! benchmarks are declared where they belong rather than assembled in one
-//! place, nobody is left holding the suite - so choosing the accuracy,
-//! choosing which ones to run, and choosing how to print them stop being
-//! things a caller writes and start being things this asks for.
-//!
 //! [`crate::main!`] runs every registered benchmark with the default
 //! [`Config`] and prints a table:
 //!
@@ -44,10 +38,9 @@
 //! nothing else, without anybody having to remember to silence the rest.
 
 use crate::assemble::Lane;
-use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
-// Only for test mocks.
 #[cfg(test)]
 use crate::Stats;
+use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
@@ -81,7 +74,6 @@ use crate::Stats;
 pub use crate::assemble::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
-// Only for test mocks.
 #[cfg(test)]
 use std::time::Duration;
 

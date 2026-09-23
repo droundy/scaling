@@ -532,17 +532,10 @@ pub use self::bench::Stats;
 
 /// Measure one closure, once, where you call it.
 ///
-/// Hidden rather than deleted, and reachable only because one thing needs
-/// it: `benches/harness-cost.rs` measures what it costs to take a benchmark
-/// by calling [`bench`](fn@bench) in a loop timed with a plain `Instant`.
-/// That cannot be written against the registry - measuring the harness with
-/// the harness would hide a regression in exactly the case where it matters,
-/// since if `bench` went wrong the numbers reporting on it would go wrong
-/// the same way and still look right.
-///
-/// They are not how a benchmark is written. `#[scaling::bench]` and
-/// [`main!`] are, and unlike these they get an interleaved measurement, a
-/// name in the report, and a share of the multiple-comparison correction.
+/// Hidden rather than deleted: the harness-cost benchmark calls this in a loop
+/// timed with a plain `Instant` to measure the overhead of taking a benchmark.
+/// That keeps the cost of the harness itself visible instead of hiding it behind
+/// the benchmarking machinery.
 #[doc(hidden)]
 pub use self::bench::{bench, bench_clone_input, bench_make_input};
 pub use self::compare::Comparison;
@@ -575,29 +568,17 @@ pub use scaling_macros::{bench, bench_scaling, input};
 /// scaling::main!();
 /// ```
 ///
-/// Every benchmark registered anywhere in this binary is discovered,
-/// measured together with the default [`Config`], and printed as a table.
-/// What used to be written out - a `Config`, a suite, the `add` calls, the
-/// printing - is decided by the attributes on the benchmarks themselves.
+/// This expands to a `main` that discovers all registered benchmarks in the
+/// binary, measures them with the default [`Config`], and prints the table.
+/// For custom filtering, budgets, or output format, build [`runner::Options`]
+/// manually and call [`runner::run`] or [`runner::measure`] from your own
+/// `main`.
 ///
 /// "This binary" means it literally: everything `#[scaling::bench]` and its
 /// siblings mark, anywhere in your crate's own `src/` - which the compiler
-/// links into every target regardless - is discovered automatically. A
-/// second *file* under `benches/` is not automatically part of it, though:
-/// Cargo treats each top-level file there as its own separate binary with
-/// its own separate `main`, so a benchmark written directly in
-/// `benches/other.rs` is invisible to `scaling::main!()` in
-/// `benches/bench.rs` unless something links them into one binary - `mod
-/// other;` from a `benches/bench/main.rs`, in Cargo's usual shape for a
-/// multi-file target, rather than one bare file per benchmark binary.
-///
-/// This is sugar, not machinery: it expands to a `main` calling
-/// [`runner::main`], which just calls [`runner::run`] with
-/// [`runner::Options::default`]. A crate that wants one thing different -
-/// filtering to one benchmark, a tighter budget, list output - builds an
-/// [`runner::Options`] by hand and calls [`runner::run`] or
-/// [`runner::measure`] from a `main` of its own instead of using this
-/// macro; see [`runner::Options`] for an example.
+/// links into every target regardless - is discovered automatically. A second
+/// *file* under `benches/` is not automatically part of it; Cargo treats each
+/// top-level file there as its own separate binary with its own `main`.
 ///
 /// # Its exit status means something
 ///
@@ -622,32 +603,14 @@ use std::time::*;
 /// Measured time, not wall-clock time: an input that is slow to build would
 /// otherwise satisfy the floor by being built, and construction is not
 /// evidence about the function. [`Config::max_time`] is the opposite - a
-/// wall-clock cap, because that is a promise about how long the caller
-/// waits - so the two clocks are deliberately different.
+/// wall-clock cap, because that is a promise about how long the caller waits -
+/// so the two clocks are deliberately different.
 ///
-/// A comparison gets twice this, since a round there buys evidence about
-/// two functions and is only as good as its weaker half.
-///
-/// All three sampling loops used to stop on a count - six samples for a flat
-/// benchmark, six rounds for a scaling one - and a count is the wrong unit.
-/// Six
-/// samples of a nanosecond-scale function is barely a millisecond of
-/// evidence, and the accuracy target is then met by whichever six happened
-/// to agree. Measured across seven workloads, 95% of `bench` runs stopped
-/// there; the scaling sweep's opening rounds come to under two milliseconds
-/// on a benchmark sitting at its measurable floor, which is the same
-/// regime.
-///
-/// A floor in time is scale-free where a count floor is not: it costs a
-/// slow function nothing, since one sample already exceeds it, while making
-/// a fast one watch the machine for a while rather than for an instant.
-/// Raising the counts instead would make a benchmark that sleeps 400ms per
-/// iteration take ten seconds.
-///
-/// Three milliseconds is where it stops paying. Sweeping both floors
-/// together over seven workloads - integer, transcendental, division and
-/// branchy, from 20ns to 2.8us - round-robin so every cell met the same
-/// drift:
+/// A comparison gets twice this, since a round there buys evidence about two
+/// functions and is only as good as its weaker half. A time floor is scale-free
+/// where a sample-count floor is not: it costs a slow function nothing while
+/// a fast one still gets enough time to reduce variance before the target is
+/// treated as met.
 ///
 /// ```none
 ///   time floor   spread   worst error bar   cost
