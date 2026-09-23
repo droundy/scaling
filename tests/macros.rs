@@ -1,9 +1,9 @@
 //! Benchmarks written the way they are meant to be written.
 //!
-//! `tests/registry.rs`'s equivalent (now `registered_by_hand` inside
-//! `src/suite.rs`, since it needs direct `Suite` access that only exists
-//! inside the crate) builds the same registrations by hand, which is what
-//! proved the runtime path before any macro existed. This checks that the
+//! `suite::registered_by_hand` (inside `src/suite.rs`, since it needs
+//! direct `Suite` access that only exists inside the crate) builds the
+//! same registrations by hand, which is what proved the runtime path
+//! before any macro existed. This checks that the
 //! macros produce the same thing from an attribute, so the two are worth
 //! keeping side by side: if one passes and the other fails, the fault is in
 //! the macro rather than in the registry.

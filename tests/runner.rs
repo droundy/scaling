@@ -140,7 +140,8 @@ fn a_script_can_read_the_numbers_it_measured() {
 fn measure_hands_back_what_it_could_not_assemble() {
     // Nothing here contradicts anything, so this is the `Ok` half; the `Err`
     // half is covered against deliberately broken registrations in
-    // `tests/registry_bad.rs`, which cannot share a binary with these.
+    // `suite::bad_registrations` (src/suite.rs), which cannot share a
+    // binary with these.
     assert!(measure(&quick()).is_ok());
 }
 
