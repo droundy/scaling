@@ -295,9 +295,15 @@ fn min_samples() -> usize {
     })
 }
 
-/// Chosen by sweeping 5, 10, 20, 30, 50 and 100 with trimming on, on the
-/// quiet deep recording; 20 passes ten of twelve cells and every other
-/// value passes fewer.
+/// Chosen by sweeping 5, 10, 20, 30, 50 and 100 with trimming on, on pass 0
+/// of the quiet deep recording, counting passes at the 2% and 1% goals:
+/// 4, 6, 9, 6, 6 and 6 of twelve.
+///
+/// Checked on passes 1 and 2, which it was not tuned on: 7 of twelve on
+/// each. The difference is entirely btree_miss, which scraped through on
+/// pass 0 at exactly 50% cover and fails on both held-out passes, so its
+/// pass 0 result was the threshold, not the recipe. Everything else passes
+/// or fails the same way on all three.
 ///
 /// Two effects cross here. Below about 20 pairs one bad pair still carries
 /// the estimate, even trimmed, and btree_miss and f64_sin blow up. Above it
