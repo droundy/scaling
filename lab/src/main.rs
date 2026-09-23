@@ -174,12 +174,21 @@ static RUNG_WEIGHT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// a replayed algorithm that parks on it exhausts the recording soonest.
 /// `LAB_RUNG_WEIGHT=count` restores equal sample counts.
 fn weighted_rung(r: &[(usize, String, f64, u8)], bits: u64) -> usize {
-    if matches!(
-        RUNG_WEIGHT
-            .get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default())
-            .as_str(),
-        "count"
-    ) {
+    let _ = &RUNG_WEIGHT;
+    // Equal counts when asked for, and by default when only two rungs are
+    // recorded.
+    //
+    // Equal *time* is right for a wide ladder, because it holds samples in
+    // the proportion a replayed algorithm would consume them. With only N
+    // and 2N recorded there is nothing left to replay across; the one
+    // consumer is `(t(2N) - t(N)) / N`. Minimising that difference's
+    // variance for fixed machine time puts about 1.41x as many samples at
+    // 2N as at N under multiplicative noise and 0.71x under additive noise.
+    // Equal counts sit between the two and are near-optimal for either,
+    // where equal time's 0.5x is worse than both. Equal counts also keep the
+    // four cells a paired comparison needs - (N,M), (2N,M), (N,2M), (2N,2M)
+    // - at a quarter each, where equal time leaves (2N,2M) at a ninth.
+    if equal_count() {
         return (bits >> 33) as usize % r.len();
     }
     // The cost of a sample is its batch *plus* the per-measurement overhead,
@@ -285,7 +294,7 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     let mut seen = BTreeSet::new();
     for w in ws.iter().chain(canaries.iter()).filter(|w| seen.insert(w.name)) {
         let (_cal, per) = counts[w.name];
-        let plan: Vec<String> = rungs_for(per)
+        let plan: Vec<String> = recorded_rungs(per)
             .iter()
             .map(|&c| {
                 let ns = c as f64 * per;
@@ -300,7 +309,7 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
         // whether it can share one with the others: every workload gets a
         // sample per round, so the slowest member sets everyone's sample
         // rate.
-        let rungs = rungs_for(per);
+        let rungs = recorded_rungs(per);
         let inv: f64 = rungs
             .iter()
             .map(|&n| 1.0 / (n as f64 * per + OVERHEAD_NS))
@@ -413,15 +422,18 @@ fn round_cost(ws: &[Arc<Workload>], counts: &HashMap<&'static str, (usize, f64)>
     ws.iter()
         .map(|w| {
             let per = counts.get(w.name).map(|c| c.1).unwrap_or(0.0);
-            let rungs = rungs_for(per);
-            // Harmonic mean, because rungs are drawn weighted by inverse
-            // duration: the expected cost of a draw is K / sum(1/d), not
-            // the arithmetic mean of the durations.
-            let inv: f64 = rungs
+            let d: Vec<f64> = recorded_rungs(per)
                 .iter()
-                .map(|&n| 1.0 / (n as f64 * per + OVERHEAD_NS))
-                .sum();
-            rungs.len() as f64 / inv
+                .map(|&n| n as f64 * per + OVERHEAD_NS)
+                .collect();
+            // The expected cost of a draw depends on how rungs are drawn:
+            // the arithmetic mean under equal counts, the harmonic mean
+            // K / sum(1/d) under equal time.
+            if equal_count() {
+                d.iter().sum::<f64>() / d.len() as f64
+            } else {
+                d.len() as f64 / d.iter().map(|x| 1.0 / x).sum::<f64>()
+            }
         })
         .sum()
 }
@@ -547,16 +559,22 @@ fn subsets_of(
         .chain(std::iter::once(&canary))
         .map(|w| {
             let per = counts.get(w.name).map(|c| c.1).unwrap_or(0.0);
-            let d: Vec<f64> = rungs_for(per)
+            let d: Vec<f64> = recorded_rungs(per)
                 .iter()
                 .map(|&n| n as f64 * per + OVERHEAD_NS)
                 .collect();
-            let inv: f64 = d.iter().map(|x| 1.0 / x).sum();
-            // Equal time per rung: samples at rung k are t_per_rung / d_k,
-            // and t_per_rung is the same for every rung by construction.
-            let t_per_rung = rounds / inv;
             let dearest = d.iter().cloned().fold(0.0, f64::max);
-            (w.name, t_per_rung / dearest, t_per_rung)
+            if equal_count() {
+                // Every rung gets rounds / K samples, so the dearest rung is
+                // no thinner than the rest in count, only in time.
+                let samples = rounds / d.len() as f64;
+                (w.name, samples, samples * dearest)
+            } else {
+                // Equal time per rung: samples at rung k are t_per_rung /
+                // d_k, and t_per_rung is the same for every rung.
+                let t_per_rung = rounds / d.iter().map(|x| 1.0 / x).sum::<f64>();
+                (w.name, t_per_rung / dearest, t_per_rung)
+            }
         })
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|(n, s, t)| (n, s, t))
@@ -578,6 +596,40 @@ fn subsets_of(
     let mut out: Vec<Vec<Arc<Workload>>> = ws.iter().map(|w| vec![w.clone()]).collect();
     out.push(full);
     out
+}
+
+/// The rungs actually recorded: the whole ladder, or with `LAB_RUNGS=top2`
+/// only the top two - `N` and `2N`, the two the two-rung estimator uses.
+///
+/// The whole ladder exists so that any algorithm can be replayed, whatever
+/// rungs it would have chosen. The price shows up in pairs: rungs are drawn
+/// independently per workload, so a round in which *both* members of a pair
+/// sit on their top two rungs is rare - 38 rounds in 637000 for
+/// cpu_canary against f64_sin - and the two-laddered comparison, which is
+/// the case that matters most for comparing two implementations of one
+/// function, could not be tested at all. Recording only the two rungs in use
+/// makes every round a usable round for every pair.
+fn recorded_rungs(per_ns: f64) -> Vec<usize> {
+    let all = rungs_for(per_ns);
+    if top2_only() && all.len() > 2 {
+        all[all.len() - 2..].to_vec()
+    } else {
+        all
+    }
+}
+
+/// Whether rungs are drawn with equal counts: when asked for, and by default
+/// when only the top two are recorded (see [`weighted_rung`]).
+fn equal_count() -> bool {
+    let mode = RUNG_WEIGHT
+        .get_or_init(|| std::env::var("LAB_RUNG_WEIGHT").unwrap_or_default())
+        .as_str();
+    mode == "count" || (top2_only() && mode != "time")
+}
+
+fn top2_only() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("LAB_RUNGS").map(|v| v == "top2").unwrap_or(false))
 }
 
 /// The rungs to record for a workload, given what one iteration costs.
@@ -692,7 +744,7 @@ fn run(
             None => calibrate(w, &mut seed),
         };
         let mut this: Vec<(usize, String, f64, u8)> = Vec::with_capacity(8);
-        for (k, &n) in rungs_for(per).iter().enumerate() {
+        for (k, &n) in recorded_rungs(per).iter().enumerate() {
             let name = rung_name(w.name, k);
             let dur = n as f64 * per;
             // A rung is only worth recording if some algorithm could pick
