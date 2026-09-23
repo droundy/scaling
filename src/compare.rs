@@ -13,7 +13,8 @@ pub struct Comparison {
     pub baseline: Stats,
     pub candidate: Stats,
     /// The Bonferroni limit this comparison was judged against, carried from
-    /// the [`Config`] that made it.
+    /// the family of comparisons it was measured in. See
+    /// [`Config::z_alpha_for`].
     z_alpha: f64,
     /// Standard error of the difference, taken from the per-round
     /// differences rather than by combining the two halves. `NaN` when
@@ -87,12 +88,9 @@ impl Comparison {
     /// ran out of [`Config::max_time`] stops wherever it got to - so on a
     /// result that is not changed, this is what "not changed" is worth.
     ///
-    /// `NaN` when there is no threshold to compare against, which is both of
-    /// the cases where there is no verdict either: no plan was set (see
-    /// [`Config::with_comparisons_planned`]), or fewer than two samples were
-    /// collected, leaving [`Stats::std_error`] itself `NaN`. Both print as
-    /// something other than a plain result, so check this before formatting
-    /// it yourself.
+    /// `NaN` when fewer than two samples were collected, leaving
+    /// [`Stats::std_error`] itself `NaN`. That prints as something other than
+    /// a plain result, so check this before formatting it yourself.
     pub fn min_detectable_difference(&self) -> f64 {
         self.z_alpha * self.std_error()
     }
@@ -110,14 +108,6 @@ impl Comparison {
 
 impl Display for Comparison {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        // Without a plan there is no threshold, so there is no verdict to
-        // report. Saying "(unchanged)" here would read exactly like a
-        // measured no-change result, and the `Drop` check that would
-        // otherwise catch the mistake does not run if the process exits, or
-        // if the `Config` is leaked or outlived by a clone.
-        if self.z_alpha.is_nan() {
-            return write!(f, "(no verdict: num_comparisons_planned is unset)");
-        }
         // Both halves are filled in together, so either would answer for the
         // pair - but combine them rather than depending on that. Reaching the
         // sensitivity goal costs several times what a plain accuracy target
@@ -150,9 +140,23 @@ impl Display for Comparison {
 impl Config {
     /// Compare two functions `f_baseline` and `f_candidate` to see if performance has changed.
     ///
-    /// Note that when using the `compare_*` family of functions, you *must* use
-    /// `Config::with_comparisons_planned` to specify the number of comparisons that will be
-    /// made.
+    /// This is judged at the Bonferroni limit for a family of one.
+    ///
+    /// # This does not correct across calls
+    ///
+    /// Calling this `n` times judges each result as though it were the only
+    /// comparison being made, so the chance of *some* false positive among
+    /// them grows with `n` - which is the thing a multiple-comparison
+    /// correction exists to stop. A `Config` cannot know how many times it is
+    /// about to be called, and this corrects for what it can see.
+    ///
+    /// `Config` used to carry a promised count and a `Drop` that checked it,
+    /// which made the caller declare that total; removing that machinery
+    /// removed the guarantee with it. Use a [`Suite`] for comparisons that
+    /// belong together: it collects them all before running any, so it knows
+    /// the size of the family and corrects for it. That is the only path here
+    /// that gets this right, and these functions are expected to give way to
+    /// it.
     ///
     /// See [`Config::compare_gen_input`] for algorithm details.
     pub fn compare<B, C, O>(&self, mut f_baseline: B, mut f_candidate: C) -> Comparison
@@ -173,9 +177,9 @@ impl Config {
     /// best kept small. [`Config::compare_gen_input`] takes a closure instead, for state that is
     /// too expensive to clone or is not [`Clone`] at all.
     ///
-    /// As with every `compare_*` function, you *must* use
-    /// [`Config::with_comparisons_planned`] to specify the number of comparisons that will be
-    /// made. See [`Config::compare_gen_input`] for algorithm details.
+    /// As with every `compare_*` function, this corrects for a family of one
+    /// and does not correct across calls; see [`Config::compare`]. See
+    /// [`Config::compare_gen_input`] for algorithm details.
     pub fn compare_input<B, C, I, O>(&self, input: I, f_baseline: B, f_candidate: C) -> Comparison
     where
         B: FnMut(&mut I) -> O,
@@ -192,9 +196,8 @@ impl Config {
     /// other. Building them is not timed. Use this in preference to [`Config::compare_input`]
     /// when the state is expensive to clone, or is not [`Clone`] at all.
     ///
-    /// As with every `compare_*` function, you *must* use
-    /// [`Config::with_comparisons_planned`] to specify the number of comparisons that will be
-    /// made.
+    /// As with every `compare_*` function, this corrects for a family of one
+    /// and does not correct across calls; see [`Config::compare`].
     ///
     /// ## Overhead
     ///
@@ -258,7 +261,16 @@ impl Config {
         let clock = Clock::new(self.max_time * 2);
         block_on(
             &clock,
-            self.compare_gen_input_async(&clock, gen_input, f_baseline, f_candidate),
+            // A family of one: this call makes exactly one comparison, and
+            // nothing else shares its threshold.
+            self.compare_gen_input_async(
+                &clock,
+                Config::z_alpha_for(1),
+                Config::next_comparison_seed(),
+                gen_input,
+                f_baseline,
+                f_candidate,
+            ),
         )
     }
 
@@ -277,9 +289,15 @@ impl Config {
     ///
     /// Neither pinning nor the exclusive guard is taken here; the caller owns
     /// them, so a suite claims the machine once for the whole session.
+    /// `z_alpha` is the Bonferroni limit for the family this comparison
+    /// belongs to, and `seed` distinguishes its random stream from that of
+    /// any sibling. Both come from the caller because both are facts about
+    /// the family rather than about this one comparison.
     pub(crate) async fn compare_gen_input_async<G, B, C, I, O>(
         &self,
         clock: &Clock,
+        z_alpha: f64,
+        seed: u64,
         mut gen_input: G,
         mut f_baseline: B,
         mut f_candidate: C,
@@ -289,7 +307,6 @@ impl Config {
         B: FnMut(&mut I) -> O,
         C: FnMut(&mut I) -> O,
     {
-        let made = self.claim_comparisons(1);
         let mut xs: Vec<I> = Vec::new();
         let (unit, base_ns, cand_ns, probed) = calibrate(
             &mut gen_input,
@@ -317,7 +334,7 @@ impl Config {
                     hit_limit: true,
                     untrustworthy: true,
                 },
-                z_alpha: self.z_alpha(),
+                z_alpha,
                 paired_std_error: f64::NAN,
             };
         }
@@ -351,7 +368,7 @@ impl Config {
         // between a function and itself. Erasing the batch instead leaves
         // each function one consistently-compiled loop, and costs one
         // indirect call per batch rather than per iteration.
-        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ made.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D);
         loop {
             flip ^= flip << 13;
             flip ^= flip >> 7;
@@ -396,7 +413,7 @@ impl Config {
             // as good as the weaker of its two halves.
             let precise_enough = base_samples.count >= MIN_SAMPLES
                 && measured_ns >= 2.0 * MIN_SAMPLE_TIME.as_secs_f64() * 1e9
-                && self.comparison_accuracy_met(base_mean, std_error);
+                && self.comparison_accuracy_met(base_mean, std_error, z_alpha);
             if precise_enough || out_of_budget {
                 return Comparison {
                     baseline: Stats {
@@ -415,32 +432,13 @@ impl Config {
                         hit_limit: !precise_enough,
                         untrustworthy: cand_samples.count < MIN_SAMPLES,
                     },
-                    z_alpha: self.z_alpha(),
+                    z_alpha,
                     paired_std_error,
                 };
             }
             // One *round* per poll, never half of one. See the note on this
             // function about why the pair may not be split.
             clock.yield_now().await;
-        }
-    }
-}
-
-impl Drop for Config {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            if let Some(plan) = Arc::get_mut(&mut self.plan) {
-                // We now know that we are the *last* user of this Config, so we can get an
-                // accurate count of how many comparisons were made. Being the
-                // last holder also means `get_mut` gives us the plan itself,
-                // so neither figure needs an atomic load.
-                let made = *plan.made.get_mut();
-                let planned = *plan.planned.get_mut();
-                assert_eq!(
-                    planned, made,
-                    "You need to set num_comparisons_planned to {made}."
-                );
-            }
         }
     }
 }
@@ -527,13 +525,14 @@ mod tests {
     #[test]
     fn stopping_asks_exactly_what_is_changed_asks() {
         for planned in [1u64, 3, 10, 100] {
-            let cfg = Config::default().with_comparisons_planned(planned);
+            let cfg = Config::default();
+            let z_alpha = Config::z_alpha_for(planned);
             for baseline in [1.0, 71.0, 2.5e6] {
                 let goal = cfg.comparison_goal_ns(baseline);
                 for scale in [0.5, 0.9, 0.99, 1.01, 1.1, 2.0] {
                     // Pick a standard error, then ask both questions of it.
-                    let se = goal / cfg.z_alpha() * scale;
-                    let stopped = cfg.comparison_accuracy_met(baseline, se);
+                    let se = goal / z_alpha * scale;
+                    let stopped = cfg.comparison_accuracy_met(baseline, se, z_alpha);
                     // A comparison whose difference is exactly the goal.
                     let c = comparison(baseline, baseline + goal, se / 2.0f64.sqrt(), planned);
                     assert_eq!(
@@ -546,7 +545,6 @@ mod tests {
             // This test never runs a comparison - it only asks the two
             // predicates about hand-built numbers - so there is no count for
             // `Drop` to check against the plan.
-            std::mem::forget(cfg);
         }
     }
 
@@ -554,11 +552,11 @@ mod tests {
     /// `min_detectable_difference` should come back as the goal itself.
     #[test]
     fn min_detectable_difference_is_the_goal_once_sampling_stops() {
-        let cfg = Config::default().with_comparisons_planned(4);
+        let cfg = Config::default();
         let baseline = 500.0;
         let goal = cfg.comparison_goal_ns(baseline);
         // The standard error the stopping rule is aiming for.
-        let se = goal / cfg.z_alpha();
+        let se = goal / Config::z_alpha_for(4);
         let c = comparison(baseline, baseline, se / 2.0f64.sqrt(), 4);
         assert!(
             (c.min_detectable_difference() - goal).abs() < 1e-9,
@@ -566,13 +564,12 @@ mod tests {
             c.min_detectable_difference()
         );
         assert!((c.min_detectable_rel() - cfg.target_rel_error).abs() < 1e-12);
-        std::mem::forget(cfg); // no comparisons run; nothing for `Drop` to check
     }
 
-    /// Two things a reader must never mistake for a clean "no change": a run
-    /// that was cut off by the budget, and one that had no threshold at all.
+    /// A run cut off by the budget must never be mistaken for a clean "no
+    /// change".
     #[test]
-    fn display_marks_a_truncated_run_and_an_unplanned_one() {
+    fn display_marks_a_truncated_run() {
         // Planned and precise: the sensitivity is the whole story.
         let clean = format!("{}", comparison(100.0, 100.0, 0.1, 4));
         assert!(clean.starts_with("(unchanged, would detect"), "{clean}");
@@ -599,119 +596,47 @@ mod tests {
         // Pinned whole, so the `\u{b1}` cannot quietly become an ASCII `+/-` and
         // drift from what `Stats` prints.
         assert_eq!("+30.0% \u{b1} 0.1% (limit)", format!("{changed}"));
-
-        // No plan: not a verdict, and it must not read like one.
-        let unplanned = format!("{}", comparison(100.0, 100.0, 0.1, 0));
-        assert!(unplanned.contains("no verdict"), "{unplanned}");
-        assert!(!unplanned.contains("unchanged"), "{unplanned}");
     }
 
-    /// Every clone of a `Config` shares one plan, so the order they happen to
-    /// drop in cannot change whether `Drop` complains.
+    /// Each entry point corrects for the family it can see, with nothing
+    /// promised in advance.
     ///
-    /// Before the plan moved into the shared cell, `planned` was per-clone
-    /// while `made` was shared: setting the plan on one clone left the other
-    /// reading zero, and whichever dropped last decided. A `Suite` sets the
-    /// plan on the caller's behalf and so hits exactly that case.
+    /// This is what replaced `Plan`: `Config` used to carry a promised count
+    /// and a `Drop` that asserted the promise was kept. The count was only
+    /// ever needed because a threshold was computed somewhere other than
+    /// where the comparisons were made - so now each computes its own, and
+    /// there is no promise left to break.
     #[test]
-    fn the_plan_is_shared_by_every_clone() {
-        let cfg = Config::default();
-        let clone = cfg.clone();
-        // Set through one clone; the other must see it.
-        clone.set_comparisons_planned(2);
-        assert_eq!(cfg.num_comparisons_planned(), 2);
-        assert_eq!(clone.z_alpha(), cfg.z_alpha());
-        assert!(cfg.z_alpha().is_finite(), "a plan implies a threshold");
+    fn each_family_gets_its_own_threshold() {
+        // More comparisons in the family means a stricter threshold.
+        let one = Config::z_alpha_for(1);
+        let ten = Config::z_alpha_for(10);
+        assert!(one.is_finite() && ten.is_finite());
+        assert!(ten > one, "ten comparisons must be judged harder than one");
 
-        // Two comparisons against a plan of two, claimed through one clone
-        // and dropped through the other. Neither drop may assert.
-        cfg.claim_comparisons(2);
-        drop(clone);
-        drop(cfg);
+        // A `Config` is now plain data: no shared state, so cloning shares
+        // nothing and dropping asserts nothing. Clippy enforces the second
+        // half - `drop(cfg)` here would warn that there is no `Drop` to run.
+        let cfg = Config::relative(0.02);
+        let clone = cfg.clone();
+        assert_eq!(clone.target_rel_error, cfg.target_rel_error);
     }
 
-    /// A `Config` kept as a template can be cloned and planned several
-    /// different ways.
+    /// Consecutive standalone comparisons must not draw the same sequence of
+    /// orders, or a loop of them correlates with itself.
     ///
-    /// Sharing the plan between clones broke this: the second clone's call
-    /// saw the first clone's number through the `Arc` and asserted, on a
-    /// caller who had done nothing wrong. Planning now detaches.
+    /// The plan's `made` counter did this as a side effect of counting.
+    /// Removing it would have quietly left every standalone comparison on the
+    /// same seed, which no test then in the suite would have caught - the
+    /// ones that run comparisons in a loop are gated on a quiesced machine
+    /// and skip on most.
     #[test]
-    fn a_template_config_can_be_cloned_and_planned_separately() {
-        let base = Config::relative(0.02);
-        let two = base.clone().with_comparisons_planned(2);
-        let three = base.clone().with_comparisons_planned(3);
-        assert_eq!(two.num_comparisons_planned(), 2);
-        assert_eq!(three.num_comparisons_planned(), 3);
-        // The template itself is untouched, and each plan is its own.
-        assert_eq!(base.num_comparisons_planned(), 0);
-        two.claim_comparisons(2);
-        three.claim_comparisons(3);
-        drop(two);
-        drop(three);
-        drop(base);
-    }
-
-    /// Detaching must not cost the check it replaced: planning one `Config`
-    /// twice is still a mistake and still says so.
-    #[test]
-    #[should_panic(expected = "only call with_comparisons_planned once")]
-    fn planning_twice_still_panics() {
-        let cfg = Config::default()
-            .with_comparisons_planned(2)
-            .with_comparisons_planned(3);
-        std::mem::forget(cfg);
-    }
-
-    /// Clones taken *after* planning still share it, so the count they must
-    /// reach between them is the one that was promised once.
-    #[test]
-    fn clones_taken_after_planning_share_it() {
-        let cfg = Config::default().with_comparisons_planned(2);
-        let clone = cfg.clone();
-        assert_eq!(clone.num_comparisons_planned(), 2);
-        cfg.claim_comparisons(1);
-        clone.claim_comparisons(1);
-        drop(clone);
-        drop(cfg);
-    }
-
-    /// The assertion still fires when the count is genuinely wrong - sharing
-    /// the plan must not have quietly disabled the check.
-    #[test]
-    #[should_panic(expected = "set num_comparisons_planned to 1")]
-    fn a_miscounted_plan_still_asserts() {
-        let cfg = Config::default().with_comparisons_planned(3);
-        cfg.claim_comparisons(1);
-        drop(cfg);
-    }
-
-    /// With no plan set there is no threshold, so nothing is ever a change -
-    /// but the loop must still terminate promptly rather than spending the
-    /// whole budget discovering that.
-    #[test]
-    fn an_unplanned_comparison_terminates_and_reports_nothing() {
-        let cfg = Config::default().with_max_time(Duration::from_secs(5));
-        // Claim the CPU before starting the clock, so what is timed is the
-        // comparison and not our wait for other tests to finish with it. The
-        // claim is re-entrant, so the comparison's own costs nothing.
-        let _held = crate::quiet::exclusive();
-        let started = Instant::now();
-        let c = cfg.compare(|| 1u64, || 1u64);
-        let elapsed = started.elapsed();
-        println!("unplanned: {c} in {elapsed:?}");
-        assert!(!c.is_changed(), "no plan means no verdict");
-        let shown = format!("{c}");
-        assert!(shown.contains("no verdict"), "{shown}");
-        assert!(
-            !shown.contains("unchanged"),
-            "must not read as a measured result: {shown}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(4),
-            "should not burn the budget: took {elapsed:?}"
-        );
-        std::mem::forget(cfg); // Drop would rightly assert; not what this tests.
+    fn consecutive_comparisons_get_different_seeds() {
+        let a = Config::next_comparison_seed();
+        let b = Config::next_comparison_seed();
+        let c = Config::next_comparison_seed();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
     }
 
     /// A workload whose cost is drawn at random, so the spread is real
@@ -741,9 +666,7 @@ mod tests {
         for (name, multiple, low, high) in
             [("1x goal", 1.0, 0.15, 0.85), ("2x goal", 2.0, 0.70, 1.0)]
         {
-            let cfg = Config::relative(0.05)
-                .with_max_time(Duration::from_secs(4))
-                .with_comparisons_planned(REPEATS);
+            let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(4));
             let mut changed = 0u64;
             for r in 0..REPEATS {
                 // `candidate` does `multiple * 5%` more work than `baseline`.

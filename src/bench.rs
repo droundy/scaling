@@ -221,7 +221,7 @@ where
 impl Config {
     /// Run a benchmark.
     ///
-    /// See [`bench`] for the default-accuracy version, and
+    /// See [`bench`](fn@bench) for the default-accuracy version, and
     /// [`Config::bench_gen_input`] for the algorithm.
     pub fn bench<F, O>(&self, mut f: F) -> Stats
     where

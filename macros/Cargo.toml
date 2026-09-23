@@ -1,0 +1,22 @@
+[package]
+name = "scaling-macros"
+version = "0.9.0"
+authors = ["David Roundy <daveroundy@gmail.com>"]
+description = "Attribute macros for the scaling benchmarking library"
+edition = "2021"
+documentation = "https://docs.rs/scaling/"
+repository = "https://github.com/droundy/scaling"
+license = "MIT OR Apache-2.0"
+# Set by this crate's own dependencies rather than by anything it does:
+# `syn`, `quote`, `proc-macro2` and `unicode-ident` all declare 1.71. It said
+# 1.66 before, matching the library, which was simply untrue - `cargo check
+# --all` on 1.66 fails here, not in the library.
+rust-version = "1.71"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

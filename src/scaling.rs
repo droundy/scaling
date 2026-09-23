@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 impl Config {
     /// Benchmark the power-law scaling of a function.
     ///
-    /// See [`bench_scaling`] for the default-accuracy version.
+    /// See [`bench_scaling`](fn@bench_scaling) for the default-accuracy version.
     ///
     /// The accuracy applies to [`Scaling::ns_per_scale`], the constant in
     /// front of the fitted law, and only once the law itself has been
@@ -381,11 +381,11 @@ async fn scaling_sweep(
 
 /// Benchmark the power-law scaling of the function with generated input
 ///
-/// This function is like [`bench_scaling`], but uses a generating function
+/// This function is like [`bench_scaling`](fn@bench_scaling), but uses a generating function
 /// to construct the input to your benchmarked function.
 ///
 /// Reports the integer power ᴾ in 𝑶(𝑁ᴾ) and the constant in front of it,
-/// with a standard error, exactly as [`bench_scaling`] does - including how
+/// with a standard error, exactly as [`bench_scaling`](fn@bench_scaling) does - including how
 /// much the choice of `nmin` matters, which is worth reading there before
 /// trusting a result from here.
 ///
