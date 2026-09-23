@@ -44,33 +44,9 @@ use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
-/// [`crate::assemble`] is not documented - most of what is in it is the
-/// pairing and version-resolution machinery, which nobody outside writes
-/// against. When two registrations of one name, type and matrix arrive
-/// from different crates or versions - something else in the dependency
-/// graph happening to register a benchmark under a name yours also uses -
-/// every version is kept, told apart by where it came from, and the
-/// oldest claimant of a comparison's baseline wins: the one that makes a
-/// regression read the right way round.
-///
-/// Deliberately comparing your current code against a past release is a
-/// different question, and the recommended way to ask it is not to rely on
-/// that: add the old release as a dev-dependency under a renamed package,
-/// and write a `#[scaling::bench(group = "...")]` wrapper in `benches/`
-/// that calls straight into its public API, alongside one that calls your
-/// current code - the same `group`/`baseline` machinery any other
-/// comparison uses, sidestepping version resolution entirely.
-///
-/// A crate can also be set up so an old release's own registrations are
-/// picked up automatically, without a wrapper, once it is pulled in the
-/// same way - but only if that release already carried the attributes,
-/// and only as long as every crate in the graph resolves to the *same*
-/// `scaling`: registration is keyed on the literal monomorphized type
-/// `inventory` collects, so two `scaling` versions anywhere in the
-/// dependency graph split the registry silently rather than erroring -
-/// the old registrations compile fine and simply never appear. That risk
-/// is why the manual wrapper above is the recommended default rather
-/// than this automatic path.
+/// This is the diagnostic used when registration metadata is ambiguous or
+/// conflicting; the runner exposes it so a benchmark binary can report the
+/// cause in a user-facing way.
 pub use crate::assemble::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;

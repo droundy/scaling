@@ -522,20 +522,15 @@ pub(crate) use bench::time_loop;
 pub(crate) use suite::{block_on, Clock, Machine};
 pub(crate) mod significant;
 
-// `self::` because the crate is called `scaling` too, and rustdoc builds
-// doctests with `--extern scaling` pointing at this very crate - which
-// leaves a bare `scaling::` ambiguous between the module below and the
-// whole crate. Rust 1.66 calls that ambiguity an error; later compilers
-// quietly pick one, so this only ever failed on the oldest supported
-// toolchain, and only when building doctests rather than the library.
+// Use `self::` because `scaling` is also the crate name; without it, doctests
+// can end up with an ambiguous `scaling::` path when built against the crate
+// itself.
 pub use self::bench::Stats;
 
 /// Measure one closure, once, where you call it.
 ///
-/// Hidden rather than deleted: the harness-cost benchmark calls this in a loop
+/// This is kept hidden because the harness-cost benchmark calls it in a loop
 /// timed with a plain `Instant` to measure the overhead of taking a benchmark.
-/// That keeps the cost of the harness itself visible instead of hiding it behind
-/// the benchmarking machinery.
 #[doc(hidden)]
 pub use self::bench::{bench, bench_clone_input, bench_make_input};
 pub use self::compare::Comparison;
@@ -543,8 +538,7 @@ pub use self::filter::Filter;
 pub use self::kway::Comparisons;
 pub use self::scaling::{Scaling, ScalingStats};
 
-/// Measure one closure's scaling, once, where you call it. Hidden for the
-/// same reason as [`bench`](fn@bench); see there.
+/// Measure one closure's scaling, once, where you call it.
 #[doc(hidden)]
 pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;

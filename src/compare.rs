@@ -272,11 +272,8 @@ mod tests {
     /// Consecutive standalone comparisons must not draw the same sequence of
     /// orders, or a loop of them correlates with itself.
     ///
-    /// The plan's `made` counter did this as a side effect of counting.
-    /// Removing it would have quietly left every standalone comparison on the
-    /// same seed, which no test then in the suite would have caught - the
-    /// ones that run comparisons in a loop are gated on a quiesced machine
-    /// and skip on most.
+    /// Each comparison advances the seed so standalone runs do not reuse a
+    /// sequence that would be correlated with the previous one.
     #[test]
     fn consecutive_comparisons_get_different_seeds() {
         let a = Config::next_comparison_seed();
@@ -303,10 +300,9 @@ mod tests {
     /// The headline promise: a difference twice the goal is caught nearly
     /// always, while one exactly at the goal is a coin flip.
     ///
-    /// Two alternatives is a family of one, so this is judged at the same
-    /// threshold the deleted `Config::compare` used to apply, and asks the
-    /// same question of the same numbers - only through the k-way loop,
-    /// which is the one sampling loop left.
+    /// A two-way comparison is still a one-family comparison, so it is judged at
+    /// the same decision threshold as any other family but through the remaining
+    /// k-way loop.
     #[test]
     fn twice_the_goal_is_caught_and_the_goal_itself_is_a_coin_flip() {
         println!();
