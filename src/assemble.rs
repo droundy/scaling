@@ -288,7 +288,7 @@ impl Diagnostic {
     /// else still runs. A contradiction is not - the lane holding it is
     /// discarded, so benchmarks that were written produce nothing, and
     /// saying so only in a field of the returned value means a caller who
-    /// writes `suite.try_add_registered_with(..).unwrap();` and drops the
+    /// writes `suite.try_add_registered().unwrap();` and drops the
     /// result sees a run that silently measured nothing.
     pub fn is_fatal(&self) -> bool {
         !matches!(
@@ -2043,7 +2043,7 @@ mod review_regressions {
 
     /// A contradiction inside a lane discards that lane, so it has to be
     /// fatal. Reported only as a warning it meant a caller who wrote
-    /// `suite.try_add_registered_with(..).unwrap();` and dropped the result
+    /// `suite.try_add_registered().unwrap();` and dropped the result
     /// saw a run that silently measured nothing.
     #[test]
     fn a_lane_contradiction_is_fatal_but_an_orphan_is_not() {

@@ -86,8 +86,8 @@ fn each_format_runs() {
 }
 
 /// A filter that matches nothing is a successful run of nothing, not an
-/// error: `--filter` is how a person narrows a run, and mistyping it should
-/// say so rather than look like a broken build.
+/// error: a `Filter` is how a caller narrows a run, and mistyping a pattern
+/// should say so rather than look like a broken build.
 #[test]
 fn a_filter_matching_nothing_still_succeeds() {
     let outcome = run(Options {
@@ -144,9 +144,9 @@ fn measure_hands_back_what_it_could_not_assemble() {
     assert!(measure(&quick()).is_ok());
 }
 
-/// `--list` measures nothing, so it is fast whatever the budget says - and
-/// it is the answer to "did my benchmark get linked in", which is the
-/// question `inventory`'s failure mode provokes.
+/// `Filter::listing(true)` measures nothing, so it is fast whatever the
+/// budget says - and it is the answer to "did my benchmark get linked in",
+/// which is the question `inventory`'s failure mode provokes.
 #[test]
 fn listing_measures_nothing() {
     let started = std::time::Instant::now();

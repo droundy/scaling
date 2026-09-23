@@ -130,8 +130,9 @@ pub struct ScalingStats {
     /// floor, not a verdict on the code. Nothing in [`crate::runner`] fails
     /// a run over it, so a script wanting to gate on it checks
     /// `scaling.is_none()` itself. If you expected a real law and see
-    /// `None`, a longer `--max-time` or a wider `nmin` range is usually
-    /// the fix, not a sign the function has no scaling behavior at all.
+    /// `None`, a longer [`Config::max_time`](crate::Config::max_time) or a
+    /// wider `nmin` range is usually the fix, not a sign the function has
+    /// no scaling behavior at all.
     pub scaling: Option<Scaling>,
     /// Relative standard error of [`Scaling::ns_per_scale`], as a fraction
     /// (0.01 = 1%).
