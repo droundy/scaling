@@ -3,9 +3,6 @@ on: [push, pull_request]
 name: Continuous integration
 
 jobs:
-  # One floor for the whole workspace. Set by the proc-macro dependencies
-  # rather than by the library, which compiles well below it - so this is
-  # checking a promise about the dependency tree as much as about the code.
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
