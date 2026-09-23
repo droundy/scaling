@@ -128,8 +128,7 @@ pub struct ScalingStats {
     /// that [`Stats::untrustworthy`](crate::Stats::untrustworthy) plays for
     /// a flat one: a statement about the budget bumping into the noise
     /// floor, not a verdict on the code. Nothing in [`crate::runner`] fails
-    /// a run over it - there is no `--fail-on-...` flag for this
-    /// specifically, so a script wanting to gate on it checks
+    /// a run over it, so a script wanting to gate on it checks
     /// `scaling.is_none()` itself. If you expected a real law and see
     /// `None`, a longer `--max-time` or a wider `nmin` range is usually
     /// the fix, not a sign the function has no scaling behavior at all.

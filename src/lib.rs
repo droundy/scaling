@@ -337,7 +337,6 @@ instead:
 ```none
 cargo bench --bench bench -- --list
 cargo bench --bench bench -- --filter sort --max-time 30s
-cargo bench --bench bench -- --fail-on-regression
 ```
 
 See [`main!`] for the whole of it, [`runner`] for what the flags do, and
@@ -495,16 +494,14 @@ cannot give it. [`quiet::status`] still tells you outright rather than
 letting a run silently assume it is quiesced: check it in CI the same way
 you would locally, and expect [`quiet::Status::NotQuiesced`] there.
 
-Be honest with yourself about what that costs
-[`--fail-on-regression`](runner::Options::fail_on_regression):
-`--fail-on-untrustworthy` catches too *few* samples, a fact about the
-budget the statistics can see. It cannot catch a busy machine, which is
-exactly the failure this caveat opened with - the whole run shifted
-together, so the error bar stays tight and looks fully earned. There is no
-flag that turns that into a caught case; the only fix is a quieter
-machine, or judging `--fail-on-regression`'s verdicts on CI with that
-firmly in mind rather than trusting them the way a quiesced run's would
-be trusted.
+Be honest with yourself about what a tight error bar is worth on a busy
+machine: the statistics can catch too *few* samples, a fact about the
+budget they can see. They cannot catch a busy machine, which is exactly
+the failure this caveat opened with - the whole run shifted together, so
+the error bar stays tight and looks fully earned. There is no flag that
+turns that into a caught case; the only fix is a quieter machine, or
+judging results from CI with that firmly in mind rather than trusting
+them the way a quiesced run's would be trusted.
 */
 
 /// Assembling registered benchmarks into a suite.
@@ -604,7 +601,6 @@ pub use scaling_macros::{bench, bench_scaling, input};
 /// cargo bench --bench bench -- --list
 /// cargo bench --bench bench -- --filter sort
 /// cargo bench --bench bench -- --max-time 30s --rel-error 0.002
-/// cargo bench --bench bench -- --fail-on-regression
 /// ```
 ///
 /// This is sugar, not machinery: it expands to a `main` calling
@@ -614,12 +610,8 @@ pub use scaling_macros::{bench, bench_scaling, input};
 ///
 /// # Its exit status means something
 ///
-/// Zero unless asked otherwise. `2` if the run never started - a command
-/// line that did not parse, or registrations that contradict each other -
-/// and `1` with `--fail-on-regression` if a comparison's alternative
-/// measured slower than its baseline by more than this run's own threshold.
-/// The distinction is deliberate: `2` means the question was not asked, `1`
-/// means it was asked and answered badly.
+/// Zero unless the run never started - a command line that did not parse,
+/// or registrations that contradict each other - which exits `2` instead.
 #[macro_export]
 macro_rules! main {
     () => {

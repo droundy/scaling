@@ -39,31 +39,6 @@ fn slow(v: &mut Vec<u64>) -> u64 {
     total
 }
 
-// ---- and one where the *baseline* is the slow half ----
-//
-// The same ten-times difference the other way round. A comparison that
-// detects a change is not a regression unless the change is a slowdown, and
-// this is what says so.
-
-#[scaling::input(group = "improving")]
-fn improving_input() -> Vec<u64> {
-    (0..64u64).collect()
-}
-
-#[scaling::bench(group = "improving", baseline, name = "was_slow")]
-fn was_slow(v: &mut Vec<u64>) -> u64 {
-    let mut total = 0u64;
-    for _ in 0..10 {
-        total = total.wrapping_add(v.iter().fold(0u64, |a, x| a.wrapping_add(*x)));
-    }
-    total
-}
-
-#[scaling::bench(group = "improving", name = "now_fast")]
-fn now_fast(v: &mut Vec<u64>) -> u64 {
-    v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
-}
-
 // ---- a flat benchmark and a matrix, so every branch of the output has
 // something to print ----
 
@@ -108,57 +83,6 @@ fn each_format_runs() {
         let outcome = run(Options { format, ..quick() });
         assert_eq!(outcome, Outcome::Measured, "{format:?}");
     }
-}
-
-/// The check is opt-in, so the same measurement passes without it and fails
-/// with it. Asserting both is what shows the flag is doing the work, rather
-/// than the run happening to fail for some other reason.
-#[test]
-fn fail_on_regression_notices_the_slower_alternative() {
-    let filter = Filter::everything().matching("regressing");
-
-    let quiet = run(Options {
-        filter: filter.clone(),
-        ..quick()
-    });
-    assert_eq!(
-        quiet,
-        Outcome::Measured,
-        "a slower alternative is not a failure unless asked about",
-    );
-
-    let asked = run(Options {
-        filter,
-        fail_on_regression: true,
-        ..quick()
-    });
-    assert_eq!(
-        asked,
-        Outcome::Failed,
-        "ten times the work should read as a regression",
-    );
-}
-
-/// A detected change is not a regression unless it is a slowdown.
-///
-/// The direction is the whole content of the check, and it is easy to leave
-/// out - `is_changed()` alone reads as though it means "something is wrong",
-/// and it would fail every run where anything got faster.
-///
-/// An earlier version of this compared `sort` against `sort_unstable` on the
-/// theory that they measure the same. They do not: on Rust 1.71 the unstable
-/// sort came out 7.3% slower on this input, correctly detected, and the test
-/// failed - it had been asserting a property of the standard library rather
-/// than of the runner. What it asks now is the ten-times difference used
-/// above, pointed the other way, which no library change moves.
-#[test]
-fn fail_on_regression_is_quiet_when_something_got_faster() {
-    let outcome = run(Options {
-        filter: Filter::everything().matching("improving"),
-        fail_on_regression: true,
-        ..quick()
-    });
-    assert_eq!(outcome, Outcome::Measured);
 }
 
 /// A filter that matches nothing is a successful run of nothing, not an

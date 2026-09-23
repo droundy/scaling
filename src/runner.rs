@@ -51,12 +51,6 @@
 //! * `--baseline <oldest|newest|NAME@VERSION>` - which claimant a version
 //!   collision's regression is judged against; see
 //!   [`crate::runner::BaselinePolicy`].
-//! * `--fail-on-regression` - exit non-zero if any comparison's alternative
-//!   measured slower than its baseline; see
-//!   [`crate::runner::Options::fail_on_regression`].
-//! * `--fail-on-untrustworthy` - exit non-zero if any error bar came from
-//!   too few samples to believe; see
-//!   [`crate::runner::Options::fail_on_untrustworthy`].
 //!
 //! `--filter`, `--skip`, `--exact` and `--list` also read from the
 //! environment - `SCALING_FILTER`, `SCALING_SKIP`, `SCALING_EXACT`,
@@ -166,23 +160,6 @@ pub struct Options {
     pub format: Format,
     /// What to do about registrations from more than one crate or version.
     pub registry: RegistryOptions,
-    /// Exit non-zero if any comparison's alternative measured slower than
-    /// its baseline, by more than the run's own threshold.
-    ///
-    /// The threshold is a statement about *sampling* noise, not about
-    /// everything else that can move a measurement - see the crate's own
-    /// "A busy machine" caveat, and its "CI" section for what that means
-    /// for this flag specifically on a runner `quiet-bench` cannot quiesce.
-    pub fail_on_regression: bool,
-    /// Exit non-zero if any error bar came from too few samples to believe.
-    ///
-    /// Off by default, unlike a first draft of this. `untrustworthy` says
-    /// the `±` is not worth reading, and the usual cause is a benchmark slow
-    /// enough that the budget bought only a handful of samples - which is a
-    /// fact about the budget, not about the code under test. Failing a build
-    /// over it would mean a slow benchmark breaking CI while measuring
-    /// exactly what it was asked to.
-    pub fail_on_untrustworthy: bool,
 }
 
 /// The flags, as `auto-args` reads them.
@@ -205,10 +182,6 @@ struct Flags {
     versions: Option<String>,
     /// Baseline among several claimants: oldest, newest, or NAME@VERSION.
     baseline: Option<String>,
-    /// Exit non-zero if a comparison got slower.
-    fail_on_regression: bool,
-    /// Exit non-zero if an error bar came from too few samples to believe.
-    fail_on_untrustworthy: bool,
 }
 
 impl Options {
@@ -273,8 +246,6 @@ impl Options {
                 None => Format::default(),
             },
             registry,
-            fail_on_regression: flags.fail_on_regression,
-            fail_on_untrustworthy: flags.fail_on_untrustworthy,
         })
     }
 }
@@ -343,18 +314,10 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 /// see what happened rather than only pass it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Everything the filter kept was measured, and nothing that was asked
-    /// to be checked failed. Exit `0`.
+    /// Everything the filter kept was measured. Exit `0`.
     Measured,
-    /// A check asked for on the command line found something - a regression,
-    /// an error bar not worth believing. Exit `1`.
-    Failed,
     /// The run never started: a command line that did not parse, or
     /// registrations that contradict each other. Exit `2`.
-    ///
-    /// Distinct from [`Outcome::Failed`] on purpose. `1` means the question
-    /// was asked and answered badly; `2` means it was never asked, which is
-    /// not the same news and should not be read as the same news.
     NotRun,
 }
 
@@ -362,7 +325,6 @@ impl From<Outcome> for ExitCode {
     fn from(outcome: Outcome) -> ExitCode {
         match outcome {
             Outcome::Measured => ExitCode::SUCCESS,
-            Outcome::Failed => ExitCode::FAILURE,
             Outcome::NotRun => ExitCode::from(2),
         }
     }
@@ -472,12 +434,7 @@ pub fn run(options: Options) -> Outcome {
             return Outcome::NotRun;
         }
     };
-    let Options {
-        format,
-        fail_on_regression,
-        fail_on_untrustworthy,
-        ..
-    } = options;
+    let Options { format, .. } = options;
 
     for w in &tokens.warnings {
         eprintln!("warning: {w}");
@@ -508,43 +465,7 @@ pub fn run(options: Options) -> Outcome {
         Format::Table => print!("{}", table(&report, &tokens)),
     }
 
-    let mut failed = false;
-    if fail_on_regression {
-        for (name, comparisons) in report.all_comparisons() {
-            let baseline = comparisons.baseline_name().to_string();
-            for (alt, c) in comparisons.against_baseline() {
-                if c.is_changed() && c.difference_ns() > 0.0 {
-                    eprintln!(
-                        "regression: {name}: {alt} is {:+.1}% against {baseline}",
-                        100.0 * c.difference_ns() / c.baseline.ns_per_iter,
-                    );
-                    failed = true;
-                }
-            }
-        }
-    }
-    if fail_on_untrustworthy {
-        for (name, stats) in report.all_stats() {
-            if stats.untrustworthy {
-                eprintln!("untrustworthy: {name} took too few samples to believe its ±");
-                failed = true;
-            }
-        }
-        for (name, comparisons) in report.all_comparisons() {
-            for (alt, stats) in comparisons.names().zip(comparisons.stats()) {
-                if stats.untrustworthy {
-                    eprintln!("untrustworthy: {name}: {alt} took too few samples to believe its ±");
-                    failed = true;
-                }
-            }
-        }
-    }
-
-    if failed {
-        Outcome::Failed
-    } else {
-        Outcome::Measured
-    }
+    Outcome::Measured
 }
 
 /// What would run, and for a comparison, what it holds.
@@ -851,7 +772,6 @@ mod tests {
             "latest",
             "--baseline",
             "newest",
-            "--fail-on-regression",
         ])
         .unwrap();
         assert!(options.filter.matches("sort"));
@@ -861,8 +781,6 @@ mod tests {
         assert_eq!(options.cfg.max_time, Duration::from_millis(250));
         assert_eq!(options.registry.versions, VersionPolicy::LatestPerCrate);
         assert_eq!(options.registry.baseline, BaselinePolicy::Newest);
-        assert!(options.fail_on_regression);
-        assert!(!options.fail_on_untrustworthy);
     }
 
     fn s(args: &[&str]) -> Vec<String> {

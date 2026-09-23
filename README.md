@@ -118,11 +118,8 @@ no printing to write: all of that is asked for on the command line.
 ```none
 cargo bench --bench bench -- --list
 cargo bench --bench bench -- --filter sort --max-time 30s
-cargo bench --bench bench -- --fail-on-regression
 ```
 
-`--fail-on-regression` exits non-zero when an alternative measured slower
-than its baseline, which is what makes this usable as a CI gate.
 `runner::measure` hands back the results instead of printing them, for a
 script that wants to look at the numbers rather than show them - reached by
 name, since nobody wrote those names down: they come from the module and
