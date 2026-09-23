@@ -18,7 +18,6 @@ libc = "0.2"
 
 [dependencies]
 inventory = "0.3.21"
-# The attribute macros themselves.
 scaling-macros = { version = "0.9.0", path = "macros" }
 
 # These two were optional, behind a `registry` feature, while the
