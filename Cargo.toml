@@ -17,9 +17,6 @@ rust-version = "1.71"
 libc = "0.2"
 
 [dependencies]
-# Collects benchmarks registered anywhere in a crate, through linker
-# sections, so that they need not be assembled into one list by hand. This is
-# what makes `#[scaling::bench]` work from wherever it is written.
 inventory = "0.3.21"
 # The attribute macros themselves.
 scaling-macros = { version = "0.9.0", path = "macros" }
