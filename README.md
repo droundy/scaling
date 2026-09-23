@@ -118,16 +118,8 @@ no printing to write: all of that is asked for on the command line.
 ```none
 cargo bench --bench bench -- --list
 cargo bench --bench bench -- --filter sort --max-time 30s
-cargo bench --bench bench -- --format json > today.json
 cargo bench --bench bench -- --fail-on-regression
 ```
-
-`--format json` needs the `json` feature (`scaling = { version = "...",
-features = ["json"] }`) - off by default, so a caller who never asks for it
-does not pay for the dependency. Its fields are `Stats`/`ScalingStats`/etc
-themselves, `Serialize`d directly rather than through a separate JSON-only
-type kept in step by hand, so its shape is a promise this crate's normal
-semver already keeps - see `runner`'s own docs for the exact shape.
 
 `--fail-on-regression` exits non-zero when an alternative measured slower
 than its baseline, which is what makes this usable as a CI gate.

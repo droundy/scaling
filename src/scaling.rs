@@ -111,14 +111,7 @@ impl Config {
 }
 
 /// Statistics for a benchmark run determining the scaling of a function.
-///
-/// Behind the `json` feature, this derives `Serialize` directly - see
-/// [`crate::runner`]'s "Flags" section for `--format json`. `scaling` is
-/// `#[serde(flatten)]`ed: `power` and `ns_per_scale` appear as ordinary
-/// top-level keys when `Some`, and are simply absent - not present with a
-/// `null` value - when `None`.
 #[derive(Debug, PartialEq, Clone)]
-#[cfg_attr(feature = "json", derive(serde::Serialize))]
 pub struct ScalingStats {
     /// The scaling law, if one was found.
     ///
@@ -140,7 +133,6 @@ pub struct ScalingStats {
     /// `scaling.is_none()` itself. If you expected a real law and see
     /// `None`, a longer `--max-time` or a wider `nmin` range is usually
     /// the fix, not a sign the function has no scaling behavior at all.
-    #[cfg_attr(feature = "json", serde(flatten))]
     pub scaling: Option<Scaling>,
     /// Relative standard error of [`Scaling::ns_per_scale`], as a fraction
     /// (0.01 = 1%).
@@ -196,7 +188,6 @@ impl ScalingStats {
 }
 /// The timing and scaling results (without statistics) for a benchmark.
 #[derive(Debug, PartialEq, Clone, Copy)]
-#[cfg_attr(feature = "json", derive(serde::Serialize))]
 pub struct Scaling {
     /// The scaling power.
     ///

@@ -10,7 +10,6 @@
 //! cargo bench --bench registered -- --list
 //! cargo bench --bench registered -- --filter sorting
 //! cargo bench --bench registered -- --max-time 200ms
-//! cargo bench --bench registered -- --format json
 //! ```
 
 fn work(n: usize) -> u64 {

@@ -71,12 +71,7 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 const MAX_SAMPLES: usize = 1_000_000;
 
 /// Statistics for a benchmark run.
-///
-/// Behind the `json` feature, this derives `Serialize` directly - see
-/// [`crate::runner`]'s "Flags" section for `--format json`, and why that
-/// makes its shape a promise this struct's own fields already are.
 #[derive(Debug, PartialEq, Clone)]
-#[cfg_attr(feature = "json", derive(serde::Serialize))]
 pub struct Stats {
     /// The time, in nanoseconds, per iteration.
     pub ns_per_iter: f64,

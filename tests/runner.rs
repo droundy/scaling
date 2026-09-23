@@ -104,11 +104,7 @@ fn a_run_measures_what_was_registered() {
 /// Every format prints, and none of them changes the verdict.
 #[test]
 fn each_format_runs() {
-    #[cfg(feature = "json")]
-    let formats = [Format::Table, Format::List, Format::Json];
-    #[cfg(not(feature = "json"))]
-    let formats = [Format::Table, Format::List];
-    for format in formats {
+    for format in [Format::Table, Format::List] {
         let outcome = run(Options { format, ..quick() });
         assert_eq!(outcome, Outcome::Measured, "{format:?}");
     }

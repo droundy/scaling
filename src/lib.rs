@@ -337,7 +337,6 @@ instead:
 ```none
 cargo bench --bench bench -- --list
 cargo bench --bench bench -- --filter sort --max-time 30s
-cargo bench --bench bench -- --format json > today.json
 cargo bench --bench bench -- --fail-on-regression
 ```
 
@@ -605,7 +604,6 @@ pub use scaling_macros::{bench, bench_scaling, input};
 /// cargo bench --bench bench -- --list
 /// cargo bench --bench bench -- --filter sort
 /// cargo bench --bench bench -- --max-time 30s --rel-error 0.002
-/// cargo bench --bench bench -- --format json > today.json
 /// cargo bench --bench bench -- --fail-on-regression
 /// ```
 ///

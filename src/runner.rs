@@ -14,20 +14,15 @@
 //!
 //! ```none
 //! cargo bench --bench bench -- --list
-//! cargo bench --bench bench -- --filter sort --format json
+//! cargo bench --bench bench -- --filter sort --format list
 //! ```
-//!
-//! `--format json` needs the `json` feature (`scaling = { version = "...",
-//! features = ["json"] }`) - without it, `json` is not even an accepted
-//! value for `--format`, since [`crate::runner::Format`] itself has no
-//! `Json` variant to compile in.
 //!
 //! # What it prints where
 //!
 //! Results go to stdout, everything else to stderr: how many benchmarks are
 //! about to run, warnings about registrations that went unused, the reason a
-//! run measured nothing. So `--format json > results.json` gives a file
-//! holding JSON and nothing else, without anybody having to remember to
+//! run measured nothing. So `--format list > results.txt` gives a file
+//! holding results and nothing else, without anybody having to remember to
 //! silence the rest.
 //!
 //! # Flags
@@ -42,9 +37,8 @@
 //! * `--exact` - match the whole name rather than any part of it, for both
 //!   `--filter` and `--skip`.
 //! * `--list` - print what would run, and measure nothing.
-//! * `--format <table|list|json>` - how to print results; see
-//!   [`crate::runner::Format`]. Table is the default. `json` needs the
-//!   `json` feature - see above.
+//! * `--format <table|list>` - how to print results; see
+//!   [`crate::runner::Format`]. Table is the default.
 //! * `--rel-error <fraction>` - stop once the standard error is this
 //!   fraction of the measurement, e.g. `0.01` for 1%.
 //! * `--abs-error <duration>` - stop once the standard error is below this,
@@ -77,8 +71,7 @@
 
 use crate::assemble::Lane;
 use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
-// Only for test mocks - the `json` module (below) brings in its own copy
-// of `Stats`, along with `Comparisons`/`ScalingStats`, for its own use.
+// Only for test mocks.
 #[cfg(test)]
 use crate::Stats;
 use auto_args::AutoArgs;
@@ -126,11 +119,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 /// How to print the results.
-///
-/// A third variant, `Json`, exists behind the `json` feature - visible here
-/// only when this documentation was built with it enabled. Without it,
-/// `--format json` is rejected outright at the command line rather than
-/// silently falling back to something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
     /// A group with several inputs as a grid, everything else as one line
@@ -150,10 +138,6 @@ pub enum Format {
     /// outright when a difference was too small to call. Use this when the
     /// question is "is that number real", rather than "which of these wins".
     List,
-    /// Machine-readable, for tracking results between runs. Only with the
-    /// `json` feature - see [`crate::runner`]'s "Flags" section.
-    #[cfg(feature = "json")]
-    Json,
 }
 
 impl Format {
@@ -161,17 +145,7 @@ impl Format {
         match s {
             "table" => Ok(Format::Table),
             "list" => Ok(Format::List),
-            #[cfg(feature = "json")]
-            "json" => Ok(Format::Json),
-            #[cfg(feature = "json")]
-            other => Err(format!(
-                "`{other}` is not a format; try table, list or json"
-            )),
-            #[cfg(not(feature = "json"))]
-            other => Err(format!(
-                "`{other}` is not a format; try table or list \
-                 (json needs the `json` feature)"
-            )),
+            other => Err(format!("`{other}` is not a format; try table or list")),
         }
     }
 }
@@ -219,7 +193,7 @@ pub struct Options {
 #[derive(AutoArgs, Debug, Default)]
 struct Flags {
     _filter: crate::filter::cli::Flags,
-    /// How to print results: table (default), list, or json.
+    /// How to print results: table (default) or list.
     format: Option<String>,
     /// Stop once the standard error is this fraction of the measurement.
     rel_error: Option<f64>,
@@ -532,8 +506,6 @@ pub fn run(options: Options) -> Outcome {
     match format {
         Format::List => println!("{report}"),
         Format::Table => print!("{}", table(&report, &tokens)),
-        #[cfg(feature = "json")]
-        Format::Json => print!("{}", json(&report)),
     }
 
     let mut failed = false;
@@ -832,125 +804,6 @@ fn short_time(ns: f64) -> String {
     format!("{:.3}{unit}", ns / divisor)
 }
 
-/// The whole report as JSON, on one array of objects.
-///
-/// Built from [`crate::Stats`]/[`crate::ScalingStats`]/[`crate::Scaling`]
-/// themselves - `Serialize` derived directly on them, behind the `json`
-/// feature - rather than
-/// separate JSON-only types kept in step by hand. See [`json::Kind`] for
-/// the one place that shape is assembled, and this module's own "Flags"
-/// section for what that buys.
-#[cfg(feature = "json")]
-fn json(report: &Report) -> String {
-    let benchmarks: Vec<json::Entry> = report
-        .names()
-        .filter_map(|name| {
-            let kind = match report.find(name)? {
-                Found::Stats(stats) => json::Kind::Flat { stats },
-                Found::Scaling(stats) => json::Kind::Scaling { stats },
-                Found::Comparison(c) => json::Kind::Comparison {
-                    comparison: json::Comparison::from(&c),
-                },
-            };
-            Some(json::Entry {
-                name: name.to_string(),
-                kind,
-            })
-        })
-        .collect();
-    serde_json::to_string_pretty(&json::Report { benchmarks })
-        .expect("Stats/ScalingStats/Comparisons contain nothing serde_json can fail on")
-}
-
-/// The types `--format json` actually writes, kept apart from everything
-/// else in this module because every one of them exists only to be
-/// `Serialize`d - nothing here has a caller outside [`mod@json`].
-#[cfg(feature = "json")]
-mod json {
-    use crate::{Comparisons, ScalingStats, Stats};
-    use serde::Serialize;
-
-    #[derive(Serialize)]
-    pub(super) struct Report {
-        pub(super) benchmarks: Vec<Entry>,
-    }
-
-    #[derive(Serialize)]
-    pub(super) struct Entry {
-        pub(super) name: String,
-        #[serde(flatten)]
-        pub(super) kind: Kind,
-    }
-
-    /// `#[serde(flatten)]` rejects a newtype variant (`Flat(Stats)`)
-    /// outright - "cannot be used on newtype structs" - but accepts a
-    /// struct variant with one named, flattened field, which serializes
-    /// identically. `#[serde(tag = "kind")]` still puts `"kind": "flat"` (etc)
-    /// alongside whatever `stats`/`comparison` flatten in as ordinary keys.
-    #[derive(Serialize)]
-    #[serde(tag = "kind", rename_all = "lowercase")]
-    pub(super) enum Kind {
-        Flat {
-            #[serde(flatten)]
-            stats: Stats,
-        },
-        Scaling {
-            #[serde(flatten)]
-            stats: ScalingStats,
-        },
-        Comparison {
-            #[serde(flatten)]
-            comparison: Comparison,
-        },
-    }
-
-    #[derive(Serialize)]
-    pub(super) struct Comparison {
-        pub(super) baseline: String,
-        pub(super) alternatives: Vec<Alternative>,
-    }
-
-    impl From<&Comparisons> for Comparison {
-        fn from(c: &Comparisons) -> Self {
-            let stats = c.stats();
-            let mut alternatives = vec![Alternative {
-                name: c.baseline_name().to_string(),
-                baseline: true,
-                stats: stats[0].clone(),
-                difference_ns: None,
-                difference_std_error: None,
-                changed: None,
-                min_detectable_ns: None,
-            }];
-            alternatives.extend(c.against_baseline().map(|(name, comparison)| Alternative {
-                name: name.to_string(),
-                baseline: false,
-                stats: comparison.candidate.clone(),
-                difference_ns: Some(comparison.difference_ns()),
-                difference_std_error: Some(comparison.std_error()),
-                changed: Some(comparison.is_changed()),
-                min_detectable_ns: Some(comparison.min_detectable_difference()),
-            }));
-            Comparison {
-                baseline: c.baseline_name().to_string(),
-                alternatives,
-            }
-        }
-    }
-
-    #[derive(Serialize)]
-    pub(super) struct Alternative {
-        pub(super) name: String,
-        pub(super) baseline: bool,
-        #[serde(flatten)]
-        pub(super) stats: Stats,
-        pub(super) difference_ns: Option<f64>,
-        pub(super) difference_std_error: Option<f64>,
-        pub(super) changed: Option<bool>,
-        pub(super) min_detectable_ns: Option<f64>,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,14 +834,6 @@ mod tests {
 
     #[test]
     fn the_flags_reach_the_options_they_name() {
-        // "list" stands in for "json" when the `json` feature is off, so
-        // this test still exercises every other flag either way - only the
-        // one assertion right below differs.
-        let format_flag = if cfg!(feature = "json") {
-            "json"
-        } else {
-            "list"
-        };
         let options = Options::from_arg_iter([
             "bench",
             "--filter",
@@ -997,7 +842,7 @@ mod tests {
             "slow",
             "--exact",
             "--format",
-            format_flag,
+            "list",
             "--rel-error",
             "0.005",
             "--max-time",
@@ -1011,9 +856,6 @@ mod tests {
         .unwrap();
         assert!(options.filter.matches("sort"));
         assert!(!options.filter.matches("mymod::sort"), "--exact");
-        #[cfg(feature = "json")]
-        assert_eq!(options.format, Format::Json);
-        #[cfg(not(feature = "json"))]
         assert_eq!(options.format, Format::List);
         assert_eq!(options.cfg.target_rel_error, 0.005);
         assert_eq!(options.cfg.max_time, Duration::from_millis(250));
@@ -1065,9 +907,6 @@ mod tests {
         let e = Options::from_arg_iter(["bench", "--format", "yaml"]).unwrap_err();
         assert!(e.contains("table"), "{e}");
         assert!(e.contains("list"), "{e}");
-        // Mentioned either way: what to install to get it, without the
-        // `json` feature; what to ask for, with it.
-        assert!(e.contains("json"), "{e}");
     }
 
     #[test]
@@ -1082,88 +921,6 @@ mod tests {
         );
         assert!(parse_baseline("scaling@").is_err());
         assert!(parse_baseline("whenever").is_err());
-    }
-
-    /// `ScalingStats::scaling` is `#[serde(flatten)]`ed, and flatten's
-    /// documented behavior for `Option<T>` is: `Some` flattens `T`'s own
-    /// fields in as usual, `None` adds no keys at all - not `power: null,
-    /// ns_per_scale: null`. Guards that behavior directly, since it is easy
-    /// to get backwards by reasoning about it rather than checking.
-    #[cfg(feature = "json")]
-    #[test]
-    fn no_scaling_law_omits_its_two_fields_rather_than_nulling_them() {
-        use crate::{Scaling, ScalingStats};
-        let some = ScalingStats {
-            scaling: Some(Scaling {
-                power: 2,
-                ns_per_scale: 3.5,
-            }),
-            rel_std_error: 0.01,
-            goodness_of_fit: 0.9,
-            iterations: 1000,
-            hit_limit: false,
-        };
-        let none = ScalingStats {
-            scaling: None,
-            rel_std_error: f64::NAN,
-            goodness_of_fit: 0.0,
-            iterations: 5,
-            hit_limit: true,
-        };
-        let s = serde_json::to_string(&some).unwrap();
-        assert!(s.contains("\"power\":2"), "{s}");
-        assert!(s.contains("\"ns_per_scale\":3.5"), "{s}");
-        let s = serde_json::to_string(&none).unwrap();
-        assert!(!s.contains("power"), "{s}");
-        assert!(!s.contains("ns_per_scale"), "{s}");
-    }
-
-    /// JSON has no `NaN` and no infinity; this crate produces both, in
-    /// `std_error` above all - "fewer than two samples" is the ordinary
-    /// case for an extremely slow benchmark. `serde_json` writes `null` for
-    /// either automatically; this only guards that the crate's own types
-    /// still route through that behavior rather than, say, a
-    /// `serialize_with` someone forgot to carry over.
-    #[cfg(feature = "json")]
-    #[test]
-    fn non_finite_numbers_become_null() {
-        let stats = Stats {
-            ns_per_iter: 1.5,
-            std_error: f64::NAN,
-            iterations: 10,
-            samples: 1,
-            hit_limit: true,
-            untrustworthy: true,
-        };
-        let s = serde_json::to_string(&stats).unwrap();
-        assert!(s.contains("\"ns_per_iter\":1.5"), "{s}");
-        assert!(s.contains("\"std_error\":null"), "{s}");
-    }
-
-    /// Benchmark names are Rust paths and would round-trip without any
-    /// escaping - but a `name = "..."` override or a `types(...)`
-    /// disambiguator carries whatever the source spelled, quotes and all.
-    /// Not re-testing `serde_json`'s own escaping in detail - only that
-    /// this crate's names actually flow through it rather than around it.
-    #[cfg(feature = "json")]
-    #[test]
-    fn names_with_the_usual_troublemakers_round_trip() {
-        let entry = json::Entry {
-            name: "a\"b\\c\nd\u{1}e".to_string(),
-            kind: json::Kind::Flat {
-                stats: Stats {
-                    ns_per_iter: 1.0,
-                    std_error: 0.1,
-                    iterations: 1,
-                    samples: 1,
-                    hit_limit: false,
-                    untrustworthy: false,
-                },
-            },
-        };
-        let s = serde_json::to_string(&entry).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["name"], "a\"b\\c\nd\u{1}e");
     }
 
     #[test]
