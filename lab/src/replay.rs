@@ -295,13 +295,26 @@ fn min_samples() -> usize {
     })
 }
 
-/// Chosen by sweeping 5, 20, 50, 100 and 200 on the quiet deep recording.
-/// At 5 the two-rung estimator stopped after about eight pairs, blew up in
-/// 2-8% of trials and claimed half the error it had. Blowups are gone by
-/// 20; `bar/sd` keeps improving to 100 (f64_sin 0.64 -> 1.05) and not
-/// beyond. It costs a fast workload a few milliseconds rather than a few
-/// hundred microseconds.
-const DEFAULT_MIN_SAMPLES: usize = 100;
+/// Chosen by sweeping 5, 10, 20, 30, 50 and 100 with trimming on, on the
+/// quiet deep recording; 20 passes ten of twelve cells and every other
+/// value passes fewer.
+///
+/// Two effects cross here. Below about 20 pairs one bad pair still carries
+/// the estimate, even trimmed, and btree_miss and f64_sin blow up. Above it
+/// the workloads with slow wander get *worse*, not better: their bar
+/// shrinks as 1/sqrt(n) while their real error has a floor, so a longer
+/// trial claims precision it does not have. str_find passes at 5, 10 and 20
+/// and fails from 30 on, its bar/sd falling 0.71 -> 0.54 -> 0.47 -> 0.32.
+///
+/// This was 100, read off the best bar/sd for the fast workloads without
+/// checking what it did to the slow ones, and swept only with trimming off
+/// - so the floor was being credited with outlier protection that trimming
+/// already provides. It cost copy_64mb two seconds for a worse bar.
+///
+/// A count rather than a duration, unlike the runner's budget: the floor
+/// exists so the error bar has enough blocks to mean something, and that
+/// depends on how many samples there are, not how long they took.
+const DEFAULT_MIN_SAMPLES: usize = 20;
 
 /// Fewest whole sweeps of the ladder before a fitted slope has an error bar.
 ///
