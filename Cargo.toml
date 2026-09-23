@@ -9,10 +9,7 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
-# Set by the dependencies below rather than by anything this crate does: the
-# library itself compiles on 1.66, where `std::hint::black_box` was
-# stabilised. `syn`, `quote`, `proc-macro2` and `unicode-ident` all declare
-# 1.71; `inventory` declares 1.68.
+# Set by the dependencies below rather than by anything this crate does.
 rust-version = "1.71"
 
 # Only used to set CPU affinity, which only exists on Linux.
