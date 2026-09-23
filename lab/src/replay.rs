@@ -198,11 +198,110 @@ pub struct Outcome {
     /// slow, and it gets reported as `> budget` rather than as a failure.
     pub capped: bool,
     pub wrapped: bool,
+    /// Samples taken, calibration probes included.
+    pub draws: usize,
 
 }
 
 /// Fewest samples before a standard error means anything.
 const MIN_SAMPLES: usize = 5;
+
+/// Fraction trimmed from *each* end of a rung's per-sample values, for the
+/// single-rung and two-rung estimators. Overridable with `LAB_PAIR_TRIM` so
+/// the level is chosen by measurement.
+fn pair_trim() -> f64 {
+    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("LAB_PAIR_TRIM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TRIM)
+    })
+}
+
+/// Chosen by sweeping 0, 10%, 25% and 40% on the quiet deep recording. Any
+/// trim removes the +0.3-0.7% bias an untrimmed estimate carries from tick
+/// excursions - the truth is a trimmed mean, so an untrimmed estimator was
+/// measuring a slightly different quantity - and with the winsorised error
+/// bar 10% and 25% agree closely. 25% matches the truth's own trim.
+const DEFAULT_TRIM: f64 = 0.25;
+
+/// Mean of the middle `1 - 2*trim` of `v`. Symmetric, so ordinary noise
+/// leaves it centred while one-sided excursions are discarded.
+fn trimmed_mean(v: &[f64], trim: f64) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    if trim <= 0.0 {
+        return v.iter().sum::<f64>() / v.len() as f64;
+    }
+    let mut w = v.to_vec();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let cut = ((w.len() as f64) * trim).floor() as usize;
+    let cut = cut.min((w.len() - 1) / 2);
+    let m = &w[cut..w.len() - cut];
+    m.iter().sum::<f64>() / m.len() as f64
+}
+
+/// Standard error of a trimmed mean, allowing for correlation.
+///
+/// Winsorise the whole series at the trim fraction - values beyond each
+/// cutoff are replaced by the cutoff rather than dropped - take batch means
+/// of that, and divide by `1 - 2*trim`. That is the textbook variance of a
+/// trimmed mean (Tukey and McLaughlin), with batch means standing in for
+/// the plain variance so that correlated samples are still allowed for.
+///
+/// A previous version trimmed *each block* instead, which is not the same
+/// thing and fails quietly when blocks are small. At 10% trim and 50
+/// samples a block held about seven values, 10% of seven rounds down to
+/// nothing, and the blocks went untrimmed while the estimate was trimmed -
+/// so the bar described a plain mean while the number was a trimmed one,
+/// and came out nearly three times too wide. Winsorising the series once
+/// makes the cutoffs independent of how the series is then cut into blocks.
+fn batch_se_trimmed(v: &[f64], trim: f64) -> f64 {
+    if trim <= 0.0 {
+        return batch_se(v);
+    }
+    if v.len() < MIN_SAMPLES {
+        return f64::INFINITY;
+    }
+    let mut sorted = v.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let cut = ((sorted.len() as f64) * trim).floor() as usize;
+    let cut = cut.min((sorted.len() - 1) / 2);
+    let lo = sorted[cut];
+    let hi = sorted[sorted.len() - 1 - cut];
+    let wins: Vec<f64> = v.iter().map(|&x| x.clamp(lo, hi)).collect();
+    batch_se(&wins) / (1.0 - 2.0 * trim)
+}
+
+/// Fewest samples before any algorithm may stop, overridable with
+/// `LAB_MIN_SAMPLES` so the effect can be measured rather than argued.
+///
+/// The error bar is estimated from blocks of the samples taken so far, and
+/// from a handful of samples it is estimated from a handful of blocks - four
+/// blocks of two, at the point the two-rung estimator was stopping. A bar
+/// that uncertain is as likely to dip low by chance as to be right, and the
+/// stopping rule fires precisely when it dips, so it selects the moments the
+/// bar is most wrong. The same few samples also let one bad pair carry the
+/// whole estimate, which is where the blowups come from.
+fn min_samples() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("LAB_MIN_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MIN_SAMPLES)
+    })
+}
+
+/// Chosen by sweeping 5, 20, 50, 100 and 200 on the quiet deep recording.
+/// At 5 the two-rung estimator stopped after about eight pairs, blew up in
+/// 2-8% of trials and claimed half the error it had. Blowups are gone by
+/// 20; `bar/sd` keeps improving to 100 (f64_sin 0.64 -> 1.05) and not
+/// beyond. It costs a fast workload a few milliseconds rather than a few
+/// hundred microseconds.
+const DEFAULT_MIN_SAMPLES: usize = 100;
 
 /// Fewest whole sweeps of the ladder before a fitted slope has an error bar.
 ///
@@ -556,15 +655,20 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
                 est = fit_trimmed(&pts, trim);
                 se = slope_se(&pts, trim);
             } else {
-                est = vals.iter().sum::<f64>() / vals.len() as f64;
-                se = batch_se(&vals);
+                est = trimmed_mean(&vals, pair_trim());
+                se = batch_se_trimmed(&vals, pair_trim());
             }
             // The floor is on *sweeps*, not samples: batch means needs
             // blocks longer than the correlation time and enough of them to
             // take a spread over, and stopping at the first moment the bar
             // looks small enough is exactly how it fails to get either.
             let sweeps = if fitting && !ladder.is_empty() { pts.len() / ladder.len() } else { 0 };
-            if est > 0.0 && se.is_finite() && se / est <= target && sweeps >= floor {
+            if est > 0.0
+                && se.is_finite()
+                && se / est <= target
+                && sweeps >= floor
+                && count >= min_samples()
+            {
                 break;
             }
         }
@@ -578,7 +682,7 @@ fn run_choice(p: &mut Player, c: Choice, target: f64, budget_s: f64) -> Outcome 
             break;
         }
     }
-    Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped }
+    Outcome { est, se, seconds: p.spent_ns * 1e-9, capped, wrapped: p.wrapped, draws: p.draws }
 }
 
 /// Replay a calibration, then let it choose its own rungs and measure.
@@ -604,12 +708,26 @@ pub fn calibrated(tape: &Tape, pol: &Policy, start: f64) -> Outcome {
 }
 
 /// The best estimate of a workload's true per-iteration cost, from the whole
-/// recording at once.
+/// recording at once: `(t(2N) - t(N)) / N` for the top two rungs.
 ///
-/// Two rungs far apart, pooled over every sample there is, so the fixed cost
-/// per measurement subtracts out and the remaining noise is divided by tens
-/// of thousands. This is not a ground truth in the sense of being correct by
-/// construction - nothing here is - but it uses orders of magnitude more
+/// This was the slope between the *widest* pair - n=1 and the top rung - on
+/// the argument that more lever arm is more precision. It is, but the lever
+/// ran straight through the region where batch time is not linear in n.
+/// Local slopes along cpu_canary's ladder are 5.30 ns/iter from n=1 to 64
+/// and 4.09 from 64 to 128, then flat at 2.36 +- 0.2% for five doublings. The
+/// widest pair averaged that start-up excess in and reported 2.409, 2% high,
+/// so estimators that were reading the flat part correctly were being
+/// scored as biased low.
+///
+/// The top two rungs sit in the linear regime and still span N iterations,
+/// which is as much lever as the top of the ladder offers. Where a workload
+/// never becomes linear - btree_miss's local slope falls 28% across its
+/// ladder as larger batches rewarm more of its working set - this is the
+/// marginal cost at the largest batch measured, which is a definite quantity
+/// even though it is not *the* cost; that workload does not have one.
+///
+/// Per-rung values are trimmed means rather than means; see [`typical`].
+/// Pooled over every sample in both rungs, this uses orders of magnitude more
 /// machine time than any algorithm under test is allowed, which is the only
 /// sense in which one measurement can referee another.
 pub fn truth(tape: &Tape) -> (f64, f64) {
@@ -619,18 +737,33 @@ pub fn truth(tape: &Tape) -> (f64, f64) {
         let m = per.iter().sum::<f64>() / per.len() as f64;
         return (m, batch_se(&per));
     }
-    // The widest pair that both have enough samples to be worth pooling.
-    let lo = 0;
     let hi = tape.rungs.len() - 1;
-    let a = &tape.rungs[lo];
+    let a = &tape.rungs[hi - 1];
     let b = &tape.rungs[hi];
-    let ma = a.batch_ns.iter().sum::<f64>() / a.batch_ns.len() as f64;
-    let mb = b.batch_ns.iter().sum::<f64>() / b.batch_ns.len() as f64;
     let dn = (b.n - a.n) as f64;
-    let est = (mb - ma) / dn;
+    let est = (typical(&b.batch_ns) - typical(&a.batch_ns)) / dn;
+    // The error is taken from the untrimmed series, which overstates it
+    // slightly: the trimmed mean is the steadier of the two. For a reference
+    // that is the safe direction to be wrong in.
     let pa = batch_se(&a.batch_ns);
     let pb = batch_se(&b.batch_ns);
     (est, (pa * pa + pb * pb).sqrt() / dn)
+}
+
+/// A rung's typical batch time: the mean of its middle half.
+///
+/// Symmetric, so ordinary noise leaves it centred, and trimming both ends
+/// removes the one-sided excursions a scheduler tick adds. A tick lands in
+/// roughly 2% of batches near the 20us ceiling and adds ~5us to each, which
+/// pulls a plain mean up by a meaningful fraction of the tightest accuracy
+/// goal - and pulls the top rung up more than the one below it, so the
+/// excess does not cancel in the subtraction.
+fn typical(v: &[f64]) -> f64 {
+    let mut w = v.to_vec();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let cut = w.len() / 4;
+    let m = &w[cut..w.len() - cut];
+    m.iter().sum::<f64>() / m.len() as f64
 }
 
 /// Accuracy targets to report against, as relative standard error.
@@ -681,6 +814,17 @@ struct Score {
     blow: f64,
     thin: bool,
     pass: bool,
+    /// Median estimate against the truth, as a percentage. The half of a
+    /// `cover` failure no error bar can fix: estimates that cluster tightly
+    /// in the wrong place.
+    bias: f64,
+    /// Standard deviation of the estimates across trials, as a percentage -
+    /// what the claimed bar ought to be.
+    spread: f64,
+    /// Median bar the algorithm claimed, as a percentage.
+    bar: f64,
+    /// Median number of samples a trial took before stopping.
+    draws: f64,
 }
 
 fn score(label: String, outs: &[Outcome], truth_ns: f64, target: f64) -> Score {
@@ -690,7 +834,8 @@ fn score(label: String, outs: &[Outcome], truth_ns: f64, target: f64) -> Score {
         || good.iter().filter(|o| o.wrapped).count() as f64 / n > WRAP_MAX;
     if good.is_empty() {
         return Score { label, time: f64::INFINITY, capped: false, within: 0.0, cover: 0.0,
-                       blow: 1.0, thin: true, pass: false };
+                       blow: 1.0, thin: true, pass: false, bias: f64::NAN,
+                       spread: f64::NAN, bar: f64::NAN, draws: f64::NAN };
     }
     let rel = |o: &Outcome| (o.est - truth_ns).abs() / truth_ns;
     let within = good.iter().filter(|o| rel(o) <= target).count() as f64 / n;
@@ -701,18 +846,50 @@ fn score(label: String, outs: &[Outcome], truth_ns: f64, target: f64) -> Score {
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let time = times[times.len() / 2];
     let pass = !thin && within >= PASS_WITHIN && cover >= COVERAGE_FLOOR && blow <= BLOWUP_MAX;
-    Score { label, time, capped, within, cover, blow, thin, pass }
+    let med = |mut v: Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let ests: Vec<f64> = good.iter().map(|o| o.est).collect();
+    let k = ests.len() as f64;
+    let mean = ests.iter().sum::<f64>() / k;
+    let spread = if k > 1.0 {
+        100.0 * (ests.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (k - 1.0)).sqrt() / truth_ns
+    } else {
+        f64::NAN
+    };
+    let bias = 100.0 * (med(ests) - truth_ns) / truth_ns;
+    let bar = 100.0 * med(good.iter().map(|o| o.se).collect()) / truth_ns;
+    let draws = med(good.iter().map(|o| o.draws as f64).collect());
+    Score { label, time, capped, within, cover, blow, thin, pass, bias, spread, bar, draws }
 }
 
 fn line(s: &Score) -> String {
-    format!(
+    let base = format!(
         "{:>22} {:>9} {:>8} {:>8} {:>8}",
         s.label,
         fmt_time(s.time, s.capped),
         pct(s.within),
         pct(s.cover),
         pct(s.blow)
-    )
+    );
+    // Why a cell failed, rather than just that it did. `cover` alone cannot
+    // tell a bar that is too small from an estimate that is in the wrong
+    // place, and those need opposite fixes: one is the variance estimate,
+    // the other is the estimator. Only on request, because a table that
+    // always carries its own diagnosis is a table nobody reads to the end.
+    if std::env::var("LAB_VERBOSE").is_ok() {
+        format!(
+            "{base}   bias {:+6.2}%  spread {:5.2}%  bar {:5.2}%  bar/sd {:4.2}  draws {:>6.0}",
+            s.bias,
+            s.spread,
+            s.bar,
+            s.bar / s.spread,
+            s.draws
+        )
+    } else {
+        base
+    }
 }
 
 /// The calibrated algorithms: these pay for calibration and have to find
@@ -720,8 +897,16 @@ fn line(s: &Score) -> String {
 fn cal_policies(target: f64) -> Vec<Policy> {
     vec![
         Policy { name: "cal one-rung", rungs: &[1.0], target, budget_s: 10.0 },
-        Policy { name: "cal auto", rungs: &[], target, budget_s: 10.0 },
-        Policy { name: "cal two-rung", rungs: &[0.125, 1.0], target, budget_s: 10.0 },
+        // `(t(2N) - t(N)) / N`: both rungs in the linear regime. This was
+        // an eighth of the top against the top, which put its low end three
+        // doublings down, inside the start-up excess the subtraction is
+        // there to remove.
+        //
+        // There was also a `cal auto` here, which stood on whatever rung
+        // calibration landed on. With the ceiling at the top of the ladder
+        // that was always the top rung, so it reported the same row as
+        // `cal one-rung` in every cell of every run.
+        Policy { name: "cal two-rung", rungs: &[0.5, 1.0], target, budget_s: 10.0 },
     ]
 }
 
@@ -783,6 +968,42 @@ pub fn report(paths: &[String]) {
         // Per rung, so a change in which rungs were drawn cannot masquerade
         // as a change in speed, and the median across rungs, so one noisy
         // rung cannot carry it.
+        // The shape of the ladder, only on request: per rung, the typical
+        // batch time and the *local* slope from the rung below it.
+        //
+        // If batch time were exactly `a + b*n` every local slope would be
+        // the same number. When they are not, "the per-iteration cost"
+        // depends on which part of the ladder is doing the measuring, and
+        // the truth used for scoring - the slope from n=1 to the top rung -
+        // is one choice among several rather than the answer. An estimator
+        // that reads a local slope near the top would then disagree with it
+        // without being wrong, and would show up here as bias.
+        if std::env::var("LAB_VERBOSE").is_ok() {
+            let typical = |r: &Rung| -> f64 {
+                let mut v = r.batch_ns.clone();
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let cut = v.len() / 4;
+                let w = &v[cut..v.len() - cut];
+                w.iter().sum::<f64>() / w.len() as f64
+            };
+            println!("  {:>8} {:>13} {:>13} {:>10}", "n", "batch ns", "local slope", "vs truth");
+            let mut prev: Option<(f64, f64)> = None;
+            for r in &tape.rungs {
+                let t = typical(r);
+                let n = r.n as f64;
+                match prev {
+                    Some((pn, pt)) => {
+                        let sl = (t - pt) / (n - pn);
+                        println!(
+                            "  {:>8} {:>13.1} {:>13.4} {:>+9.2}%",
+                            r.n, t, sl, 100.0 * (sl - truth_ns) / truth_ns
+                        );
+                    }
+                    None => println!("  {:>8} {:>13.1} {:>13} {:>10}", r.n, t, "", ""),
+                }
+                prev = Some((n, t));
+            }
+        }
         let drift = drift_of(tape);
         if drift.is_finite() {
             println!(
