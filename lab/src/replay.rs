@@ -1683,6 +1683,15 @@ const PAIR_TRIALS: usize = 200;
 /// Batch means applied to the ratio itself: cut the rounds into contiguous
 /// blocks, estimate the ratio within each, and take the spread of those.
 ///
+/// The spread is of the *log* of each block's ratio, so what comes back is
+/// the standard error of `ln R`, not of `R`. That is the one scale on which
+/// A/B and B/A are the same measurement: their logs are exact negatives,
+/// with the same spread, whereas the spread of `1/R` is not `1/` anything
+/// simple. On the linear scale the two orientations of one pair stopped at
+/// different points and scored differently. A bar `s` here reads as the
+/// factor `e^s` either way - `R` times or divided by it - which for small
+/// `s` is the familiar `±s` as a fraction.
+///
 /// A ratio of two noisy slopes has no convenient closed-form error, and a
 /// delta-method one would assume away the very correlation between rounds
 /// that matters here. Estimating it block by block keeps the bar empirical.
@@ -1695,7 +1704,7 @@ fn ratio_se(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> f64 {
     if per < PAIR_MIN_BLOCK {
         return f64::INFINITY;
     }
-    let e: Vec<f64> = (0..b).map(|i| est(&rs[i * per..(i + 1) * per])).collect();
+    let e: Vec<f64> = (0..b).map(|i| est(&rs[i * per..(i + 1) * per]).ln()).collect();
     if e.iter().any(|x| !x.is_finite()) {
         return f64::INFINITY;
     }
@@ -1706,13 +1715,20 @@ fn ratio_se(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> f64 {
 
 struct PairOutcome {
     est: f64,
+    /// Standard error of `ln est`.
     se: f64,
     rounds: usize,
     capped: bool,
 }
 
 /// Measure from `start` until the bar reaches `target`, as a real one would.
+///
+/// `target` is a fraction, as a user would give it, and is met when the bar
+/// on `ln R` reaches `ln(1 + target)`: when the ratio is known to within a
+/// factor of `1 + target`, which is the same test whichever way round it is
+/// taken.
 fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, target: f64) -> PairOutcome {
+    let goal = target.ln_1p();
     let mut n = PAIR_FLOOR;
     loop {
         let seg = &rs[start..(start + n).min(rs.len())];
@@ -1721,7 +1737,7 @@ fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, targ
             // Ran off the end of the recording before stopping.
             return PairOutcome { est: e, se: s, rounds: seg.len(), capped: true };
         }
-        if e.is_finite() && s.is_finite() && s / e <= target {
+        if e.is_finite() && s <= goal {
             return PairOutcome { est: e, se: s, rounds: n, capped: false };
         }
         if n >= PAIR_CAP {
@@ -1795,10 +1811,13 @@ pub fn pairs(paths: &[String]) {
                         if good.is_empty() {
                             continue;
                         }
-                        let rel = |o: &PairOutcome| (o.est - truth).abs() / truth;
-                        let within = good.iter().filter(|o| rel(o) <= target).count() as f64 / n;
-                        let cover = good.iter().filter(|o| (o.est - truth).abs() <= o.se).count() as f64 / n;
-                        let blows = good.iter().filter(|o| rel(o) > BLOWUP * target).count();
+                        // Every comparison is by factor, as the bar is: off by
+                        // 2% means a factor of 1.02 either way, so being high
+                        // and being low count alike.
+                        let off = |o: &PairOutcome| (o.est / truth).ln().abs();
+                        let within = good.iter().filter(|o| off(o) <= target.ln_1p()).count() as f64 / n;
+                        let cover = good.iter().filter(|o| off(o) <= o.se).count() as f64 / n;
+                        let blows = good.iter().filter(|o| off(o) > (BLOWUP * target).ln_1p()).count();
                         let blow = blows as f64 / n;
                         let capped = outs.iter().filter(|o| o.capped).count() as f64 / n;
                         let mut rounds: Vec<usize> = outs.iter().map(|o| o.rounds).collect();
@@ -1818,7 +1837,7 @@ pub fn pairs(paths: &[String]) {
                             rounds[rounds.len() / 2]
                         );
                         if verbose {
-                            let mut e: Vec<f64> = good.iter().map(|o| o.est).collect();
+                            let mut e: Vec<f64> = good.iter().map(|o| o.est.ln()).collect();
                             e.sort_by(|x, y| x.partial_cmp(y).unwrap());
                             let mean = e.iter().sum::<f64>() / e.len() as f64;
                             let sd = (e.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / e.len() as f64).sqrt();
@@ -1827,7 +1846,7 @@ pub fn pairs(paths: &[String]) {
                             let bar = bars.get(bars.len() / 2).copied().unwrap_or(f64::NAN);
                             line += &format!(
                                 "   bias {:+.2}%  bar/sd {:.2}  blowups {}/{}",
-                                100.0 * (e[e.len() / 2] - truth) / truth,
+                                100.0 * ((e[e.len() / 2] - truth.ln()).exp() - 1.0),
                                 bar / sd,
                                 blows,
                                 outs.len()
@@ -1839,5 +1858,66 @@ pub fn pairs(paths: &[String]) {
                 println!();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rounds for two workloads under one wandering clock, with rungs drawn
+    /// as the recorder draws them.
+    fn clocked_rounds(len: usize) -> Vec<PairRound> {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut unit = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut clock = 1.0f64;
+        (0..len)
+            .map(|_| {
+                clock = (clock + 0.02 * (unit() - 0.5)).clamp(0.6, 1.6);
+                let na = if unit() < 0.5 { 512 } else { 1024 };
+                let nb = if unit() < 0.5 { 128 } else { 256 };
+                let noise = |u: f64| 1.0 + 0.01 * (u - 0.5);
+                PairRound {
+                    na,
+                    ta: clock * (40.0 + 3.0 * na as f64) * noise(unit()),
+                    nb,
+                    tb: clock * (40.0 + 7.0 * nb as f64) * noise(unit()),
+                }
+            })
+            .collect()
+    }
+
+    /// A/B and B/A are one measurement: reciprocal estimates, the same bar,
+    /// and so the same point to stop at.
+    #[test]
+    fn pair_bar_is_the_same_either_way_round() {
+        let ab = clocked_rounds(600);
+        let ba: Vec<PairRound> = ab
+            .iter()
+            .map(|r| PairRound { na: r.nb, ta: r.tb, nb: r.na, tb: r.ta })
+            .collect();
+        for est in [ratio_paired as fn(&[PairRound]) -> f64, ratio_independent] {
+            let (r, q) = (est(&ab), est(&ba));
+            assert!((r * q - 1.0).abs() < 1e-9, "{r} * {q} is not 1");
+            let (s, t) = (ratio_se(&ab, est), ratio_se(&ba, est));
+            assert!(s.is_finite() && s > 0.0);
+            assert!((s - t).abs() < 1e-9 * s, "bar {s} one way, {t} the other");
+            for goal in TARGETS {
+                assert_eq!(pair_trial(&ab, 0, est, goal).rounds, pair_trial(&ba, 0, est, goal).rounds);
+            }
+        }
+    }
+
+    /// The overhead is subtracted and the clock cancelled: the paired
+    /// estimate lands on the true 3/7, not on the ratio of batch times.
+    #[test]
+    fn paired_ratio_is_the_ratio_of_slopes() {
+        let r = ratio_paired(&clocked_rounds(4000));
+        assert!((r / (3.0 / 7.0) - 1.0).abs() < 0.002, "{r} is not 3/7");
     }
 }
