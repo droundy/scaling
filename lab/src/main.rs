@@ -47,6 +47,9 @@ fn main() {
             let dir = args.get(2).cloned().unwrap_or_else(|| "selftest".to_string());
             replay::selftest(&dir);
         }
+        Some("pairs") => {
+            replay::pairs(&args[2..]);
+        }
         Some("compositions") => {
             replay::compositions(&args[2..]);
         }
@@ -80,6 +83,7 @@ fn main() {
                  lab collect <duration> <dir> [workloads]   measure; e.g. `lab collect 30m out`\n  \
                  lab analyze <recording.bin>...            replay algorithms against a recording\n  \
                  lab compositions <recording.bin>...      does a cost move with its company?\n  \
+                 lab pairs <recording.bin>...             ratio of each pair of workloads\n  \
                  lab selftest [dir]                        write fake data whose answer is in its name\n\n\
                  The runner decides nothing: it picks no rung, tests no convergence, and lets\n\
                  no workload leave the round early. Every other choice - calibration, rung\n\

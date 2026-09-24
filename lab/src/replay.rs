@@ -1494,3 +1494,350 @@ fn median_of(v: &[f64]) -> f64 {
         w[w.len() / 2]
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ratios between two workloads.
+//
+// The most important measurement is often not a time but a ratio: how much
+// faster is this implementation than that one. On a quiet machine the ratio
+// of two separately-estimated times is fine. On a machine whose clock moves,
+// it is not - and the reason is specific to the two-rung subtraction.
+// `t(2N) - t(N)` pairs samples from *different rounds*, so it subtracts two
+// different clocks; on a noisy machine about one pair in ten of a clock-bound
+// workload came out negative.
+//
+// What rescues it is that everything in one round runs under the same clock.
+// So `log t_A - log t_B` taken within a round is clock-free, whatever rungs
+// the two happened to be on, and a two-way model over those within-round
+// log ratios recovers both workloads' rung structure up to one shared
+// constant - which cancels in the ratio of their slopes. The subtraction
+// then happens inside the model, where no pair of samples ever straddles two
+// clocks.
+//
+// It cancels the clock only for two workloads that respond to it alike. Two
+// clock-bound workloads, or two memory-bound ones, share what a round did to
+// them; a clock-bound workload against a memory-bound one does not, and on a
+// noisy machine their ratio genuinely moves - by 9-13% in the recordings
+// here - so there is no fixed answer for any estimator to find.
+// ---------------------------------------------------------------------------
+
+/// One round as a pair sees it: each workload's batch size and batch time.
+#[derive(Clone, Copy)]
+struct PairRound {
+    na: usize,
+    ta: f64,
+    nb: usize,
+    tb: f64,
+}
+
+/// Rounds in which A and B each sat on one of their top two rungs, in the
+/// order taken.
+///
+/// With `LAB_RUNGS=top2` recordings that is every round. With a full ladder
+/// it is a small fraction - both workloads drawn onto their top rungs at
+/// once - and the rounds kept are then spread out in time, which weakens the
+/// correlation between successive ones and flatters any estimator that is
+/// hurt by it. Prefer `top2` recordings for pairs.
+fn pair_rounds(run: &Run, a: &str, b: &str) -> Vec<PairRound> {
+    // Per rung index: its base workload and batch size, resolved once.
+    let table: Vec<(&str, usize)> = (0..run.order.len())
+        .map(|i| run.describe(i as u16))
+        .collect();
+    let top = |base: &str| -> Option<(usize, usize)> {
+        let mut ns: Vec<usize> = table
+            .iter()
+            .filter(|(b, _)| *b == base)
+            .map(|&(_, n)| n)
+            .collect();
+        ns.sort_unstable();
+        ns.dedup();
+        (ns.len() >= 2).then(|| (ns[ns.len() - 2], ns[ns.len() - 1]))
+    };
+    let (Some((a1, a2)), Some((b1, b2))) = (top(a), top(b)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for r in run.rounds() {
+        let (mut pa, mut pb) = (None, None);
+        for &(i, ns) in r {
+            let (base, n) = table[i as usize];
+            if base == a {
+                pa = Some((n, ns));
+            } else if base == b {
+                pb = Some((n, ns));
+            }
+        }
+        if let (Some((na, ta)), Some((nb, tb))) = (pa, pb) {
+            if (na == a1 || na == a2) && (nb == b1 || nb == b2) && ta > 0.0 && tb > 0.0 {
+                out.push(PairRound { na, ta, nb, tb });
+            }
+        }
+    }
+    out
+}
+
+/// A's per-iteration cost over B's, each from its own two-rung subtraction.
+///
+/// The obvious estimator, and the right one on a quiet machine, where there
+/// is no shared variation to cancel and pairing only adds the other
+/// workload's noise. On a noisy one it is unbiased over a long run but its
+/// error bar is not: consecutive rounds share a clock state, so within one
+/// short measurement the clock looks steady and the bar comes out too small.
+fn ratio_independent(rs: &[PairRound]) -> f64 {
+    use std::collections::BTreeMap;
+    let mut a: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    let mut b: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    for r in rs {
+        a.entry(r.na).or_default().push(r.ta);
+        b.entry(r.nb).or_default().push(r.tb);
+    }
+    let slope = |m: &BTreeMap<usize, Vec<f64>>| -> f64 {
+        let mut it = m.iter();
+        let (Some((&n1, v1)), Some((&n2, v2))) = (it.next(), it.next()) else {
+            return f64::NAN;
+        };
+        (trimmed_mean(v2, DEFAULT_TRIM) - trimmed_mean(v1, DEFAULT_TRIM)) / (n2 - n1) as f64
+    };
+    let (sa, sb) = (slope(&a), slope(&b));
+    if sa > 0.0 && sb > 0.0 {
+        sa / sb
+    } else {
+        f64::NAN
+    }
+}
+
+/// A's per-iteration cost over B's, from within-round log ratios.
+///
+/// Each round contributes `log t_A - log t_B`, in which the round's clock
+/// cancels exactly. Those are grouped into cells by the rungs the two were
+/// on and fitted as `alpha(n_A) - beta(n_B)` - a two-way additive model, the
+/// round's own clock having already been eliminated by the difference. It is
+/// linear least squares on cell means, solved by backfitting, so nothing is
+/// extrapolated. `exp(alpha)` and `exp(beta)` are then each workload's batch
+/// times up to one shared constant, which cancels in the ratio of slopes.
+fn ratio_paired(rs: &[PairRound]) -> f64 {
+    use std::collections::BTreeMap;
+    let mut cells: BTreeMap<(usize, usize), Vec<f64>> = BTreeMap::new();
+    for r in rs {
+        cells.entry((r.na, r.nb)).or_default().push(r.ta.ln() - r.tb.ln());
+    }
+    let ns: Vec<usize> = cells.keys().map(|k| k.0).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let ms: Vec<usize> = cells.keys().map(|k| k.1).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    if ns.len() < 2 || ms.len() < 2 || cells.len() < 3 {
+        return f64::NAN;
+    }
+    let d: BTreeMap<(usize, usize), (f64, f64)> = cells
+        .iter()
+        .map(|(k, v)| (*k, (trimmed_mean(v, DEFAULT_TRIM), v.len() as f64)))
+        .collect();
+    let mut al: BTreeMap<usize, f64> = ns.iter().map(|&x| (x, 0.0)).collect();
+    let mut be: BTreeMap<usize, f64> = ms.iter().map(|&y| (y, 0.0)).collect();
+    for _ in 0..60 {
+        for &x in &ns {
+            let (mut s, mut w) = (0.0, 0.0);
+            for &y in &ms {
+                if let Some(&(m, c)) = d.get(&(x, y)) {
+                    s += c * (m + be[&y]);
+                    w += c;
+                }
+            }
+            if w > 0.0 {
+                al.insert(x, s / w);
+            }
+        }
+        for &y in &ms {
+            let (mut s, mut w) = (0.0, 0.0);
+            for &x in &ns {
+                if let Some(&(m, c)) = d.get(&(x, y)) {
+                    s += c * (al[&x] - m);
+                    w += c;
+                }
+            }
+            if w > 0.0 {
+                be.insert(y, s / w);
+            }
+        }
+    }
+    let (n1, n2) = (ns[ns.len() - 2], ns[ns.len() - 1]);
+    let (m1, m2) = (ms[ms.len() - 2], ms[ms.len() - 1]);
+    let ba = (al[&n2].exp() - al[&n1].exp()) / (n2 - n1) as f64;
+    let bb = (be[&m2].exp() - be[&m1].exp()) / (m2 - m1) as f64;
+    if ba > 0.0 && bb > 0.0 {
+        ba / bb
+    } else {
+        f64::NAN
+    }
+}
+
+/// Fewest rounds in a block of the ratio's error bar.
+///
+/// Each block's ratio needs every cell it depends on, and with rungs drawn
+/// independently a small block can miss one - so blocks are held to a size
+/// where that is rare, and a block that still misses one makes the bar
+/// infinite rather than quietly smaller.
+const PAIR_MIN_BLOCK: usize = 15;
+const PAIR_FLOOR: usize = 60;
+const PAIR_CAP: usize = 4000;
+const PAIR_TRIALS: usize = 200;
+
+/// Batch means applied to the ratio itself: cut the rounds into contiguous
+/// blocks, estimate the ratio within each, and take the spread of those.
+///
+/// A ratio of two noisy slopes has no convenient closed-form error, and a
+/// delta-method one would assume away the very correlation between rounds
+/// that matters here. Estimating it block by block keeps the bar empirical.
+/// On the recordings here it comes out honest: bar over actual spread
+/// 0.65-1.11 for the paired estimator on a noisy machine, where every
+/// single-workload estimator sat at 0.3-0.8.
+fn ratio_se(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> f64 {
+    let b = (rs.len() / PAIR_MIN_BLOCK).clamp(4, 20);
+    let per = rs.len() / b;
+    if per < PAIR_MIN_BLOCK {
+        return f64::INFINITY;
+    }
+    let e: Vec<f64> = (0..b).map(|i| est(&rs[i * per..(i + 1) * per])).collect();
+    if e.iter().any(|x| !x.is_finite()) {
+        return f64::INFINITY;
+    }
+    let m = e.iter().sum::<f64>() / b as f64;
+    let var = e.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b as f64 - 1.0);
+    (var / b as f64).sqrt()
+}
+
+struct PairOutcome {
+    est: f64,
+    se: f64,
+    rounds: usize,
+    capped: bool,
+}
+
+/// Measure from `start` until the bar reaches `target`, as a real one would.
+fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, target: f64) -> PairOutcome {
+    let mut n = PAIR_FLOOR;
+    loop {
+        let seg = &rs[start..(start + n).min(rs.len())];
+        let (e, s) = (est(seg), ratio_se(seg, est));
+        if seg.len() < n {
+            // Ran off the end of the recording before stopping.
+            return PairOutcome { est: e, se: s, rounds: seg.len(), capped: true };
+        }
+        if e.is_finite() && s.is_finite() && s / e <= target {
+            return PairOutcome { est: e, se: s, rounds: n, capped: false };
+        }
+        if n >= PAIR_CAP {
+            return PairOutcome { est: e, se: s, rounds: n, capped: true };
+        }
+        n = (n as f64 * 1.3) as usize + 1;
+    }
+}
+
+/// Compare the two ratio estimators on every pair of workloads in each
+/// recording.
+///
+/// Trials are laid end to end - each starts where the last one stopped - so
+/// no round is used twice and the trials are independent, up to
+/// `PAIR_TRIALS` per recording. Each is scored against the recording's own
+/// long-run paired ratio. For two workloads that respond to the machine
+/// alike that long-run ratio is the clock-free one, so it is a fair
+/// reference even on a noisy machine; for two that do not, there is no
+/// fixed ratio and the mixed pairs fail here as they should.
+pub fn pairs(paths: &[String]) {
+    type Est = (&'static str, fn(&[PairRound]) -> f64);
+    let estimators: [Est; 2] = [("independent", ratio_independent), ("paired", ratio_paired)];
+    println!(
+        "Ratio of per-iteration cost, A over B, measured within shared rounds.\n\
+         within = inside the goal (want >={})   cover = inside its own bar (want ~{})\n\
+         blow = off by more than {BLOWUP}x the goal (want <={})\n",
+        pct(PASS_WITHIN),
+        pct(EXPECT_COVERAGE),
+        pct(BLOWUP_MAX)
+    );
+    let verbose = std::env::var("LAB_VERBOSE").is_ok();
+    for path in paths {
+        let Some(run) = Run::load(path) else {
+            continue;
+        };
+        if paths.len() > 1 {
+            println!("--- {path} ---");
+        }
+        let bases: Vec<String> = run
+            .order
+            .iter()
+            .map(|n| n.split('@').next().unwrap_or(n).to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for (i, a) in bases.iter().enumerate() {
+            for b in &bases[i + 1..] {
+                let rs = pair_rounds(&run, a, b);
+                if rs.len() < 2 * PAIR_FLOOR {
+                    println!("===== {a} / {b} =====  only {} usable rounds; skipped\n", rs.len());
+                    continue;
+                }
+                let truth = ratio_paired(&rs);
+                println!("===== {a} / {b} =====  truth {truth:.6e}  ({} usable rounds)", rs.len());
+                println!(
+                    "  {:>11} {:>5} {:>8} {:>7} {:>7} {:>7} {:>8}",
+                    "estimator", "goal", "within", "cover", "blow", "capped", "rounds"
+                );
+                for &(label, est) in &estimators {
+                    for &target in &TARGETS {
+                        let mut outs: Vec<PairOutcome> = Vec::new();
+                        let mut s = 0;
+                        while s + PAIR_FLOOR <= rs.len() && outs.len() < PAIR_TRIALS {
+                            let o = pair_trial(&rs, s, est, target);
+                            s += o.rounds.max(1);
+                            outs.push(o);
+                        }
+                        let n = outs.len() as f64;
+                        let good: Vec<&PairOutcome> =
+                            outs.iter().filter(|o| o.est.is_finite() && o.est > 0.0).collect();
+                        if good.is_empty() {
+                            continue;
+                        }
+                        let rel = |o: &PairOutcome| (o.est - truth).abs() / truth;
+                        let within = good.iter().filter(|o| rel(o) <= target).count() as f64 / n;
+                        let cover = good.iter().filter(|o| (o.est - truth).abs() <= o.se).count() as f64 / n;
+                        let blows = good.iter().filter(|o| rel(o) > BLOWUP * target).count();
+                        let blow = blows as f64 / n;
+                        let capped = outs.iter().filter(|o| o.capped).count() as f64 / n;
+                        let mut rounds: Vec<usize> = outs.iter().map(|o| o.rounds).collect();
+                        rounds.sort_unstable();
+                        let pass = within >= PASS_WITHIN
+                            && cover >= COVERAGE_FLOOR
+                            && blow <= BLOWUP_MAX
+                            && capped < 0.5;
+                        let mut line = format!(
+                            "  {:>11} {:>4.1}% {:>8} {:>7} {:>7} {:>7} {:>8}",
+                            label,
+                            100.0 * target,
+                            pct(within),
+                            pct(cover),
+                            pct(blow),
+                            pct(capped),
+                            rounds[rounds.len() / 2]
+                        );
+                        if verbose {
+                            let mut e: Vec<f64> = good.iter().map(|o| o.est).collect();
+                            e.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                            let mean = e.iter().sum::<f64>() / e.len() as f64;
+                            let sd = (e.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / e.len() as f64).sqrt();
+                            let mut bars: Vec<f64> = good.iter().filter(|o| o.se.is_finite()).map(|o| o.se).collect();
+                            bars.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                            let bar = bars.get(bars.len() / 2).copied().unwrap_or(f64::NAN);
+                            line += &format!(
+                                "   bias {:+.2}%  bar/sd {:.2}  blowups {}/{}",
+                                100.0 * (e[e.len() / 2] - truth) / truth,
+                                bar / sd,
+                                blows,
+                                outs.len()
+                            );
+                        }
+                        println!("{line}  {}", if pass { "pass" } else { "FAIL" });
+                    }
+                }
+                println!();
+            }
+        }
+    }
+}

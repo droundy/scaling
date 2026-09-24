@@ -156,6 +156,19 @@ pub struct Run {
     /// read by nothing.
     by_name: HashMap<String, Vec<f64>>,
     pub rungs: HashMap<String, RungMeta>,
+    /// Every sample in the order taken, as (index into `order`, whole-batch
+    /// ns), grouped into rounds by [`Run::rounds`].
+    ///
+    /// Round membership is what makes a *ratio* between two workloads
+    /// measurable on a machine whose speed moves: everything in one round
+    /// ran under the same clock, so a ratio of two samples from the same
+    /// round is clock-free. The format has always carried it - sample `i` is
+    /// in round `i / W` - and the loader used to throw it away.
+    seq: Vec<(u16, f64)>,
+    /// Rung names in header order; `seq` indexes into this.
+    pub order: Vec<String>,
+    /// Workloads per round, which is the round length in samples.
+    pub width: usize,
 }
 
 impl Run {
@@ -211,6 +224,7 @@ impl Run {
 
         let body = &bytes[split + 5..];
         let mut by_name: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut seq: Vec<(u16, f64)> = Vec::with_capacity(body.len() / 2);
         let mut i = 0usize;
         while i + 1 < body.len() {
             let widx = body[i] as usize;
@@ -227,6 +241,7 @@ impl Run {
                 break;
             };
             let m = &rungs[workload];
+            seq.push((widx as u16, ns as f64));
             // Per iteration from here on. Calibration happens once, at
             // whatever clock speed prevailed then, so batch sizes differ
             // between runs; comparing batch durations across runs inherits
@@ -239,11 +254,55 @@ impl Run {
 
         let mut names: Vec<String> = by_name.keys().cloned().collect();
         names.sort();
+        let width = order
+            .iter()
+            .map(|n| n.split('@').next().unwrap_or(n))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         Some(Run {
             names,
             by_name,
             rungs,
+            seq,
+            order,
+            width,
         })
+    }
+
+    /// The recording cut into rounds: `width` samples each, one per workload.
+    ///
+    /// That layout is an invariant the *runner* keeps - one sample per
+    /// workload per round, and a round is never cut short, because the
+    /// deadline and the rung cap are both tested between rounds - and the
+    /// format depends on it, since it stores neither round nor slot. So it
+    /// is checked here rather than trusted: a round that does not hold each
+    /// workload exactly once means the layout has shifted, and every round
+    /// after it would be misread. Reading stops at the first such round,
+    /// with a note, rather than carrying on with misaligned data.
+    pub fn rounds(&self) -> Vec<&[(u16, f64)]> {
+        let base = |i: u16| -> &str {
+            let n = &self.order[i as usize];
+            n.split('@').next().unwrap_or(n)
+        };
+        let mut out = Vec::with_capacity(self.seq.len() / self.width.max(1));
+        for (k, r) in self.seq.chunks_exact(self.width.max(1)).enumerate() {
+            let mut seen = std::collections::BTreeSet::new();
+            if !r.iter().all(|&(i, _)| seen.insert(base(i))) {
+                eprintln!(
+                    "round {k} does not hold each of {} workloads once; the layout has shifted, so reading stops there",
+                    self.width
+                );
+                break;
+            }
+            out.push(r);
+        }
+        out
+    }
+
+    /// The base workload and batch size of a sample.
+    pub fn describe(&self, i: u16) -> (&str, usize) {
+        let n = &self.order[i as usize];
+        (n.split('@').next().unwrap_or(n), self.rungs[n].n)
     }
 
     pub fn get(&self, name: &str) -> &[f64] {
