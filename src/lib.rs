@@ -587,7 +587,9 @@ macro_rules! main {
     };
 }
 
+#[cfg(test)]
 use std::sync::atomic::AtomicU64;
+#[cfg(test)]
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::*;
 
@@ -799,6 +801,7 @@ impl Config {
     /// Consecutive comparisons differing matters more here than a
     /// comparison's order being reproducible across runs - a [`Suite`] seeds
     /// its entries from their position instead, and so stays reproducible.
+    #[cfg(test)]
     pub(crate) fn next_comparison_seed() -> u64 {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         NEXT.fetch_add(1, Relaxed)

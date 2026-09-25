@@ -47,33 +47,6 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 
 /// Alternatives to be timed against one another, gathered before any of them
 /// runs.
-///
-/// The first one added is the baseline; every other is reported against it.
-/// Built internally from `group = "..."` or a matrix - not constructed
-/// directly, hence `ignore` below rather than a doctest.
-///
-/// ```ignore
-/// # fn old() -> u64 { 0 }
-/// # fn new() -> u64 { 0 }
-/// # fn newer() -> u64 { 0 }
-/// let cfg = scaling::Config::default();
-/// let results = cfg
-///     .comparison()
-///     .add("old", old)
-///     .add("new", new)
-///     .add("newer", newer)
-///     .run();
-/// println!("{results}");
-/// ```
-///
-/// Two of the alternatives are reported against the baseline, so this is a
-/// family of two comparisons, not three, and it is corrected for two.
-/// Nothing has to be declared: the set knows its own size.
-///
-/// That correction covers the alternatives *within* one set. Running several
-/// sets and reading them together is a larger family than any of them knows
-/// about, and [`ComparisonSet::run`] cannot correct for it - add them to a
-/// [`Suite`] instead, which sees them all before running any.
 pub(crate) struct ComparisonSet<'a, I> {
     cfg: &'a Config,
     make_input: Box<GenInput<'a, I>>,
@@ -86,16 +59,8 @@ struct Entry<'a, I> {
 }
 
 impl Config {
-    /// Start gathering alternatives that take no input. A comparison is
-    /// declared with `group = "..."` or a matrix, not built here.
-    ///
-    /// Assembly only ever needs [`Config::comparison_make_input`] - every
-    /// registered alternative takes an (erased) input. This unit-input
-    /// sibling exists so tests can exercise the k-way comparison algorithm
-    /// directly, independent of registration - hence `allow(dead_code)`
-    /// rather than `#[cfg(test)]`: it is real crate-internal API, not test
-    /// scaffolding, even though nothing outside tests currently calls it.
-    #[allow(dead_code)]
+    /// Create a ComparisonSet for testing.
+    #[cfg(test)]
     pub(crate) fn comparison(&self) -> ComparisonSet<'_, ()> {
         ComparisonSet {
             cfg: self,
@@ -139,7 +104,7 @@ impl<'a> ComparisonSet<'a, ()> {
     ///
     /// Only used by tests exercising [`Config::comparison`] directly - see
     /// its doc comment.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn add<F, O>(self, name: &str, mut f: F) -> Self
     where
         F: FnMut() -> O + 'a,
@@ -216,7 +181,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// driving this standalone loop. Only tests call it directly, to check
     /// the k-way algorithm itself - the statistics, the pairing, the stopping
     /// rule - independent of registration or a suite.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn run(self) -> Comparisons {
         // Before pinning and before the machine lock, both of which have
         // effects that outlive a panic and the second of which blocks: a

@@ -205,12 +205,17 @@ impl Clock {
 /// A [`Suite`] takes one of these for the whole session rather than one per
 /// benchmark. The guard is re-entrant within a thread, so the benchmarks it
 /// interleaves cost nothing extra when they are also run individually.
-pub(crate) struct Machine(#[allow(dead_code)] Option<quiet::Exclusive>);
+pub(crate) struct Machine {
+    /// Holds a lock to on the quiet cores.
+    _exclusive: Option<quiet::Exclusive>,
+}
 
 impl Machine {
     pub(crate) fn claim() -> Self {
         quiet::pin_if_reserved();
-        Machine(quiet::exclusive_if_pinned())
+        Machine {
+            _exclusive: quiet::exclusive_if_pinned(),
+        }
     }
 }
 
@@ -369,7 +374,7 @@ impl<T: Clone> Token<T> {
     /// instead - see its own doc comment for why. Only tests hold a `Token`
     /// directly, to check `Suite`'s own scheduling and interleaving without
     /// going through registration at all.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn get(&self) -> Option<T> {
         self.cell().clone()
     }
@@ -2461,9 +2466,7 @@ mod registered_by_hand {
         let mut suite = cfg
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
-        let tokens = suite
-            .try_add_registered()
-            .unwrap();
+        let tokens = suite.try_add_registered().unwrap();
         let report = suite.run();
 
         let flat = tokens.flat["e2e::flat"]
@@ -2503,9 +2506,7 @@ mod registered_by_hand {
         let mut suite = cfg
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
-        let tokens = suite
-            .try_add_registered()
-            .unwrap();
+        let tokens = suite.try_add_registered().unwrap();
         suite.run();
 
         let cmps = tokens.comparisons["e2e-sort@data"].get().unwrap();
@@ -2528,9 +2529,7 @@ mod registered_by_hand {
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
         let by_hand = suite.add("e2e::by_hand", || work(150));
-        let tokens = suite
-            .try_add_registered()
-            .unwrap();
+        let tokens = suite.try_add_registered().unwrap();
         let after = suite.add("e2e::after", || work(150));
         let report = suite.run();
 
@@ -2558,11 +2557,7 @@ mod registered_by_hand {
             .with_filter(Filter::everything().matching("e2e"));
         // Deliberately thrown away: a script driving a benchmark binary has no
         // way to get hold of these.
-        drop(
-            suite
-                .try_add_registered()
-                .unwrap(),
-        );
+        drop(suite.try_add_registered().unwrap());
         let report = suite.run();
 
         let stats = report
@@ -2589,11 +2584,7 @@ mod registered_by_hand {
         let mut suite = cfg
             .suite()
             .with_filter(Filter::everything().matching("e2e"));
-        drop(
-            suite
-                .try_add_registered()
-                .unwrap(),
-        );
+        drop(suite.try_add_registered().unwrap());
         let report = suite.run();
 
         let (_, cmp) = report
