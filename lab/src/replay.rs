@@ -1699,18 +1699,55 @@ const PAIR_TRIALS: usize = 200;
 /// 0.65-1.11 for the paired estimator on a noisy machine, where every
 /// single-workload estimator sat at 0.3-0.8.
 fn ratio_se(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> f64 {
-    let b = (rs.len() / PAIR_MIN_BLOCK).clamp(4, 20);
-    let per = rs.len() / b;
-    if per < PAIR_MIN_BLOCK {
+    let Some(e) = block_logs(rs, est) else {
         return f64::INFINITY;
-    }
-    let e: Vec<f64> = (0..b).map(|i| est(&rs[i * per..(i + 1) * per]).ln()).collect();
+    };
+    let b = e.len();
     if e.iter().any(|x| !x.is_finite()) {
         return f64::INFINITY;
     }
     let m = e.iter().sum::<f64>() / b as f64;
     let var = e.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b as f64 - 1.0);
-    (var / b as f64).sqrt()
+    let t = if pair_student() { T_ONE_SIGMA.get(b - 2).copied().unwrap_or(1.0) } else { 1.0 };
+    t * (var / b as f64).sqrt()
+}
+
+/// Student's t at the one-sigma point (0.8413), for 1 to 19 degrees of
+/// freedom.
+const T_ONE_SIGMA: [f64; 19] = [
+    1.8373, 1.3213, 1.1969, 1.1416, 1.1105, 1.0906, 1.0767, 1.0665, 1.0587, 1.0526, 1.0476,
+    1.0434, 1.04, 1.037, 1.0345, 1.0322, 1.0303, 1.0286, 1.027,
+];
+
+/// Fewest blocks the ratio's bar is judged from (`LAB_PAIR_BLOCKS`, default
+/// 4); the floor of a trial rises to fill them.
+///
+/// Four blocks is three degrees of freedom, and a bar that uncertain comes
+/// out under half its true size about one time in seven. The stopping rule
+/// checks it over and over, so it stops on exactly those: most of the
+/// clock/clock blowups are that, and iid noise with no machine at all
+/// reproduces them. Eight blocks removes nearly all of it (PROBLEMS.md, "Why
+/// a ratio blows up").
+fn pair_min_blocks() -> usize {
+    static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("LAB_PAIR_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(4))
+}
+
+/// Widen the bar by Student's t for its degrees of freedom (`LAB_PAIR_T`).
+/// Too mild to stop the lucky-small stops at four blocks, so off by default.
+fn pair_student() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("LAB_PAIR_T").is_ok())
+}
+
+/// The blocks of [`ratio_se`]: `ln R` estimated within each, in order.
+fn block_logs(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> Option<Vec<f64>> {
+    let b = (rs.len() / PAIR_MIN_BLOCK).clamp(pair_min_blocks(), 20.max(pair_min_blocks()));
+    let per = rs.len() / b;
+    if per < PAIR_MIN_BLOCK {
+        return None;
+    }
+    Some((0..b).map(|i| est(&rs[i * per..(i + 1) * per]).ln()).collect())
 }
 
 struct PairOutcome {
@@ -1729,7 +1766,7 @@ struct PairOutcome {
 /// taken.
 fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, target: f64) -> PairOutcome {
     let goal = target.ln_1p();
-    let mut n = PAIR_FLOOR;
+    let mut n = PAIR_FLOOR.max(PAIR_MIN_BLOCK * pair_min_blocks());
     loop {
         let seg = &rs[start..(start + n).min(rs.len())];
         let (e, s) = (est(seg), ratio_se(seg, est));
@@ -1769,6 +1806,12 @@ pub fn pairs(paths: &[String]) {
         pct(BLOWUP_MAX)
     );
     let verbose = std::env::var("LAB_VERBOSE").is_ok();
+    let mut trials = std::env::var("LAB_TRIALS").ok().and_then(|p| {
+        std::fs::File::create(&p)
+            .map_err(|e| eprintln!("could not create {p}: {e}"))
+            .ok()
+            .map(std::io::BufWriter::new)
+    });
     for path in paths {
         let Some(run) = Run::load(path) else {
             continue;
@@ -1799,11 +1842,16 @@ pub fn pairs(paths: &[String]) {
                 for &(label, est) in &estimators {
                     for &target in &TARGETS {
                         let mut outs: Vec<PairOutcome> = Vec::new();
+                        let mut starts: Vec<usize> = Vec::new();
                         let mut s = 0;
                         while s + PAIR_FLOOR <= rs.len() && outs.len() < PAIR_TRIALS {
                             let o = pair_trial(&rs, s, est, target);
+                            starts.push(s);
                             s += o.rounds.max(1);
                             outs.push(o);
+                        }
+                        if let Some(w) = trials.as_mut() {
+                            dump_trials(w, path, a, b, label, target, &rs, est, truth, &starts, &outs);
                         }
                         let n = outs.len() as f64;
                         let good: Vec<&PairOutcome> =
@@ -1858,6 +1906,60 @@ pub fn pairs(paths: &[String]) {
                 println!();
             }
         }
+    }
+}
+
+/// One line per trial, for diagnosing the ones that go wrong
+/// (`LAB_TRIALS=file`).
+///
+/// Beside what the trial itself saw, each line carries the same estimator
+/// run over the rounds around it, all as `ln(est / truth)`: the `5n` rounds
+/// before and after (has the ratio itself moved there?), the next `n` (would
+/// an identical trial have gone wrong too?), and the trial carried on to
+/// `4n` (does more data fix it?). Then the trial's own blocks, so a single
+/// bad block can be told from a shift that runs through all of them.
+#[allow(clippy::too_many_arguments)]
+fn dump_trials(
+    w: &mut impl std::io::Write,
+    path: &str,
+    a: &str,
+    b: &str,
+    label: &str,
+    target: f64,
+    rs: &[PairRound],
+    est: fn(&[PairRound]) -> f64,
+    truth: f64,
+    starts: &[usize],
+    outs: &[PairOutcome],
+) {
+    let lt = truth.ln();
+    let off = |lo: usize, hi: usize| -> f64 {
+        let (lo, hi) = (lo.min(rs.len()), hi.min(rs.len()));
+        if hi < lo + PAIR_FLOOR {
+            return f64::NAN;
+        }
+        est(&rs[lo..hi]).ln() - lt
+    };
+    for (&s, o) in starts.iter().zip(outs) {
+        let n = o.rounds;
+        let seg = &rs[s..(s + n).min(rs.len())];
+        let blocks = block_logs(seg, est)
+            .unwrap_or_default()
+            .iter()
+            .map(|x| format!("{:.5}", x - lt))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            w,
+            "{path}\t{a}\t{b}\t{label}\t{target}\t{s}\t{n}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{blocks}",
+            o.capped as u8,
+            o.est.ln() - lt,
+            o.se,
+            off(s.saturating_sub(5 * n), s),
+            off(s + n, s + 6 * n),
+            off(s + n, s + 2 * n),
+            off(s, s + 4 * n),
+        );
     }
 }
 

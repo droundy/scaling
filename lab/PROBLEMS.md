@@ -361,6 +361,82 @@ subtraction at all.
 
 ---
 
+## Why a ratio blows up
+
+`lab pairs` counts a trial as a blowup when it stops believing it has met
+its goal, but it is actually more than 4x the goal from the long-run ratio.
+With an honest one-sigma bar that should almost never happen: a Gaussian
+error of 4 sigma has odds of about 1 in 16,000. On the six `top2` recordings
+the paired estimator did far worse than that. There are three separate
+causes, found by dumping every trial with `LAB_TRIALS=file`. Each has a
+different remedy.
+
+**1. Mixed pairs on a noisy machine: the ratio itself moves (~30%).** A
+clock-bound workload over a memory-bound one has no fixed ratio when the
+clock moves. `btree_miss / f64_sin` over 13 s windows has an rms spread of
+3-16%, depending on the pass. No estimator can fix this, and scoring them
+against a long-run "truth" is only a reminder of it.
+
+**2. Clock/clock pairs: the bar is sometimes lucky-small (0.3-0.4%).** This
+is pure statistics. The machine plays no part in it:
+
+- The early stopping checks judge the bar from 4 blocks, which is 3 degrees
+  of freedom.
+- A bar with 3 degrees of freedom comes out under half its true size about
+  14% of the time.
+- The stopping rule checks again and again, so it stops on exactly those
+  lucky-small bars.
+
+These blowups show the signature of that:
+
+- More than half stopped at the 60-round floor, against a quarter of all
+  trials.
+- All the blocks agree with each other, so the bar is small, but they are
+  all shifted the same way.
+- The next 60 rounds are usually fine.
+
+Simulated iid Gaussian rounds under the same stopping rule give 0.3-1.5%
+blowups, the same rate with no machine at all. Requiring **at least 8
+blocks** (`LAB_PAIR_BLOCKS=8`, so a floor of 120 rounds) fixes it:
+
+| | blowups, 4 blocks | blowups, 8 blocks | rounds spent, at 2% / 1% / 0.5% goal |
+| --- | --- | --- | --- |
+| quiet | 33 / 10,731 | 1 / 10,742 | x1.58 / x1.22 / x1.03 |
+| noisy | 46 / 10,348 | 14 / 10,328 | x1.44 / x1.14 / x1.03 |
+
+It also helps coverage: 65-68% becomes 68-79%. The Student-t correction on
+its own (`LAB_PAIR_T`) halves the blowups on the quiet recordings and does
+nothing on the noisy ones. It inflates the bar by 20% at 3 degrees of
+freedom, which is not enough to stop the lucky-small stops.
+
+**3. Memory-bound workloads: slow episodes longer than a measurement (1-4%,
+even quiet).** On the quiet machine, `btree_miss` has minutes in which it
+runs 1.5-4% slow, sometimes several in a row; `copy_64mb` weakly shares
+them. Over the same minutes, `cpu_canary` is flat to 0.0%. The episodes do
+not follow temperature. They follow the number of runnable processes only
+faintly, and that is sampled once a second, which is too coarse to rule out
+activity on other cores. Their cause is not identified.
+
+A variation slower than a measurement is invisible to that measurement's
+bar, since every block sees the same episode. So these blowups are not
+statistical, and 8 blocks only trims them (1.8% to 1.2%). In 13 s windows
+the rms wander of a `btree_miss` ratio is 1.2-1.7%, and 6-17% of those
+windows are more than 2% from the long-run value. **A 0.5% goal is below
+what `btree_miss` reproduces to at these time scales.** A measurement could
+detect the problem, with a split-half check or block variance that grows
+with block size, and refuse the answer. It cannot measure its way past it.
+
+The same mechanism, weaker, is behind what 8 blocks leaves on noisy
+clock/clock pairs: 10 of 14 are at the 0.5% goal, where trials are long.
+Even matched ratios wander 0.3-1.8% per 13 s on the noisy machine, with
+`str_find / urandom_read` the worst.
+
+**Reading pass/fail.** In aggregate, clock/clock pairs were already under the
+1% blowup limit. Most of their failing cells were 3 blowups where 2 would
+pass, at a mean of about one per 200 trials.
+
+---
+
 ## How they interact
 
 - (1) causes much of (3): composition changes the clock, and the clock
