@@ -460,9 +460,9 @@ today.
 
 The model is right about which way to lean and wrong about how far. It
 assumes Gaussian block means looked at once. Here the rule looks again and
-again, and the tails are heavier than Gaussian. At its cheapest, the
-relative 90% rule costs about the same as 8 blocks and keeps 8 of the 33
-blowups. An absolute confidence level is stricter at every block count, so
+again, and the tails are heavier than Gaussian. The relative 90% rule is
+cheaper than 8 blocks only at the loosest goal (x1.34 against x1.58), and
+it keeps 8 of the 33 blowups. An absolute confidence level is stricter at every block count, so
 it charges for long trials that were already safe.
 
 A plain floor of 8 blocks is the simplest, and nothing tried beats it on
