@@ -397,7 +397,8 @@ These blowups show the signature of that:
 
 Simulated iid Gaussian rounds under the same stopping rule give 0.3-1.5%
 blowups, the same rate with no machine at all. Requiring **at least 8
-blocks** (`LAB_PAIR_BLOCKS=8`, so a floor of 120 rounds) fixes it:
+blocks** fixes it. That means a floor of 120 rounds, and it is now the
+default; `LAB_PAIR_BLOCKS=4` restores the old rule.
 
 | | blowups, 4 blocks | blowups, 8 blocks | rounds spent, at 2% / 1% / 0.5% goal |
 | --- | --- | --- | --- |
@@ -409,6 +410,14 @@ its own (`LAB_PAIR_T`) halves the blowups on the quiet recordings and does
 nothing on the noisy ones. It inflates the bar by 20% at 3 degrees of
 freedom, which is not enough to stop the lucky-small stops.
 
+Scored cell by cell, with the paired estimator:
+
+- **Quiet machine.** Clock/clock cells pass 54 of 54, up from 52.
+- **Noisy machine.** They pass 51 of 54, up from 46. The three still
+  failing are 0.5% goals with 3-4 blowups each, which is cause 3 below.
+- **Mixed and memory pairs.** These go from 18 to 34 of 81 passing on the
+  quiet machine and from 2 to 6 on the noisy one.
+
 **Smaller blocks do not make it cheaper.** Another way to get more blocks
 from fewer rounds is to shrink them (`LAB_PAIR_BLOCK_ROUNDS`). Blocks are 15
 rounds so that each one reliably holds both rungs of both workloads. On
@@ -416,7 +425,7 @@ quiet clock/clock pairs, mean rounds per trial at a 2% / 1% goal were:
 
 | blocks | floor | blowups | rounds, 2% goal | rounds, 1% goal |
 | --- | --- | --- | --- | --- |
-| 4 of 15 rounds (today) | 60 | 33 | 99 | 281 |
+| 4 of 15 rounds (old default) | 60 | 33 | 99 | 281 |
 | 8 of 15 rounds | 120 | 1 | 156 | 342 |
 | 6 of 10 rounds | 60 | 10 | 129 | 344 |
 | 8 of 10 rounds | 80 | 1 | 156 | 362 |
@@ -444,11 +453,11 @@ goal (`LAB_PAIR_CONF_Z`). The bound is stricter the fewer the blocks. The
 blocks, so that only thin bars are held to more.
 
 Quiet clock/clock pairs; rounds at the 2% / 1% / 0.5% goals, relative to
-today:
+the old 4 blocks:
 
 | rule | blowups | rounds |
 | --- | --- | --- |
-| 4 blocks (today) | 33 | x1 / x1 / x1 |
+| 4 blocks (old default) | 33 | x1 / x1 / x1 |
 | 8 blocks | 1 | x1.58 / x1.22 / x1.03 |
 | 90% confident | 1 | x1.85 / x1.64 / x1.48 |
 | 70% confident | 7 | x1.31 / x1.28 / x1.20 |
@@ -456,7 +465,7 @@ today:
 | 8 blocks and relative, 90% | 0 | x1.74 / x1.28 / x1.03 |
 
 On the noisy recordings every variant lands at 11-20 blowups, against 46
-today.
+with 4 blocks.
 
 The model is right about which way to lean and wrong about how far. It
 assumes Gaussian block means looked at once. Here the rule looks again and

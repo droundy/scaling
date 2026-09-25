@@ -1676,7 +1676,12 @@ fn ratio_paired(rs: &[PairRound]) -> f64 {
 /// where that is rare, and a block that still misses one makes the bar
 /// infinite rather than quietly smaller.
 const PAIR_MIN_BLOCK: usize = 15;
-const PAIR_FLOOR: usize = 60;
+
+/// Fewest blocks the ratio's bar is judged from - see [`pair_min_blocks`].
+const PAIR_MIN_BLOCKS: usize = 8;
+
+/// Fewest rounds a trial takes: enough for [`PAIR_MIN_BLOCKS`] blocks.
+const PAIR_FLOOR: usize = PAIR_MIN_BLOCK * PAIR_MIN_BLOCKS;
 const PAIR_CAP: usize = 4000;
 const PAIR_TRIALS: usize = 200;
 
@@ -1720,17 +1725,19 @@ const T_ONE_SIGMA: [f64; 19] = [
 ];
 
 /// Fewest blocks the ratio's bar is judged from (`LAB_PAIR_BLOCKS`, default
-/// 4); the floor of a trial rises to fill them.
+/// [`PAIR_MIN_BLOCKS`]); the floor of a trial rises to fill them.
 ///
-/// Four blocks is three degrees of freedom, and a bar that uncertain comes
-/// out under half its true size about one time in seven. The stopping rule
-/// checks it over and over, so it stops on exactly those: most of the
-/// clock/clock blowups are that, and iid noise with no machine at all
-/// reproduces them. Eight blocks removes nearly all of it (PROBLEMS.md, "Why
-/// a ratio blows up").
+/// It was four. Four blocks is three degrees of freedom, and a bar that
+/// uncertain comes out under half its true size about one time in seven.
+/// The stopping rule checks it over and over, so it stops on exactly those:
+/// that was most of the clock/clock blowups, and iid noise with no machine
+/// at all reproduces them. Eight removes nearly all of it, for more rounds
+/// only where the goal is loose - and neither smaller blocks nor a cutoff
+/// that tightens as blocks get fewer did better for the cost (PROBLEMS.md,
+/// "Why a ratio blows up").
 fn pair_min_blocks() -> usize {
     static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *B.get_or_init(|| std::env::var("LAB_PAIR_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(4))
+    *B.get_or_init(|| std::env::var("LAB_PAIR_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(PAIR_MIN_BLOCKS))
 }
 
 /// How many blocks `len` rounds are cut into for the bar.
@@ -1780,7 +1787,7 @@ fn pair_block_rounds() -> usize {
 }
 
 /// Widen the bar by Student's t for its degrees of freedom (`LAB_PAIR_T`).
-/// Too mild to stop the lucky-small stops at four blocks, so off by default.
+/// Too mild to stop the lucky-small stops at four blocks, so off.
 fn pair_student() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *T.get_or_init(|| std::env::var("LAB_PAIR_T").is_ok())
