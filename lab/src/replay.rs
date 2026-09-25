@@ -1733,6 +1733,39 @@ fn pair_min_blocks() -> usize {
     *B.get_or_init(|| std::env::var("LAB_PAIR_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(4))
 }
 
+/// How many blocks `len` rounds are cut into for the bar.
+fn pair_blocks(len: usize) -> usize {
+    (len / pair_block_rounds()).clamp(pair_min_blocks(), 20.max(pair_min_blocks()))
+}
+
+/// How much tighter than the goal a bar from `b` blocks must be before a
+/// trial stops (`LAB_PAIR_CONF_Z=z`, one-sided normal quantile; unset, 1).
+///
+/// A bar `s` from `b` blocks is itself uncertain: `(b-1) s^2 / sigma^2` is
+/// chi-square with `b-1` degrees of freedom. So `sigma` is below
+/// `s * sqrt((b-1) / chi2_{b-1}(alpha))` with confidence `1 - alpha`, and
+/// the trial stops only when that upper bound meets the goal - stricter the
+/// fewer the blocks. The chi-square quantile is Wilson-Hilferty's, within
+/// about 1% from three degrees of freedom up. `LAB_PAIR_CONF_REL` divides
+/// by the factor at 20 blocks, so only thin bars are held to more.
+fn pair_stop_factor(b: usize) -> f64 {
+    static Z: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    let Some(z) = *Z.get_or_init(|| std::env::var("LAB_PAIR_CONF_Z").ok().and_then(|v| v.parse().ok())) else {
+        return 1.0;
+    };
+    let f = |b: usize| -> f64 {
+        let k = (b - 1) as f64;
+        let c = 2.0 / (9.0 * k);
+        let q = k * (1.0 - c - z * c.sqrt()).max(1e-6).powi(3);
+        (k / q).sqrt()
+    };
+    if std::env::var("LAB_PAIR_CONF_REL").is_ok() {
+        f(b) / f(20)
+    } else {
+        f(b)
+    }
+}
+
 /// Fewest rounds in a block (`LAB_PAIR_BLOCK_ROUNDS`, default
 /// [`PAIR_MIN_BLOCK`]).
 ///
@@ -1755,7 +1788,7 @@ fn pair_student() -> bool {
 
 /// The blocks of [`ratio_se`]: `ln R` estimated within each, in order.
 fn block_logs(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> Option<Vec<f64>> {
-    let b = (rs.len() / pair_block_rounds()).clamp(pair_min_blocks(), 20.max(pair_min_blocks()));
+    let b = pair_blocks(rs.len());
     let per = rs.len() / b;
     if per < pair_block_rounds() {
         return None;
@@ -1787,7 +1820,7 @@ fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, targ
             // Ran off the end of the recording before stopping.
             return PairOutcome { est: e, se: s, rounds: seg.len(), capped: true };
         }
-        if e.is_finite() && s <= goal {
+        if e.is_finite() && s * pair_stop_factor(pair_blocks(seg.len())) <= goal {
             return PairOutcome { est: e, se: s, rounds: n, capped: false };
         }
         if n >= PAIR_CAP {

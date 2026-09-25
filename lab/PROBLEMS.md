@@ -435,6 +435,39 @@ Lower floors cost *more*. Two reasons:
 The noisy recordings agree. Fifteen-round blocks with a minimum of 8 are as
 good as any variant tried.
 
+**A stricter cutoff for fewer blocks works, but costs more.** The other
+principled fix is to require confidence that the bar is tight enough. A bar
+`s` from `b` blocks bounds the true error by `s * sqrt((b-1) / chi2_{b-1})`
+at a chosen confidence, and the trial stops only when that bound meets the
+goal (`LAB_PAIR_CONF_Z`). The bound is stricter the fewer the blocks. The
+"relative" variant (`LAB_PAIR_CONF_REL`) divides by the factor at 20
+blocks, so that only thin bars are held to more.
+
+Quiet clock/clock pairs; rounds at the 2% / 1% / 0.5% goals, relative to
+today:
+
+| rule | blowups | rounds |
+| --- | --- | --- |
+| 4 blocks (today) | 33 | x1 / x1 / x1 |
+| 8 blocks | 1 | x1.58 / x1.22 / x1.03 |
+| 90% confident | 1 | x1.85 / x1.64 / x1.48 |
+| 70% confident | 7 | x1.31 / x1.28 / x1.20 |
+| relative, 90% | 8 | x1.34 / x1.18 / x1.03 |
+| 8 blocks and relative, 90% | 0 | x1.74 / x1.28 / x1.03 |
+
+On the noisy recordings every variant lands at 11-20 blowups, against 46
+today.
+
+The model is right about which way to lean and wrong about how far. It
+assumes Gaussian block means looked at once. Here the rule looks again and
+again, and the tails are heavier than Gaussian. At its cheapest, the
+relative 90% rule costs about the same as 8 blocks and keeps 8 of the 33
+blowups. An absolute confidence level is stricter at every block count, so
+it charges for long trials that were already safe.
+
+A plain floor of 8 blocks is the simplest, and nothing tried beats it on
+cost for the same safety.
+
 **3. Memory-bound workloads: slow episodes longer than a measurement (1-4%,
 even quiet).** On the quiet machine, `btree_miss` has minutes in which it
 runs 1.5-4% slow, sometimes several in a row; `copy_64mb` weakly shares
