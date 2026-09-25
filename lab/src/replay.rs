@@ -2002,7 +2002,7 @@ fn dump_trials(
             .map(|x| format!("{:.5}", x - lt))
             .collect::<Vec<_>>()
             .join(",");
-        let _ = writeln!(
+        let _ = write!(
             w,
             "{path}\t{a}\t{b}\t{label}\t{target}\t{s}\t{n}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{blocks}",
             o.capped as u8,
@@ -2013,7 +2013,29 @@ fn dump_trials(
             off(s + n, s + 2 * n),
             off(s, s + 4 * n),
         );
+        // Reruns (`LAB_RERUN_GAPS=g1,g2,...`, in rounds after this trial
+        // ends): the same trial again, and the same budget split into two
+        // trials at a goal looser by sqrt 2, the second `g` rounds after the
+        // first. Positions wrap, so a late trial reruns near the start.
+        if label == "paired" {
+            let wrap = |p: usize| p % rs.len().saturating_sub(2 * PAIR_CAP).max(1);
+            let half = (std::f64::consts::SQRT_2 * target.ln_1p()).exp_m1();
+            let f = |o: &PairOutcome| format!("{:.6},{:.6},{},{}", o.est.ln() - lt, o.se, o.rounds, o.capped as u8);
+            for g in rerun_gaps() {
+                let again = pair_trial(rs, wrap(s + n + g), est, target);
+                let first = pair_trial(rs, s, est, half);
+                let second = pair_trial(rs, wrap(s + first.rounds + g), est, half);
+                let _ = write!(w, "\t{g}:{};{};{}", f(&again), f(&first), f(&second));
+            }
+        }
+        let _ = writeln!(w);
     }
+}
+
+fn rerun_gaps() -> Vec<usize> {
+    std::env::var("LAB_RERUN_GAPS")
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

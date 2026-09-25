@@ -499,6 +499,45 @@ clock/clock pairs: 10 of 14 are at the 0.5% goal, where trials are long.
 Even matched ratios wander 0.3-1.8% per 13 s on the noisy machine, with
 `str_find / urandom_read` the worst.
 
+**With 8 blocks, what is left is the long trials.** Of the 14 noisy
+clock/clock blowups, 43% ran 2,438 rounds or more, against 5% of all trials.
+Of the quiet memory-pair blowups, 37% did, against 10%. A trial runs long
+because its noise is large, and that is when there is drift for it to miss.
+
+**Rerunning later catches drift, if the rerun is not reserved for close
+calls.** A blowup does not look borderline. It has a tight bar and sits
+several bars from the truth, so a rule that reruns only the comparisons
+that are borderline significant would skip exactly these.
+
+What works is running every comparison twice with time in between. The
+replay starts a second trial `g` rounds after the first ends
+(`LAB_RERUN_GAPS`), at about 79 rounds a second. The two runs "disagree"
+when they are more than two combined bars apart.
+
+| | gap | first-run blowups caught by disagreement | other trials that disagree | blowups, both averaged | blowups, budget split in two |
+| --- | --- | --- | --- | --- | --- |
+| quiet, memory pairs | none | 60% | 9.5% | 55 of 159 | 124 |
+| | ~1 min | 72% | 17% | 33 | 64 |
+| | ~10 min | 85% | 21% | 14 | 41 |
+| noisy, clock/clock | none | 71% | 4.1% | 2 of 14 | 13 |
+| | ~1 min | 100% | 5.3% | 2 | 2 |
+| | ~10 min | 100% | 6.6% | 3 | 4 |
+
+The gap is what gives a rerun its power. An immediate rerun shares the
+episode that fooled the first run. Among memory pairs, the "other trials
+that disagree" are mostly real too: the pairs' ratio moves on a scale that
+their bars leave out.
+
+"Budget split in two" means two runs, each at a goal looser by a factor of
+sqrt 2, averaged. It costs x1.2-1.3 the rounds of one run, rather than x2,
+because of the floor and the stepping. With a 10-minute gap it cuts the
+quiet memory-pair blowups from 159 to 41.
+
+In a suite, the gap comes free: run everything once at the looser goal,
+then run it all again. Any comparison whose two passes disagree is then the
+one to run a third time. Mixed pairs on the noisy machine stay out of reach,
+since they have no fixed ratio for a rerun to confirm.
+
 **Reading pass/fail.** In aggregate, clock/clock pairs were already under the
 1% blowup limit. Most of their failing cells were 3 blowups where 2 would
 pass, at a mean of about one per 200 trials.
