@@ -1733,6 +1733,19 @@ fn pair_min_blocks() -> usize {
     *B.get_or_init(|| std::env::var("LAB_PAIR_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(4))
 }
 
+/// Fewest rounds in a block (`LAB_PAIR_BLOCK_ROUNDS`, default
+/// [`PAIR_MIN_BLOCK`]).
+///
+/// Smaller blocks buy more of them from fewer rounds, but not cheaper
+/// trials: a block of a few rounds trims too little, so its spread
+/// overstates the error and the trial runs longer (PROBLEMS.md).
+fn pair_block_rounds() -> usize {
+    static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("LAB_PAIR_BLOCK_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(PAIR_MIN_BLOCK)
+    })
+}
+
 /// Widen the bar by Student's t for its degrees of freedom (`LAB_PAIR_T`).
 /// Too mild to stop the lucky-small stops at four blocks, so off by default.
 fn pair_student() -> bool {
@@ -1742,9 +1755,9 @@ fn pair_student() -> bool {
 
 /// The blocks of [`ratio_se`]: `ln R` estimated within each, in order.
 fn block_logs(rs: &[PairRound], est: fn(&[PairRound]) -> f64) -> Option<Vec<f64>> {
-    let b = (rs.len() / PAIR_MIN_BLOCK).clamp(pair_min_blocks(), 20.max(pair_min_blocks()));
+    let b = (rs.len() / pair_block_rounds()).clamp(pair_min_blocks(), 20.max(pair_min_blocks()));
     let per = rs.len() / b;
-    if per < PAIR_MIN_BLOCK {
+    if per < pair_block_rounds() {
         return None;
     }
     Some((0..b).map(|i| est(&rs[i * per..(i + 1) * per]).ln()).collect())
@@ -1766,7 +1779,7 @@ struct PairOutcome {
 /// taken.
 fn pair_trial(rs: &[PairRound], start: usize, est: fn(&[PairRound]) -> f64, target: f64) -> PairOutcome {
     let goal = target.ln_1p();
-    let mut n = PAIR_FLOOR.max(PAIR_MIN_BLOCK * pair_min_blocks());
+    let mut n = pair_block_rounds() * pair_min_blocks();
     loop {
         let seg = &rs[start..(start + n).min(rs.len())];
         let (e, s) = (est(seg), ratio_se(seg, est));

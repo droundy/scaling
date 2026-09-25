@@ -409,6 +409,32 @@ its own (`LAB_PAIR_T`) halves the blowups on the quiet recordings and does
 nothing on the noisy ones. It inflates the bar by 20% at 3 degrees of
 freedom, which is not enough to stop the lucky-small stops.
 
+**Smaller blocks do not make it cheaper.** Another way to get more blocks
+from fewer rounds is to shrink them (`LAB_PAIR_BLOCK_ROUNDS`). Blocks are 15
+rounds so that each one reliably holds both rungs of both workloads. On
+quiet clock/clock pairs, mean rounds per trial at a 2% / 1% goal were:
+
+| blocks | floor | blowups | rounds, 2% goal | rounds, 1% goal |
+| --- | --- | --- | --- | --- |
+| 4 of 15 rounds (today) | 60 | 33 | 99 | 281 |
+| 8 of 15 rounds | 120 | 1 | 156 | 342 |
+| 6 of 10 rounds | 60 | 10 | 129 | 344 |
+| 8 of 10 rounds | 80 | 1 | 156 | 362 |
+| 8 of 6 rounds | 48 | 0 | 196 | 383 |
+| 12 of 5 rounds | 60 | 0 | 225 | 390 |
+
+Lower floors cost *more*. Two reasons:
+
+- Much of what 4 blocks seemed to save was stops made on a lucky-small bar,
+  so an honest bar can only move later. It stops when the noise says it
+  may, wherever the floor is.
+- A block of a few rounds leaves each rung cell one or two samples to trim,
+  so its estimate is noisier than the full estimator's. The bar then
+  overstates the error: coverage rises to 78%, and the trial runs longer.
+
+The noisy recordings agree. Fifteen-round blocks with a minimum of 8 are as
+good as any variant tried.
+
 **3. Memory-bound workloads: slow episodes longer than a measurement (1-4%,
 even quiet).** On the quiet machine, `btree_miss` has minutes in which it
 runs 1.5-4% slow, sometimes several in a row; `copy_64mb` weakly shares
