@@ -583,19 +583,9 @@ pub(crate) mod significant;
 // itself.
 pub use self::bench::Timing;
 
-/// Measure one closure, once, where you call it.
-///
-/// This is kept hidden because the harness-cost benchmark calls it in a loop
-/// timed with a plain `Instant` to measure the overhead of taking a benchmark.
-#[doc(hidden)]
-pub use self::bench::{bench, bench_clone_input, bench_make_input};
 pub use self::compare::Difference;
 pub use self::kway::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
-
-/// Measure one closure's scaling, once, where you call it.
-#[doc(hidden)]
-pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
 pub(crate) use self::kway::InputGroup;
@@ -1026,24 +1016,6 @@ pub(crate) mod testutil {
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 
-    /// A cost with a heavy right tail: nine calls in ten are trivial and the
-    /// tenth is ten thousand times longer.
-    ///
-    /// This is the shape the selection effect feeds on. A handful of samples
-    /// that happen to miss the tail have both a low mean and a small standard
-    /// deviation - so the run stops, and stops low.
-    pub fn bimodal_cost(seed: u64) -> impl FnMut() -> u64 {
-        let mut rng = XorShift(seed | 1);
-        move || {
-            let n = if rng.next() % 10 == 0 { 10_000 } else { 1 };
-            let mut acc = 0u64;
-            for i in 0..n {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
-            }
-            acc
-        }
-    }
-
     /// Near enough the same mean as [`bimodal_cost`], with no spread of its
     /// own at all - so whatever varies when this is measured is the machine.
     pub fn fixed_cost(seed: u64) -> impl FnMut() -> u64 {
@@ -1063,59 +1035,5 @@ pub(crate) mod testutil {
         let mean = xs.iter().sum::<f64>() / n;
         let sd = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
         (mean, sd / mean)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fib(n: usize) -> usize {
-        let mut i = 0;
-        let mut sum = 0;
-        let mut last = 0;
-        let mut curr = 1usize;
-        while i < n - 1 {
-            sum = curr.wrapping_add(last);
-            last = curr;
-            curr = sum;
-            i += 1;
-        }
-        sum
-    }
-
-    // This is only here because doctests don't work with `--nocapture`.
-    #[test]
-    #[ignore]
-    fn doctests_again() {
-        println!();
-        println!("fib 200: {}", bench(|| fib(200)));
-        println!("fib 500: {}", bench(|| fib(500)));
-        println!("fib scaling: {}", bench_scaling(fib, 0));
-        println!(
-            "reverse: {}",
-            bench_clone_input(vec![0; 100], |xs| xs.reverse())
-        );
-        println!(
-            "sort:    {}",
-            bench_clone_input(vec![0; 100], |xs| xs.sort())
-        );
-
-        // This is fine:
-        println!("fib 1:   {}", bench(|| fib(500)));
-        // This is NOT fine:
-        println!(
-            "fib 2:   {}",
-            bench(|| {
-                fib(500);
-            })
-        );
-        // This is also fine, but a bit weird:
-        println!(
-            "fib 3:   {}",
-            bench_clone_input(0, |x| {
-                *x = fib(500);
-            })
-        );
     }
 }

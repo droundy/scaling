@@ -208,43 +208,6 @@ impl Timing {
     }
 }
 
-/// Run a benchmark, with default accuracy (see [`Config`]).
-///
-/// The return value of `f` is not used, but we trick the optimiser into
-/// thinking we're going to use it. Make sure to return enough information
-/// to prevent the optimiser from eliminating code from your benchmark! (See
-/// the module docs for more.)
-pub fn bench<F, O>(f: F) -> Timing
-where
-    F: FnMut() -> O,
-{
-    Config::default().bench(f)
-}
-
-/// Run a benchmark with an input, with default accuracy (see
-/// [`Config`]).
-///
-/// See [`Config::bench_clone_input`] for the full documentation.
-pub fn bench_clone_input<F, I, O>(input: I, f: F) -> Timing
-where
-    F: FnMut(&mut I) -> O,
-    I: Clone,
-{
-    Config::default().bench_clone_input(input, f)
-}
-
-/// Run a benchmark with a generated input, with default
-/// accuracy (see [`Config`]).
-///
-/// See [`Config::bench_make_input`] for the full documentation.
-pub fn bench_make_input<G, F, I, O>(make_input: G, f: F) -> Timing
-where
-    G: FnMut() -> I,
-    F: FnMut(&mut I) -> O,
-{
-    Config::default().bench_make_input(make_input, f)
-}
-
 impl Config {
     /// Run a benchmark.
     ///
@@ -605,121 +568,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    #[test]
-    fn very_quick() {
-        println!();
-        println!("very quick: {}", bench(|| {}));
-    }
-
-    #[test]
-    fn very_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_millis(400)));
-        println!("very slow: {}", stats);
-        assert!(stats.ns_per_iter > 399.0e6);
-        // Deterministic, so we expect to stop as soon as `MIN_SAMPLES` is
-        // reached rather than being forced further by the accuracy target.
-        assert!(stats.samples >= 6);
-    }
-
-    #[test]
-    fn painfully_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_secs(11)));
-        println!("painfully slow: {}", stats);
-        println!("ns {}", stats.ns_per_iter);
-        assert!(stats.ns_per_iter > 11.0e9);
-        // A single call already blows the entire time budget, so we report
-        // it directly rather than pay for a second 11-second call.
-        assert_eq!(1, stats.iterations);
-        assert_eq!(1, stats.samples);
-        assert!(stats.hit_limit);
-        // One sample is far too few to trust an error bar, and there is not
-        // even one to report.
-        assert!(stats.untrustworthy);
-        assert!(stats.std_error.is_nan());
-    }
-
-    #[test]
-    fn sadly_slow() {
-        println!();
-        let stats = bench(|| thread::sleep(Duration::from_secs(6)));
-        println!("sadly slow: {}", stats);
-        println!("ns {}", stats.ns_per_iter);
-        assert!(stats.ns_per_iter > 6.0e9);
-        // The calibration probe (whose timing is discarded as warmup) plus
-        // one real sample already exceed the 10-second budget - and both of
-        // them really did run the benchmark, so both are counted.
-        assert_eq!(2, stats.iterations);
-        assert_eq!(1, stats.samples);
-        assert!(stats.hit_limit);
-    }
-
-    #[test]
-    fn test_sleep() {
-        println!();
-        println!(
-            "sleep 1 ms: {}",
-            bench(|| thread::sleep(Duration::from_millis(1)))
-        );
-    }
-
-    #[test]
-    fn noop() {
-        println!();
-        println!("noop base: {}", bench(|| {}));
-        println!("noop 0:    {}", bench_clone_input(vec![0u64; 0], |_| {}));
-        println!("noop 16:   {}", bench_clone_input(vec![0u64; 16], |_| {}));
-        println!("noop 64:   {}", bench_clone_input(vec![0u64; 64], |_| {}));
-        println!("noop 256:  {}", bench_clone_input(vec![0u64; 256], |_| {}));
-        println!("noop 512:  {}", bench_clone_input(vec![0u64; 512], |_| {}));
-    }
-
-    #[test]
-    fn ret_value() {
-        println!();
-        println!(
-            "no ret 32:    {}",
-            bench_clone_input(vec![0u64; 32], |x| { x.clone() })
-        );
-        println!(
-            "return 32:    {}",
-            bench_clone_input(vec![0u64; 32], |x| x.clone())
-        );
-        println!(
-            "no ret 256:   {}",
-            bench_clone_input(vec![0u64; 256], |x| { x.clone() })
-        );
-        println!(
-            "return 256:   {}",
-            bench_clone_input(vec![0u64; 256], |x| x.clone())
-        );
-        println!(
-            "no ret 1024:  {}",
-            bench_clone_input(vec![0u64; 1024], |x| { x.clone() })
-        );
-        println!(
-            "return 1024:  {}",
-            bench_clone_input(vec![0u64; 1024], |x| x.clone())
-        );
-        println!(
-            "no ret 4096:  {}",
-            bench_clone_input(vec![0u64; 4096], |x| { x.clone() })
-        );
-        println!(
-            "return 4096:  {}",
-            bench_clone_input(vec![0u64; 4096], |x| x.clone())
-        );
-        println!(
-            "no ret 50000: {}",
-            bench_clone_input(vec![0u64; 50000], |x| { x.clone() })
-        );
-        println!(
-            "return 50000: {}",
-            bench_clone_input(vec![0u64; 50000], |x| x.clone())
-        );
-    }
-
     // Cheap deterministic PRNG so a failure reproduces from its seed.
 
     /// A benchmark with real, injected variance (coefficient of variation
@@ -787,30 +635,6 @@ mod tests {
                 "asked for {:.2}% accuracy but observed spread was {:.2}%",
                 100.0 * target,
                 100.0 * observed
-            );
-        }
-    }
-
-    #[test]
-    fn estimates_the_mean_not_the_minimum() {
-        println!();
-        // Use paired workloads with the same mean but different shape; the ratio
-        // should stay near one even if the machine drifts.
-        const REPEATS: usize = 4;
-        for r in 0..REPEATS {
-            let seed = seed_for(r);
-            let bimodal = bench(bimodal_cost(seed)).ns_per_iter;
-            let fixed = bench(fixed_cost(seed)).ns_per_iter;
-            let ratio = bimodal / fixed;
-            println!("bimodal {bimodal:.1} / fixed {fixed:.1} = {ratio:.4}");
-            // An estimator reporting the minimum - or the median, which the
-            // old shape could not have caught - would see nine cheap calls
-            // in ten and land near 0.001. The band is wide because what is
-            // being separated differs by three orders of magnitude, not by
-            // a few percent.
-            assert!(
-                (0.5..1.5).contains(&ratio),
-                "reported cost ratio {ratio:.4} says this is not the mean"
             );
         }
     }

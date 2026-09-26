@@ -27,8 +27,8 @@ impl Config {
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
-    #[doc(hidden)]
-    pub fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
+    #[cfg(test)]
+    pub(crate) fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
         F: FnMut(usize) -> O,
     {
@@ -317,7 +317,8 @@ impl Display for Scaling {
 /// character is the first thing to try.
 ///
 /// See [`Config::bench_scaling`] to choose your own accuracy.
-pub fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
+#[cfg(test)]
+pub(crate) fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
 where
     F: FnMut(usize) -> O,
 {
@@ -409,47 +410,6 @@ async fn scaling_sweep(
         iterations,
         hit_limit: measured.hit_limit || rejected,
     }
-}
-
-/// Benchmark the power-law scaling of the function with generated input
-///
-/// This function is like [`bench_scaling`](fn@bench_scaling), but uses a generating function
-/// to construct the input to your benchmarked function.
-///
-/// Reports the integer power ᴾ in 𝑶(𝑁ᴾ) and the constant in front of it,
-/// with a standard error, exactly as [`bench_scaling`](fn@bench_scaling) does - including how
-/// much the choice of `nmin` matters, which is worth reading there before
-/// trusting a result from here.
-///
-/// # Example
-///
-/// `no_run` because summing a vector is memory-bound, so on a machine that
-/// is not quiesced the growth this measures can be a neighbouring process's
-/// rather than the sum's - the same reason this crate's own tests of it
-/// skip unless `quiet-bench` has reserved a CPU. The example is still
-/// compiled, so it cannot go stale; it is only the timing that is not
-/// trustworthy enough to assert on wherever the docs happen to be built.
-///
-/// ```no_run
-/// use scaling::bench_scaling_gen;
-///
-/// let summation = bench_scaling_gen(|n| vec![3.0; n], |v| v.iter().cloned().sum::<f64>(),0);
-/// println!("summation: {}", summation);
-/// // Summation must run in linear time.
-/// assert_eq!(1, summation.scaling.expect("a power law").power);
-/// ```
-/// which gives output
-/// ```none
-/// summation:    (1.206 ± 0.011)ns/N (R²=0.999)
-/// ```
-///
-/// See [`Config::bench_scaling_gen`] to choose your own accuracy.
-pub fn bench_scaling_gen<G, F, I, O>(make_input: G, f: F, nmin: usize) -> ScalingStats
-where
-    G: FnMut(usize) -> I,
-    F: Fn(&mut I) -> O,
-{
-    Config::default().bench_scaling_gen(make_input, f, nmin)
 }
 
 /// A polynomial fit against sizes whose error bars were *measured* rather
