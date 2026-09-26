@@ -348,19 +348,19 @@ impl<'a> Scheduler<'a> {
 /// friends - can name its return type; `get` itself is `#[cfg(test)]`, so
 /// outside this crate's own tests a token can be held and passed along but
 /// never read.
-pub struct Token<T>(Arc<Mutex<Option<T>>>);
+pub struct BadToken<T>(Arc<Mutex<Option<T>>>);
 
 // Not `#[derive(Clone)]`, which would demand `T: Clone` for no reason: what
 // is cloned is the handle, not the answer behind it.
-impl<T> Clone for Token<T> {
+impl<T> Clone for BadToken<T> {
     fn clone(&self) -> Self {
-        Token(self.0.clone())
+        BadToken(self.0.clone())
     }
 }
 
-impl<T> Token<T> {
+impl<T> BadToken<T> {
     fn new() -> Self {
-        Token(Arc::new(Mutex::new(None)))
+        BadToken(Arc::new(Mutex::new(None)))
     }
 
     /// The lock is only ever taken to store a result or to read one, never
@@ -371,7 +371,7 @@ impl<T> Token<T> {
     }
 }
 
-impl<T: Clone> Token<T> {
+impl<T: Clone> BadToken<T> {
     /// The answer, or `None` if the suite has not run yet.
     ///
     /// A registered benchmark's result is read back through [`Report`]
@@ -385,12 +385,12 @@ impl<T: Clone> Token<T> {
     }
 }
 
-impl<T> fmt::Debug for Token<T> {
+impl<T> fmt::Debug for BadToken<T> {
     /// Deliberately not `where T: Debug`. A token is a handle, and what a
     /// reader wants of one is whether its answer has arrived yet; the answer
-    /// itself is what [`Token::get`] and [`Report`] are for.
+    /// itself is what [`BadToken::get`] and [`Report`] are for.
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("Token")
+        f.debug_struct("BadToken")
             .field("measured", &self.cell().is_some())
             .finish()
     }
@@ -406,7 +406,7 @@ impl<T> fmt::Debug for Token<T> {
 /// # Why there is an `as_any` as well
 ///
 /// Rendering was once all this had to do, because a caller who wanted the
-/// measurement rather than its text held a [`Token`] for it. That stops
+/// measurement rather than its text held a [`BadToken`] for it. That stops
 /// being true as soon as the caller did not write the `add` call:
 /// [`Suite::try_add_registered`] adds benchmarks nobody named, so
 /// nobody holds their tokens, and a script wanting to *ask* something of the
@@ -517,7 +517,7 @@ impl<'a> Suite<'a> {
     fn push<T: Display + 'static>(
         &mut self,
         name: &str,
-        token: &Token<T>,
+        token: &BadToken<T>,
         clock: Rc<Clock>,
         future: Pin<Box<dyn Future<Output = ()> + 'a>>,
     ) {
@@ -531,16 +531,16 @@ impl<'a> Suite<'a> {
         &mut self,
         name: &str,
         max_time: Duration,
-        body: impl FnOnce(Rc<Clock>, Token<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
-    ) -> Token<T> {
+        body: impl FnOnce(Rc<Clock>, BadToken<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
+    ) -> BadToken<T> {
         let clock = Rc::new(Clock::new(max_time));
-        let token = Token::new();
+        let token = BadToken::new();
         self.push(name, &token, clock.clone(), body(clock, token.clone()));
         token
     }
 
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
-    pub fn add<F, O>(&mut self, name: &str, f: F) -> Token<Stats>
+    pub fn add<F, O>(&mut self, name: &str, f: F) -> BadToken<Stats>
     where
         F: FnMut() -> O + 'a,
         O: 'a,
@@ -552,7 +552,12 @@ impl<'a> Suite<'a> {
     ///
     /// See [`Suite::add_make_input_with`] for what a per-benchmark `Config`
     /// is for and what it does not change.
-    pub(crate) fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F) -> Token<Stats>
+    pub(crate) fn add_with<F, O>(
+        &mut self,
+        cfg: &'a Config,
+        name: &str,
+        mut f: F,
+    ) -> BadToken<Stats>
     where
         F: FnMut() -> O + 'a,
         O: 'a,
@@ -561,7 +566,7 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
-    pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Token<Stats>
+    pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F) -> BadToken<Stats>
     where
         F: FnMut(&mut I) -> O + 'a,
         I: Clone + 'a,
@@ -578,7 +583,7 @@ impl<'a> Suite<'a> {
         name: &str,
         input: I,
         f: F,
-    ) -> Token<Stats>
+    ) -> BadToken<Stats>
     where
         F: FnMut(&mut I) -> O + 'a,
         I: Clone + 'a,
@@ -589,7 +594,7 @@ impl<'a> Suite<'a> {
 
     /// Add a benchmark over generated inputs, as [`bench_make_input`] would
     /// run it.
-    pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> Token<Stats>
+    pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> BadToken<Stats>
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
@@ -625,7 +630,7 @@ impl<'a> Suite<'a> {
         name: &str,
         make_input: G,
         f: F,
-    ) -> Token<Stats>
+    ) -> BadToken<Stats>
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
@@ -641,7 +646,7 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
-    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
+    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> BadToken<ScalingStats>
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
@@ -657,7 +662,7 @@ impl<'a> Suite<'a> {
         name: &str,
         f: F,
         nmin: usize,
-    ) -> Token<ScalingStats>
+    ) -> BadToken<ScalingStats>
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
@@ -677,7 +682,7 @@ impl<'a> Suite<'a> {
         make_input: G,
         f: F,
         nmin: usize,
-    ) -> Token<ScalingStats>
+    ) -> BadToken<ScalingStats>
     where
         G: FnMut(usize) -> I + 'a,
         F: Fn(&mut I) -> O + 'a,
@@ -696,7 +701,7 @@ impl<'a> Suite<'a> {
         make_input: G,
         f: F,
         nmin: usize,
-    ) -> Token<ScalingStats>
+    ) -> BadToken<ScalingStats>
     where
         G: FnMut(usize) -> I + 'a,
         F: Fn(&mut I) -> O + 'a,
@@ -731,7 +736,7 @@ impl<'a> Suite<'a> {
         &mut self,
         name: &str,
         set: ComparisonSet<'a, I>,
-    ) -> Token<Comparisons>
+    ) -> BadToken<Comparisons>
     where
         I: Clone + 'a,
     {
@@ -764,7 +769,7 @@ impl<'a> Suite<'a> {
             .checked_mul(k as u32)
             .unwrap_or(Duration::MAX);
         let clock = Rc::new(Clock::new(budget));
-        let token = Token::new();
+        let token = BadToken::new();
         let answer = token.clone();
         let mine = clock.clone();
         self.push(
@@ -1265,8 +1270,8 @@ mod tests {
     fn tokens_keep_their_own_types() {
         let cfg = Config::default().with_max_time(Duration::from_millis(50));
         let mut suite = cfg.suite();
-        let flat: Token<Stats> = suite.add("flat", || (0..20u64).sum::<u64>());
-        let cmp: Token<Comparisons> = suite.add_comparison(
+        let flat: BadToken<Stats> = suite.add("flat", || (0..20u64).sum::<u64>());
+        let cmp: BadToken<Comparisons> = suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..20u64).sum::<u64>())
@@ -1288,16 +1293,16 @@ mod tests {
     fn all_three_kinds_share_one_suite() {
         let cfg = Config::default().with_max_time(Duration::from_millis(80));
         let mut suite = cfg.suite();
-        let flat: Token<Stats> = suite.add("flat", || (0..50u64).sum::<u64>());
+        let flat: BadToken<Stats> = suite.add("flat", || (0..50u64).sum::<u64>());
         // A different input type from the comparison below, which is the
         // thing a `ComparisonSet` alone cannot do.
-        let with_input: Token<Stats> =
+        let with_input: BadToken<Stats> =
             suite.add_input("with input", vec![3u8; 32], |v: &mut Vec<u8>| {
                 v.iter().map(|&x| x as u64).sum::<u64>()
             });
-        let scaled: Token<ScalingStats> =
+        let scaled: BadToken<ScalingStats> =
             suite.add_scaling("scaled", |n| (0..n as u64).sum::<u64>(), 1000);
-        let cmp: Token<Comparisons> = suite.add_comparison(
+        let cmp: BadToken<Comparisons> = suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..50u64).sum::<u64>())
@@ -1531,7 +1536,7 @@ mod tests {
             } else {
                 (0..N).collect()
             };
-            let tokens: Vec<(usize, Token<Stats>)> = order
+            let tokens: Vec<(usize, BadToken<Stats>)> = order
                 .iter()
                 .map(|&i| (i, suite.add(&format!("b{i}"), spin(ROUNDS))))
                 .collect();
