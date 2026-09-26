@@ -101,8 +101,8 @@ pub struct Options {
 pub enum Outcome {
     /// The registered benchmarks were measured. Exit `0`.
     Measured,
-    /// The run never started: a command line that did not parse, or
-    /// registrations that contradict each other. Exit `2`.
+    /// The run never started because registrations contradict each other.
+    /// Exit `2`.
     NotRun,
 }
 

@@ -874,8 +874,8 @@ mod tests {
     /// enormously sensitive to it: byte-identical code has read 0.10% in one
     /// session and 1.19% in another. Three passes that agree tell you about
     /// that session, not about the technique - which this entry got wrong
-    /// once already, and TODO item 4 records. Run it several times, at
-    /// different times, and compare the *ranges*:
+    /// once already. Run it several times, at different times, and compare
+    /// the *ranges*:
     ///
     /// ```none
     /// cargo test --release -- --ignored --nocapture position_bias

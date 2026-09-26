@@ -630,8 +630,8 @@ pub use scaling_macros::{bench, bench_scaling, input};
 ///
 /// # Its exit status means something
 ///
-/// Zero unless the run never started - a command line that did not parse,
-/// or registrations that contradict each other - which exits `2` instead.
+/// Zero unless the run never started because registrations contradict each
+/// other, which exits `2` instead.
 #[macro_export]
 macro_rules! main {
     () => {
