@@ -17,9 +17,9 @@ use std::fmt;
 pub use crate::kway::InputGroup;
 pub use crate::suite::Suite;
 
-/// An `AddAlt` shim that does nothing, for tests that check what assembly
-/// *decides* rather than what it *measures* - a plan or a lane can be built
-/// and inspected without a real alternative behind it.
+/// A comparison alternative shim that does nothing, for tests that check
+/// what assembly *decides* rather than what it *measures* - a plan or a lane
+/// can be built and inspected without a real alternative behind it.
 #[cfg(test)]
 pub(crate) fn noop_alt<'a>(
     set: InputGroup<'a, ErasedInput>,
@@ -27,33 +27,6 @@ pub(crate) fn noop_alt<'a>(
 ) -> InputGroup<'a, ErasedInput> {
     set
 }
-
-/// How a flat benchmark adds itself to a suite.
-///
-/// Named, along with its siblings below, because these signatures appear in
-/// several places and are easier to compare when they are spelled once.
-///
-/// Returns nothing: a registered benchmark's answer is read back by name,
-/// through [`Report`](crate::Report), once the suite has run - nothing
-/// downstream of assembly ever holds this call's return value.
-pub type AddFlat = fn(&mut Suite<'_>, &str);
-
-/// How a scaling benchmark adds itself to a suite.
-pub type AddScaling = fn(&mut Suite<'_>, &str);
-
-/// How one alternative joins a comparison.
-pub type AddAlt = for<'a> fn(InputGroup<'a, ErasedInput>, &str) -> InputGroup<'a, ErasedInput>;
-
-/// Builds one erased input.
-pub type MakeInput = fn() -> ErasedInput;
-
-/// Reports a type, rather than being one.
-///
-/// A registration is a `static`, so it is built in a `const` context, where
-/// `TypeId::of` only became usable in Rust 1.91 - far above this crate's
-/// 1.66. A `fn` pointer is const-constructible on every version, and calling
-/// it during assembly costs nothing worth counting.
-pub type TypeIdOf = fn() -> TypeId;
 
 /// One registered benchmark.
 ///
@@ -125,10 +98,10 @@ pub enum Kind {
     /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
     /// [`Suite::add_make_input`] - which of the three, and any input
     /// generator, is baked into the shim.
-    Flat(AddFlat),
+    Flat(fn(&mut Suite<'_>, &str)),
     /// Adds itself with [`Suite::add_scaling`] or [`Suite::add_scaling_gen`].
     /// `nmin` is baked in too, since this signature has nowhere to pass it.
-    Scaling(AddScaling),
+    Scaling(fn(&mut Suite<'_>, &str)),
 }
 
 inventory::collect!(Registered);
@@ -247,7 +220,7 @@ pub struct Candidate {
     /// The type of input it takes, which is what it is paired on. A function
     /// rather than the id itself, because a registration is a `static` and
     /// so must be built in a `const` context.
-    pub input_type: TypeIdOf,
+    pub input_type: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
     pub input_type_name: &'static str,
     /// Whether this is the one the others are reported against, in every
@@ -259,7 +232,7 @@ pub struct Candidate {
     pub crate_version: &'static str,
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
-    pub add_alt: AddAlt,
+    pub add_alt: for<'a> fn(InputGroup<'a, ErasedInput>, &str) -> InputGroup<'a, ErasedInput>,
 }
 
 impl fmt::Debug for Candidate {
@@ -300,13 +273,13 @@ pub struct Input {
     pub crate_name: &'static str,
     pub crate_version: &'static str,
     /// The type it produces, which is what candidates are paired to it on.
-    pub type_id: TypeIdOf,
+    pub type_id: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
     pub type_name: &'static str,
     /// Called once per round. With multiple candidates the value is cloned
     /// for each, so that all of them meet the same input; a singleton uses it
     /// directly. See [`ErasedInput`].
-    pub make: MakeInput,
+    pub make: fn() -> ErasedInput,
 }
 
 inventory::collect!(Input);
