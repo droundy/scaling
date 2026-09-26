@@ -478,7 +478,7 @@ impl Timings {
     /// Each alternative beyond the baseline, paired with its name, as a
     /// [`Timing`] against the baseline.
     pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {
-        (1..self.timings.len()).map(move |i| (self.names[i].as_str(), self.timings[i].clone()))
+        (1..self.timings.len()).map(move |i| (self.names[i].as_str(), self.timings[i]))
     }
 
     /// Whether any alternative differed from the baseline.

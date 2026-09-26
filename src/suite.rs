@@ -530,7 +530,7 @@ impl Report {
     /// caller that does not know what it is looking at can simply ask.
     pub fn stats(&self, name: &str) -> Option<Timing> {
         match self.find(name)? {
-            Found::Timing(c) if c.stats().len() == 1 => Some(c.stats()[0].clone()),
+            Found::Timing(c) if c.stats().len() == 1 => Some(c.stats()[0]),
             _ => None,
         }
     }
@@ -560,7 +560,7 @@ impl Report {
     /// Every flat measurement, with its name, in the order they were added.
     pub fn all_stats(&self) -> impl Iterator<Item = (&str, Timing)> {
         self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Timing(c) if c.stats().len() == 1 => Some((name.as_str(), c.stats()[0].clone())),
+            Found::Timing(c) if c.stats().len() == 1 => Some((name.as_str(), c.stats()[0])),
             _ => None,
         })
     }
