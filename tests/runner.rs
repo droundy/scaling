@@ -6,7 +6,7 @@
 //! written with the attributes rather than by hand, because the thing under
 //! test is the whole path from an attribute to an exit status.
 
-use scaling::runner::{measure, run, Format, Options, Outcome};
+use scaling::runner::{measure, run, Outcome};
 use scaling::Config;
 use std::time::Duration;
 
@@ -63,26 +63,14 @@ fn reversed() -> Vec<u64> {
 }
 
 /// Short enough that the whole file stays a test rather than a benchmark.
-fn quick() -> Options {
-    Options {
-        cfg: Config::relative(0.02).with_max_time(Duration::from_millis(40)),
-        ..Options::default()
-    }
+fn quick() -> Config {
+    Config::relative(0.02).with_max_time(Duration::from_millis(40))
 }
 
 #[test]
 fn a_run_measures_what_was_registered() {
     let outcome = run(quick());
     assert_eq!(outcome, Outcome::Measured);
-}
-
-/// Every format prints, and none of them changes the verdict.
-#[test]
-fn each_format_runs() {
-    for format in [Format::Table, Format::List] {
-        let outcome = run(Options { format, ..quick() });
-        assert_eq!(outcome, Outcome::Measured, "{format:?}");
-    }
 }
 
 /// A script can measure and then read the numbers, rather than reading a

@@ -216,7 +216,7 @@ impl Config {
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub fn bench<F, O>(&self, mut f: F) -> Timing
     where
         F: FnMut() -> O,

@@ -68,7 +68,7 @@ impl Config {
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub fn bench_scaling_gen<G, F, I, O>(&self, make_input: G, f: F, nmin: usize) -> ScalingStats
     where
         G: FnMut(usize) -> I,

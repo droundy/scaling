@@ -87,11 +87,8 @@ fn total_folded(v: &mut Vec<u64>) -> u64 {
 // ---------------------------------------------------------------------
 
 fn run() -> scaling::Report {
-    let options = scaling::runner::Options {
-        cfg: Config::default().with_max_time(Duration::from_millis(30)),
-        ..scaling::runner::Options::default()
-    };
-    scaling::runner::measure(&options).expect("these registrations compose")
+    let config = Config::default().with_max_time(Duration::from_millis(30));
+    scaling::runner::measure(&config).expect("these registrations compose")
 }
 
 /// The cross-product forms itself, and every cell is a comparison.

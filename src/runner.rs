@@ -49,49 +49,6 @@ use std::process::ExitCode;
 #[cfg(test)]
 use std::time::Duration;
 
-/// How to print the results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Format {
-    /// A group with several inputs as a grid, everything else as one line
-    /// each.
-    ///
-    /// The default. A group sharing several inputs reaches the report as one
-    /// comparison per input under a flattened `group@input` name - which is
-    /// the right thing to measure and the wrong shape to read, so it is
-    /// gridded back together here. A group with only one input has no grid
-    /// worth drawing and prints as an ordinary comparison instead.
-    #[default]
-    Table,
-    /// Every entry as one line, grids included.
-    ///
-    /// What the grid gives up is precision: a cell shows a time and a
-    /// percentage, where the line form shows the error bar on both and says
-    /// outright when a difference was too small to call. Use this when the
-    /// question is "is that number real", rather than "which of these wins".
-    List,
-}
-
-/// Everything the runner needs, which is everything a caller would otherwise
-/// have written a `main` to decide.
-///
-/// Public and plainly built: a crate wanting anything other than table output
-/// and the default budget builds one of these by hand and calls [`run`] or
-/// [`measure`] from its own `main`, rather than using [`crate::main!`].
-///
-/// ```no_run
-/// use scaling::runner::{run, Options};
-/// fn main() -> std::process::ExitCode {
-///     run(Options::default()).into()
-/// }
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct Options {
-    /// Accuracy and budget, as [`Config`] describes them.
-    pub cfg: Config,
-    /// How to print what they measured.
-    pub format: Format,
-}
-
 /// What a run came to.
 ///
 /// A named answer rather than a bare [`ExitCode`], which cannot be compared
@@ -122,7 +79,7 @@ impl From<Outcome> for ExitCode {
 /// [`measure`] from a hand-written `main` instead - see [`Options`]'s own
 /// docs for that.
 pub fn main() -> ExitCode {
-    run(Options::default()).into()
+    run(Config::default()).into()
 }
 
 /// Discover everything registered and assemble it into a suite, ready to
@@ -131,8 +88,8 @@ pub fn main() -> ExitCode {
 /// Shared by [`run`] and [`measure`] so that the two cannot drift: what
 /// `measure` hands back is what `run` would have printed, assembled by the
 /// same code under the same options.
-fn assemble(options: &Options) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
-    let mut suite = options.cfg.suite();
+fn assemble(config: &Config) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
+    let mut suite = config.suite();
     let tokens = suite.try_add_registered()?;
     Ok((suite, tokens))
 }
@@ -167,13 +124,13 @@ fn assemble(options: &Options) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
 /// let fast = report.comparison("lookup").expect("it ran");
 /// assert_eq!(fast.baseline_name(), "linear_scan");
 /// ```
-pub fn measure(options: &Options) -> Result<Report, Vec<Diagnostic>> {
+pub fn measure(options: &Config) -> Result<Report, Vec<Diagnostic>> {
     let (suite, _tokens) = assemble(options)?;
     Ok(suite.run())
 }
 
 /// Discover, measure and print, under options built by someone else.
-pub fn run(options: Options) -> Outcome {
+pub fn run(options: Config) -> Outcome {
     let (suite, tokens) = match assemble(&options) {
         Ok(assembled) => assembled,
         Err(problems) => {
@@ -184,7 +141,6 @@ pub fn run(options: Options) -> Outcome {
             return Outcome::NotRun;
         }
     };
-    let Options { format, .. } = options;
 
     for w in &tokens.warnings {
         eprintln!("warning: {w}");
@@ -202,10 +158,8 @@ pub fn run(options: Options) -> Outcome {
 
     let report = suite.run();
 
-    match format {
-        Format::List => println!("{report}"),
-        Format::Table => print!("{}", table(&report, &tokens)),
-    }
+    println!("{report}\n");
+    print!("{}", table(&report, &tokens));
 
     Outcome::Measured
 }

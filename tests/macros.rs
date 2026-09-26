@@ -14,7 +14,7 @@
 //! get hold of one and can only ever reach the registry through the
 //! runner's public entry point.
 
-use scaling::runner::{measure, Options};
+use scaling::runner::measure;
 use scaling::Config;
 use std::time::Duration;
 
@@ -228,11 +228,8 @@ fn iter_sum() -> u64 {
 
 // ---------------------------------------------------------------------
 
-fn options(max_time_ms: u64) -> Options {
-    Options {
-        cfg: Config::default().with_max_time(Duration::from_millis(max_time_ms)),
-        ..Options::default()
-    }
+fn options(max_time_ms: u64) -> Config {
+    Config::default().with_max_time(Duration::from_millis(max_time_ms))
 }
 
 #[test]
