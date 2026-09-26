@@ -345,6 +345,63 @@ candidates and inputs are registered independently and paired by type, with
 no list of the pairings anywhere, so adding one new input is picked up by
 every candidate that shares its group and type.
 
+## Attribute inputs and setup
+
+A flat benchmark may take no argument or one input. Use `input = value` when
+each iteration should receive a clone of the same initial value, or
+`make_input = || value` when each iteration needs a newly built value. The
+function may take `&I`, `&mut I`, or `I` by value; by-value inputs are useful
+when the benchmark consumes its input:
+
+```rust
+#[scaling::bench(input = vec![0_u8; 1024])]
+fn count(bytes: &[u8]) -> usize { bytes.len() }
+
+#[scaling::bench(make_input = || vec![0_u8; 1024])]
+fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
+```
+
+For comparisons, candidates use the group's shared `#[scaling::input]`
+instead of `input =` or `make_input =` on the candidate. The shared input
+is generated once per iteration and cloned so ordinary candidates in that
+round see the same value. A setup-once candidate uses the shared input only
+when its returned closure is first built; later inputs are still generated,
+but that cached closure is called without them. Comparison candidates must
+take `&I` or `&mut I`; owned inputs are currently supported only by
+standalone benchmarks.
+
+A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
+setup-once benchmark: the function runs once, then the returned closure is
+called for every timed iteration. This is useful when mutable state must
+persist between calls, such as an advancing random-number generator. With
+`input = value`, the value is passed to setup once, not cloned for every
+call to the returned closure. This form cannot be combined with
+`make_input =`, and a returned closure that itself takes an argument is not
+supported.
+
+For a scaling benchmark, `nmin` is required and `input =` is unavailable
+because the input must vary with `n`. Use `make_input = |n| ...` to build
+size-dependent input; it runs before timing, once per sample. A scaling
+benchmark can also return `impl Fn() -> O` or `impl FnMut() -> O`: setup is
+then cached separately for each size, and the returned closure is timed at
+that size. It cannot be combined with `make_input =`.
+
+An input registration can be expanded across types with `types(A, B, ...)`
+or across sizes with `sizes(1, 2, ...)`. A type-expanded input is generic
+and produces one registration per listed type. A size-expanded input takes
+the size as its argument and produces one input per listed size. These
+options are alternatives, not combinable. Candidates can likewise use
+`types(A, B, ...)` to register a generic candidate once per listed input
+type. For example, this registers two inputs for the same comparison:
+
+```rust
+#[scaling::input(group = "sorting", sizes(8, 32))]
+fn values(size: usize) -> Vec<u8> { (0..size as u8).collect() }
+
+#[scaling::bench(group = "sorting")]
+fn sort(values: &mut Vec<u8>) { values.sort_unstable() }
+```
+
 ## Why they are measured together
 
 Benchmarks run one after another are measured in different machines. The
