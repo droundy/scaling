@@ -466,8 +466,6 @@ pub(crate) struct Suite<'a> {
     entries: Vec<(String, Arc<dyn Reportable>)>,
     /// Comparisons added so far, so [`Suite::run`] can fill in the plan.
     comparisons: u64,
-    /// Which entries to measure. Everything, unless a caller says otherwise.
-    filter: Filter,
     /// The Bonferroni limit, shared with every comparison this suite holds.
     ///
     /// A cell because the comparisons are boxed as they are added, before the
@@ -494,7 +492,6 @@ impl Config {
             scheduler: Scheduler::new(0x9E37_79B9_7F4A_7C15),
             entries: Vec::new(),
             comparisons: 0,
-            filter: Filter::everything(),
             // `NaN` until `run` sets it. Nothing reads it before then, and a
             // suite holding no comparisons never reads it at all.
             z_alpha: Rc::new(Cell::new(f64::NAN)),
@@ -512,38 +509,6 @@ impl<'a> Suite<'a> {
         self.entries.is_empty()
     }
 
-    /// Measure only the entries this [`Filter`] keeps.
-    ///
-    /// It applies to everything the suite holds, hand-added and discovered
-    /// alike - a run that honoured a filter for registered benchmarks and
-    /// quietly ignored it for the two added by hand would be worse than not
-    /// having one.
-    ///
-    /// A filtered-out benchmark is not added at all: no clock, no place in
-    /// the round robin, no time spent. Its token is still returned, and
-    /// simply never fills - the same thing that happens to any token when a
-    /// suite is built and not run.
-    ///
-    pub fn with_filter(mut self, filter: Filter) -> Self {
-        self.filter = filter;
-        self
-    }
-
-    /// The filter this suite is measuring under.
-    pub fn filter(&self) -> &Filter {
-        &self.filter
-    }
-
-    /// What this suite would measure, in the order it was added.
-    ///
-    /// Everything the filter kept and nothing it did not, which is what
-    /// answers [`Filter::is_listing`] - acted on by the caller rather than
-    /// here, printing not being a library's business.
-    ///
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|(name, _)| name.as_str())
-    }
-
     fn push<T: Display + 'static>(
         &mut self,
         name: &str,
@@ -555,21 +520,14 @@ impl<'a> Suite<'a> {
         self.scheduler.push(clock, future);
     }
 
-    /// The filter check, clock, token and [`Suite::push`] shared by every
-    /// `add_*_with` method: only the future `body` builds differs between
-    /// them.
+    /// The clock, token and [`Suite::push`] shared by every `add_*_with`
+    /// method: only the future `body` builds differs between them.
     fn add_task<T: Display + 'static>(
         &mut self,
         name: &str,
         max_time: Duration,
         body: impl FnOnce(Rc<Clock>, Token<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
     ) -> Token<T> {
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
         let clock = Rc::new(Clock::new(max_time));
         let token = Token::new();
         self.push(name, &token, clock.clone(), body(clock, token.clone()));
@@ -678,7 +636,7 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
-    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
+    pub(crate) fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
@@ -773,16 +731,8 @@ impl<'a> Suite<'a> {
             k >= 2,
             "a comparison needs at least two alternatives, got {k}"
         );
-        // After the assertion, so that filtering cannot hide a mistake, and
-        // before the count, so the Bonferroni limit is taken over what is
-        // really going to be measured.
-        // Filtered out: build nothing. The token is still handed back and
-        // simply never fills, which is what happens to any token when a
-        // suite is not run.
-        if !self.filter.matches(name) {
-            return Token::new();
-        }
-
+        // After the assertion and before the count, so the Bonferroni limit
+        // is taken over what is really going to be measured.
         // Every alternative beyond the baseline is a chance at a false
         // positive, and so counts against the plan `run` will set.
         self.comparisons += k as u64 - 1;
@@ -1983,157 +1933,6 @@ mod report_lookup {
 }
 
 #[cfg(test)]
-mod filtering {
-    use super::*;
-    use std::time::Duration;
-
-    fn cfg() -> Config {
-        Config::default().with_max_time(Duration::from_millis(20))
-    }
-
-    #[test]
-    fn only_what_the_filter_keeps_is_measured() {
-        let cfg = cfg();
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("sort"));
-        let sorting = suite.add("sorting", || {
-            let mut v = vec![3u8, 1, 2];
-            v.sort();
-            v
-        });
-        let summing = suite.add("summing", || (0..32u64).sum::<u64>());
-        assert_eq!(suite.len(), 1, "only the kept one was added at all");
-        let report = suite.run();
-
-        assert!(sorting.get().is_some());
-        assert!(
-            summing.get().is_none(),
-            "a filtered-out benchmark is never measured",
-        );
-        let shown = format!("{report}");
-        assert!(shown.contains("sorting"), "{shown}");
-        assert!(
-            !shown.contains("summing"),
-            "and does not appear in the report at all: {shown}",
-        );
-    }
-
-    /// The filter reaches every kind, not only flat benchmarks.
-    #[test]
-    fn scaling_benchmarks_and_comparisons_are_filtered_too() {
-        let cfg = cfg();
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("keep"));
-        let _ = suite.add_scaling("drop_scaling", |n: usize| (0..n as u64).sum::<u64>(), 32);
-        let _ = suite.add_scaling("keep_scaling", |n: usize| (0..n as u64).sum::<u64>(), 32);
-        let _ = suite.add_comparison(
-            "drop_cmp",
-            cfg.comparison()
-                .add("a", || (0..32u64).sum::<u64>())
-                .add("b", || (0..32u64).sum::<u64>()),
-        );
-        let _ = suite.add_comparison(
-            "keep_cmp",
-            cfg.comparison()
-                .add("a", || (0..32u64).sum::<u64>())
-                .add("b", || (0..32u64).sum::<u64>()),
-        );
-        assert_eq!(suite.len(), 2);
-        let names: Vec<&str> = suite.names().collect();
-        assert_eq!(names, ["keep_scaling", "keep_cmp"]);
-    }
-
-    /// A comparison is matched on its own name, not its alternatives'.
-    ///
-    /// Its alternatives are measured in one interleaved round so that their
-    /// differences are paired; running one of them is a different and worse
-    /// measurement, not a smaller one. So a comparison is in or out entire.
-    #[test]
-    fn a_comparison_is_filtered_whole_and_by_its_own_name() {
-        let cfg = cfg();
-        // `slower` is the name of an alternative, not of the comparison.
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("slower"));
-        let _ = suite.add_comparison(
-            "hashing",
-            cfg.comparison()
-                .add("base", || (0..32u64).sum::<u64>())
-                .add("slower", || (0..256u64).sum::<u64>()),
-        );
-        assert_eq!(
-            suite.len(),
-            0,
-            "matching an alternative does not pull in its comparison",
-        );
-
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("hashing"));
-        let cmp = suite.add_comparison(
-            "hashing",
-            cfg.comparison()
-                .add("base", || (0..32u64).sum::<u64>())
-                .add("slower", || (0..256u64).sum::<u64>()),
-        );
-        suite.run();
-        assert_eq!(
-            cmp.get().expect("kept").stats().len(),
-            2,
-            "and matching the comparison takes all of it",
-        );
-    }
-
-    /// Filtering changes the Bonferroni limit, and should: five comparisons
-    /// are five chances at a false positive and one is one. The correction
-    /// is for the size of the family, so the family has to be what was
-    /// actually run.
-    #[test]
-    fn the_threshold_follows_what_the_filter_kept() {
-        let cfg = cfg();
-        let mut all = cfg.suite();
-        for name in ["a", "b", "c"] {
-            let _ = all.add_comparison(
-                name,
-                cfg.comparison()
-                    .add("x", || (0..32u64).sum::<u64>())
-                    .add("y", || (0..32u64).sum::<u64>()),
-            );
-        }
-        assert_eq!(all.comparisons, 3);
-
-        let mut one = cfg.suite().with_filter(Filter::everything().matching("b"));
-        for name in ["a", "b", "c"] {
-            let _ = one.add_comparison(
-                name,
-                cfg.comparison()
-                    .add("x", || (0..32u64).sum::<u64>())
-                    .add("y", || (0..32u64).sum::<u64>()),
-            );
-        }
-        assert_eq!(
-            one.comparisons, 1,
-            "a filtered-out comparison must not count towards the correction \
-             for comparisons that were never made",
-        );
-    }
-
-    /// A mistake is still a mistake when it is filtered out - a filter is
-    /// for choosing what to measure, not for silencing complaints.
-    #[test]
-    #[should_panic(expected = "at least two alternatives")]
-    fn a_filtered_out_comparison_still_has_to_be_a_comparison() {
-        let cfg = cfg();
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("nothing matches this"));
-        let _ = suite.add_comparison("lonely", cfg.comparison().add("only", || 1u64));
-    }
-}
-
-#[cfg(test)]
 mod per_benchmark_config {
     use super::*;
     use std::time::Duration;
@@ -2401,9 +2200,7 @@ mod registered_by_hand {
         // Restricted to this module's own names - see `versions_and_rivals`'s
         // `run` for why: one process-wide registry, shared with every other
         // `#[cfg(test)]` module in the crate.
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("e2e"));
+        let mut suite = cfg.suite();
         let tokens = suite.try_add_registered().unwrap();
         let report = suite.run();
 
@@ -2441,9 +2238,7 @@ mod registered_by_hand {
     #[test]
     fn the_declared_baseline_is_the_one_used() {
         let cfg = Config::default().with_max_time(Duration::from_millis(60));
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("e2e"));
+        let mut suite = cfg.suite();
         let tokens = suite.try_add_registered().unwrap();
         suite.run();
 
@@ -2463,9 +2258,7 @@ mod registered_by_hand {
     #[test]
     fn registered_and_hand_added_benchmarks_mix() {
         let cfg = Config::default().with_max_time(Duration::from_millis(60));
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("e2e"));
+        let mut suite = cfg.suite();
         let by_hand = suite.add("e2e::by_hand", || work(150));
         let tokens = suite.try_add_registered().unwrap();
         let after = suite.add("e2e::after", || work(150));
@@ -2490,9 +2283,7 @@ mod registered_by_hand {
     #[test]
     fn registered_results_are_recoverable_from_the_report_alone() {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("e2e"));
+        let mut suite = cfg.suite();
         // Deliberately thrown away: a script driving a benchmark binary has no
         // way to get hold of these.
         drop(suite.try_add_registered().unwrap());
@@ -2519,9 +2310,7 @@ mod registered_by_hand {
     #[test]
     fn a_script_can_check_which_registered_alternative_wins() {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("e2e"));
+        let mut suite = cfg.suite();
         drop(suite.try_add_registered().unwrap());
         let report = suite.run();
 
@@ -2804,9 +2593,7 @@ mod versions_and_rivals {
         // `inventory` registry - restricted to this module's own names, so
         // `try_add_registered` does not also assemble and measure
         // `registered_by_hand`'s benchmarks on every call here.
-        let mut suite = cfg
-            .suite()
-            .with_filter(Filter::everything().matching("mixing"));
+        let mut suite = cfg.suite();
         let tokens = suite.try_add_registered().unwrap();
         suite.run();
         tokens

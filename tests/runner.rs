@@ -7,7 +7,7 @@
 //! test is the whole path from an attribute to an exit status.
 
 use scaling::runner::{measure, run, Format, Options, Outcome};
-use scaling::{Config, Filter};
+use scaling::Config;
 use std::time::Duration;
 
 fn work(n: usize) -> u64 {
@@ -85,18 +85,6 @@ fn each_format_runs() {
     }
 }
 
-/// A filter that matches nothing is a successful run of nothing, not an
-/// error: a `Filter` is how a caller narrows a run, and mistyping a pattern
-/// should say so rather than look like a broken build.
-#[test]
-fn a_filter_matching_nothing_still_succeeds() {
-    let outcome = run(Options {
-        filter: Filter::everything().matching("no-such-benchmark"),
-        ..quick()
-    });
-    assert_eq!(outcome, Outcome::Measured);
-}
-
 /// A script can measure and then read the numbers, rather than reading a
 /// printout of them.
 ///
@@ -107,11 +95,7 @@ fn a_filter_matching_nothing_still_succeeds() {
 /// module and function a benchmark was declared in.
 #[test]
 fn a_script_can_read_the_numbers_it_measured() {
-    let report = measure(&Options {
-        filter: Filter::everything().matching("regressing"),
-        ..quick()
-    })
-    .expect("these registrations compose");
+    let report = measure(&quick()).expect("these registrations compose");
 
     let comparison = report
         .comparison("regressing@regressing_input")
@@ -128,10 +112,7 @@ fn a_script_can_read_the_numbers_it_measured() {
         "ten times the work should measure slower, not faster",
     );
 
-    assert!(
-        report.stats("flat").is_none(),
-        "the filter kept one group, so nothing else is in the report",
-    );
+    assert!(report.stats("flat").is_some());
 }
 
 /// Registrations that do not compose come back as a list rather than a
@@ -143,23 +124,4 @@ fn measure_hands_back_what_it_could_not_assemble() {
     // `suite::bad_registrations` (src/suite.rs), which cannot share a
     // binary with these.
     assert!(measure(&quick()).is_ok());
-}
-
-/// `Filter::listing(true)` measures nothing, so it is fast whatever the
-/// budget says - and it is the answer to "did my benchmark get linked in",
-/// which is the question `inventory`'s failure mode provokes.
-#[test]
-fn listing_measures_nothing() {
-    let started = std::time::Instant::now();
-    let outcome = run(Options {
-        cfg: Config::default(),
-        filter: Filter::everything().listing(true),
-        ..Options::default()
-    });
-    assert_eq!(outcome, Outcome::Measured);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "listing took {:?}, so it measured something",
-        started.elapsed(),
-    );
 }

@@ -9,17 +9,15 @@
 //! scaling::main!();
 //! ```
 //!
-//! Anything else - filtering to one benchmark, a tighter budget, list
-//! output - is a [`Options`] built by hand and passed to [`run`] or
+//! Anything else - a tighter budget or different output format - is an
+//! [`Options`] built by hand and passed to [`run`] or
 //! [`measure`] from your own `main`:
 //!
 //! ```no_run
 //! use scaling::runner::{run, Format, Options};
-//! use scaling::Filter;
 //!
 //! fn main() -> std::process::ExitCode {
 //!     let options = Options {
-//!         filter: Filter::everything().matching("sort"),
 //!         format: Format::List,
 //!         ..Options::default()
 //!     };
@@ -27,8 +25,8 @@
 //! }
 //! ```
 //!
-//! See [`Options`] for every field, [`Filter`] for what a name matches and
-//! how patterns combine, and [`Config`] for the accuracy/budget knobs.
+//! See [`Options`] for every field and [`Config`] for the accuracy/budget
+//! knobs.
 //!
 //! # What it prints where
 //!
@@ -40,7 +38,7 @@
 use crate::assemble::Lane;
 #[cfg(test)]
 use crate::Stats;
-use crate::{Config, Filter, Found, RegisteredTokens, Report, Suite};
+use crate::{Config, Found, RegisteredTokens, Report, Suite};
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
@@ -78,29 +76,20 @@ pub enum Format {
 /// Everything the runner needs, which is everything a caller would otherwise
 /// have written a `main` to decide.
 ///
-/// Public and plainly built: a crate wanting anything other than every
-/// benchmark, table output and the default budget builds one of these by
-/// hand and calls [`run`] or [`measure`] from its own `main`, rather than
-/// using [`crate::main!`] and being pushed out of the runner entirely.
+/// Public and plainly built: a crate wanting anything other than table output
+/// and the default budget builds one of these by hand and calls [`run`] or
+/// [`measure`] from its own `main`, rather than using [`crate::main!`].
 ///
 /// ```no_run
 /// use scaling::runner::{run, Options};
-/// use scaling::Filter;
-///
 /// fn main() -> std::process::ExitCode {
-///     let options = Options {
-///         filter: Filter::everything().matching("sort"),
-///         ..Options::default()
-///     };
-///     run(options).into()
+///     run(Options::default()).into()
 /// }
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Accuracy and budget, as [`Config`] describes them.
     pub cfg: Config,
-    /// Which benchmarks to measure.
-    pub filter: Filter,
     /// How to print what they measured.
     pub format: Format,
 }
@@ -112,7 +101,7 @@ pub struct Options {
 /// see what happened rather than only pass it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Everything the filter kept was measured. Exit `0`.
+    /// The registered benchmarks were measured. Exit `0`.
     Measured,
     /// The run never started: a command line that did not parse, or
     /// registrations that contradict each other. Exit `2`.
@@ -145,7 +134,7 @@ pub fn main() -> ExitCode {
 /// `measure` hands back is what `run` would have printed, assembled by the
 /// same code under the same options.
 fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diagnostic>> {
-    let mut suite = options.cfg.suite().with_filter(options.filter.clone());
+    let mut suite = options.cfg.suite();
     let tokens = suite.try_add_registered()?;
     Ok((suite, tokens))
 }
@@ -159,9 +148,8 @@ fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diag
 /// [`Report::stats`], [`Report::comparison`], [`Report::scaling`] - which is
 /// what makes this usable without knowing in advance what a run will hold.
 ///
-/// The filter applies, so a script can measure the one comparison it cares
-/// about. `Err` carries every reason the registrations do not compose, the
-/// same list [`run`] would have printed.
+/// `Err` carries every reason the registrations do not compose, the same list
+/// [`run`] would have printed.
 ///
 /// ```no_run
 /// use scaling::runner::{measure, Options};
@@ -176,8 +164,7 @@ fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diag
 ///     (0..1000u64).collect::<Vec<_>>().binary_search(&42).is_ok()
 /// }
 ///
-/// let mut options = Options::default();
-/// options.filter = scaling::Filter::everything().matching("lookup");
+/// let options = Options::default();
 /// let report = measure(&options).expect("the registrations compose");
 /// let fast = report.comparison("lookup").expect("it ran");
 /// assert_eq!(fast.baseline_name(), "linear_scan");
@@ -205,16 +192,8 @@ pub fn run(options: Options) -> Outcome {
         eprintln!("warning: {w}");
     }
 
-    // Before `is_listing`: an empty suite has nothing to list either, and
-    // listing one - nothing registered at all, or a filter that matched
-    // nothing - should say so rather than print zero bytes and exit clean.
     if suite.is_empty() {
         eprintln!("{}", nothing_to_run(&tokens));
-        return Outcome::Measured;
-    }
-
-    if suite.filter().is_listing() {
-        print!("{}", listing(&suite, &tokens));
         return Outcome::Measured;
     }
     eprintln!(
@@ -233,43 +212,6 @@ pub fn run(options: Options) -> Outcome {
     Outcome::Measured
 }
 
-/// What would run, and for a comparison, what it holds.
-///
-/// The alternatives matter here more than anywhere else: a comparison
-/// reaches the report under one name, and a listing that stopped at that
-/// name would answer "is my benchmark linked in" with a maybe.
-fn listing(suite: &Suite<'_>, tokens: &RegisteredTokens) -> String {
-    let alternatives = alternatives(tokens);
-    let mut out = String::new();
-    for name in suite.names() {
-        out.push_str(name);
-        out.push('\n');
-        for (i, alt) in alternatives.get(name).into_iter().flatten().enumerate() {
-            let mark = if i == 0 { "  (baseline)" } else { "" };
-            out.push_str(&format!("    {alt}{mark}\n"));
-        }
-    }
-    out
-}
-
-/// Every comparison's alternatives, baseline first, by the name the
-/// comparison itself is reported under.
-fn alternatives(tokens: &RegisteredTokens) -> BTreeMap<String, Vec<String>> {
-    let mut out = BTreeMap::new();
-    for lane in &tokens.lanes {
-        // A lane with one candidate has nothing to compare against, so its
-        // cells are plain benchmarks and their names say what they are.
-        if lane.candidates.len() < 2 {
-            continue;
-        }
-        let names: Vec<String> = lane.candidates.iter().map(|c| c.name.clone()).collect();
-        for input in &lane.inputs {
-            out.insert(lane.comparison_name(input), names.clone());
-        }
-    }
-    out
-}
-
 /// Why a run measured nothing, which is nearly always one of two things.
 fn nothing_to_run(tokens: &RegisteredTokens) -> String {
     let registered = tokens.flat.len() + tokens.scaling.len() + tokens.comparisons.len();
@@ -283,10 +225,7 @@ fn nothing_to_run(tokens: &RegisteredTokens) -> String {
          the attribute is enabled here."
             .to_string()
     } else {
-        format!(
-            "the filter matched none of the {registered} registered benchmarks; \
-             Filter::everything().listing(true) shows what there is"
-        )
+        format!("no measurements were produced from the {registered} registered benchmarks")
     }
 }
 
@@ -350,9 +289,8 @@ struct Cell {
 
 /// One matrix lane as a grid: candidates down the side, inputs across.
 ///
-/// Returns `None` when nothing in the lane was measured - a filtered run is
-/// entitled to leave a whole matrix out, and an empty grid says less than no
-/// grid at all. Names it did show are added to `gridded`, so the caller
+/// Returns `None` when nothing in the lane was measured. Names it did show
+/// are added to `gridded`, so the caller
 /// knows not to print them again.
 fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<String> {
     let mut columns: Vec<String> = Vec::new();
@@ -620,8 +558,7 @@ mod grids {
         );
     }
 
-    /// A filtered run is entitled to leave a whole matrix out, and an empty
-    /// grid says less than no grid at all.
+    /// An empty grid says less than no grid at all.
     #[test]
     fn a_lane_nothing_measured_prints_nothing() {
         let cfg = Config::default();

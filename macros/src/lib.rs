@@ -912,9 +912,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     }
                     if repeatable {
                         // Setup runs once, lazily - on first call, which is
-                        // also the first time `Adder::flat`'s own filter
-                        // check has already passed, so a filtered-out
-                        // benchmark never pays for it. `__action` stays a
+                        // `__action` stays a
                         // concrete (if unnameable) type the whole way
                         // through: `impl Trait` is not `Box<dyn Trait>`, so
                         // nothing here is a dynamic call - every call after

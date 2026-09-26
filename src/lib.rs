@@ -362,8 +362,8 @@ produces `k` [`Stats`].
 Measuring them together is also what lets the multiple-comparison correction
 be right: the threshold each comparison is judged at comes from how many
 comparisons the run actually holds, which is knowable only once they have
-all been collected. Filter a run down to one comparison and it is judged
-more leniently, correctly so.
+all been collected. A run containing one comparison is judged according to
+that one comparison.
 
 What this buys is a *bound*, not an improvement. Reversing the declaration
 order of eight identical workloads moves an interleaved benchmark by
@@ -504,7 +504,6 @@ them the way a quiesced run's would be trusted.
 pub mod assemble;
 mod bench;
 mod compare;
-mod filter;
 mod kway;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
@@ -534,7 +533,6 @@ pub use self::bench::Stats;
 #[doc(hidden)]
 pub use self::bench::{bench, bench_clone_input, bench_make_input};
 pub use self::compare::Comparison;
-pub use self::filter::Filter;
 pub use self::kway::Comparisons;
 pub use self::scaling::{Scaling, ScalingStats};
 
@@ -564,9 +562,8 @@ pub use scaling_macros::{bench, bench_scaling, input};
 ///
 /// This expands to a `main` that discovers all registered benchmarks in the
 /// binary, measures them with the default [`Config`], and prints the table.
-/// For custom filtering, budgets, or output format, build [`runner::Options`]
-/// manually and call [`runner::run`] or [`runner::measure`] from your own
-/// `main`.
+/// For custom budgets or output format, build [`runner::Options`] manually and
+/// call [`runner::run`] or [`runner::measure`] from your own `main`.
 ///
 /// "This binary" means it literally: everything `#[scaling::bench]` and its
 /// siblings mark, anywhere in your crate's own `src/` - which the compiler
