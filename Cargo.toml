@@ -9,8 +9,8 @@ repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
 license = "MIT OR Apache-2.0"
-# Set by the dependencies below rather than by anything this crate does.
-rust-version = "1.71"
+# `#[expect]` was stabilized in Rust 1.81.
+rust-version = "1.81"
 
 # Only used to set CPU affinity, which only exists on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
