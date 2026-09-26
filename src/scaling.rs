@@ -12,21 +12,6 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 impl Config {
-    /// Benchmark the power-law scaling of a function.
-    ///
-    /// See [`bench_scaling`](fn@bench_scaling) for the default-accuracy version.
-    ///
-    /// The accuracy applies to [`Scaling::ns_per_scale`], the constant in
-    /// front of the fitted law, and only once the law itself has been
-    /// identified - see [`ScalingStats::rel_std_error`] for why those are
-    /// two different questions.
-    ///
-    /// `target_rel_error` is the one that makes sense here.
-    /// `target_abs_error` is accepted and well defined, but its units are
-    /// nanoseconds per `Nᴾ`, which makes it confusing.
-    /// Hidden alongside the free function of the same name: it is the
-    /// same one-shot measurement with an accuracy chosen. See
-    /// [`crate::bench`] for why they are still reachable.
     #[cfg(test)]
     pub(crate) fn bench_scaling<F, O>(&self, f: F, nmin: usize) -> ScalingStats
     where
@@ -37,9 +22,6 @@ impl Config {
         block_on(&clock, self.bench_scaling_async(&clock, f, nmin))
     }
 
-    /// The scaling sweep, which yields to the scheduler between rounds. See
-    /// [`Config::bench_scaling`], and [`Config::bench_make_input_async`] for
-    /// why the asynchronous form is the only one.
     pub(crate) async fn bench_scaling_async<F, O>(
         &self,
         clock: &Clock,
@@ -61,13 +43,6 @@ impl Config {
         .await
     }
 
-    /// Benchmark the power-law scaling of a function with a generated input.
-    ///
-    /// See [`bench_scaling_gen`] for the default-accuracy version, and
-    /// [`Config::bench_scaling`] for what the accuracy applies to.
-    /// Hidden alongside the free function of the same name: it is the
-    /// same one-shot measurement with an accuracy chosen. See
-    /// [`crate::bench`] for why they are still reachable.
     #[cfg(test)]
     pub fn bench_scaling_gen<G, F, I, O>(&self, make_input: G, f: F, nmin: usize) -> ScalingStats
     where

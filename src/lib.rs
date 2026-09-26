@@ -1016,20 +1016,6 @@ pub(crate) mod testutil {
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 
-    /// Near enough the same mean as [`bimodal_cost`], with no spread of its
-    /// own at all - so whatever varies when this is measured is the machine.
-    pub fn fixed_cost(seed: u64) -> impl FnMut() -> u64 {
-        let mut rng = XorShift(seed | 1);
-        move || {
-            std::hint::black_box(rng.next());
-            let mut acc = 0u64;
-            for i in 0..1001 {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
-            }
-            acc
-        }
-    }
-
     pub fn mean_and_spread(xs: &[f64]) -> (f64, f64) {
         let n = xs.len() as f64;
         let mean = xs.iter().sum::<f64>() / n;
