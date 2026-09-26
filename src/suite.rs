@@ -495,8 +495,8 @@ impl Report {
     /// }
     ///
     /// let report = measure(&Options::default()).expect("the registrations compose");
-    /// let stats: scaling::Stats = report.get("sum_to_100").expect("it ran");
-    /// assert!(stats.ns_per_iter > 0.0);
+    /// let timing: scaling::Timing = report.get("sum_to_100").expect("it ran");
+    /// assert!(timing.ns_per_iter > 0.0);
     /// ```
     ///
     /// The one place a downcast is unavoidable: `T` is caller-chosen, and a
@@ -528,7 +528,7 @@ impl Report {
     ///
     /// `None` if that name was something else - a comparison, say - so a
     /// caller that does not know what it is looking at can simply ask.
-    pub fn stats(&self, name: &str) -> Option<Stats> {
+    pub fn stats(&self, name: &str) -> Option<Timing> {
         match self.find(name)? {
             Found::Timing(c) if c.stats().len() == 1 => Some(c.stats()[0].clone()),
             _ => None,
@@ -558,7 +558,7 @@ impl Report {
     }
 
     /// Every flat measurement, with its name, in the order they were added.
-    pub fn all_stats(&self) -> impl Iterator<Item = (&str, Stats)> {
+    pub fn all_stats(&self) -> impl Iterator<Item = (&str, Timing)> {
         self.entries.iter().filter_map(|(name, found)| match found {
             Found::Timing(c) if c.stats().len() == 1 => Some((name.as_str(), c.stats()[0].clone())),
             _ => None,
@@ -610,13 +610,14 @@ mod tests {
     use crate::testutil::{fixed_cost, mean_and_spread};
 
     fn nothing() -> Found {
-        Found::Timing(Timings::test_singleton(Stats {
+        Found::Timing(Timings::test_singleton(Timing {
             ns_per_iter: 0.0,
             std_error: 0.0,
             iterations: 0,
             samples: 0,
             hit_limit: false,
             untrustworthy: false,
+            difference: None,
         }))
     }
 
@@ -1065,16 +1066,16 @@ mod tests {
         println!("quiesced: {}", crate::testutil::quiesced());
         let cfg = Config::default().with_max_time(Duration::from_millis(100));
 
-        let mut seq: Vec<Stats> = Vec::new();
-        let mut alone: Vec<Stats> = Vec::new();
-        let mut inter: Vec<Stats> = Vec::new();
+        let mut seq: Vec<Timing> = Vec::new();
+        let mut alone: Vec<Timing> = Vec::new();
+        let mut inter: Vec<Timing> = Vec::new();
         // A suite of one is the control. It goes through every line of the
         // scheduler, the async loop and the boxed future that the real arm
         // does, but has nothing to be interleaved *with* - so its samples are
         // back to back, exactly as `bench`'s are. If the effect is
         // interleaving it should look like `bench`; if it is anything else
         // about the suite machinery, it should look like the interleaved arm.
-        let run_suite = |subject_only: bool, out: &mut Vec<Stats>, seed: u64| {
+        let run_suite = |subject_only: bool, out: &mut Vec<Timing>, seed: u64| {
             let mut suite = cfg.suite();
             suite.add("subject", fixed_cost(seed));
             if !subject_only {
@@ -1101,7 +1102,7 @@ mod tests {
             }
         }
 
-        let report = |label: &str, runs: &[Stats]| {
+        let report = |label: &str, runs: &[Timing]| {
             let mut means: Vec<f64> = runs.iter().map(|s| s.ns_per_iter).collect();
             let (_, rel_spread) = mean_and_spread(&means);
             means.sort_by(|a, b| a.partial_cmp(b).unwrap());

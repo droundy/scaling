@@ -376,7 +376,7 @@ pub struct Plan {
 /// simply never handed a `Vec<u8>`.
 ///
 /// A lane with one candidate still uses an input group, but its result is a
-/// plain [`Stats`](crate::Stats) rather than a comparison report. The runner
+/// plain [`Timing`](crate::Timing) rather than a comparison report. The runner
 /// makes that distinction when it consumes a `Lane`.
 #[derive(Debug)]
 pub struct Lane {
@@ -1005,7 +1005,7 @@ mod tests {
 
     /// A lone candidate has no difference to report, but remains a valid
     /// singleton lane. The consumer decides whether to report its result as
-    /// `Stats` or as a one-entry group.
+    /// `Timing` or as a one-entry group.
     #[test]
     fn a_lone_candidate_is_kept_not_rejected() {
         let cs = leak_c(vec![cand::<()>("lonely", "only", "()", true)]);
@@ -1309,8 +1309,9 @@ mod pairing {
             .add_input("b", |e: &mut ErasedInput| sum(e.get_mut::<Vec<u64>>()))
             .run();
         let (_, c) = results.against_baseline().next().expect("one alternative");
-        let combined = (c.candidate.std_error.powi(2) + c.baseline.std_error.powi(2)).sqrt();
-        let paired = c.std_error();
+        let difference = c.difference().expect("candidate has a difference");
+        let combined = difference.combined_std_error(c.std_error);
+        let paired = difference.std_error;
         println!("combined={combined:.4} paired={paired:.4}");
         assert!(
             paired < combined / 2.0,

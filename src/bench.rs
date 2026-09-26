@@ -3,11 +3,11 @@
 //!
 //! The loop keeps taking samples until the standard error of the mean is
 //! small enough to meet the caller's accuracy target, or until the time
-//! budget runs out; see [`Config`] for the target and [`Stats`] for what
+//! budget runs out; see [`Config`] for the target and [`Timing`] for what
 //! comes back.
 
 use super::*;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Formatter};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// function on a short budget - nothing has been selected for, and the
 /// error bar from the three or four samples we did manage is honest, wide,
 /// and a good deal more use than none at all. So a budget-forced stop
-/// reports whatever standard error it has (and sets [`Stats::hit_limit`]).
+/// reports whatever standard error it has (and sets [`Timing::hit_limit`]).
 ///
 /// Not a knob: callers control accuracy with [`Config::relative`] and
 /// [`Config::absolute`], and cost with [`Config::max_time`], and no useful
@@ -70,9 +70,9 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 /// below this.
 const MAX_SAMPLES: usize = 1_000_000;
 
-/// Statistics for a benchmark run.
-#[derive(Debug, PartialEq, Clone)]
-pub struct Stats {
+/// A benchmark's measured timing.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Timing {
     /// The time, in nanoseconds, per iteration.
     pub ns_per_iter: f64,
     /// Standard error of `ns_per_iter`, in nanoseconds - the figure shown
@@ -88,7 +88,7 @@ pub struct Stats {
     /// that many digits. `NaN` when fewer than 2 samples were collected
     /// (see `hit_limit`), where a standard error cannot exist.
     ///
-    /// [`Stats::rel_std_error`] gives the same figure as a fraction.
+    /// [`Timing::rel_std_error`] gives the same figure as a fraction.
     pub std_error: f64,
     /// How many times the benchmarked code was actually run, including the
     /// calibration probes whose timings were discarded.
@@ -105,7 +105,7 @@ pub struct Stats {
     /// target: the answer is real, just less precise than you asked for.
     ///
     /// Look at `std_error` to see how much less. Distinct from
-    /// [`Stats::untrustworthy`], which is about whether to believe
+    /// [`Timing::untrustworthy`], which is about whether to believe
     /// `std_error` in the first place.
     pub hit_limit: bool,
     /// `true` if too few samples were collected for the standard error
@@ -119,20 +119,48 @@ pub struct Stats {
     /// simply needed longer sets only `hit_limit`, and its error bar is
     /// perfectly believable - just wider than requested.
     pub untrustworthy: bool,
+    pub difference: Option<Difference>,
 }
 
-impl Stats {
+impl Timing {
     /// Standard error as a fraction of the measurement (0.01 = 1%).
     ///
-    /// `NaN` when [`Stats::std_error`] is, and also when `ns_per_iter` is
+    /// `NaN` when [`Timing::std_error`] is, and also when `ns_per_iter` is
     /// zero, where a relative error is undefined.
     pub fn rel_std_error(&self) -> f64 {
         self.std_error / self.ns_per_iter
     }
+
+    /// The difference from the baseline, if this is not the baseline itself.
+    pub fn difference(&self) -> Option<&Difference> {
+        self.difference.as_ref()
+    }
+
+    /// Whether this timing differs significantly from its baseline.
+    pub fn is_changed(&self) -> bool {
+        self.difference.as_ref().is_some_and(Difference::is_changed)
+    }
+
+    pub fn difference_ns(&self) -> f64 {
+        self.difference.as_ref().map_or(f64::NAN, |d| d.ns)
+    }
+
+    pub fn min_detectable_difference(&self) -> f64 {
+        self.difference
+            .as_ref()
+            .map_or(f64::NAN, Difference::min_detectable_difference)
+    }
+
+    pub fn min_detectable_rel(&self) -> f64 {
+        self.difference
+            .as_ref()
+            .map_or(f64::NAN, Difference::min_detectable_rel)
+    }
+
 }
 
-impl Display for Stats {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+impl Timing {
+    pub(crate) fn write_measurement(&self, f: &mut Formatter) -> fmt::Result {
         // Report the error bar in the *same* unit as the measurement, even
         // when that means leading zeroes. The point of an error bar is to
         // let a reader tell at a glance whether two results differ by more
@@ -174,7 +202,7 @@ impl Display for Stats {
             // showing when the only quality signal was an R², which says
             // nothing about how well the answer is known; now that the `±`
             // states the precision outright they are just noise on a line
-            // meant to be scanned in a column. Both remain on [`Stats`] for
+            // meant to be scanned in a column. Both remain on [`Timing`] for
             // anyone who wants them.
             write!(f, "{value:>11} ± {error}{limit}")
         }
@@ -187,7 +215,7 @@ impl Display for Stats {
 /// thinking we're going to use it. Make sure to return enough information
 /// to prevent the optimiser from eliminating code from your benchmark! (See
 /// the module docs for more.)
-pub fn bench<F, O>(f: F) -> Stats
+pub fn bench<F, O>(f: F) -> Timing
 where
     F: FnMut() -> O,
 {
@@ -198,7 +226,7 @@ where
 /// [`Config`]).
 ///
 /// See [`Config::bench_clone_input`] for the full documentation.
-pub fn bench_clone_input<F, I, O>(input: I, f: F) -> Stats
+pub fn bench_clone_input<F, I, O>(input: I, f: F) -> Timing
 where
     F: FnMut(&mut I) -> O,
     I: Clone,
@@ -210,7 +238,7 @@ where
 /// accuracy (see [`Config`]).
 ///
 /// See [`Config::bench_make_input`] for the full documentation.
-pub fn bench_make_input<G, F, I, O>(make_input: G, f: F) -> Stats
+pub fn bench_make_input<G, F, I, O>(make_input: G, f: F) -> Timing
 where
     G: FnMut() -> I,
     F: FnMut(&mut I) -> O,
@@ -227,7 +255,7 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench<F, O>(&self, mut f: F) -> Stats
+    pub fn bench<F, O>(&self, mut f: F) -> Timing
     where
         F: FnMut() -> O,
     {
@@ -249,7 +277,7 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench_clone_input<F, I, O>(&self, input: I, f: F) -> Stats
+    pub fn bench_clone_input<F, I, O>(&self, input: I, f: F) -> Timing
     where
         F: FnMut(&mut I) -> O,
         I: Clone,
@@ -312,7 +340,7 @@ impl Config {
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
     #[doc(hidden)]
-    pub fn bench_make_input<G, F, I, O>(&self, make_input: G, f: F) -> Stats
+    pub fn bench_make_input<G, F, I, O>(&self, make_input: G, f: F) -> Timing
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
@@ -339,7 +367,7 @@ impl Config {
         clock: &Clock,
         mut make_input: G,
         mut f: F,
-    ) -> Stats
+    ) -> Timing
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
@@ -351,13 +379,14 @@ impl Config {
             // Even the single calibration probe blew the whole time budget
             // (an extremely slow benchmark): report it directly rather
             // than paying for a second full-length call just to "warm up".
-            return Stats {
+            return Timing {
                 ns_per_iter: first_ns / unit as f64,
                 std_error: f64::NAN,
                 iterations: probed,
                 samples: 1,
                 hit_limit: true,
                 untrustworthy: true,
+                difference: None,
             };
         }
         // Otherwise the probe that finished calibration serves as the
@@ -389,7 +418,7 @@ impl Config {
                 && measured_ns >= MIN_SAMPLE_TIME.as_secs_f64() * 1e9
                 && self.accuracy_met(mean, std_error);
             if precise_enough || out_of_budget {
-                return Stats {
+                return Timing {
                     ns_per_iter: mean,
                     std_error,
                     // Derived rather than accumulated, which keeps the
@@ -404,6 +433,7 @@ impl Config {
                     // means what it says; stopping below `MIN_SAMPLES`
                     // leaves an error bar too noisy to read at all.
                     untrustworthy: samples.count < MIN_SAMPLES,
+                    difference: None,
                 };
             }
             // One sample per poll. In a suite this is where every other
@@ -532,7 +562,7 @@ where
     let target = SAMPLE_TIME.as_secs_f64() * 1e9;
     let mut unit = 1usize;
     // Every probe really does run the benchmark, so they count towards
-    // `Stats::iterations` even though their timings are discarded.
+    // `Timing::iterations` even though their timings are discarded.
     let mut probed = 0u64;
     loop {
         let (setup_ns, t) = time_batch(make_input, f, xs, unit);
@@ -796,19 +826,19 @@ mod tests {
         const REPEATS: usize = 10;
         // A larger gap keeps the test meaningful: a small gap often stops at the
         // same floor for both targets.
-        let loose: Vec<Stats> = (0..REPEATS)
+        let loose: Vec<Timing> = (0..REPEATS)
             .map(|r| Config::relative(0.05).bench(variable_cost(seed_for(r))))
             .collect();
-        let tight: Vec<Stats> = (0..REPEATS)
+        let tight: Vec<Timing> = (0..REPEATS)
             .map(|r| Config::relative(0.003).bench(variable_cost(seed_for(r))))
             .collect();
-        let iters = |v: &[Stats]| v.iter().map(|s| s.iterations).sum::<u64>();
+        let iters = |v: &[Timing]| v.iter().map(|s| s.iterations).sum::<u64>();
         let (loose_iters, tight_iters) = (iters(&loose), iters(&tight));
         println!("loose iterations {loose_iters}, tight iterations {tight_iters}");
         assert!(tight_iters > 2 * loose_iters);
 
         let spread =
-            |v: &[Stats]| mean_and_spread(&v.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>()).1;
+            |v: &[Timing]| mean_and_spread(&v.iter().map(|s| s.ns_per_iter).collect::<Vec<_>>()).1;
         let (loose_spread, tight_spread) = (spread(&loose), spread(&tight));
         println!(
             "loose spread {:.2}%, tight spread {:.2}%",
@@ -853,13 +883,14 @@ mod tests {
         let shown = |ns: f64, rel: f64| {
             format!(
                 "{}",
-                Stats {
+                Timing {
                     ns_per_iter: ns,
                     std_error: ns * rel,
                     iterations: 10,
                     samples: 6,
                     hit_limit: false,
                     untrustworthy: false,
+                    difference: None,
                 }
             )
             .trim_start()
@@ -994,7 +1025,7 @@ mod tests {
         const REPEATS: usize = 40;
         for &target in &[0.05, 0.02, 0.01] {
             let cfg = Config::relative(target);
-            let stats: Vec<Stats> = (0..REPEATS)
+            let stats: Vec<Timing> = (0..REPEATS)
                 .map(|r| cfg.bench(variable_cost(seed_for(r))))
                 .collect();
             let claimed = stats.iter().map(|s| s.rel_std_error()).sum::<f64>() / REPEATS as f64;

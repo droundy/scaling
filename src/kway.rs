@@ -205,7 +205,7 @@ impl<I: 'static> InputGroup<I> {
             self.entries.len()
         );
         let _machine = Machine::claim();
-        // `k` times the budget, because `k` `Stats` come out of this: at the
+        // `k` times the budget, because `k` timings come out of this: at the
         // single budget each alternative would get a `k`th of the wall clock
         // a lone `bench` call is allowed, for the same target.
         let clock = Clock::new(self.cfg.max_time * self.entries.len().max(1) as u32);
@@ -324,35 +324,32 @@ impl<I: 'static> InputGroup<I> {
         };
 
         let iterations = probed + rounds as u64 * unit as u64;
-        let stats = (0..k)
+        let mut timings: Vec<Timing> = (0..k)
             .map(|i| {
                 let (ns_per_iter, std_error) = own[i].mean_and_stderr();
-                Stats {
+                Timing {
                     ns_per_iter,
                     std_error,
                     iterations,
                     samples: rounds,
                     hit_limit: !precise_enough,
                     untrustworthy: rounds < MIN_SAMPLES,
+                    difference: None,
                 }
             })
             .collect();
-        // Index zero is the baseline, which has no difference from itself to
-        // report an error for.
-        let paired_std_errors = (0..k)
-            .map(|i| {
-                if i == 0 {
-                    f64::NAN
-                } else {
-                    diffs[i].mean_and_stderr().1
-                }
-            })
-            .collect();
+        let baseline = timings[0];
+        for (timing, diff) in timings[1..].iter_mut().zip(diffs[1..].iter()) {
+            timing.difference = Some(Difference::from_parts(
+                &baseline,
+                timing,
+                z_alpha,
+                diff.mean_and_stderr().1,
+            ));
+        }
         Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
-            stats,
-            paired_std_errors,
-            z_alpha,
+            timings,
         }
     }
 }
@@ -440,26 +437,20 @@ async fn calibrate<I>(
     }
 }
 
-/// What running an input group measured: a [`Stats`] for every alternative,
+/// What running an input group measured: a [`Timing`] for every alternative,
 /// and every alternative's difference from the baseline when there is one.
 #[derive(Debug, Clone)]
 pub struct Timings {
     names: Vec<String>,
-    stats: Vec<Stats>,
-    /// Standard error of each alternative's difference from the baseline,
-    /// accumulated per round. `NaN` at index zero, the baseline itself.
-    paired_std_errors: Vec<f64>,
-    z_alpha: f64,
+    timings: Vec<Timing>,
 }
 
 impl Timings {
     #[cfg(test)]
-    pub(crate) fn test_singleton(stats: Stats) -> Self {
+    pub(crate) fn test_singleton(timing: Timing) -> Self {
         Timings {
             names: vec!["nothing".to_string()],
-            stats: vec![stats],
-            paired_std_errors: vec![f64::NAN],
-            z_alpha: f64::NAN,
+            timings: vec![timing],
         }
     }
 
@@ -475,24 +466,19 @@ impl Timings {
     }
 
     /// What each alternative measured, in the order they were added.
-    pub fn stats(&self) -> &[Stats] {
-        &self.stats
+    pub fn timings(&self) -> &[Timing] {
+        &self.timings
+    }
+
+    /// What each alternative measured, in the order they were added.
+    pub fn stats(&self) -> &[Timing] {
+        self.timings()
     }
 
     /// Each alternative beyond the baseline, paired with its name, as a
     /// [`Timing`] against the baseline.
     pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {
-        (1..self.stats.len()).map(move |i| {
-            (
-                self.names[i].as_str(),
-                Timing::from_parts(
-                    self.stats[0].clone(),
-                    self.stats[i].clone(),
-                    self.z_alpha,
-                    self.paired_std_errors[i],
-                ),
-            )
-        })
+        (1..self.timings.len()).map(move |i| (self.names[i].as_str(), self.timings[i].clone()))
     }
 
     /// Whether any alternative differed from the baseline.
@@ -504,9 +490,15 @@ impl Timings {
 impl Display for Timings {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let width = self.names.iter().map(|n| n.len()).max().unwrap_or(0);
-        writeln!(f, "{:width$}  {}  (baseline)", self.names[0], self.stats[0])?;
+        writeln!(
+            f,
+            "{:width$}  {}  (baseline)",
+            self.names[0], self.timings[0]
+        )?;
         for (name, c) in self.against_baseline() {
-            writeln!(f, "{:width$}  {}  {}", name, c.candidate, c)?;
+            write!(f, "{:width$}  ", name)?;
+            c.write_measurement(f)?;
+            writeln!(f, "  {}", c)?;
         }
         Ok(())
     }
@@ -659,9 +651,8 @@ mod tests {
                 .run();
             println!("{results}");
             for (_, c) in results.against_baseline() {
-                let combined =
-                    (c.baseline.std_error.powi(2) + c.candidate.std_error.powi(2)).sqrt();
-                ratios.push(c.std_error() / combined);
+                let difference = c.difference().expect("candidate has a difference");
+                ratios.push(difference.std_error / difference.combined_std_error(c.std_error));
             }
         }
         // Individually these run from about 0.4 to 0.9 - a ratio of two

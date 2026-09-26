@@ -218,10 +218,10 @@ standard errors *away* from the true value about 5% of the time, and about a
 third of the time you should expect the discrepancy to be more than one
 standard error.  So do *not* take this `±` value as a bound on the error!
 
-[`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
-and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
-work it took, [`Stats::hit_limit`] tells you if the budget ran out before
-the target accuracy was met, and [`Stats::untrustworthy`] tells you if too
+[`Timing::std_error`] and [`Timing::rel_std_error`] give the error absolutely
+and relatively, [`Timing::iterations`] and [`Timing::samples`] say how much
+work it took, [`Timing::hit_limit`] tells you if the budget ran out before
+the target accuracy was met, and [`Timing::untrustworthy`] tells you if too
 few samples were collected for the error bar itself to mean anything.
 Those are marked `(limit)` and `(untrusted)` in the output.
 
@@ -581,7 +581,7 @@ pub(crate) mod significant;
 // Use `self::` because `scaling` is also the crate name; without it, doctests
 // can end up with an ambiguous `scaling::` path when built against the crate
 // itself.
-pub use self::bench::Stats;
+pub use self::bench::Timing;
 
 /// Measure one closure, once, where you call it.
 ///
@@ -589,7 +589,7 @@ pub use self::bench::Stats;
 /// timed with a plain `Instant` to measure the overhead of taking a benchmark.
 #[doc(hidden)]
 pub use self::bench::{bench, bench_clone_input, bench_make_input};
-pub use self::compare::Timing;
+pub use self::compare::Difference;
 pub use self::kway::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
 
@@ -729,7 +729,7 @@ pub struct Config {
     /// precision.
     pub target_abs_error: Duration,
     /// Give up after roughly this much wall-clock time even if neither goal
-    /// was reached, setting [`Stats::hit_limit`].
+    /// was reached, setting [`Timing::hit_limit`].
     ///
     /// Wall clock rather than measured time, because this is a promise about
     /// how long the caller waits - a benchmark whose input is slow to build
@@ -967,7 +967,7 @@ impl Running {
     /// The error is absolute rather than relative because that is the
     /// primitive quantity: it needs nothing but the samples, whereas
     /// dividing by the mean is undefined when the mean is zero.
-    /// [`Stats::rel_std_error`] is derived from it for reporting.
+    /// [`Timing::rel_std_error`] is derived from it for reporting.
     fn mean_and_stderr(&self) -> (f64, f64) {
         if self.count < 2 {
             // A standard error needs at least two points to exist at all.

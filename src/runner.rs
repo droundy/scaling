@@ -311,8 +311,13 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
                 cells.insert(
                     (alt.to_string(), input.name.clone()),
                     Cell {
-                        ns: c.candidate.ns_per_iter,
-                        percent: Some((100.0 * c.difference_ns() / baseline, c.is_changed())),
+                        ns: c.ns_per_iter,
+                        percent: Some((
+                            c.difference()
+                                .expect("candidate has a difference")
+                                .percent(),
+                            c.is_changed(),
+                        )),
                     },
                 );
             }

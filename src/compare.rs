@@ -1,137 +1,88 @@
 use super::*;
 use std::fmt::{self, Display, Formatter};
 
-/// One alternative measured against another: the two [`Stats`] and the
-/// verdict built from them.
-#[derive(Debug, Clone)]
-pub struct Timing {
-    /// What the alternative this one is judged against measured.
-    pub baseline: Stats,
-    /// What this alternative measured.
-    pub candidate: Stats,
-    /// The Bonferroni limit this comparison was judged against, carried from
-    /// the family of comparisons it was measured in. See
-    /// [`Config::z_alpha_for`].
+/// The measured difference between a timing and its baseline.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Difference {
+    /// How much slower the candidate measured than the baseline, in
+    /// nanoseconds. Negative means the candidate was faster.
+    pub ns: f64,
+    /// Standard error of `ns`, in nanoseconds.
+    pub std_error: f64,
+    /// The baseline's nanoseconds per iteration, used for relative changes.
+    pub baseline_ns_per_iter: f64,
+    baseline_std_error: f64,
     z_alpha: f64,
-    /// Standard error of the difference, taken from the per-round
-    /// differences rather than by combining the two halves. `NaN` when
-    /// fewer than two rounds were run.
-    paired_std_error: f64,
 }
 
-impl Timing {
-    /// How much slower `candidate` measured than `baseline`, in nanoseconds.
-    /// Negative when `candidate` was faster.
-    pub fn difference_ns(&self) -> f64 {
-        self.candidate.ns_per_iter - self.baseline.ns_per_iter
-    }
-    /// Standard error of [`Timing::difference_ns`].
-    ///
-    /// Taken from the per-round differences rather than by combining the two
-    /// halves. The halves are timed back to back under nearly identical
-    /// conditions, so whatever the machine does slowly - a drifting clock, a
-    /// warming package - moves both together and cancels out of each round's
-    /// difference. Adding their variances as though they were independent
-    /// counts that common movement twice.
-    ///
-    /// It shows on a workload with real spread. Comparing such a function
-    /// against itself, where the true difference is zero so the spread of
-    /// the reported difference is exactly what the `±` should describe:
-    ///
-    /// ```none
-    ///                observed spread   claimed
-    ///   combined         0.123ns       0.165ns
-    ///   paired           0.123ns       0.126ns
-    /// ```
-    ///
-    /// A third narrower, and honest rather than merely cautious.
-    ///
-    /// Falls back to the combined form when there were fewer than two rounds
-    /// to difference - the budget-blown path, where no paired estimate
-    /// exists.
-    pub fn std_error(&self) -> f64 {
-        if self.paired_std_error.is_nan() {
-            return (self.candidate.std_error.powi(2) + self.baseline.std_error.powi(2)).sqrt();
-        }
-        self.paired_std_error
-    }
-    /// Whether [`Timing::difference_ns`] is large enough, relative to
-    /// [`Timing::std_error`], to call a real change rather than noise -
-    /// judged against the family of comparisons this one was measured
-    /// alongside. See [`Timing::min_detectable_difference`] for what
-    /// "large enough" came to on this particular result.
-    pub fn is_changed(&self) -> bool {
-        crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
+impl Difference {
+    /// How large the difference is relative to the baseline (0.01 = 1%).
+    pub fn relative(&self) -> f64 {
+        self.ns / self.baseline_ns_per_iter
     }
 
-    /// Assemble one from parts measured elsewhere.
-    ///
-    /// For [`crate::InputGroup`], which times multiple alternatives
-    /// against each other and then reports each against the baseline. The
-    /// verdict, the sensitivity and the formatting are the same questions
-    /// there as here, so they are asked of the same type.
+    /// How large the difference is relative to the baseline, as a percentage.
+    pub fn percent(&self) -> f64 {
+        self.relative() * 100.0
+    }
+
+    /// Whether the difference is large enough to count as a real change.
+    pub fn is_changed(&self) -> bool {
+        crate::significant::is_significant(self.ns, self.std_error, self.z_alpha)
+    }
+
+    /// The smallest difference this result could have called a change.
+    pub fn min_detectable_difference(&self) -> f64 {
+        self.z_alpha * self.std_error
+    }
+
+    /// The smallest detectable difference as a fraction of the baseline.
+    pub fn min_detectable_rel(&self) -> f64 {
+        self.min_detectable_difference() / self.baseline_ns_per_iter
+    }
+
+    #[cfg(test)]
+    pub(crate) fn combined_std_error(&self, candidate_std_error: f64) -> f64 {
+        (candidate_std_error.powi(2) + self.baseline_std_error.powi(2)).sqrt()
+    }
+
     pub(crate) fn from_parts(
-        baseline: Stats,
-        candidate: Stats,
+        baseline: &Timing,
+        candidate: &Timing,
         z_alpha: f64,
         paired_std_error: f64,
     ) -> Self {
-        Timing {
-            baseline,
-            candidate,
+        let std_error = if paired_std_error.is_nan() {
+            (candidate.std_error.powi(2) + baseline.std_error.powi(2)).sqrt()
+        } else {
+            paired_std_error
+        };
+        Difference {
+            ns: candidate.ns_per_iter - baseline.ns_per_iter,
+            std_error,
+            baseline_ns_per_iter: baseline.ns_per_iter,
+            baseline_std_error: baseline.std_error,
             z_alpha,
-            paired_std_error,
         }
-    }
-
-    /// The smallest difference this comparison could have called a change,
-    /// in nanoseconds.
-    ///
-    /// Sampling aims to bring this down to
-    /// [`Config::target_rel_error`] of the baseline, but a comparison that
-    /// ran out of [`Config::max_time`] stops wherever it got to - so on a
-    /// result that is not changed, this is what "not changed" is worth.
-    ///
-    /// `NaN` when fewer than two samples were collected, leaving
-    /// [`Stats::std_error`] itself `NaN`. That prints as something other than
-    /// a plain result, so check this before formatting it yourself.
-    pub fn min_detectable_difference(&self) -> f64 {
-        self.z_alpha * self.std_error()
-    }
-
-    /// [`Timing::min_detectable_difference`] as a fraction of the
-    /// baseline (`0.01` = 1%).
-    ///
-    /// `NaN` wherever [`Timing::min_detectable_difference`] is, and
-    /// infinite when the baseline measured as zero, where a relative figure
-    /// is undefined.
-    pub fn min_detectable_rel(&self) -> f64 {
-        self.min_detectable_difference() / self.baseline.ns_per_iter
     }
 }
 
 impl Display for Timing {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        // Both halves are filled in together, so either would answer for the
-        // pair - but combine them rather than depending on that. Reaching the
-        // sensitivity goal costs several times what a plain accuracy target
-        // does, so a comparison running out of budget is ordinary rather than
-        // exotic, and a truncated answer has to say so.
-        let limit = match (
-            self.baseline.hit_limit || self.candidate.hit_limit,
-            self.baseline.untrustworthy || self.candidate.untrustworthy,
-        ) {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let Some(difference) = &self.difference else {
+            return self.write_measurement(f);
+        };
+        let limit = match (self.hit_limit, self.untrustworthy) {
             (true, true) => " (limit, untrusted)",
             (true, false) => " (limit)",
             (false, true) => " (untrusted)",
             (false, false) => "",
         };
-        if self.is_changed() {
-            let percent_change = self.difference_ns() / self.baseline.ns_per_iter * 100.0;
-            let rel_error = self.std_error() / self.baseline.ns_per_iter * 100.0;
-            write!(f, "{percent_change:+.1}% ± {rel_error:.1}%{limit}")
+        if difference.is_changed() {
+            let rel_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
+            write!(f, "{:+.1}% ± {rel_error:.1}%{limit}", difference.percent())
         } else {
-            let detectable = self.min_detectable_rel() * 100.0;
+            let detectable = difference.min_detectable_rel() * 100.0;
             if detectable.is_finite() {
                 write!(f, "(unchanged, would detect {detectable:.1}%){limit}")
             } else {
@@ -146,26 +97,28 @@ mod tests {
     use super::*;
     use crate::testutil::*;
 
-    fn stats(ns: f64, std_error: f64) -> Stats {
-        Stats {
+    fn timing(ns: f64, std_error: f64) -> Timing {
+        Timing {
             ns_per_iter: ns,
             std_error,
             iterations: 1000,
             samples: 100,
             hit_limit: false,
             untrustworthy: false,
+            difference: None,
         }
     }
 
     fn comparison(baseline: f64, candidate: f64, se_each: f64, planned: u64) -> Timing {
-        Timing {
-            baseline: stats(baseline, se_each),
-            candidate: stats(candidate, se_each),
-            z_alpha: crate::significant::bonferroni_z_limit(planned, crate::significant::FWER),
-            // These are hand-built, so there are no per-round differences to
-            // take: the tests using them ask about the combined form.
-            paired_std_error: f64::NAN,
-        }
+        let baseline = timing(baseline, se_each);
+        let mut candidate_timing = timing(candidate, se_each);
+        candidate_timing.difference = Some(Difference::from_parts(
+            &baseline,
+            &candidate_timing,
+            crate::significant::bonferroni_z_limit(planned, crate::significant::FWER),
+            f64::NAN,
+        ));
+        candidate_timing
     }
 
     /// The stopping rule and the verdict must be the same question asked of
@@ -226,24 +179,21 @@ mod tests {
 
         // The budget ran out before the goal was reached.
         let mut truncated = comparison(100.0, 100.0, 0.1, 4);
-        truncated.baseline.hit_limit = true;
-        truncated.candidate.hit_limit = true;
+        truncated.hit_limit = true;
         let truncated = format!("{truncated}");
         assert!(truncated.ends_with(" (limit)"), "{truncated}");
 
         // Too few samples for the error bar itself to be worth reading.
         let mut untrusted = comparison(100.0, 100.0, 0.1, 4);
-        untrusted.baseline.untrustworthy = true;
-        untrusted.candidate.untrustworthy = true;
+        untrusted.untrustworthy = true;
         let untrusted = format!("{untrusted}");
         assert!(untrusted.ends_with(" (untrusted)"), "{untrusted}");
 
         // A change that is real, but measured on a truncated run.
         let mut changed = comparison(100.0, 130.0, 0.1, 4);
-        changed.baseline.hit_limit = true;
-        changed.candidate.hit_limit = true;
+        changed.hit_limit = true;
         // Pinned whole, so the `\u{b1}` cannot quietly become an ASCII `+/-` and
-        // drift from what `Stats` prints.
+        // drift from what a raw Timing prints.
         assert_eq!("+30.0% \u{b1} 0.1% (limit)", format!("{changed}"));
     }
 

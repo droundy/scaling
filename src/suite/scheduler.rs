@@ -109,19 +109,20 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench::Stats;
+    use crate::Timing;
     use crate::Timings;
     use std::cell::RefCell;
     use std::time::Duration;
 
     fn nothing() -> Found {
-        Found::Timing(Timings::test_singleton(Stats {
+        Found::Timing(Timings::test_singleton(Timing {
             ns_per_iter: 0.0,
             std_error: 0.0,
             iterations: 0,
             samples: 0,
             hit_limit: false,
             untrustworthy: false,
+            difference: None,
         }))
     }
 

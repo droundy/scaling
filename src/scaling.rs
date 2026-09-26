@@ -125,7 +125,7 @@ pub struct ScalingStats {
     /// This happens *before* any degree's fit is judged against the
     /// others - no coefficient cleared its own error bar, so there was
     /// nothing to compare. It plays the same role for a scaling benchmark
-    /// that [`Stats::untrustworthy`](crate::Stats::untrustworthy) plays for
+    /// that [`Timing::untrustworthy`](crate::Timing::untrustworthy) plays for
     /// a flat one: a statement about the budget bumping into the noise
     /// floor, not a verdict on the code. Nothing in [`crate::runner`] fails
     /// a run over it, so a script wanting to gate on it checks
