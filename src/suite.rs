@@ -61,7 +61,6 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
@@ -241,9 +240,12 @@ pub(crate) fn block_on<F: Future>(clock: &Clock, future: F) -> F::Output {
 
 /// One benchmark in flight.
 struct Task<'a> {
-    future: Pin<Box<dyn Future<Output = ()> + 'a>>,
+    future: Pin<Box<dyn Future<Output = Found> + 'a>>,
     clock: Rc<Clock>,
-    done: bool,
+    /// The future's own return value, once it has one - `None` until then,
+    /// and never touched again after. Replaces a separate `done` flag: a
+    /// task is done exactly when this is `Some`.
+    result: Option<Found>,
 }
 
 /// Round-robin over a set of benchmarks, one sample each per round.
@@ -268,11 +270,11 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn push(&mut self, clock: Rc<Clock>, future: Pin<Box<dyn Future<Output = ()> + 'a>>) {
+    fn push(&mut self, clock: Rc<Clock>, future: Pin<Box<dyn Future<Output = Found> + 'a>>) {
         self.tasks.push(Task {
             future,
             clock,
-            done: false,
+            result: None,
         });
     }
 
@@ -317,7 +319,11 @@ impl<'a> Scheduler<'a> {
     /// Finished benchmarks are retired *between* rounds rather than as they
     /// finish, so that removing one cannot disturb the rest of the round's
     /// order and skip somebody.
-    fn run(&mut self) {
+    ///
+    /// Consumes the scheduler and hands back every result, in the order
+    /// tasks were pushed - never disturbed, since only `live` is shuffled
+    /// and pruned here, not `self.tasks` itself.
+    fn run(mut self) -> Vec<Found> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut live: Vec<usize> = (0..self.tasks.len()).collect();
@@ -326,127 +332,25 @@ impl<'a> Scheduler<'a> {
             for &i in &live {
                 let task = &mut self.tasks[i];
                 task.clock.begin_poll();
-                let polled = task.future.as_mut().poll(&mut cx);
+                if let Poll::Ready(value) = task.future.as_mut().poll(&mut cx) {
+                    task.result = Some(value);
+                }
                 task.clock.end_poll();
-                task.done = polled.is_ready();
             }
-            live.retain(|&i| !self.tasks[i].done);
+            live.retain(|&i| self.tasks[i].result.is_none());
         }
+        self.tasks
+            .into_iter()
+            .map(|t| t.result.expect("every task finished"))
+            .collect()
     }
-}
-
-/// Where one benchmark's answer will appear once the suite has run.
-///
-/// Returned by every `Suite::add*` method. Holding a token rather than
-/// looking the answer up by name is what lets one suite mix benchmarks whose
-/// results have different types: a flat benchmark hands back a [`Stats`], a
-/// comparison a [`Comparisons`], and each token remembers which.
-///
-/// `get` is `None` until the suite has run.
-///
-/// Public only so that a registered shim - [`crate::registry::AddFlat`] and
-/// friends - can name its return type; `get` itself is `#[cfg(test)]`, so
-/// outside this crate's own tests a token can be held and passed along but
-/// never read.
-pub struct BadToken<T>(Arc<Mutex<Option<T>>>);
-
-// Not `#[derive(Clone)]`, which would demand `T: Clone` for no reason: what
-// is cloned is the handle, not the answer behind it.
-impl<T> Clone for BadToken<T> {
-    fn clone(&self) -> Self {
-        BadToken(self.0.clone())
-    }
-}
-
-impl<T> BadToken<T> {
-    fn new() -> Self {
-        BadToken(Arc::new(Mutex::new(None)))
-    }
-
-    /// The lock is only ever taken to store a result or to read one, never
-    /// across a benchmark, so a poisoned lock means some *other* benchmark
-    /// panicked and this one's answer is still perfectly good.
-    fn cell(&self) -> std::sync::MutexGuard<'_, Option<T>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-impl<T: Clone> BadToken<T> {
-    /// The answer, or `None` if the suite has not run yet.
-    ///
-    /// A registered benchmark's result is read back through [`Report`]
-    /// instead - see its own doc comment for why. `#[cfg(test)]` because
-    /// only this crate's own tests call it directly, to check `Suite`'s own
-    /// scheduling and interleaving without going through registration at
-    /// all; a registered shim holds its token only to hand it back.
-    #[cfg(test)]
-    pub fn get(&self) -> Option<T> {
-        self.cell().clone()
-    }
-}
-
-impl<T> fmt::Debug for BadToken<T> {
-    /// Deliberately not `where T: Debug`. A token is a handle, and what a
-    /// reader wants of one is whether its answer has arrived yet; the answer
-    /// itself is what [`BadToken::get`] and [`Report`] are for.
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("BadToken")
-            .field("measured", &self.cell().is_some())
-            .finish()
-    }
-}
-
-/// A result that can be shown in the suite's table, whatever its type.
-///
-/// `Arc<Mutex<Option<T>>>` coerces straight to `Arc<dyn Reportable>`, so the
-/// suite can keep every benchmark's cell in one list - in declaration order,
-/// for printing - while the caller keeps the same cells typed, in tokens.
-/// No enum of result kinds is needed.
-///
-/// # Why there is an `as_any` as well
-///
-/// Rendering was once all this had to do, because a caller who wanted the
-/// measurement rather than its text held a [`BadToken`] for it. That stops
-/// being true as soon as the caller did not write the `add` call:
-/// [`Suite::try_add_registered`] adds benchmarks nobody named, so
-/// nobody holds their tokens, and a script wanting to *ask* something of the
-/// results -
-/// which of these is fastest, is the one we ship still the best - has only
-/// the [`Report`]. Recovering the value from it needs the type back, and
-/// that means a downcast.
-trait Reportable {
-    fn render(&self) -> Option<String>;
-    /// The cell itself, for [`Report::get`] to downcast.
-    fn as_any(&self) -> &(dyn Any + 'static);
-}
-
-impl<T: Display + 'static> Reportable for Mutex<Option<T>> {
-    fn render(&self) -> Option<String> {
-        self.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|v| v.to_string())
-    }
-
-    fn as_any(&self) -> &(dyn Any + 'static) {
-        self
-    }
-}
-
-/// Recover a cell's value as `T`, or `None` if it holds something else - the
-/// one place the downcast [`Report::get`] and [`Report::find`] both need
-/// happens.
-fn downcast<T: Clone + 'static>(cell: &Arc<dyn Reportable>) -> Option<T> {
-    let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
-    typed
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .cloned()
 }
 
 /// One measurement, as [`Report::find`] hands it back - whichever of the
-/// three concrete kinds a report can hold this one turned out to be.
+/// three concrete kinds a report can hold this one turned out to be, and
+/// also what every benchmark's own future resolves to: the scheduler
+/// collects these directly, in declaration order, once every task is done.
+#[derive(Clone)]
 pub(crate) enum Found {
     Stats(Stats),
     Scaling(ScalingStats),
@@ -467,8 +371,9 @@ pub(crate) enum Found {
 pub struct Suite<'a> {
     cfg: &'a Config,
     scheduler: Scheduler<'a>,
-    /// Names and type-erased cells, in declaration order, for [`Report`].
-    entries: Vec<(String, Arc<dyn Reportable>)>,
+    /// Names, in declaration order, zipped with [`Scheduler::run`]'s results
+    /// to build a [`Report`].
+    names: Vec<String>,
     /// Comparisons added so far, so [`Suite::run`] can fill in the plan.
     comparisons: u64,
     /// The Bonferroni limit, shared with every comparison this suite holds.
@@ -495,7 +400,7 @@ impl Config {
             // round to the next, which it does. Varying it between runs as
             // well would only make a suite harder to reproduce.
             scheduler: Scheduler::new(0x9E37_79B9_7F4A_7C15),
-            entries: Vec::new(),
+            names: Vec::new(),
             comparisons: 0,
             // `NaN` until `run` sets it. Nothing reads it before then, and a
             // suite holding no comparisons never reads it at all.
@@ -507,40 +412,37 @@ impl Config {
 impl<'a> Suite<'a> {
     /// How many benchmarks have been added.
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.names.len()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.names.is_empty()
     }
 
-    fn push<T: Display + 'static>(
+    fn push(
         &mut self,
         name: &str,
-        token: &BadToken<T>,
         clock: Rc<Clock>,
-        future: Pin<Box<dyn Future<Output = ()> + 'a>>,
+        future: Pin<Box<dyn Future<Output = Found> + 'a>>,
     ) {
-        self.entries.push((name.to_string(), token.0.clone()));
+        self.names.push(name.to_string());
         self.scheduler.push(clock, future);
     }
 
-    /// The clock, token and [`Suite::push`] shared by every `add_*_with`
-    /// method: only the future `body` builds differs between them.
-    fn add_task<T: Display + 'static>(
+    /// The clock and [`Suite::push`] shared by every `add_*_with` method:
+    /// only the future `body` builds differs between them.
+    fn add_task(
         &mut self,
         name: &str,
         max_time: Duration,
-        body: impl FnOnce(Rc<Clock>, BadToken<T>) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
-    ) -> BadToken<T> {
+        body: impl FnOnce(Rc<Clock>) -> Pin<Box<dyn Future<Output = Found> + 'a>>,
+    ) {
         let clock = Rc::new(Clock::new(max_time));
-        let token = BadToken::new();
-        self.push(name, &token, clock.clone(), body(clock, token.clone()));
-        token
+        self.push(name, clock.clone(), body(clock));
     }
 
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
-    pub fn add<F, O>(&mut self, name: &str, f: F) -> BadToken<Stats>
+    pub fn add<F, O>(&mut self, name: &str, f: F)
     where
         F: FnMut() -> O + 'a,
         O: 'a,
@@ -552,12 +454,7 @@ impl<'a> Suite<'a> {
     ///
     /// See [`Suite::add_make_input_with`] for what a per-benchmark `Config`
     /// is for and what it does not change.
-    pub(crate) fn add_with<F, O>(
-        &mut self,
-        cfg: &'a Config,
-        name: &str,
-        mut f: F,
-    ) -> BadToken<Stats>
+    pub(crate) fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F)
     where
         F: FnMut() -> O + 'a,
         O: 'a,
@@ -566,7 +463,7 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
-    pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F) -> BadToken<Stats>
+    pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F)
     where
         F: FnMut(&mut I) -> O + 'a,
         I: Clone + 'a,
@@ -577,13 +474,7 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add_input`], measured against `cfg` rather than the suite's
     /// own. See [`Suite::add_make_input_with`].
-    pub(crate) fn add_input_with<F, I, O>(
-        &mut self,
-        cfg: &'a Config,
-        name: &str,
-        input: I,
-        f: F,
-    ) -> BadToken<Stats>
+    pub(crate) fn add_input_with<F, I, O>(&mut self, cfg: &'a Config, name: &str, input: I, f: F)
     where
         F: FnMut(&mut I) -> O + 'a,
         I: Clone + 'a,
@@ -594,7 +485,7 @@ impl<'a> Suite<'a> {
 
     /// Add a benchmark over generated inputs, as [`bench_make_input`] would
     /// run it.
-    pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> BadToken<Stats>
+    pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F)
     where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
@@ -630,23 +521,22 @@ impl<'a> Suite<'a> {
         name: &str,
         make_input: G,
         f: F,
-    ) -> BadToken<Stats>
-    where
+    ) where
         G: FnMut() -> I + 'a,
         F: FnMut(&mut I) -> O + 'a,
         I: 'a,
         O: 'a,
     {
-        self.add_task(name, cfg.max_time, |clock, token| {
+        self.add_task(name, cfg.max_time, |clock| {
             Box::pin(async move {
                 let stats = cfg.bench_make_input_async(&clock, make_input, f).await;
-                *token.cell() = Some(stats);
+                Found::Stats(stats)
             })
         })
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
-    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> BadToken<ScalingStats>
+    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize)
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
@@ -656,33 +546,19 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add_scaling`], measured against `cfg` rather than the suite's
     /// own. See [`Suite::add_make_input_with`].
-    pub(crate) fn add_scaling_with<F, O>(
-        &mut self,
-        cfg: &'a Config,
-        name: &str,
-        f: F,
-        nmin: usize,
-    ) -> BadToken<ScalingStats>
+    pub(crate) fn add_scaling_with<F, O>(&mut self, cfg: &'a Config, name: &str, f: F, nmin: usize)
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
     {
-        self.add_task(name, cfg.max_time, |clock, token| {
-            Box::pin(async move {
-                *token.cell() = Some(cfg.bench_scaling_async(&clock, f, nmin).await);
-            })
+        self.add_task(name, cfg.max_time, |clock| {
+            Box::pin(async move { Found::Scaling(cfg.bench_scaling_async(&clock, f, nmin).await) })
         })
     }
 
     /// Add a scaling benchmark over generated inputs, as
     /// [`bench_scaling_gen`] would run it.
-    pub fn add_scaling_gen<G, F, I, O>(
-        &mut self,
-        name: &str,
-        make_input: G,
-        f: F,
-        nmin: usize,
-    ) -> BadToken<ScalingStats>
+    pub fn add_scaling_gen<G, F, I, O>(&mut self, name: &str, make_input: G, f: F, nmin: usize)
     where
         G: FnMut(usize) -> I + 'a,
         F: Fn(&mut I) -> O + 'a,
@@ -701,19 +577,18 @@ impl<'a> Suite<'a> {
         make_input: G,
         f: F,
         nmin: usize,
-    ) -> BadToken<ScalingStats>
-    where
+    ) where
         G: FnMut(usize) -> I + 'a,
         F: Fn(&mut I) -> O + 'a,
         I: 'a,
         O: 'a,
     {
-        self.add_task(name, cfg.max_time, |clock, token| {
+        self.add_task(name, cfg.max_time, |clock| {
             Box::pin(async move {
-                *token.cell() = Some(
+                Found::Scaling(
                     cfg.bench_scaling_gen_async(&clock, make_input, f, nmin)
                         .await,
-                );
+                )
             })
         })
     }
@@ -732,11 +607,7 @@ impl<'a> Suite<'a> {
     /// If the set holds fewer than two alternatives - checked here rather
     /// than when the suite runs, so the mistake is reported at the line that
     /// made it.
-    pub(crate) fn add_comparison<I>(
-        &mut self,
-        name: &str,
-        set: ComparisonSet<'a, I>,
-    ) -> BadToken<Comparisons>
+    pub(crate) fn add_comparison<I>(&mut self, name: &str, set: ComparisonSet<'a, I>)
     where
         I: Clone + 'a,
     {
@@ -769,19 +640,15 @@ impl<'a> Suite<'a> {
             .checked_mul(k as u32)
             .unwrap_or(Duration::MAX);
         let clock = Rc::new(Clock::new(budget));
-        let token = BadToken::new();
-        let answer = token.clone();
         let mine = clock.clone();
         self.push(
             name,
-            &token,
             clock,
             Box::pin(async move {
                 let results = set.run_async(&mine, z_alpha.get(), seed).await;
-                *answer.cell() = Some(results);
+                Found::Comparison(results)
             }),
         );
-        token
     }
 
     /// Measure every benchmark, interleaved, and report them together.
@@ -796,15 +663,15 @@ impl<'a> Suite<'a> {
     /// Nothing is promised in advance and nothing is checked afterwards: the
     /// scheduler runs every entry that was added, so the number corrected for
     /// and the number made are the same number by construction.
-    pub(crate) fn run(mut self) -> Report {
+    pub(crate) fn run(self) -> Report {
         self.z_alpha.set(Config::z_alpha_for(self.comparisons));
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
-        self.scheduler.run();
+        let results = self.scheduler.run();
         Report {
-            entries: self.entries,
+            entries: self.names.into_iter().zip(results).collect(),
         }
     }
 }
@@ -949,7 +816,7 @@ impl<'a> Suite<'a> {
 
 /// Everything a suite measured, in the order it was declared.
 pub struct Report {
-    entries: Vec<(String, Arc<dyn Reportable>)>,
+    entries: Vec<(String, Found)>,
 }
 
 impl Report {
@@ -989,9 +856,19 @@ impl Report {
     /// let stats: scaling::Stats = report.get("sum_to_100").expect("it ran");
     /// assert!(stats.ns_per_iter > 0.0);
     /// ```
+    ///
+    /// The one place a downcast is unavoidable: `T` is caller-chosen, and a
+    /// report holds a mixture of concrete types. `find` and the three
+    /// concrete accessors below all know exactly which variant they want and
+    /// never need one.
     pub fn get<T: Clone + 'static>(&self, name: &str) -> Option<T> {
-        let (_, cell) = self.entries.iter().find(|(n, _)| n == name)?;
-        downcast(cell)
+        let (_, found) = self.entries.iter().find(|(n, _)| n == name)?;
+        let any: &dyn Any = match found {
+            Found::Stats(s) => s,
+            Found::Scaling(s) => s,
+            Found::Comparison(c) => c,
+        };
+        any.downcast_ref::<T>().cloned()
     }
 
     /// One measurement, whichever concrete kind it turns out to be - a
@@ -1000,17 +877,10 @@ impl Report {
     /// turn, as [`Report::stats`]/[`Report::scaling`]/[`Report::comparison`]
     /// each do their own.
     pub(crate) fn find(&self, name: &str) -> Option<Found> {
-        let (_, cell) = self.entries.iter().find(|(n, _)| n == name)?;
-        if let Some(v) = downcast(cell) {
-            return Some(Found::Stats(v));
-        }
-        if let Some(v) = downcast(cell) {
-            return Some(Found::Scaling(v));
-        }
-        if let Some(v) = downcast(cell) {
-            return Some(Found::Comparison(v));
-        }
-        None
+        self.entries
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, found)| found.clone())
     }
 
     /// A flat benchmark's measurement, by name.
@@ -1018,12 +888,18 @@ impl Report {
     /// `None` if that name was something else - a comparison, say - so a
     /// caller that does not know what it is looking at can simply ask.
     pub fn stats(&self, name: &str) -> Option<Stats> {
-        self.get(name)
+        match self.find(name)? {
+            Found::Stats(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// A scaling benchmark's measurement, by name.
     pub fn scaling(&self, name: &str) -> Option<ScalingStats> {
-        self.get(name)
+        match self.find(name)? {
+            Found::Scaling(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// A comparison's results, by name.
@@ -1034,31 +910,25 @@ impl Report {
     /// well as its difference from the baseline, so this is what a script
     /// asking "which of these is actually fastest here" wants.
     pub fn comparison(&self, name: &str) -> Option<Comparisons> {
-        self.get(name)
+        match self.find(name)? {
+            Found::Comparison(c) => Some(c),
+            _ => None,
+        }
     }
 
     /// Every flat measurement, with its name, in the order they were added.
     pub fn all_stats(&self) -> impl Iterator<Item = (&str, Stats)> {
-        self.all()
+        self.entries.iter().filter_map(|(name, found)| match found {
+            Found::Stats(s) => Some((name.as_str(), s.clone())),
+            _ => None,
+        })
     }
 
     /// Every comparison, with its name, in the order they were added.
     pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Comparisons)> {
-        self.all()
-    }
-
-    /// Every entry of one type, with its name. Entries of other types are
-    /// skipped rather than being an error, which is what makes this usable
-    /// on a report holding a mixture.
-    fn all<T: Clone + 'static>(&self) -> impl Iterator<Item = (&str, T)> {
-        self.entries.iter().filter_map(|(name, cell)| {
-            let typed = cell.as_any().downcast_ref::<Mutex<Option<T>>>()?;
-            let value = typed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .cloned()?;
-            Some((name.as_str(), value))
+        self.entries.iter().filter_map(|(name, found)| match found {
+            Found::Comparison(c) => Some((name.as_str(), c.clone())),
+            _ => None,
         })
     }
 }
@@ -1071,16 +941,20 @@ impl Display for Report {
             .map(|(name, _)| name.len())
             .max()
             .unwrap_or(0);
-        for (i, (name, cell)) in self.entries.iter().enumerate() {
+        for (i, (name, found)) in self.entries.iter().enumerate() {
             if i > 0 {
                 writeln!(f)?;
             }
-            let shown = cell.render();
+            let shown = match found {
+                Found::Stats(s) => s.to_string(),
+                Found::Scaling(s) => s.to_string(),
+                Found::Comparison(c) => c.to_string(),
+            };
             // Trimmed because a multi-line result brings its own trailing
             // newline - `Comparisons` writes every line with `writeln!` - and
             // this loop supplies the separators itself. Leaving it produced a
             // blank line after any comparison that was not the last entry.
-            let shown = shown.as_deref().unwrap_or("(not measured)").trim_end();
+            let shown = shown.trim_end();
             // A comparison prints several lines, so it is given its own
             // block rather than being crammed onto the name's line.
             if shown.contains('\n') {
@@ -1098,16 +972,35 @@ mod tests {
     use super::*;
     use crate::testutil::{fixed_cost, mean_and_spread};
 
+    /// A meaningless [`Found`], for tests that exercise the scheduler's
+    /// polling policy and could not care less what a task actually measures.
+    fn nothing() -> Found {
+        Found::Stats(Stats {
+            ns_per_iter: 0.0,
+            std_error: 0.0,
+            iterations: 0,
+            samples: 0,
+            hit_limit: false,
+            untrustworthy: false,
+        })
+    }
+
     /// A future that yields `n` times and then reports how many rounds it
     /// took, appending its identity to a shared log every time it is polled.
     /// Nothing here is timed, so these tests say the same thing on a busy
     /// machine as on a quiet one.
-    async fn scripted(id: usize, yields: usize, log: Rc<RefCell<Vec<usize>>>, clock: Rc<Clock>) {
+    async fn scripted(
+        id: usize,
+        yields: usize,
+        log: Rc<RefCell<Vec<usize>>>,
+        clock: Rc<Clock>,
+    ) -> Found {
         for _ in 0..yields {
             log.borrow_mut().push(id);
             clock.yield_now().await;
         }
         log.borrow_mut().push(id);
+        nothing()
     }
 
     use std::cell::RefCell;
@@ -1131,7 +1024,7 @@ mod tests {
     fn every_round_polls_everyone_exactly_once() {
         const N: usize = 5;
         const ROUNDS: usize = 4;
-        let (mut s, log) = scheduler_of(&[ROUNDS; N], 0x243f_6a88_85a3_08d3);
+        let (s, log) = scheduler_of(&[ROUNDS; N], 0x243f_6a88_85a3_08d3);
         s.run();
         let log = log.borrow();
         assert_eq!(log.len(), N * (ROUNDS + 1));
@@ -1147,7 +1040,7 @@ mod tests {
     /// comment rather than a behaviour.
     #[test]
     fn the_starting_position_moves_between_rounds() {
-        let (mut s, log) = scheduler_of(&[20; 4], 0x9e37_79b9_7f4a_7c15);
+        let (s, log) = scheduler_of(&[20; 4], 0x9e37_79b9_7f4a_7c15);
         s.run();
         let log = log.borrow();
         let firsts: Vec<usize> = log.chunks(4).map(|r| r[0]).collect();
@@ -1175,7 +1068,7 @@ mod tests {
     #[test]
     fn the_neighbour_order_varies_too() {
         const N: usize = 3;
-        let (mut s, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
+        let (s, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
         s.run();
         let log = log.borrow();
         // Read adjacency straight off the flat log rather than within
@@ -1201,7 +1094,7 @@ mod tests {
     #[test]
     fn retiring_early_does_not_skip_a_neighbour() {
         // Three benchmarks wanting very different numbers of rounds.
-        let (mut s, log) = scheduler_of(&[0, 3, 7], 0x2545_f491_4f6c_dd1d);
+        let (s, log) = scheduler_of(&[0, 3, 7], 0x2545_f491_4f6c_dd1d);
         s.run();
         let log = log.borrow();
         let polls = |id: usize| log.iter().filter(|&&x| x == id).count();
@@ -1215,7 +1108,7 @@ mod tests {
     /// divide by zero in the offset.
     #[test]
     fn an_empty_scheduler_finishes() {
-        let (mut s, log) = scheduler_of(&[], 1);
+        let (s, log) = scheduler_of(&[], 1);
         s.run();
         assert!(log.borrow().is_empty());
     }
@@ -1264,45 +1157,21 @@ mod tests {
         assert!(clock.exhausted());
     }
 
-    /// A suite mixes result types, and each token must hand back its own.
-    /// This is the thing an enum of result kinds was avoided for.
-    #[test]
-    fn tokens_keep_their_own_types() {
-        let cfg = Config::default().with_max_time(Duration::from_millis(50));
-        let mut suite = cfg.suite();
-        let flat: BadToken<Stats> = suite.add("flat", || (0..20u64).sum::<u64>());
-        let cmp: BadToken<Comparisons> = suite.add_comparison(
-            "pair",
-            cfg.comparison()
-                .add("a", || (0..20u64).sum::<u64>())
-                .add("b", || (0..20u64).sum::<u64>()),
-        );
-        assert!(flat.get().is_none(), "nothing is measured before the run");
-        let report = suite.run();
-        println!("{report}");
-
-        let stats = flat.get().expect("the flat benchmark reported");
-        assert!(stats.ns_per_iter > 0.0);
-        let comparisons = cmp.get().expect("the comparison reported");
-        assert_eq!(comparisons.stats().len(), 2);
-    }
-
-    /// All three kinds in one suite, interleaved: this is the whole point of
-    /// erasing the input type and reporting through tokens.
+    /// All three kinds in one suite, interleaved, each reported back under
+    /// its own type: this is the whole point of erasing the input type and
+    /// reporting through names.
     #[test]
     fn all_three_kinds_share_one_suite() {
         let cfg = Config::default().with_max_time(Duration::from_millis(80));
         let mut suite = cfg.suite();
-        let flat: BadToken<Stats> = suite.add("flat", || (0..50u64).sum::<u64>());
+        suite.add("flat", || (0..50u64).sum::<u64>());
         // A different input type from the comparison below, which is the
         // thing a `ComparisonSet` alone cannot do.
-        let with_input: BadToken<Stats> =
-            suite.add_input("with input", vec![3u8; 32], |v: &mut Vec<u8>| {
-                v.iter().map(|&x| x as u64).sum::<u64>()
-            });
-        let scaled: BadToken<ScalingStats> =
-            suite.add_scaling("scaled", |n| (0..n as u64).sum::<u64>(), 1000);
-        let cmp: BadToken<Comparisons> = suite.add_comparison(
+        suite.add_input("with input", vec![3u8; 32], |v: &mut Vec<u8>| {
+            v.iter().map(|&x| x as u64).sum::<u64>()
+        });
+        suite.add_scaling("scaled", |n| (0..n as u64).sum::<u64>(), 1000);
+        suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..50u64).sum::<u64>())
@@ -1311,10 +1180,13 @@ mod tests {
         let report = suite.run();
         println!("{report}");
 
-        assert!(flat.get().is_some());
-        assert!(with_input.get().is_some());
-        assert!(scaled.get().is_some(), "the scaling benchmark reported");
-        assert_eq!(cmp.get().unwrap().stats().len(), 2);
+        assert!(report.stats("flat").is_some());
+        assert!(report.stats("with input").is_some());
+        assert!(
+            report.scaling("scaled").is_some(),
+            "the scaling benchmark reported"
+        );
+        assert_eq!(report.comparison("pair").unwrap().stats().len(), 2);
     }
 
     /// The table is in declaration order, not alphabetical and not whatever
@@ -1325,9 +1197,9 @@ mod tests {
         let mut suite = cfg.suite();
         // Declared in an order that is neither alphabetical nor the order
         // they will finish in - "zebra" is the cheapest and finishes first.
-        let _ = suite.add("middle", || (0..200u64).sum::<u64>());
-        let _ = suite.add("zebra", || 1u64 + 1);
-        let _ = suite.add("apple", || (0..400u64).sum::<u64>());
+        suite.add("middle", || (0..200u64).sum::<u64>());
+        suite.add("zebra", || 1u64 + 1);
+        suite.add("apple", || (0..400u64).sum::<u64>());
         let shown = format!("{}", suite.run());
         let names: Vec<&str> = shown
             .lines()
@@ -1343,14 +1215,14 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         // Three alternatives is two comparisons; two alternatives is one.
-        let _ = suite.add_comparison(
+        suite.add_comparison(
             "three",
             cfg.comparison()
                 .add("a", || 1u64 + 1)
                 .add("b", || 1u64 + 1)
                 .add("c", || 1u64 + 1),
         );
-        let _ = suite.add_comparison(
+        suite.add_comparison(
             "two",
             cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
         );
@@ -1371,7 +1243,7 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         for _ in 0..2 {
             let mut suite = cfg.suite();
-            let _ = suite.add_comparison(
+            suite.add_comparison(
                 "pair",
                 cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
             );
@@ -1395,23 +1267,23 @@ mod tests {
     fn the_threshold_reaches_every_comparison() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        let pair = suite.add_comparison(
+        suite.add_comparison(
             "pair",
             cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
         );
-        let trio = suite.add_comparison(
+        suite.add_comparison(
             "trio",
             cfg.comparison()
                 .add("a", || 1u64 + 1)
                 .add("b", || 1u64 + 1)
                 .add("c", || 1u64 + 1),
         );
-        suite.run();
-        for token in [pair, trio] {
-            for (name, cmp) in token.get().unwrap().against_baseline() {
+        let report = suite.run();
+        for name in ["pair", "trio"] {
+            for (alt, cmp) in report.comparison(name).unwrap().against_baseline() {
                 assert!(
                     cmp.min_detectable_difference().is_finite(),
-                    "{name} was judged against a NaN threshold",
+                    "{alt} was judged against a NaN threshold",
                 );
             }
         }
@@ -1428,11 +1300,11 @@ mod tests {
     fn a_comparison_before_another_entry_leaves_no_blank_line() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        let _ = suite.add_comparison(
+        suite.add_comparison(
             "pair",
             cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
         );
-        let _ = suite.add("flat", || (0..20u64).sum::<u64>());
+        suite.add("flat", || (0..20u64).sum::<u64>());
         let shown = format!("{}", suite.run());
         assert!(
             !shown.lines().any(|l| l.trim().is_empty()),
@@ -1451,7 +1323,7 @@ mod tests {
         // No `forget` afterwards, because this line never returns - and
         // `Config::drop` skips its check while panicking, so the unwind is
         // clean.
-        let _ = suite.add_comparison("lonely", cfg.comparison().add("only", || 1u64 + 1));
+        suite.add_comparison("lonely", cfg.comparison().add("only", || 1u64 + 1));
     }
 
     /// An empty suite must run and report nothing, rather than dividing by
@@ -1536,14 +1408,13 @@ mod tests {
             } else {
                 (0..N).collect()
             };
-            let tokens: Vec<(usize, BadToken<Stats>)> = order
-                .iter()
-                .map(|&i| (i, suite.add(&format!("b{i}"), spin(ROUNDS))))
-                .collect();
-            suite.run();
+            for &i in &order {
+                suite.add(&format!("b{i}"), spin(ROUNDS));
+            }
+            let measured = suite.run();
             let mut out = vec![0.0; N];
-            for (i, t) in tokens {
-                out[i] = t.get().unwrap().ns_per_iter;
+            for (i, out_i) in out.iter_mut().enumerate() {
+                *out_i = measured.stats(&format!("b{i}")).unwrap().ns_per_iter;
             }
             out
         };
@@ -1619,9 +1490,9 @@ mod tests {
             let mut run_direct = || direct.push(cfg.bench(fixed_cost(seed)).ns_per_iter);
             let mut run_suite = || {
                 let mut suite = cfg.suite();
-                let subject = suite.add("subject", fixed_cost(seed));
-                suite.run();
-                viasuite.push(subject.get().unwrap().ns_per_iter);
+                suite.add("subject", fixed_cost(seed));
+                let report = suite.run();
+                viasuite.push(report.stats("subject").unwrap().ns_per_iter);
             };
             // Alternate, so neither is always the one that runs cold.
             if r % 2 == 0 {
@@ -1694,17 +1565,17 @@ mod tests {
         // about the suite machinery, it should look like the interleaved arm.
         let run_suite = |subject_only: bool, out: &mut Vec<Stats>, seed: u64| {
             let mut suite = cfg.suite();
-            let subject = suite.add("subject", fixed_cost(seed));
+            suite.add("subject", fixed_cost(seed));
             if !subject_only {
                 for i in 0..FILLERS {
-                    let _ = suite.add(
+                    suite.add(
                         &format!("filler{i}"),
                         fixed_cost(seed.wrapping_add(i as u64 + 1)),
                     );
                 }
             }
-            suite.run();
-            out.push(subject.get().unwrap());
+            let report = suite.run();
+            out.push(report.stats("subject").unwrap());
         };
         for r in 0..REPEATS {
             let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r as u64 + 1);
@@ -1771,6 +1642,7 @@ mod tests {
                     for _ in 0..5 {
                         idle.yield_now().await;
                     }
+                    nothing()
                 }),
             );
         }
@@ -1783,6 +1655,7 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(4));
                         busy.yield_now().await;
                     }
+                    nothing()
                 }),
             );
         }
@@ -1809,18 +1682,15 @@ mod report_lookup {
         Config::default().with_max_time(Duration::from_millis(20))
     }
 
-    /// A measurement can be had from a finished report by name, without
-    /// having kept the token that was handed out when it was added.
-    ///
-    /// Which is the whole point: under `try_add_registered` nobody
-    /// wrote the `add` call, so nobody holds those tokens, and a script that
-    /// wants to ask something of the results has only the report.
+    /// A measurement can be had from a finished report by name alone - which
+    /// is the whole point: under `try_add_registered` nobody wrote the `add`
+    /// call, so a script that wants to ask something of the results has only
+    /// the report.
     #[test]
-    fn a_measurement_can_be_had_by_name_without_its_token() {
+    fn a_measurement_can_be_had_by_name() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        // Deliberately dropped: this is the situation being tested.
-        drop(suite.add("summing", || (0..64u64).sum::<u64>()));
+        suite.add("summing", || (0..64u64).sum::<u64>());
         let report = suite.run();
 
         let stats = report.stats("summing").expect("it was measured");
@@ -1835,8 +1705,8 @@ mod report_lookup {
     fn asking_for_the_wrong_type_gives_nothing() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        let _ = suite.add("flat", || (0..64u64).sum::<u64>());
-        let _ = suite.add_comparison(
+        suite.add("flat", || (0..64u64).sum::<u64>());
+        suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..64u64).sum::<u64>())
@@ -1862,9 +1732,9 @@ mod report_lookup {
     fn every_kind_of_result_can_be_recovered() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        let _ = suite.add("flat", || (0..64u64).sum::<u64>());
-        let _ = suite.add_scaling("scaled", |n: usize| (0..n as u64).sum::<u64>(), 32);
-        let _ = suite.add_comparison(
+        suite.add("flat", || (0..64u64).sum::<u64>());
+        suite.add_scaling("scaled", |n: usize| (0..n as u64).sum::<u64>(), 32);
+        suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..64u64).sum::<u64>())
@@ -1884,9 +1754,9 @@ mod report_lookup {
     fn iterating_one_kind_skips_the_rest() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        let _ = suite.add("one", || (0..64u64).sum::<u64>());
-        let _ = suite.add("two", || (0..64u64).sum::<u64>());
-        let _ = suite.add_comparison(
+        suite.add("one", || (0..64u64).sum::<u64>());
+        suite.add("two", || (0..64u64).sum::<u64>());
+        suite.add_comparison(
             "pair",
             cfg.comparison()
                 .add("a", || (0..64u64).sum::<u64>())
@@ -1910,7 +1780,7 @@ mod report_lookup {
     fn a_script_can_ask_which_alternative_is_actually_fastest() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        let _ = suite.add_comparison(
+        suite.add_comparison(
             "hashing",
             cfg.comparison()
                 // The one we ship, and a deliberately slower rival.
@@ -1957,15 +1827,15 @@ mod per_benchmark_config {
         let cfg = Config::default().with_max_time(Duration::from_millis(500));
         let stingy = Config::relative(1e-9).with_max_time(Duration::from_micros(1));
         let mut suite = cfg.suite();
-        let ordinary = suite.add("ordinary", || (0..50u64).sum::<u64>());
-        let starved = suite.add_with(&stingy, "starved", || (0..50u64).sum::<u64>());
-        suite.run();
+        suite.add("ordinary", || (0..50u64).sum::<u64>());
+        suite.add_with(&stingy, "starved", || (0..50u64).sum::<u64>());
+        let report = suite.run();
         assert!(
-            starved.get().unwrap().hit_limit,
+            report.stats("starved").unwrap().hit_limit,
             "the benchmark given a microsecond should have run out",
         );
         assert!(
-            !ordinary.get().unwrap().hit_limit,
+            !report.stats("ordinary").unwrap().hit_limit,
             "its neighbour keeps the suite's budget",
         );
     }
@@ -1986,7 +1856,7 @@ mod per_benchmark_config {
         let cfg = Config::default().with_max_time(generous);
         let stingy = Config::relative(1e-9).with_max_time(Duration::from_millis(10));
         let mut suite = cfg.suite();
-        let starved = suite.add_comparison(
+        suite.add_comparison(
             "starved",
             stingy
                 .comparison()
@@ -1995,10 +1865,15 @@ mod per_benchmark_config {
         );
         let _held = crate::quiet::exclusive();
         let started = Instant::now();
-        suite.run();
+        let report = suite.run();
         let elapsed = started.elapsed();
         assert!(
-            starved.get().unwrap().stats().iter().any(|s| s.hit_limit),
+            report
+                .comparison("starved")
+                .unwrap()
+                .stats()
+                .iter()
+                .any(|s| s.hit_limit),
             "an unreachable goal must end at the budget",
         );
         assert!(
@@ -2014,9 +1889,9 @@ mod per_benchmark_config {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let other = Config::relative(0.5);
         let mut suite = cfg.suite();
-        let _ = suite.add_with(&other, "flat", || (0..32u64).sum::<u64>());
+        suite.add_with(&other, "flat", || (0..32u64).sum::<u64>());
         for name in ["one", "two"] {
-            let _ = suite.add_comparison(
+            suite.add_comparison(
                 name,
                 cfg.comparison()
                     .add("a", || (0..32u64).sum::<u64>())
@@ -2276,13 +2151,19 @@ mod registered_by_hand {
     fn registered_and_hand_added_benchmarks_mix() {
         let cfg = Config::default().with_max_time(Duration::from_millis(60));
         let mut suite = cfg.suite();
-        let by_hand = suite.add("e2e::by_hand", || work(150));
+        suite.add("e2e::by_hand", || work(150));
         suite.try_add_registered().unwrap();
-        let after = suite.add("e2e::after", || work(150));
+        suite.add("e2e::after", || work(150));
         let report = suite.run();
 
-        assert!(by_hand.get().is_some(), "the hand-added one ran");
-        assert!(after.get().is_some(), "so did the one added afterwards");
+        assert!(
+            report.stats("e2e::by_hand").is_some(),
+            "the hand-added one ran"
+        );
+        assert!(
+            report.stats("e2e::after").is_some(),
+            "so did the one added afterwards"
+        );
         assert!(
             report.stats("e2e::flat").is_some(),
             "so did the registered one"

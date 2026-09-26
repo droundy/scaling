@@ -523,7 +523,7 @@ mod grids {
     fn measured() -> Report {
         let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
         let mut suite = cfg.suite();
-        let _ = suite.add_comparison(
+        suite.add_comparison(
             "sorting@reversed",
             cfg.comparison()
                 .add("stable", || (0..64u64).sum::<u64>())
