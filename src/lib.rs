@@ -609,8 +609,8 @@ pub use scaling_macros::{bench, bench_scaling, input};
 ///
 /// This expands to a `main` that discovers all registered benchmarks in the
 /// binary, measures them with the default [`Config`], and prints the table.
-/// For custom budgets or output format, build [`runner::Options`] manually and
-/// call [`runner::run`] or [`runner::measure`] from your own `main`.
+/// For custom budgets or settings, build a [`Config`] manually and call
+/// [`runner::run`] or [`runner::measure`] from your own `main`.
 ///
 /// "This binary" means it literally: everything `#[scaling::bench]` and its
 /// siblings mark, anywhere in your crate's own `src/` - which the compiler

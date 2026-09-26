@@ -461,15 +461,16 @@ impl Report {
     /// `None` if nothing of that name was measured, if it was measured but
     /// is of another type, or if the suite has not run.
     /// ```
-    /// use scaling::runner::{measure, Options};
+    /// use scaling::{runner, Config};
     ///
     /// #[scaling::bench(name = "sum_to_100")]
     /// fn my_benchmark() -> u64 {
     ///     (0..100u64).sum()
     /// }
     ///
-    /// let report = measure(&Options::default()).expect("the registrations compose");
-    /// let timing: scaling::Timing = report.get_timings("sum_to_100").expect("it ran");
+    /// let report = runner::measure(&Config::default()).expect("the registrations compose");
+    /// let timings = report.get_timings("sum_to_100").expect("it ran");
+    /// let timing = timings.timings()[0];
     /// assert!(timing.ns_per_iter > 0.0);
     /// ```
     pub fn get_timings(&self, name: &str) -> Option<Timings> {
@@ -485,16 +486,16 @@ impl Report {
     /// `None` if nothing of that name was measured, if it was measured but
     /// is of another type, or if the suite has not run.
     /// ```
-    /// use scaling::runner::{measure, Options};
+    /// use scaling::{runner, Config};
     ///
-    /// #[scaling::scaling(name = "sum_to_100")]
-    /// fn my_benchmark(n: u64) -> u64 {
-    ///     (0..n).sum()
+    /// #[scaling::bench_scaling(name = "sum_to_100", nmin = 32)]
+    /// fn my_benchmark(n: usize) -> u64 {
+    ///     (0..n as u64).sum()
     /// }
     ///
-    /// let report = measure(&Options::default()).expect("the registrations compose");
-    /// let scaling: scaling::ScalingStats = report.get_scaling("sum_to_100").expect("it ran");
-    /// assert!(scaling.ns_per_iter > 0.0);
+    /// let report = runner::measure(&Config::default()).expect("the registrations compose");
+    /// let scaling = report.get_scaling("sum_to_100").expect("it ran");
+    /// assert!(scaling.iterations > 0);
     /// ```
     pub fn get_scaling(&self, name: &str) -> Option<ScalingStats> {
         if let Some((_, Found::Scaling(scaling))) = self.entries.iter().find(|(n, _)| n == name) {

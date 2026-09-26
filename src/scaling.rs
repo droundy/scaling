@@ -250,48 +250,6 @@ impl Display for Scaling {
     }
 }
 
-/// Benchmark the power-law scaling of the function.
-///
-/// Uses the default accuracy (see [`Config`]).
-///
-/// Reports the integer power ᴾ in 𝑶(𝑁ᴾ) and the constant in front of it,
-/// with a standard error. Sizes are chosen by a first stage that climbs
-/// until a single call is long enough to time; each is then measured
-/// repeatedly, so the fit is judged against error bars that were measured
-/// rather than assumed. A cost that is not a power law is rejected -
-/// `goodness_of_fit` zeroed and `hit_limit` set - rather than fitted anyway.
-/// Takes around 10s by default; see [`Config::max_time`].
-///
-/// # Choosing `nmin`
-///
-/// Sizes are measured in multiples of `nmin`, and nothing smaller is tried.
-/// That matters more than it looks, because many costs simply do not behave
-/// the same way at small sizes: a vector that fits in cache is a different
-/// machine from one that does not, and measuring across the boundary fits a
-/// curve to two regimes at once.
-///
-/// Summing a vector shows this plainly. Run from `nmin` of 1 it is not a
-/// power law at all - it is rejected on every run, its constant moves by
-/// tens of percent between runs, and the reported `±` understates that by a
-/// factor of fifty. Raising `nmin` until the smallest size is already out
-/// of cache fixes it:
-///
-/// ```none
-/// nmin           reported   spread over 8 runs   claimed +-
-///       1     0.303 ns/N          39.5%              0.74%
-///   1_000     0.371 ns/N           8.9%              0.60%
-/// 100_000     0.423 ns/N           2.8%              0.73%
-/// 1_000_000   0.686 ns/N           0.7%              0.58%
-/// ```
-///
-/// Note that the answer *changes*, and is not converging on a mistake being
-/// corrected: per-element cost really is higher once the vector no longer
-/// fits in cache. There is no single true number here, only one per regime,
-/// and `nmin` is how you say which regime you meant. If a scaling result
-/// comes back flagged, an `nmin` above wherever your workload changes
-/// character is the first thing to try.
-///
-/// See [`Config::bench_scaling`] to choose your own accuracy.
 #[cfg(test)]
 pub(crate) fn bench_scaling<F, O>(f: F, nmin: usize) -> ScalingStats
 where

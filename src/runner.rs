@@ -9,24 +9,20 @@
 //! scaling::main!();
 //! ```
 //!
-//! Anything else - a tighter budget or different output format - is an
-//! [`Options`] built by hand and passed to [`run`] or
-//! [`measure`] from your own `main`:
+//! Anything else - a tighter budget or different settings - is a
+//! [`Config`] built by hand and passed to [`run`] or [`measure`] from your
+//! own `main`:
 //!
 //! ```no_run
-//! use scaling::runner::{run, Format, Options};
+//! use scaling::{runner, Config};
 //!
 //! fn main() -> std::process::ExitCode {
-//!     let options = Options {
-//!         format: Format::List,
-//!         ..Options::default()
-//!     };
-//!     run(options).into()
+//!     let config = Config::default().with_max_time(std::time::Duration::from_secs(1));
+//!     runner::run(config).into()
 //! }
 //! ```
 //!
-//! See [`Options`] for every field and [`Config`] for the accuracy/budget
-//! knobs.
+//! See [`Config`] for the accuracy and time-budget knobs.
 //!
 //! # What it prints where
 //!
@@ -75,9 +71,8 @@ impl From<Outcome> for ExitCode {
 /// The whole of a benchmark binary. See [`crate::main!`].
 ///
 /// Every registered benchmark, table output, the default budget. A crate
-/// wanting anything else builds its own [`Options`] and calls [`run`] or
-/// [`measure`] from a hand-written `main` instead - see [`Options`]'s own
-/// docs for that.
+/// wanting anything else builds its own [`Config`] and calls [`run`] or
+/// [`measure`] from a hand-written `main` instead.
 pub fn main() -> ExitCode {
     run(Config::default()).into()
 }
@@ -107,7 +102,7 @@ fn assemble(config: &Config) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
 /// [`run`] would have printed.
 ///
 /// ```no_run
-/// use scaling::runner::{measure, Options};
+/// use scaling::{runner, Config};
 ///
 /// #[scaling::bench(group = "lookup", name = "linear_scan", baseline)]
 /// fn scan() -> bool {
@@ -119,8 +114,7 @@ fn assemble(config: &Config) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
 ///     (0..1000u64).collect::<Vec<_>>().binary_search(&42).is_ok()
 /// }
 ///
-/// let options = Options::default();
-/// let report = measure(&options).expect("the registrations compose");
+/// let report = runner::measure(&Config::default()).expect("the registrations compose");
 /// let fast = report.comparison("lookup").expect("it ran");
 /// assert_eq!(fast.baseline_name(), "linear_scan");
 /// ```
