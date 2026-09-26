@@ -560,7 +560,7 @@ them the way a quiesced run's would be trusted.
 #[doc(hidden)]
 pub mod assemble;
 mod bench;
-mod compare;
+mod difference;
 mod kway;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
@@ -583,7 +583,7 @@ pub(crate) mod significant;
 // itself.
 pub use self::bench::Timing;
 
-pub use self::compare::Difference;
+pub use self::difference::Difference;
 pub use self::kway::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::Report;
