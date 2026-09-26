@@ -1038,8 +1038,6 @@ async fn measure_scaling(
     loop {
         let (means, ses): (Vec<f64>, Vec<f64>) = acc.iter().map(|a| a.mean_and_stderr()).unzip();
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
-        // `map_or` rather than `is_some_and`, which needs a newer compiler
-        // than the `rust-version` in `Cargo.toml` promises.
         // The same floor `bench` uses, and for the same reason: six rounds
         // of a benchmark at its measurable floor is under two milliseconds
         // of evidence, and a fit that agrees over six rounds by luck is
@@ -1050,9 +1048,9 @@ async fn measure_scaling(
         // building and dropping an input is not evidence. `over_budget`
         // still watches both clocks, so this cannot fail to terminate.
         let precise = spent >= MIN_SAMPLE_TIME.as_secs_f64() * 1e9
-            && fit.as_ref().map_or(false, |f| {
-                f.std_error < cfg.target_rel_error * f.ns_per_scale.abs()
-            });
+            && fit
+                .as_ref()
+                .is_some_and(|f| f.std_error < cfg.target_rel_error * f.ns_per_scale.abs());
         // Check the budget only after a fit that was not good enough, so a
         // benchmark that is already precise enough never reports having hit
         // a limit it did not need.
