@@ -2,7 +2,7 @@
 //!
 //! The reason to run fifty benchmarks together rather than one after another
 //! is the same reason a comparison's alternatives beat two separate
-//! [`bench`] calls, and the reason [`InputGroup`] beats k-1 comparisons
+//! [`bench`] calls, and the reason [`InputGroup`] beats pairwise comparisons
 //! in pairs. Run in
 //! sequence, benchmark #1 samples the machine at t=0 and #50 samples it at
 //! t=500s, by which time the package is warmer and the clock has drifted;

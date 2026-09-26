@@ -248,8 +248,8 @@ mod tests {
     /// always, while one exactly at the goal is a coin flip.
     ///
     /// A two-way comparison is still a one-family comparison, so it is judged at
-    /// the same decision threshold as any other family but through the remaining
-    /// k-way loop.
+    /// the same decision threshold as any other family but through the shared
+    /// input group loop.
     #[test]
     fn twice_the_goal_is_caught_and_the_goal_itself_is_a_coin_flip() {
         println!();

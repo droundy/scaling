@@ -1,8 +1,8 @@
 //! Measuring one or more alternatives over a shared input: [`InputGroup`].
 //!
-//! The reason to time k things together rather than k-1 times in pairs is
-//! the same reason a comparison's alternatives beat two separate [`bench`]
-//! calls. Whatever the machine does slowly - a clock drifting, a package warming -
+//! The reason to time all alternatives together rather than in pairs is the
+//! same reason a comparison's alternatives beat two separate [`bench`] calls.
+//! Whatever the machine does slowly - a clock drifting, a package warming -
 //! lands on every alternative within the same round and cancels out of the
 //! differences between them. Measured one after another instead, each would
 //! sample a different stretch of that drift, and the differences would carry
@@ -220,7 +220,7 @@ impl<I: 'static> InputGroup<I> {
         )
     }
 
-    /// The k-way sampling loop, which yields to the scheduler between rounds.
+    /// The input group sampling loop, which yields to the scheduler between rounds.
     ///
     /// A round - every alternative once, from a rotated starting position -
     /// is atomic for the same reason a two-way comparison's is: the

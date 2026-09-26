@@ -561,7 +561,7 @@ them the way a quiesced run's would be trusted.
 pub mod assemble;
 mod bench;
 mod difference;
-mod kway;
+mod input_group;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///
@@ -584,11 +584,11 @@ pub(crate) mod significant;
 pub use self::bench::Timing;
 
 pub use self::difference::Difference;
-pub use self::kway::Timings;
+pub use self::input_group::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::Report;
 
-pub(crate) use self::kway::InputGroup;
+pub(crate) use self::input_group::InputGroup;
 pub(crate) use self::suite::{Assembled, Suite};
 
 /// Re-exported so that registration code written by a macro has a single

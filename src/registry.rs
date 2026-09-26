@@ -14,7 +14,7 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 
-pub use crate::kway::InputGroup;
+pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
 
 /// A comparison alternative shim that does nothing, for tests that check
