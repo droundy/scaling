@@ -156,7 +156,6 @@ impl Timing {
             .as_ref()
             .map_or(f64::NAN, Difference::min_detectable_rel)
     }
-
 }
 
 impl Timing {
