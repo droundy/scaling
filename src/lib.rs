@@ -329,14 +329,13 @@ scaling::main!();
 ```
 
 which discovers every registered benchmark, measures them together, and
-prints them with the default accuracy and budget. What used to be written
-out - which benchmarks to run, how to print them, a tighter budget - is a
-[`runner::Options`] built by hand and passed to [`runner::run`] from your
-own `main`, instead of using this macro.
+prints them with the default accuracy and budget. To change the accuracy or
+time budget, build a [`Config`] and pass it to [`runner::run`] from your own
+`main`, instead of using this macro.
 
-See [`main!`] for the whole of it, [`runner`] for the `Options` a hand-
-written `main` builds, and [`runner::measure`] for reading the numbers in
-a script rather than printing them.
+See [`main!`] for the whole of it, [`Config`] for the available settings,
+and [`runner::measure`] for reading the numbers in a script rather than
+printing them.
 
 Comparisons are declared the same way. `group = "..."` (or `group("a",
 "b")`, to belong to several at once) makes a function one candidate of a
@@ -678,8 +677,8 @@ const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// A benchmark uses [`Config::default`] unless [`crate::runner::Options::cfg`]
-/// says otherwise; the methods below build one by hand.
+/// A benchmark uses [`Config::default`] unless a caller supplies a different
+/// `Config`; the methods below build one by hand.
 ///
 /// ```
 /// use scaling::Config;

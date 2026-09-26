@@ -3,8 +3,8 @@
 //! Every benchmark below says what it is where it is written, and the last
 //! line is the whole program - no `Config`, no `Suite`, no `add` per
 //! benchmark, no decision about what to do when listing was asked for, no
-//! `println!`. All of that is the runner's; see `scaling::runner::Options`
-//! for a tighter budget or a different output format.
+//! `println!`. All of that is the runner's; see `scaling::Config` for a
+//! tighter accuracy target or time budget.
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))

@@ -1,7 +1,7 @@
 //! The runner, driven the way `scaling::main!()` drives it.
 //!
 //! `scaling::main!()` reads the command line and calls
-//! [`scaling::runner::run`]; these build the same [`Options`] directly, so
+//! [`scaling::runner::run`]; these build the same [`Config`] directly, so
 //! what is exercised is everything that macro would reach. Registrations are
 //! written with the attributes rather than by hand, because the thing under
 //! test is the whole path from an attribute to an exit status.

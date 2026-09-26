@@ -116,21 +116,22 @@ together with the default accuracy and budget, and printed as a table -
 that is what `scaling::main!()` above gives you. There is no `Config` to
 build, no list to add to and no printing to write.
 
-Choosing a tighter budget or list output instead of a table is a
-[`runner::Options`] built by hand in your own `main`:
+Choosing a tighter accuracy target or time budget means building a
+[`Config`] and passing it to the runner in your own `main`:
 
 ```rust,no_run
-use scaling::runner::{run, Options};
+use scaling::{runner, Config};
 
 fn main() -> std::process::ExitCode {
-    let options = Options::default();
-    run(options).into()
+    let config = Config::default()
+      .with_max_time(std::time::Duration::from_secs(1));
+    runner::run(config).into()
 }
 ```
 
-`runner::measure` hands back the results instead of printing them, for a
-script that wants to look at the numbers rather than show them - reached by
-name, since nobody wrote those names down: they come from the module and
+`runner::measure(&config)` hands back the results instead of printing them,
+for a script that wants to look at the numbers rather than show them - reached
+by name, since nobody wrote those names down: they come from the module and
 function each benchmark was declared in.
 
 ## Comparisons
