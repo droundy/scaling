@@ -598,7 +598,7 @@ pub use self::scaling::{Scaling, ScalingStats};
 pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
-pub(crate) use self::kway::ComparisonSet;
+pub(crate) use self::kway::InputGroup;
 pub(crate) use self::suite::{Assembled, Found, Suite};
 
 /// Re-exported so that registration code written by a macro has a single
@@ -823,7 +823,7 @@ impl Config {
     /// The Bonferroni limit for a family of `comparisons` comparisons.
     ///
     /// Each entry point works this out for the family it can see:
-    /// [`ComparisonSet::run`] for its own `k - 1`, and a [`Suite`] for its
+    /// [`InputGroup::run`] for its own `k - 1`, and a [`Suite`] for its
     /// total, which it knows once its last entry is added and before it runs
     /// anything. Nothing is promised in advance, so there is nothing to
     /// verify afterwards.

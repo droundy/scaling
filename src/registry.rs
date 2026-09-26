@@ -14,7 +14,7 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 
-pub use crate::kway::ComparisonSet;
+pub use crate::kway::InputGroup;
 pub use crate::suite::Suite;
 
 /// An `AddAlt` shim that does nothing, for tests that check what assembly
@@ -22,9 +22,9 @@ pub use crate::suite::Suite;
 /// and inspected without a real alternative behind it.
 #[cfg(test)]
 pub(crate) fn noop_alt<'a>(
-    set: ComparisonSet<'a, ErasedInput>,
+    set: InputGroup<'a, ErasedInput>,
     _: &str,
-) -> ComparisonSet<'a, ErasedInput> {
+) -> InputGroup<'a, ErasedInput> {
     set
 }
 
@@ -42,12 +42,7 @@ pub type AddFlat = fn(&mut Suite<'_>, &str);
 pub type AddScaling = fn(&mut Suite<'_>, &str);
 
 /// How one alternative joins a comparison.
-pub type AddAlt =
-    for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>;
-
-/// How a matrix candidate is added as a plain benchmark, given a maker for
-/// the input it is paired with.
-pub type AddPaired = fn(&mut Suite<'_>, &str, MakeInput);
+pub type AddAlt = for<'a> fn(InputGroup<'a, ErasedInput>, &str) -> InputGroup<'a, ErasedInput>;
 
 /// Builds one erased input.
 pub type MakeInput = fn() -> ErasedInput;
@@ -262,13 +257,8 @@ pub struct Candidate {
     pub is_baseline: bool,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
-    /// Added as a plain benchmark, for the case where a lane holds only one
-    /// candidate and so has nothing to compare against. Takes the maker for
-    /// the input it is being paired with as an argument rather than
-    /// capturing it, which is exactly what lets one registered candidate be
-    /// paired with any number of separately registered inputs.
-    pub add_flat: AddPaired,
-    /// The usual path: one alternative of this input's comparison.
+    /// One alternative of the input group this candidate belongs to,
+    /// including when it is the only candidate in the group.
     pub add_alt: AddAlt,
 }
 
@@ -313,8 +303,9 @@ pub struct Input {
     pub type_id: TypeIdOf,
     /// That type as the source spells it, for diagnostics.
     pub type_name: &'static str,
-    /// Called once per round, and the value cloned for each candidate, so
-    /// that all of them meet the same one. See [`ErasedInput`].
+    /// Called once per round. With multiple candidates the value is cloned
+    /// for each, so that all of them meet the same input; a singleton uses it
+    /// directly. See [`ErasedInput`].
     pub make: MakeInput,
 }
 

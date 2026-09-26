@@ -375,9 +375,9 @@ pub struct Plan {
 /// unrelated type families and still be correct - a `String` candidate is
 /// simply never handed a `Vec<u8>`.
 ///
-/// A lane with fewer than two candidates has nothing to compare against and
-/// becomes a plain benchmark instead; that decision is made by whoever
-/// consumes a `Lane`, not here - see [`Lane::flat_name`].
+/// A lane with one candidate still uses an input group, but its result is a
+/// plain [`Stats`](crate::Stats) rather than a comparison report. The runner
+/// makes that distinction when it consumes a `Lane`.
 #[derive(Debug)]
 pub struct Lane {
     /// The group this lane belongs to.
@@ -424,11 +424,9 @@ pub struct Lane {
 impl Lane {
     /// What a cell of this lane is called.
     ///
-    /// A lane with two or more candidates becomes one comparison per input,
-    /// so the comparison is named for the group and the input and the
-    /// candidates are its alternatives. A lone candidate has nothing to
-    /// compare against and is a plain benchmark, which needs its own name -
-    /// see [`Lane::flat_name`].
+    /// A lane with two or more candidates is named for the group and input.
+    /// A lone candidate is named for the candidate as well, since it has no
+    /// baseline to compare against - see [`Lane::flat_name`].
     ///
     /// The type is appended only when [`Lane::needs_type_suffix`] says
     /// another lane of this group has an input of the same name - two lanes
@@ -962,7 +960,7 @@ mod tests {
         assert_eq!(names(&one), names(&two));
     }
 
-    /// The baseline goes first because `ComparisonSet` takes its first
+    /// The baseline goes first because `InputGroup` takes its first
     /// alternative as the baseline - that ordering is how the decision made
     /// here reaches the set built later.
     #[test]
@@ -1005,10 +1003,9 @@ mod tests {
         }
     }
 
-    /// A lone candidate has nothing to compare against, but that is no
-    /// longer an error - unlike today's groups, it degrades to a plain
-    /// benchmark. Whoever consumes the lane decides that, not `plan` itself,
-    /// so all this checks is that the lane survives.
+    /// A lone candidate has no difference to report, but remains a valid
+    /// singleton lane. The consumer decides whether to report its result as
+    /// `Stats` or as a one-entry group.
     #[test]
     fn a_lone_candidate_is_kept_not_rejected() {
         let cs = leak_c(vec![cand::<()>("lonely", "only", "()", true)]);
@@ -1246,7 +1243,7 @@ mod pairing {
         let cfg = Config::relative(0.5).with_max_time(Duration::from_millis(50));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let _ = cfg
-            .comparison_make_input(move || {
+            .input_group_make_input(move || {
                 // Varying, so that "they saw the same thing" is a real
                 // claim rather than one a constant would satisfy.
                 let n = 4 + (rng.next() % 16) as usize;
@@ -1304,7 +1301,7 @@ mod pairing {
         let cfg = Config::relative(0.02).with_max_time(Duration::from_millis(300));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
         let results = cfg
-            .comparison_make_input(move || {
+            .input_group_make_input(move || {
                 let n = 100 + (rng.next() % 8000) as usize;
                 ErasedInput::new((0..n as u64).collect::<Vec<u64>>())
             })
@@ -1325,12 +1322,8 @@ mod pairing {
 #[cfg(test)]
 pub(crate) mod lane_tests {
     use super::*;
-    use crate::registry::{noop_alt, ErasedInput, MakeInput, Suite};
+    use crate::registry::{noop_alt, ErasedInput};
     use std::any::TypeId;
-
-    fn noop_flat(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
-        adder.add_make_input(name, make, |_: &mut ErasedInput| ());
-    }
 
     /// Leaks a one-element group list, for the (common) single-group test
     /// helpers below.
@@ -1363,7 +1356,6 @@ pub(crate) mod lane_tests {
             is_baseline,
             crate_name,
             crate_version,
-            add_flat: noop_flat,
             add_alt: noop_alt,
         }
     }
@@ -1657,9 +1649,8 @@ pub(crate) mod lane_tests {
         );
     }
 
-    /// A lone candidate has nothing to compare against. It is still measured,
-    /// as a plain benchmark, rather than being dropped or panicking inside
-    /// `add_comparison`.
+    /// A lone candidate has no difference to report. It is still measured
+    /// as a singleton input group rather than being dropped.
     #[test]
     fn a_lane_with_one_candidate_is_kept_for_plain_measurement() {
         let cs = leak_c(vec![cand::<u8>("m", "only", "u8", false)]);

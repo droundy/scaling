@@ -406,7 +406,7 @@ fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
 }
 
 /// `|__v| #fname(__v.take().expect(...))`: the closure a shim uses when the
-/// benchmark consumes its input by value. `Suite`/`ComparisonSet` only ever
+/// benchmark consumes its input by value. `Suite`/`InputGroup` only ever
 /// hand out `&mut I`, so the stored value is wrapped in `Option<I>` and taken
 /// out of it right before the call - exactly the trick this crate's own
 /// documentation would otherwise have to tell a caller to write by hand.
@@ -845,62 +845,23 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         },
     ) in instantiations.into_iter().enumerate()
     {
-        let flat = format_ident!("__scaling_mflat_{}_{}", fname, n);
         let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
         let call = call_expr(fname, ty.as_ref());
-        // Same setup-once shape as an ordinary benchmark or a group member -
-        // see `repeatable_call`. `#flat` and `#alt` are each called once per
-        // (candidate, input) pairing (assembly builds a fresh one per lane),
-        // so `__action`'s scope here is exactly one pairing's whole run, not
-        // shared across others. The matrix's input is still regenerated (for
-        // `#flat`) or regenerated-and-cloned (for `#alt`, one comparison's
-        // shared input per round) every call regardless - only the setup
-        // function's own work, not the matrix's own input machinery, is
-        // what this saves.
-        let (flat_body, alt_body) = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
+        let alt_body = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
             let repeatable = repeatable_call(call);
-            (
-                quote! {
-                    let mut __action = ::core::option::Option::None;
-                    __adder.add_make_input(
-                        __name,
-                        __make,
-                        move |__e: &mut ::scaling::registry::ErasedInput| #repeatable,
-                    )
-                },
-                quote! {
-                    let mut __action = ::core::option::Option::None;
-                    __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
-                },
-            )
+            quote! {
+                let mut __action = ::core::option::Option::None;
+                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
+            }
         } else {
-            (
-                quote! {
-                    __adder.add_make_input(
-                        __name,
-                        __make,
-                        |__e: &mut ::scaling::registry::ErasedInput| #call,
-                    )
-                },
-                quote! {
-                    __set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
-                },
-            )
+            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call))
         };
         out.extend(quote! {
             #[doc(hidden)]
-            fn #flat(
-                __adder: &mut ::scaling::registry::Suite<'_>,
-                __name: &str,
-                __make: fn() -> ::scaling::registry::ErasedInput,
-            ) {
-                #flat_body;
-            }
-            #[doc(hidden)]
             fn #alt<'__s>(
-                __set: ::scaling::registry::ComparisonSet<'__s, ::scaling::registry::ErasedInput>,
+                __set: ::scaling::registry::InputGroup<'__s, ::scaling::registry::ErasedInput>,
                 __name: &str,
-            ) -> ::scaling::registry::ComparisonSet<'__s, ::scaling::registry::ErasedInput> {
+            ) -> ::scaling::registry::InputGroup<'__s, ::scaling::registry::ErasedInput> {
                 #alt_body
             }
             ::scaling::inventory::submit! {
@@ -912,7 +873,6 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     is_baseline: #baseline,
                     crate_name: ::core::env!("CARGO_PKG_NAME"),
                     crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    add_flat: #flat,
                     add_alt: #alt,
                 }
             }

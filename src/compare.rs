@@ -66,7 +66,7 @@ impl Comparison {
 
     /// Assemble one from parts measured elsewhere.
     ///
-    /// For [`crate::ComparisonSet`], which times more than two alternatives
+    /// For [`crate::InputGroup`], which times multiple alternatives
     /// against each other and then reports each against the baseline. The
     /// verdict, the sensitivity and the formatting are the same questions
     /// there as here, so they are asked of the same type.
@@ -319,7 +319,7 @@ mod tests {
                 let cand_iters = (base_iters as f64 * (1.0 + 0.05 * multiple)) as usize;
                 let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
                 let c = cfg
-                    .comparison()
+                    .input_group()
                     .add("baseline", variable_cost(seed, base_iters))
                     .add("candidate", variable_cost(seed, cand_iters))
                     .run();

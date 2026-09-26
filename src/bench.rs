@@ -462,7 +462,7 @@ where
 /// nanoseconds.
 ///
 /// The timed part of [`time_batch`], split out because
-/// [`crate::ComparisonSet`] prepares one batch of inputs and then hands the
+/// [`crate::InputGroup`] prepares one batch of inputs and then hands the
 /// same batch - cloned - to each alternative in turn, so its generating and
 /// its timing happen in different places.
 pub(crate) fn time_loop<F, I, O>(f: &mut F, xs: &mut [I]) -> f64

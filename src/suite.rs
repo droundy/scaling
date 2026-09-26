@@ -2,7 +2,7 @@
 //!
 //! The reason to run fifty benchmarks together rather than one after another
 //! is the same reason a comparison's alternatives beat two separate
-//! [`bench`] calls, and the reason [`ComparisonSet`] beats k-1 comparisons
+//! [`bench`] calls, and the reason [`InputGroup`] beats k-1 comparisons
 //! in pairs. Run in
 //! sequence, benchmark #1 samples the machine at t=0 and #50 samples it at
 //! t=500s, by which time the package is warmer and the clock has drifted;
@@ -11,9 +11,9 @@
 //! samples spread across the whole session, so all of them average the same
 //! drift.
 //!
-//! What makes this harder than [`ComparisonSet`] is that the benchmarks do
+//! What makes this harder than [`InputGroup`] is that the benchmarks do
 //! not match: they take different input types, run for wildly different
-//! times, and want different batch sizes. A `ComparisonSet` can share one
+//! times, and want different batch sizes. An `InputGroup` can share one
 //! calibrated `unit` across its alternatives and step them in lockstep. A
 //! suite cannot, so the scheduling has to be in *time* rather than in
 //! batches, and each benchmark has to be able to stop in the middle and be
@@ -33,7 +33,7 @@
 //! Boxing the resulting future erases the input type at the same time, which
 //! is the other thing a heterogeneous suite needed. The cost is one indirect
 //! call per poll, and a poll is a whole sample - the same amortisation that
-//! makes [`ComparisonSet`]'s batch-level erasure free, rather than the
+//! makes [`InputGroup`]'s batch-level erasure free, rather than the
 //! per-iteration erasure that cost 14% on a 9ns function.
 //!
 //! **`async` is an implementation detail.** No future, and nothing to
@@ -288,12 +288,10 @@ impl<'a> Suite<'a> {
         I: 'a,
         O: 'a,
     {
-        self.add_task(name, cfg.max_time, |clock| {
-            Box::pin(async move {
-                let stats = cfg.bench_make_input_async(&clock, make_input, f).await;
-                Found::Stats(stats)
-            })
-        })
+        let group = cfg
+            .input_group_make_input_uncloned(make_input)
+            .add_input(name, f);
+        self.add_single_input_group(name, group);
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
@@ -354,28 +352,27 @@ impl<'a> Suite<'a> {
         })
     }
 
-    /// Add a whole k-way comparison, built with [`Config::comparison`].
+    /// Add an input group, built with [`Config::input_group`].
     ///
-    /// The comparison counts as *one* participant in the round robin, not
-    /// `k`, because its round has to stay whole: the paired error bars it
-    /// reports only cancel the machine's slow movement because every
+    /// The group counts as *one* participant in the round robin, not
+    /// `k`, because its round has to stay whole: paired error bars only
+    /// cancel the machine's slow movement because every
     /// alternative met that movement inside the same round. That is also
     /// fair rather than merely necessary - one poll here runs `k` batches
     /// where a flat benchmark runs one, and it is producing `k` [`Stats`].
     ///
     /// # Panics
     ///
-    /// If the set holds fewer than two alternatives - checked here rather
-    /// than when the suite runs, so the mistake is reported at the line that
-    /// made it.
-    pub(crate) fn add_comparison<I>(&mut self, name: &str, set: ComparisonSet<'a, I>)
+    /// If the set holds no alternatives, or has multiple alternatives but no
+    /// way to clone their shared inputs.
+    pub(crate) fn add_input_group<I>(&mut self, name: &str, set: InputGroup<'a, I>)
     where
-        I: Clone + 'a,
+        I: 'a,
     {
         let k = set.len();
         assert!(
-            k >= 2,
-            "a comparison needs at least two alternatives, got {k}"
+            k > 0,
+            "an input group needs at least one alternative, got {k}"
         );
         // After the assertion and before the count, so the Bonferroni limit
         // is taken over what is really going to be measured.
@@ -408,6 +405,25 @@ impl<'a> Suite<'a> {
             Box::pin(async move {
                 let results = set.run_async(&mine, z_alpha.get(), seed).await;
                 Found::Comparison(results)
+            }),
+        );
+    }
+
+    fn add_single_input_group<I: 'a>(&mut self, name: &str, group: InputGroup<'a, I>) {
+        assert_eq!(
+            group.len(),
+            1,
+            "a standalone input group has one alternative"
+        );
+        let budget = group.cfg().max_time;
+        let clock = Rc::new(Clock::new(budget));
+        let mine = clock.clone();
+        self.push(
+            name,
+            clock,
+            Box::pin(async move {
+                let result = group.run_async(&mine, f64::NAN, 0).await;
+                Found::Stats(result.stats()[0].clone())
             }),
         );
     }
@@ -480,7 +496,7 @@ impl<'a> Suite<'a> {
     /// and are measured the same way. Calling it twice would add everything
     /// twice, so do not.
     ///
-    /// Registered comparisons go through [`Suite::add_comparison`] like any
+    /// Registered groups go through [`Suite::add_input_group`] like any
     /// other, so they are counted towards the suite's multiple-comparison
     /// plan by the machinery that was already there.
     ///
@@ -539,34 +555,26 @@ impl<'a> Suite<'a> {
 
         for lane in &plan.lanes {
             for input in &lane.inputs {
-                if lane.candidates.len() < 2 {
-                    // Nothing to compare against, so this is a plain
-                    // benchmark rather than a one-sided comparison. A lane
-                    // with zero candidates never reaches here - `assemble`
-                    // reports it as an orphaned input and drops the lane
-                    // before it is ever built - but that invariant lives in
-                    // a different file with no type to enforce it, so name
-                    // it here rather than let a violation surface as a bare
-                    // out-of-bounds index.
+                // One generator per input. Multiple candidates clone its
+                // values; a singleton uses them directly.
+                let make = input.reg.make;
+                let mut group = cfg.input_group_make_input(make);
+                for c in &lane.candidates {
+                    group = (c.reg.add_alt)(group, &c.name);
+                }
+                if lane.candidates.len() == 1 {
                     let c = lane
                         .candidates
                         .first()
                         .expect("assemble never builds a lane with no candidates");
                     let name = lane.flat_name(c, input);
-                    (c.reg.add_flat)(&mut *self, &name, input.reg.make);
+                    self.add_single_input_group(&name, group);
                     tokens.flat += 1;
-                    continue;
+                } else {
+                    let name = lane.comparison_name(input);
+                    self.add_input_group(&name, group);
+                    tokens.comparisons += 1;
                 }
-                // One generator per input, cloned per candidate, which is
-                // what makes the differences paired - see `ErasedInput`.
-                let make = input.reg.make;
-                let mut alt = cfg.comparison_make_input(make);
-                for c in &lane.candidates {
-                    alt = (c.reg.add_alt)(alt, &c.name);
-                }
-                let name = lane.comparison_name(input);
-                self.add_comparison(&name, alt);
-                tokens.comparisons += 1;
             }
         }
         tokens.lanes = plan.lanes;
@@ -780,14 +788,14 @@ mod tests {
         let mut suite = cfg.suite();
         suite.add("flat", || (0..50u64).sum::<u64>());
         // A different input type from the comparison below, which is the
-        // thing a `ComparisonSet` alone cannot do.
+        // thing an `InputGroup` alone cannot do.
         suite.add_input("with input", vec![3u8; 32], |v: &mut Vec<u8>| {
             v.iter().map(|&x| x as u64).sum::<u64>()
         });
         suite.add_scaling("scaled", |n| (0..n as u64).sum::<u64>(), 1000);
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || (0..50u64).sum::<u64>())
                 .add("b", || (0..50u64).sum::<u64>()),
         );
@@ -801,6 +809,22 @@ mod tests {
             "the scaling benchmark reported"
         );
         assert_eq!(report.comparison("pair").unwrap().stats().len(), 2);
+    }
+
+    #[test]
+    fn a_singleton_input_group_accepts_non_clone_borrowed_inputs() {
+        struct NonClone<'a>(&'a str);
+
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let backing = String::from("borrowed input");
+        let mut suite = cfg.suite();
+        suite.add_make_input(
+            "non-clone",
+            || NonClone(backing.as_str()),
+            |input| input.0.len(),
+        );
+        let stats = suite.run().stats("non-clone").expect("it was measured");
+        assert!(stats.ns_per_iter > 0.0);
     }
 
     /// The table is in declaration order, not alphabetical and not whatever
@@ -829,16 +853,18 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         // Three alternatives is two comparisons; two alternatives is one.
-        suite.add_comparison(
+        suite.add_input_group(
             "three",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || 1u64 + 1)
                 .add("b", || 1u64 + 1)
                 .add("c", || 1u64 + 1),
         );
-        suite.add_comparison(
+        suite.add_input_group(
             "two",
-            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+            cfg.input_group()
+                .add("a", || 1u64 + 1)
+                .add("b", || 1u64 + 1),
         );
         assert_eq!(suite.comparisons, 3);
         // The cell every comparison in this suite reads from.
@@ -857,9 +883,11 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         for _ in 0..2 {
             let mut suite = cfg.suite();
-            suite.add_comparison(
+            suite.add_input_group(
                 "pair",
-                cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+                cfg.input_group()
+                    .add("a", || 1u64 + 1)
+                    .add("b", || 1u64 + 1),
             );
             let z = suite.z_alpha.clone();
             suite.run();
@@ -881,13 +909,15 @@ mod tests {
     fn the_threshold_reaches_every_comparison() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+            cfg.input_group()
+                .add("a", || 1u64 + 1)
+                .add("b", || 1u64 + 1),
         );
-        suite.add_comparison(
+        suite.add_input_group(
             "trio",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || 1u64 + 1)
                 .add("b", || 1u64 + 1)
                 .add("c", || 1u64 + 1),
@@ -914,9 +944,11 @@ mod tests {
     fn a_comparison_before_another_entry_leaves_no_blank_line() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison().add("a", || 1u64 + 1).add("b", || 1u64 + 1),
+            cfg.input_group()
+                .add("a", || 1u64 + 1)
+                .add("b", || 1u64 + 1),
         );
         suite.add("flat", || (0..20u64).sum::<u64>());
         let shown = format!("{}", suite.run());
@@ -927,17 +959,16 @@ mod tests {
         assert!(shown.lines().last().unwrap().starts_with("flat"), "{shown}");
     }
 
-    /// A lone alternative is caught where the mistake was made, rather than
-    /// deep inside the scheduler once the suite is already running.
+    /// A singleton group produces ordinary per-alternative stats without a
+    /// difference against its own baseline.
     #[test]
-    #[should_panic(expected = "at least two alternatives")]
-    fn one_alternative_is_not_a_comparison() {
-        let cfg = Config::default();
+    fn one_alternative_runs_without_a_comparison() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        // No `forget` afterwards, because this line never returns - and
-        // `Config::drop` skips its check while panicking, so the unwind is
-        // clean.
-        suite.add_comparison("lonely", cfg.comparison().add("only", || 1u64 + 1));
+        suite.add_input_group("lonely", cfg.input_group().add("only", || 1u64 + 1));
+        let results = suite.run().comparison("lonely").expect("it was measured");
+        assert_eq!(results.stats().len(), 1);
+        assert_eq!(results.against_baseline().count(), 0);
     }
 
     /// An empty suite must run and report nothing, rather than dividing by
@@ -1320,9 +1351,9 @@ mod report_lookup {
         let cfg = cfg();
         let mut suite = cfg.suite();
         suite.add("flat", || (0..64u64).sum::<u64>());
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || (0..64u64).sum::<u64>())
                 .add("b", || (0..64u64).sum::<u64>()),
         );
@@ -1348,9 +1379,9 @@ mod report_lookup {
         let mut suite = cfg.suite();
         suite.add("flat", || (0..64u64).sum::<u64>());
         suite.add_scaling("scaled", |n: usize| (0..n as u64).sum::<u64>(), 32);
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || (0..64u64).sum::<u64>())
                 .add("b", || (0..64u64).sum::<u64>()),
         );
@@ -1370,9 +1401,9 @@ mod report_lookup {
         let mut suite = cfg.suite();
         suite.add("one", || (0..64u64).sum::<u64>());
         suite.add("two", || (0..64u64).sum::<u64>());
-        suite.add_comparison(
+        suite.add_input_group(
             "pair",
-            cfg.comparison()
+            cfg.input_group()
                 .add("a", || (0..64u64).sum::<u64>())
                 .add("b", || (0..64u64).sum::<u64>()),
         );
@@ -1394,9 +1425,9 @@ mod report_lookup {
     fn a_script_can_ask_which_alternative_is_actually_fastest() {
         let cfg = cfg();
         let mut suite = cfg.suite();
-        suite.add_comparison(
+        suite.add_input_group(
             "hashing",
-            cfg.comparison()
+            cfg.input_group()
                 // The one we ship, and a deliberately slower rival.
                 .add("shipped", || (0..64u64).sum::<u64>())
                 .add("rival", || (0..512u64).sum::<u64>()),
@@ -1470,10 +1501,10 @@ mod per_benchmark_config {
         let cfg = Config::default().with_max_time(generous);
         let stingy = Config::relative(1e-9).with_max_time(Duration::from_millis(10));
         let mut suite = cfg.suite();
-        suite.add_comparison(
+        suite.add_input_group(
             "starved",
             stingy
-                .comparison()
+                .input_group()
                 .add("a", || (0..50u64).sum::<u64>())
                 .add("b", || (0..50u64).sum::<u64>()),
         );
@@ -1505,9 +1536,9 @@ mod per_benchmark_config {
         let mut suite = cfg.suite();
         suite.add_with(&other, "flat", || (0..32u64).sum::<u64>());
         for name in ["one", "two"] {
-            suite.add_comparison(
+            suite.add_input_group(
                 name,
-                cfg.comparison()
+                cfg.input_group()
                     .add("a", || (0..32u64).sum::<u64>())
                     .add("b", || (0..32u64).sum::<u64>()),
             );
@@ -1541,7 +1572,7 @@ mod per_benchmark_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Candidate, ErasedInput, Input, MakeInput};
+    use crate::registry::{Candidate, ErasedInput, Input};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -1597,37 +1628,21 @@ mod registered_by_hand {
         }
     }
 
-    fn flat_baseline(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
-        adder.add_make_input(name, make, |e: &mut ErasedInput| {
-            let v = e.get_mut::<Vec<u64>>();
-            v.sort();
-            v.len()
-        });
-    }
-
     fn alt_baseline<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
+        set: InputGroup<'a, ErasedInput>,
         name: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
+    ) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
             v.len()
         })
-    }
-
-    fn flat_unstable(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
-        adder.add_make_input(name, make, |e: &mut ErasedInput| {
-            let v = e.get_mut::<Vec<u64>>();
-            v.sort_unstable();
-            v.len()
-        });
     }
 
     fn alt_unstable<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
+        set: InputGroup<'a, ErasedInput>,
         name: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
+    ) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort_unstable();
@@ -1635,21 +1650,8 @@ mod registered_by_hand {
         })
     }
 
-    fn flat_slow(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
-        adder.add_make_input(name, make, |e: &mut ErasedInput| {
-            let v = e.get_mut::<Vec<u64>>();
-            v.sort();
-            v.sort_unstable();
-            v.sort();
-            v.len()
-        });
-    }
-
     /// Deliberately slower, so the comparison has something real to find.
-    fn alt_slow<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
-        name: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
+    fn alt_slow<'a>(set: InputGroup<'a, ErasedInput>, name: &str) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
@@ -1668,7 +1670,6 @@ mod registered_by_hand {
             is_baseline: true,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            add_flat: flat_baseline,
             add_alt: alt_baseline,
         }
     }
@@ -1682,7 +1683,6 @@ mod registered_by_hand {
             is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            add_flat: flat_unstable,
             add_alt: alt_unstable,
         }
     }
@@ -1696,7 +1696,6 @@ mod registered_by_hand {
             is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            add_flat: flat_slow,
             add_alt: alt_slow,
         }
     }
@@ -1860,17 +1859,13 @@ mod registered_by_hand {
 #[cfg(test)]
 mod bad_registrations {
     use super::*;
-    use crate::registry::{Candidate, ErasedInput, MakeInput};
+    use crate::registry::{Candidate, ErasedInput};
 
     fn add(adder: &mut Suite<'_>, name: &str) {
         adder.add(name, || (0..16u64).sum::<u64>());
     }
 
-    fn flat(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
-        adder.add_make_input(name, make, |_: &mut ErasedInput| ());
-    }
-
-    fn alt<'a>(set: ComparisonSet<'a, ErasedInput>, name: &str) -> ComparisonSet<'a, ErasedInput> {
+    fn alt<'a>(set: InputGroup<'a, ErasedInput>, name: &str) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |_| ())
     }
 
@@ -1898,7 +1893,6 @@ mod bad_registrations {
         is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        add_flat: flat,
         add_alt: alt,
     };
     static TWO_BASELINES_B: Candidate = Candidate {
@@ -1909,7 +1903,6 @@ mod bad_registrations {
         is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        add_flat: flat,
         add_alt: alt,
     };
 
@@ -1999,26 +1992,16 @@ mod versions_and_rivals {
         work(v, 3)
     }
 
-    fn add_flat_new(adder: &mut Suite<'_>, name: &str, make: fn() -> ErasedInput) {
-        adder.add_make_input(name, make, |e: &mut ErasedInput| {
-            mix_new(e.get_mut::<Vec<u64>>())
-        });
-    }
-    fn add_flat_old(adder: &mut Suite<'_>, name: &str, make: fn() -> ErasedInput) {
-        adder.add_make_input(name, make, |e: &mut ErasedInput| {
-            mix_old(e.get_mut::<Vec<u64>>())
-        });
-    }
     fn add_alt_new<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
+        set: InputGroup<'a, ErasedInput>,
         name: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
+    ) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
     }
     fn add_alt_old<'a>(
-        set: ComparisonSet<'a, ErasedInput>,
+        set: InputGroup<'a, ErasedInput>,
         name: &str,
-    ) -> ComparisonSet<'a, ErasedInput> {
+    ) -> InputGroup<'a, ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
     }
 
@@ -2037,7 +2020,6 @@ mod versions_and_rivals {
             is_baseline: true,
             crate_name: "mycrate",
             crate_version: "0.9.0",
-            add_flat: add_flat_new,
             add_alt: add_alt_new,
         }
     }
@@ -2051,7 +2033,6 @@ mod versions_and_rivals {
             is_baseline: true,
             crate_name: "mycrate",
             crate_version: "0.8.0",
-            add_flat: add_flat_old,
             add_alt: add_alt_old,
         }
     }
@@ -2066,7 +2047,6 @@ mod versions_and_rivals {
             is_baseline: false,
             crate_name: "theircrate",
             crate_version: "0.1.0",
-            add_flat: add_flat_new,
             add_alt: add_alt_new,
         }
     }

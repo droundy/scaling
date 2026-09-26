@@ -449,14 +449,11 @@ mod tests {
 mod grids {
     use super::*;
     use crate::assemble::{Named, Origin};
-    use crate::registry::{noop_alt, Candidate, ErasedInput, Input, MakeInput};
+    use crate::registry::{noop_alt, Candidate, ErasedInput, Input};
     use std::any::TypeId;
 
     // Never called: `grid` pairs and prints, it does not measure. They exist
     // because a registration is a struct and its fields have to be filled.
-    fn unused_flat(_: &mut Suite<'_>, _: &str, _: MakeInput) {
-        unreachable!("a grid does not measure")
-    }
     fn unused_make() -> ErasedInput {
         ErasedInput::new(0u64)
     }
@@ -469,7 +466,6 @@ mod grids {
         is_baseline: true,
         crate_name: "scaling",
         crate_version: "0.9.0",
-        add_flat: unused_flat,
         add_alt: noop_alt,
     };
     static UNSTABLE: Candidate = Candidate {
@@ -523,9 +519,9 @@ mod grids {
     fn measured() -> Report {
         let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
         let mut suite = cfg.suite();
-        suite.add_comparison(
+        suite.add_input_group(
             "sorting@reversed",
-            cfg.comparison()
+            cfg.input_group()
                 .add("stable", || (0..64u64).sum::<u64>())
                 // Ten times the work, so the percentage in the grid is a
                 // number this can actually assert on.

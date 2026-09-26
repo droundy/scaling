@@ -1,4 +1,4 @@
-//! Comparing more than two alternatives at once: [`ComparisonSet`].
+//! Measuring one or more alternatives over a shared input: [`InputGroup`].
 //!
 //! The reason to time k things together rather than k-1 times in pairs is
 //! the same reason a comparison's alternatives beat two separate [`bench`]
@@ -45,11 +45,11 @@ type GenInput<'a, I> = dyn FnMut() -> I + 'a;
 /// amount of averaging distinguishes the two.
 type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 
-/// Alternatives to be timed against one another, gathered before any of them
-/// runs.
-pub struct ComparisonSet<'a, I> {
+/// Benchmarks sharing an input, gathered before any of them runs.
+pub struct InputGroup<'a, I> {
     cfg: &'a Config,
     make_input: Box<GenInput<'a, I>>,
+    clone_input: Option<Box<dyn Fn(&I) -> I + 'a>>,
     entries: Vec<Entry<'a, I>>,
 }
 
@@ -59,50 +59,68 @@ struct Entry<'a, I> {
 }
 
 impl Config {
-    /// Create a ComparisonSet for testing.
+    /// Create an InputGroup for testing.
     #[cfg(test)]
-    pub(crate) fn comparison(&self) -> ComparisonSet<'_, ()> {
-        ComparisonSet {
+    pub(crate) fn input_group(&self) -> InputGroup<'_, ()> {
+        InputGroup {
             cfg: self,
             make_input: Box::new(|| ()),
+            clone_input: Some(Box::new(Clone::clone)),
             entries: Vec::new(),
         }
     }
 
     /// Start gathering alternatives that each need freshly generated input.
     ///
-    /// One batch of inputs is generated per round and then *cloned* for each
-    /// alternative, so that within a round they are all measured on the same
-    /// inputs while no alternative can leave anything behind for the next.
-    /// That is why `I` must be [`Clone`] here, and why the clone should be a
-    /// faithful one: an alternative that is handed a shallow copy sharing a
-    /// buffer with the original is not being measured on its own input.
+    /// One batch of inputs is generated per round. With multiple alternatives
+    /// it is cloned for each one, so they are measured on the same inputs and
+    /// none can leave anything behind for the next. That is why `I` must be
+    /// [`Clone`] here, and why the clone should be faithful: an alternative
+    /// handed a shallow copy sharing a buffer with the original is not being
+    /// measured on its own input. A singleton group uses the generated batch
+    /// directly and does not need `I: Clone`.
     ///
     /// Neither the generating nor the cloning is timed, but both are paid
     /// out of [`Config::max_time`].
     ///
-    /// Like [`Config::comparison`]: this is what assembles a registered
-    /// comparison group or matrix lane.
-    pub(crate) fn comparison_make_input<'a, G, I: Clone>(
+    /// Like [`Config::input_group`]: this assembles a registered input group
+    /// or matrix lane.
+    pub(crate) fn input_group_make_input<'a, G, I: Clone + 'a>(
         &'a self,
         make_input: G,
-    ) -> ComparisonSet<'a, I>
+    ) -> InputGroup<'a, I>
     where
         G: FnMut() -> I + 'a,
     {
-        ComparisonSet {
+        InputGroup {
             cfg: self,
             make_input: Box::new(make_input),
+            clone_input: Some(Box::new(Clone::clone)),
+            entries: Vec::new(),
+        }
+    }
+
+    pub(crate) fn input_group_make_input_uncloned<'a, G, I>(
+        &'a self,
+        make_input: G,
+    ) -> InputGroup<'a, I>
+    where
+        G: FnMut() -> I + 'a,
+    {
+        InputGroup {
+            cfg: self,
+            make_input: Box::new(make_input),
+            clone_input: None,
             entries: Vec::new(),
         }
     }
 }
 
-impl<'a> ComparisonSet<'a, ()> {
+impl<'a> InputGroup<'a, ()> {
     /// Add an alternative that takes no input. The first one added is the
     /// baseline.
     ///
-    /// Only used by tests exercising [`Config::comparison`] directly - see
+    /// Only used by tests exercising [`Config::input_group`] directly - see
     /// its doc comment.
     #[cfg(test)]
     pub(crate) fn add<F, O>(self, name: &str, mut f: F) -> Self
@@ -113,7 +131,7 @@ impl<'a> ComparisonSet<'a, ()> {
     }
 }
 
-impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
+impl<'a, I: 'a> InputGroup<'a, I> {
     /// Add an alternative that takes the generated input. The first one
     /// added is the baseline.
     ///
@@ -121,7 +139,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// return: each is timed by its own instantiation of the timing loop,
     /// and only that loop, not its `O`, is visible to [`run`].
     ///
-    /// [`run`]: ComparisonSet::run
+    /// [`run`]: InputGroup::run
     pub fn add_input<F, O>(mut self, name: &str, mut f: F) -> Self
     where
         F: FnMut(&mut I) -> O + 'a,
@@ -141,7 +159,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// The `Config` this set was built from, which governs both its accuracy
     /// goal and its budget.
     ///
-    /// For [`Suite::add_comparison`], which sizes the comparison's clock and
+    /// For [`Suite::add_input_group`], which sizes the group's clock and
     /// so needs the same `Config` the sampling loop will consult - the set
     /// carries its own, and it is not necessarily the suite's.
     pub(crate) fn cfg(&self) -> &'a Config {
@@ -173,24 +191,20 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     ///
     /// # Panics
     ///
-    /// If fewer than two alternatives were added: there is nothing to
-    /// compare a lone alternative against.
+    /// If no alternatives were added, or multiple alternatives were added
+    /// without a way to clone their shared inputs.
     ///
-    /// A `Suite` never calls this: it interleaves a registered comparison's
-    /// samples with the rest of the suite via its own scheduler instead of
-    /// driving this standalone loop. Only tests call it directly, to check
-    /// the k-way algorithm itself - the statistics, the pairing, the stopping
-    /// rule - independent of registration or a suite.
+    /// A `Suite` never calls this directly: it interleaves the group's
+    /// samples with the rest of the suite via its own scheduler. Only tests
+    /// call it directly, to check the sampling algorithm independently of a
+    /// suite.
     #[cfg(test)]
     pub(crate) fn run(self) -> Comparisons {
         // Before pinning and before the machine lock, both of which have
-        // effects that outlive a panic and the second of which blocks: a
-        // caller who added one alternative has made a mistake that wants
-        // reporting now, not after waiting for another process to give the
-        // reserved CPUs back. `run_async` re-checks for the suite path.
+        // effects that outlive a panic and the second of which blocks.
         assert!(
-            self.entries.len() >= 2,
-            "a comparison needs at least two alternatives, got {}",
+            !self.entries.is_empty(),
+            "an input group needs at least one alternative, got {}",
             self.entries.len()
         );
         let _machine = Machine::claim();
@@ -220,28 +234,41 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     ///
     /// # Panics
     ///
-    /// If fewer than two alternatives were added.
+    /// If no alternatives were added, or multiple alternatives were added
+    /// without a way to clone their shared inputs.
     /// `z_alpha` is the Bonferroni limit for the family this set belongs to -
     /// its own `k - 1` when run alone, or the whole suite's total when run in
     /// one - and `seed` distinguishes its random stream from its siblings'.
     pub(crate) async fn run_async(self, clock: &Clock, z_alpha: f64, seed: u64) -> Comparisons {
-        assert!(
-            self.entries.len() >= 2,
-            "a comparison needs at least two alternatives, got {}",
-            self.entries.len()
-        );
-        let ComparisonSet {
+        let InputGroup {
             cfg,
             mut make_input,
+            clone_input,
             mut entries,
         } = self;
         let k = entries.len();
+        assert!(
+            k > 0,
+            "an input group needs at least one alternative, got {k}"
+        );
+        assert!(
+            k == 1 || clone_input.is_some(),
+            "multiple alternatives need clonable shared inputs"
+        );
+        let clone_input = clone_input.as_deref();
         // `master` holds the round's inputs; `xs` is the copy an alternative
         // is actually handed, and may be left in any state.
         let mut master: Vec<I> = Vec::new();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, probed) =
-            calibrate(&mut make_input, &mut entries, &mut master, &mut xs, clock).await;
+        let (unit, probed) = calibrate(
+            &mut make_input,
+            &mut entries,
+            &mut master,
+            &mut xs,
+            clone_input,
+            clock,
+        )
+        .await;
 
         let mut own = vec![Running::default(); k];
         let mut diffs = vec![Running::default(); k];
@@ -261,8 +288,17 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
             refill(&mut make_input, &mut master, unit);
             for step in 0..k {
                 let i = (offset + step) % k;
-                clone_into(&master, &mut xs);
-                let t = (entries[i].batch)(&mut xs);
+                let batch_inputs = if k == 1 {
+                    &mut master
+                } else {
+                    clone_into(
+                        &master,
+                        &mut xs,
+                        clone_input.expect("multiple alternatives need clonable inputs"),
+                    );
+                    &mut xs
+                };
+                let t = (entries[i].batch)(batch_inputs);
                 times[i] = t / unit as f64;
                 measured_ns += t;
             }
@@ -338,19 +374,20 @@ fn refill<I>(make_input: &mut GenInput<I>, xs: &mut Vec<I>, unit: usize) {
 /// whatever the last alternative left behind - here every element is
 /// replaced outright, so what an alternative did to its copy cannot reach
 /// the next one.
-fn clone_into<I: Clone>(master: &[I], xs: &mut Vec<I>) {
+fn clone_into<I>(master: &[I], xs: &mut Vec<I>, clone_input: &dyn Fn(&I) -> I) {
     xs.clear();
-    xs.extend_from_slice(master);
+    xs.extend(master.iter().map(clone_input));
 }
 
 /// Find a batch size whose measured duration, summed over every alternative,
 /// reaches [`SAMPLE_TIME`]: the same extrapolation
 /// [`Config::bench_make_input`] does, over a whole round.
-async fn calibrate<'a, I: Clone>(
+async fn calibrate<'a, I>(
     make_input: &mut GenInput<'a, I>,
     entries: &mut [Entry<'a, I>],
     master: &mut Vec<I>,
     xs: &mut Vec<I>,
+    clone_input: Option<&dyn Fn(&I) -> I>,
     clock: &Clock,
 ) -> (usize, u64) {
     let probe_ceiling_ns = (clock.budget() / 100)
@@ -368,9 +405,19 @@ async fn calibrate<'a, I: Clone>(
         let mut timed_ns = 0.0;
         let probe_start = Instant::now();
         refill(make_input, master, unit);
+        let singleton = entries.len() == 1;
         for e in entries.iter_mut() {
-            clone_into(master, xs);
-            timed_ns += (e.batch)(xs);
+            let batch_inputs = if singleton {
+                &mut *master
+            } else {
+                clone_into(
+                    master,
+                    xs,
+                    clone_input.expect("multiple alternatives need clonable inputs"),
+                );
+                &mut *xs
+            };
+            timed_ns += (e.batch)(batch_inputs);
         }
         // Everything the probe cost, generating and cloning included: what
         // the ceiling below is protecting against is a probe that takes an
@@ -396,8 +443,8 @@ async fn calibrate<'a, I: Clone>(
     }
 }
 
-/// What running a comparison set measured: a [`Stats`] for every
-/// alternative, and every alternative's difference from the baseline.
+/// What running an input group measured: a [`Stats`] for every alternative,
+/// and every alternative's difference from the baseline when there is one.
 #[derive(Debug, Clone)]
 pub struct Comparisons {
     names: Vec<String>,
@@ -478,13 +525,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "at least two alternatives")]
-    fn one_alternative_is_not_a_comparison() {
-        let cfg = Config::default();
-        cfg.comparison().add("only", || 1u64).run();
-        // Unreachable, but were the panic ever to stop happening, `Drop`
-        // would report a plan of 1 against 0 made rather than the missing
-        // panic, which is a confusing way to fail.
+    fn one_alternative_is_a_valid_input_group() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let results = cfg.input_group().add("only", || 1u64).run();
+        assert_eq!(results.stats().len(), 1);
+        assert_eq!(results.against_baseline().count(), 0);
     }
 
     #[test]
@@ -492,7 +537,7 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(200));
         // Four alternatives, three of them reported against the baseline.
         let _ = cfg
-            .comparison()
+            .input_group()
             .add("a", || 1u64)
             .add("b", || 2u64)
             .add("c", || 3u64)
@@ -509,7 +554,7 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(200));
         let mut n = 0u64;
         let r = cfg
-            .comparison_make_input(move || {
+            .input_group_make_input(move || {
                 n += 1;
                 n
             })
@@ -536,7 +581,7 @@ mod tests {
         for r in 0..REPEATS {
             let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
             let c = cfg
-                .comparison()
+                .input_group()
                 // Wrapped so that each is a *distinct* closure type, and so
                 // gets its own instantiation of the timing loop, as three
                 // genuinely different functions would. Identical code
@@ -595,7 +640,7 @@ mod tests {
         for r in 0..REPEATS {
             let mut rng = XorShift(0x243f_6a88_85a3_08d3u64.wrapping_mul(r + 1) | 1);
             let results = cfg
-                .comparison_make_input(move || {
+                .input_group_make_input(move || {
                     // Lengths spread over 4000x, so what a batch costs is
                     // dominated by which lengths it happened to draw.
                     let n = 1 + (rng.next() as usize % 4000);
@@ -636,7 +681,7 @@ mod tests {
             let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
             let base = 2000;
             let c = cfg
-                .comparison()
+                .input_group()
                 .add("base", variable_cost(seed, base))
                 .add("slower", variable_cost(seed, (base as f64 * 1.10) as usize))
                 .add("faster", variable_cost(seed, (base as f64 * 0.90) as usize))
