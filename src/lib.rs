@@ -542,7 +542,7 @@ pub use self::scaling::{bench_scaling, bench_scaling_gen};
 pub use self::suite::Report;
 
 pub(crate) use self::kway::ComparisonSet;
-pub(crate) use self::suite::{Found, RegisteredTokens, Suite, Token};
+pub(crate) use self::suite::{Assembled, Found, Suite};
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.

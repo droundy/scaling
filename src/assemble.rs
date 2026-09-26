@@ -875,8 +875,7 @@ pub fn plan(
     for group in group_names {
         let group_cands = cands_by_group.remove(group).unwrap_or_default();
         let group_inputs = inputs_by_group.remove(group).unwrap_or_default();
-        let (group_lanes, group_problems) =
-            lanes_for_group(group, &group_cands, &group_inputs);
+        let (group_lanes, group_problems) = lanes_for_group(group, &group_cands, &group_inputs);
         lanes.extend(group_lanes);
         problems.extend(group_problems);
     }
@@ -909,15 +908,14 @@ pub fn plan(
 mod tests {
     use super::lane_tests::*;
     use super::*;
-    use crate::registry::{Adder, Handle, Kind};
-    use crate::Stats;
+    use crate::registry::{Kind, Suite};
     use std::any::TypeId;
 
     // Shim that does nothing. Assembly never calls it - it decides what
     // *would* be run - so a plan can be checked without a machine claim, a
     // benchmark, or a linker.
-    fn noop_flat(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
-        adder.flat(name, || ())
+    fn noop_flat(adder: &mut Suite<'_>, name: &str) {
+        adder.add(name, || ());
     }
 
     /// A standalone benchmark.
@@ -1327,12 +1325,11 @@ mod pairing {
 #[cfg(test)]
 pub(crate) mod lane_tests {
     use super::*;
-    use crate::registry::{noop_alt, Adder, ErasedInput, Handle, MakeInput};
-    use crate::Stats;
+    use crate::registry::{noop_alt, ErasedInput, MakeInput, Suite};
     use std::any::TypeId;
 
-    fn noop_flat(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
-        adder.make_input(name, make, |_: &mut ErasedInput| ())
+    fn noop_flat(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
+        adder.add_make_input(name, make, |_: &mut ErasedInput| ());
     }
 
     /// Leaks a one-element group list, for the (common) single-group test
@@ -1595,10 +1592,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "bravo", "u8", false),
             cand::<u8>("m", "charlie", "u8", false),
         ]);
-        assert_eq!(
-            lanes(&before, &is).0[0].candidates[0].name,
-            "bravo"
-        );
+        assert_eq!(lanes(&before, &is).0[0].candidates[0].name, "bravo");
 
         let after = leak_c(vec![
             cand::<u8>("m", "bravo", "u8", false),
@@ -1621,10 +1615,7 @@ pub(crate) mod lane_tests {
             cand::<u8>("m", "zulu", "u8", true),
         ]);
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
-        assert_eq!(
-            lanes(&cs, &is).0[0].candidates[0].name,
-            "zulu"
-        );
+        assert_eq!(lanes(&cs, &is).0[0].candidates[0].name, "zulu");
     }
 
     /// Two marked is a contradiction, unlike none.
@@ -2068,7 +2059,9 @@ mod review_regressions {
             name,
             crate_name: "mycrate",
             crate_version: version,
-            kind: Kind::Flat(|a, n| a.flat(n, || ())),
+            kind: Kind::Flat(|a, n| {
+                a.add(n, || ());
+            }),
         }
     }
 

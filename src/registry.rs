@@ -11,111 +11,20 @@
 //! documented so that what they emit can be read and checked rather than
 //! taken on faith.
 
-use crate::{ComparisonSet, ScalingStats, Stats, Suite, Token};
 use std::any::{Any, TypeId};
 use std::fmt;
 
-/// What a registered shim is given to add its one benchmark with, in place of
-/// a suite itself.
-///
-/// This is the whole of what a `Kind::Flat` or `Kind::Scaling` shim may do -
-/// exactly the "add rather than run" contract [`Kind`] documents, spelled as
-/// a type a macro's generated code can name without also naming (and so,
-/// without the docs promising anything about) `Suite`.
-pub struct Adder<'a, 'b>(pub(crate) &'b mut Suite<'a>);
-
-impl<'a, 'b> Adder<'a, 'b> {
-    /// Adds a benchmark, as [`Suite::add`] would.
-    pub fn flat<F, O>(&mut self, name: &str, f: F) -> Handle<Stats>
-    where
-        F: FnMut() -> O + 'a,
-        O: 'a,
-    {
-        Handle(self.0.add(name, f))
-    }
-
-    /// Adds a benchmark over a fixed input, as [`Suite::add_input`] would.
-    pub fn input<F, I, O>(&mut self, name: &str, input: I, f: F) -> Handle<Stats>
-    where
-        F: FnMut(&mut I) -> O + 'a,
-        I: Clone + 'a,
-        O: 'a,
-    {
-        Handle(self.0.add_input(name, input, f))
-    }
-
-    /// Adds a benchmark over generated inputs, as [`Suite::add_make_input`]
-    /// would.
-    pub fn make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F) -> Handle<Stats>
-    where
-        G: FnMut() -> I + 'a,
-        F: FnMut(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
-    {
-        Handle(self.0.add_make_input(name, make_input, f))
-    }
-
-    /// Adds a scaling benchmark, as [`Suite::add_scaling`] would.
-    pub fn scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Handle<ScalingStats>
-    where
-        F: FnMut(usize) -> O + 'a,
-        O: 'a,
-    {
-        Handle(self.0.add_scaling(name, f, nmin))
-    }
-
-    /// Adds a scaling benchmark over generated inputs, as
-    /// [`Suite::add_scaling_gen`] would.
-    pub fn scaling_gen<G, F, I, O>(
-        &mut self,
-        name: &str,
-        make_input: G,
-        f: F,
-        nmin: usize,
-    ) -> Handle<ScalingStats>
-    where
-        G: FnMut(usize) -> I + 'a,
-        F: Fn(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
-    {
-        Handle(self.0.add_scaling_gen(name, make_input, f, nmin))
-    }
-}
-
-/// The opaque result of a shim adding its benchmark to a suite - a token,
-/// with the type itself kept private so that nothing outside assembly can
-/// read or construct one directly.
-pub struct Handle<T>(pub(crate) Token<T>);
-
-impl<T> Handle<T> {
-    pub(crate) fn into_token(self) -> Token<T> {
-        self.0
-    }
-}
-
-/// One alternative's slot in a comparison group under assembly, threaded
-/// through every `Kind::Alt` shim by value because a comparison set is a
-/// consuming builder.
-pub struct Alternative<'a>(pub(crate) ComparisonSet<'a, ErasedInput>);
-
-impl<'a> Alternative<'a> {
-    /// Adds one alternative, as [`ComparisonSet::add_input`] would.
-    pub fn add<F, O>(self, name: &str, f: F) -> Self
-    where
-        F: FnMut(&mut ErasedInput) -> O + 'a,
-        O: 'a,
-    {
-        Alternative(self.0.add_input(name, f))
-    }
-}
+pub use crate::kway::ComparisonSet;
+pub use crate::suite::Suite;
 
 /// An `AddAlt` shim that does nothing, for tests that check what assembly
 /// *decides* rather than what it *measures* - a plan or a lane can be built
 /// and inspected without a real alternative behind it.
 #[cfg(test)]
-pub(crate) fn noop_alt<'a>(set: Alternative<'a>, _: &str) -> Alternative<'a> {
+pub(crate) fn noop_alt<'a>(
+    set: ComparisonSet<'a, ErasedInput>,
+    _: &str,
+) -> ComparisonSet<'a, ErasedInput> {
     set
 }
 
@@ -123,17 +32,22 @@ pub(crate) fn noop_alt<'a>(set: Alternative<'a>, _: &str) -> Alternative<'a> {
 ///
 /// Named, along with its siblings below, because these signatures appear in
 /// several places and are easier to compare when they are spelled once.
-pub type AddFlat = fn(&mut Adder<'_, '_>, &str) -> Handle<Stats>;
+///
+/// Returns nothing: a registered benchmark's answer is read back by name,
+/// through [`Report`](crate::Report), once the suite has run - nothing
+/// downstream of assembly ever holds this call's return value.
+pub type AddFlat = fn(&mut Suite<'_>, &str);
 
 /// How a scaling benchmark adds itself to a suite.
-pub type AddScaling = fn(&mut Adder<'_, '_>, &str) -> Handle<ScalingStats>;
+pub type AddScaling = fn(&mut Suite<'_>, &str);
 
 /// How one alternative joins a comparison.
-pub type AddAlt = for<'a> fn(Alternative<'a>, &str) -> Alternative<'a>;
+pub type AddAlt =
+    for<'a> fn(ComparisonSet<'a, ErasedInput>, &str) -> ComparisonSet<'a, ErasedInput>;
 
 /// How a matrix candidate is added as a plain benchmark, given a maker for
 /// the input it is paired with.
-pub type AddPaired = fn(&mut Adder<'_, '_>, &str, MakeInput) -> Handle<Stats>;
+pub type AddPaired = fn(&mut Suite<'_>, &str, MakeInput);
 
 /// Builds one erased input.
 pub type MakeInput = fn() -> ErasedInput;
@@ -213,16 +127,12 @@ pub struct Registered {
 /// [`Config::bench`]: crate::Config::bench
 #[derive(Debug)]
 pub enum Kind {
-    /// Adds itself with [`Adder::flat`], [`Adder::input`] or
-    /// [`Adder::make_input`] - which of the three, and any input generator, is
-    /// baked into the shim.
-    ///
-    /// Hands back the handle that `add` returned, so that a caller can still
-    /// look this benchmark's answer up by name after the suite has run
-    /// rather than only reading it out of the printed report.
+    /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
+    /// [`Suite::add_make_input`] - which of the three, and any input
+    /// generator, is baked into the shim.
     Flat(AddFlat),
-    /// Adds itself with [`Adder::scaling`] or [`Adder::scaling_gen`]. `nmin`
-    /// is baked in too, since this signature has nowhere to pass it.
+    /// Adds itself with [`Suite::add_scaling`] or [`Suite::add_scaling_gen`].
+    /// `nmin` is baked in too, since this signature has nowhere to pass it.
     Scaling(AddScaling),
 }
 
@@ -494,8 +404,7 @@ mod tests {
             }
             match r.kind {
                 Kind::Flat(add) => {
-                    let mut adder = Adder(&mut suite);
-                    let _handle = add(&mut adder, r.name);
+                    add(&mut suite, r.name);
                     added += 1;
                 }
                 _ => panic!("the self-test registrations are all flat"),
@@ -515,12 +424,12 @@ mod tests {
     // Two registrations, written the way generated code will write them.
     // Deliberately at item position in a test module: that is where
     // `submit!` has to work, and it is the arrangement a macro produces.
-    fn add_alpha(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
-        adder.flat(name, || (0..32u64).sum::<u64>())
+    fn add_alpha(adder: &mut Suite<'_>, name: &str) {
+        adder.add(name, || (0..32u64).sum::<u64>());
     }
 
-    fn add_beta(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
-        adder.input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort())
+    fn add_beta(adder: &mut Suite<'_>, name: &str) {
+        adder.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort());
     }
 
     inventory::submit! {

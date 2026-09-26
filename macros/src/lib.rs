@@ -684,7 +684,7 @@ fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
 }
 
 /// `|__v| #fname(__v.take().expect(...))`: the closure a shim uses when the
-/// benchmark consumes its input by value. `Adder`/`ComparisonSet` only ever
+/// benchmark consumes its input by value. `Suite`/`ComparisonSet` only ever
 /// hand out `&mut I`, so the stored value is wrapped in `Option<I>` and taken
 /// out of it right before the call - exactly the trick this crate's own
 /// documentation would otherwise have to tell a caller to write by hand.
@@ -823,8 +823,8 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             let body = match (&args.input, &args.make_input) {
                 // The setup function itself runs once: `input` is given to
                 // it there, not cloned/regenerated per call the way
-                // `Adder::input`/`make_input` would. Routing this through
-                // `Adder::input` instead would still type-check - the lazy
+                // `Suite::add_input`/`add_make_input` would. Routing this
+                // through `Suite::add_input` instead would still type-check - the lazy
                 // `get_or_insert_with` below only ever uses the first of the
                 // many clones it would hand out - but it would pay to build
                 // every one of those unused clones first, for nothing.
@@ -844,7 +844,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     quote! {
                         {
                             let mut __action = ::core::option::Option::None;
-                            __adder.flat(__name, move || {
+                            __adder.add(__name, move || {
                                 (__action.get_or_insert_with(|| #fname(#input)))()
                             })
                         }
@@ -855,32 +855,32 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         {
                             let mut __input = #input;
                             let mut __action = ::core::option::Option::None;
-                            __adder.flat(__name, move || {
+                            __adder.add(__name, move || {
                                 (__action.get_or_insert_with(|| #fname(&mut __input)))()
                             })
                         }
                     }
                 }
-                // `|__v| #fname(__v)`, not `#fname` passed directly: `Adder`
+                // `|__v| #fname(__v)`, not `#fname` passed directly: `Suite`
                 // always hands out `&mut I`, and a named function's own type
                 // does not satisfy a generic `FnMut(&mut I)` bound merely
                 // because Rust would reborrow `&mut I` as `&I` at an
                 // ordinary call site - that coercion only applies to an
                 // actual call expression, which this closure body gives it.
                 (Some(input), None) if !owned => {
-                    quote!(__adder.input(__name, #input, |__v| #fname(__v)))
+                    quote!(__adder.add_input(__name, #input, |__v| #fname(__v)))
                 }
                 (None, Some(gen)) if !owned => {
-                    quote!(__adder.make_input(__name, #gen, |__v| #fname(__v)))
+                    quote!(__adder.add_make_input(__name, #gen, |__v| #fname(__v)))
                 }
-                // The function consumes its input, so `Adder` - which only
+                // The function consumes its input, so `Suite` - which only
                 // ever hands out `&mut I` - cannot call it directly. See
                 // `take_and_call` for the `Option`/`.take()` trick that
                 // works around that.
                 (Some(input), None) => {
                     let take = take_and_call(fname);
                     quote! {
-                        __adder.input(
+                        __adder.add_input(
                             __name,
                             ::core::option::Option::Some(#input),
                             #take,
@@ -890,7 +890,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 (None, Some(gen)) => {
                     let take = take_and_call(fname);
                     quote! {
-                        __adder.make_input(
+                        __adder.add_make_input(
                             __name,
                             {
                                 let mut __gen = #gen;
@@ -922,13 +922,13 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         quote! {
                             {
                                 let mut __action = ::core::option::Option::None;
-                                __adder.flat(__name, move || {
+                                __adder.add(__name, move || {
                                     (__action.get_or_insert_with(#fname))()
                                 })
                             }
                         }
                     } else {
-                        quote!(__adder.flat(__name, #fname))
+                        quote!(__adder.add(__name, #fname))
                     }
                 }
                 (Some(_), Some(_)) => unreachable!("checked above"),
@@ -936,10 +936,10 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __adder: &mut ::scaling::registry::Adder<'_, '_>,
+                    __adder: &mut ::scaling::registry::Suite<'_>,
                     __name: &str,
-                ) -> ::scaling::registry::Handle<::scaling::Stats> {
-                    #body
+                ) {
+                    #body;
                 }
                 ::scaling::inventory::submit! {
                     ::scaling::registry::Registered {
@@ -978,12 +978,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             let body = match &args.make_input {
                 // Wrapped for the same reason as the flat case above.
                 Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
-                    quote!(__adder.scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
+                    quote!(__adder.add_scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
                 }
                 Some(gen) => {
                     let take = take_and_call(fname);
                     quote! {
-                        __adder.scaling_gen(
+                        __adder.add_scaling_gen(
                             __name,
                             {
                                 let mut __gen = #gen;
@@ -999,21 +999,21 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         {
                             let mut __cache: ::std::collections::HashMap<usize, _> =
                                 ::std::collections::HashMap::new();
-                            __adder.scaling(__name, move |__n: usize| {
+                            __adder.add_scaling(__name, move |__n: usize| {
                                 (__cache.entry(__n).or_insert_with(|| #fname(__n)))()
                             }, #nmin)
                         }
                     }
                 }
-                None => quote!(__adder.scaling(__name, #fname, #nmin)),
+                None => quote!(__adder.add_scaling(__name, #fname, #nmin)),
             };
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __adder: &mut ::scaling::registry::Adder<'_, '_>,
+                    __adder: &mut ::scaling::registry::Suite<'_>,
                     __name: &str,
-                ) -> ::scaling::registry::Handle<::scaling::ScalingStats> {
-                    #body
+                ) {
+                    #body;
                 }
                 ::scaling::inventory::submit! {
                     ::scaling::registry::Registered {
@@ -1197,7 +1197,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             (
                 quote! {
                     let mut __action = ::core::option::Option::None;
-                    __adder.make_input(
+                    __adder.add_make_input(
                         __name,
                         __make,
                         move |__e: &mut ::scaling::registry::ErasedInput| #repeatable,
@@ -1205,37 +1205,37 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 },
                 quote! {
                     let mut __action = ::core::option::Option::None;
-                    __set.add(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
+                    __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
                 },
             )
         } else {
             (
                 quote! {
-                    __adder.make_input(
+                    __adder.add_make_input(
                         __name,
                         __make,
                         |__e: &mut ::scaling::registry::ErasedInput| #call,
                     )
                 },
                 quote! {
-                    __set.add(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
+                    __set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call)
                 },
             )
         };
         out.extend(quote! {
             #[doc(hidden)]
             fn #flat(
-                __adder: &mut ::scaling::registry::Adder<'_, '_>,
+                __adder: &mut ::scaling::registry::Suite<'_>,
                 __name: &str,
                 __make: fn() -> ::scaling::registry::ErasedInput,
-            ) -> ::scaling::registry::Handle<::scaling::Stats> {
-                #flat_body
+            ) {
+                #flat_body;
             }
             #[doc(hidden)]
             fn #alt<'__s>(
-                __set: ::scaling::registry::Alternative<'__s>,
+                __set: ::scaling::registry::ComparisonSet<'__s, ::scaling::registry::ErasedInput>,
                 __name: &str,
-            ) -> ::scaling::registry::Alternative<'__s> {
+            ) -> ::scaling::registry::ComparisonSet<'__s, ::scaling::registry::ErasedInput> {
                 #alt_body
             }
             ::scaling::inventory::submit! {

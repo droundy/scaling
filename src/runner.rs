@@ -36,9 +36,7 @@
 //! nothing else, without anybody having to remember to silence the rest.
 
 use crate::assemble::Lane;
-#[cfg(test)]
-use crate::Stats;
-use crate::{Config, Found, RegisteredTokens, Report, Suite};
+use crate::{Assembled, Config, Found, Report, Suite};
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
@@ -133,7 +131,7 @@ pub fn main() -> ExitCode {
 /// Shared by [`run`] and [`measure`] so that the two cannot drift: what
 /// `measure` hands back is what `run` would have printed, assembled by the
 /// same code under the same options.
-fn assemble(options: &Options) -> Result<(Suite<'_>, RegisteredTokens), Vec<Diagnostic>> {
+fn assemble(options: &Options) -> Result<(Suite<'_>, Assembled), Vec<Diagnostic>> {
     let mut suite = options.cfg.suite();
     let tokens = suite.try_add_registered()?;
     Ok((suite, tokens))
@@ -213,8 +211,8 @@ pub fn run(options: Options) -> Outcome {
 }
 
 /// Why a run measured nothing, which is nearly always one of two things.
-fn nothing_to_run(tokens: &RegisteredTokens) -> String {
-    let registered = tokens.flat.len() + tokens.scaling.len() + tokens.comparisons.len();
+fn nothing_to_run(tokens: &Assembled) -> String {
+    let registered = tokens.flat + tokens.scaling + tokens.comparisons;
     if registered == 0 {
         // The failure `inventory` actually produces: it collects through
         // linker sections, so a module that was not compiled into this
@@ -238,7 +236,7 @@ fn nothing_to_run(tokens: &RegisteredTokens) -> String {
 /// several inputs earns one; a lane with one falls through to the plain
 /// per-name rendering below, same as a flat benchmark or a lone comparison
 /// always has.
-fn table(report: &Report, tokens: &RegisteredTokens) -> String {
+fn table(report: &Report, tokens: &Assembled) -> String {
     if tokens.lanes.is_empty() {
         return format!("{report}\n");
     }
@@ -451,12 +449,12 @@ mod tests {
 mod grids {
     use super::*;
     use crate::assemble::{Named, Origin};
-    use crate::registry::{noop_alt, Adder, Candidate, ErasedInput, Handle, Input, MakeInput};
+    use crate::registry::{noop_alt, Candidate, ErasedInput, Input, MakeInput};
     use std::any::TypeId;
 
     // Never called: `grid` pairs and prints, it does not measure. They exist
     // because a registration is a struct and its fields have to be filled.
-    fn unused_flat(_: &mut Adder<'_, '_>, _: &str, _: MakeInput) -> Handle<Stats> {
+    fn unused_flat(_: &mut Suite<'_>, _: &str, _: MakeInput) {
         unreachable!("a grid does not measure")
     }
     fn unused_make() -> ErasedInput {
@@ -574,7 +572,7 @@ mod grids {
     #[test]
     fn without_lanes_the_table_is_the_report() {
         let report = measured();
-        let tokens = RegisteredTokens::default();
+        let tokens = Assembled::default();
         assert_eq!(table(&report, &tokens), format!("{report}\n"));
     }
 }

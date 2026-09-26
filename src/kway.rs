@@ -47,7 +47,7 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 
 /// Alternatives to be timed against one another, gathered before any of them
 /// runs.
-pub(crate) struct ComparisonSet<'a, I> {
+pub struct ComparisonSet<'a, I> {
     cfg: &'a Config,
     make_input: Box<GenInput<'a, I>>,
     entries: Vec<Entry<'a, I>>,
@@ -105,7 +105,7 @@ impl<'a> ComparisonSet<'a, ()> {
     /// Only used by tests exercising [`Config::comparison`] directly - see
     /// its doc comment.
     #[cfg(test)]
-    pub fn add<F, O>(self, name: &str, mut f: F) -> Self
+    pub(crate) fn add<F, O>(self, name: &str, mut f: F) -> Self
     where
         F: FnMut() -> O + 'a,
     {
@@ -134,7 +134,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     }
 
     /// How many alternatives have been added.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
@@ -182,7 +182,7 @@ impl<'a, I: Clone + 'a> ComparisonSet<'a, I> {
     /// the k-way algorithm itself - the statistics, the pairing, the stopping
     /// rule - independent of registration or a suite.
     #[cfg(test)]
-    pub fn run(self) -> Comparisons {
+    pub(crate) fn run(self) -> Comparisons {
         // Before pinning and before the machine lock, both of which have
         // effects that outlive a panic and the second of which blocks: a
         // caller who added one alternative has made a mistake that wants

@@ -9,10 +9,10 @@
 //! the macro rather than in the registry.
 //!
 //! Driven through [`scaling::runner::measure`] rather than `Config::suite`:
-//! `Suite`, `Token` and `RegisteredTokens` are `pub(crate)`, reachable only
-//! from inside the crate, so an ordinary integration test - which links
-//! `scaling` the way any downstream crate would - can only ever reach the
-//! registry through the runner's public entry point.
+//! building a `Suite` is `pub(crate)`, so an ordinary integration test -
+//! which links `scaling` the way any downstream crate would - has no way to
+//! get hold of one and can only ever reach the registry through the
+//! runner's public entry point.
 
 use scaling::runner::{measure, Options};
 use scaling::Config;

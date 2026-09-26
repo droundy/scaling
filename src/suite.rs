@@ -54,10 +54,9 @@
 //!   nothing at all.
 
 use super::*;
-use crate::registry::{Adder, Alternative, Candidate, Input, Kind, Registered};
+use crate::registry::{Candidate, Input, Kind, Registered};
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -343,8 +342,13 @@ impl<'a> Scheduler<'a> {
 /// results have different types: a flat benchmark hands back a [`Stats`], a
 /// comparison a [`Comparisons`], and each token remembers which.
 ///
-/// [`Token::get`] is `None` until the suite has run.
-pub(crate) struct Token<T>(Arc<Mutex<Option<T>>>);
+/// `get` is `None` until the suite has run.
+///
+/// Public only so that a registered shim - [`crate::registry::AddFlat`] and
+/// friends - can name its return type; `get` itself is `#[cfg(test)]`, so
+/// outside this crate's own tests a token can be held and passed along but
+/// never read.
+pub struct Token<T>(Arc<Mutex<Option<T>>>);
 
 // Not `#[derive(Clone)]`, which would demand `T: Clone` for no reason: what
 // is cloned is the handle, not the answer behind it.
@@ -371,9 +375,10 @@ impl<T: Clone> Token<T> {
     /// The answer, or `None` if the suite has not run yet.
     ///
     /// A registered benchmark's result is read back through [`Report`]
-    /// instead - see its own doc comment for why. Only tests hold a `Token`
-    /// directly, to check `Suite`'s own scheduling and interleaving without
-    /// going through registration at all.
+    /// instead - see its own doc comment for why. `#[cfg(test)]` because
+    /// only this crate's own tests call it directly, to check `Suite`'s own
+    /// scheduling and interleaving without going through registration at
+    /// all; a registered shim holds its token only to hand it back.
     #[cfg(test)]
     pub fn get(&self) -> Option<T> {
         self.cell().clone()
@@ -459,7 +464,7 @@ pub(crate) enum Found {
 /// benchmark's samples are drawn: across the whole session rather than in one
 /// stretch of it, so that no benchmark is measured in a machine state its
 /// neighbours never saw.
-pub(crate) struct Suite<'a> {
+pub struct Suite<'a> {
     cfg: &'a Config,
     scheduler: Scheduler<'a>,
     /// Names and type-erased cells, in declaration order, for [`Report`].
@@ -501,11 +506,11 @@ impl Config {
 
 impl<'a> Suite<'a> {
     /// How many benchmarks have been added.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -547,7 +552,7 @@ impl<'a> Suite<'a> {
     ///
     /// See [`Suite::add_make_input_with`] for what a per-benchmark `Config`
     /// is for and what it does not change.
-    pub fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F) -> Token<Stats>
+    pub(crate) fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F) -> Token<Stats>
     where
         F: FnMut() -> O + 'a,
         O: 'a,
@@ -567,7 +572,7 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add_input`], measured against `cfg` rather than the suite's
     /// own. See [`Suite::add_make_input_with`].
-    pub fn add_input_with<F, I, O>(
+    pub(crate) fn add_input_with<F, I, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
@@ -614,7 +619,7 @@ impl<'a> Suite<'a> {
     /// suite holds. A benchmark cannot opt out of the family it is part of by
     /// bringing its own `Config`.
     ///
-    pub fn add_make_input_with<G, F, I, O>(
+    pub(crate) fn add_make_input_with<G, F, I, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
@@ -636,7 +641,7 @@ impl<'a> Suite<'a> {
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
-    pub(crate) fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
+    pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize) -> Token<ScalingStats>
     where
         F: FnMut(usize) -> O + 'a,
         O: 'a,
@@ -646,7 +651,7 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add_scaling`], measured against `cfg` rather than the suite's
     /// own. See [`Suite::add_make_input_with`].
-    pub fn add_scaling_with<F, O>(
+    pub(crate) fn add_scaling_with<F, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
@@ -684,7 +689,7 @@ impl<'a> Suite<'a> {
 
     /// [`Suite::add_scaling_gen`], measured against `cfg` rather than the
     /// suite's own. See [`Suite::add_make_input_with`].
-    pub fn add_scaling_gen_with<G, F, I, O>(
+    pub(crate) fn add_scaling_gen_with<G, F, I, O>(
         &mut self,
         cfg: &'a Config,
         name: &str,
@@ -722,7 +727,11 @@ impl<'a> Suite<'a> {
     /// If the set holds fewer than two alternatives - checked here rather
     /// than when the suite runs, so the mistake is reported at the line that
     /// made it.
-    pub fn add_comparison<I>(&mut self, name: &str, set: ComparisonSet<'a, I>) -> Token<Comparisons>
+    pub(crate) fn add_comparison<I>(
+        &mut self,
+        name: &str,
+        set: ComparisonSet<'a, I>,
+    ) -> Token<Comparisons>
     where
         I: Clone + 'a,
     {
@@ -782,7 +791,7 @@ impl<'a> Suite<'a> {
     /// Nothing is promised in advance and nothing is checked afterwards: the
     /// scheduler runs every entry that was added, so the number corrected for
     /// and the number made are the same number by construction.
-    pub fn run(mut self) -> Report {
+    pub(crate) fn run(mut self) -> Report {
         self.z_alpha.set(Config::z_alpha_for(self.comparisons));
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
@@ -795,24 +804,20 @@ impl<'a> Suite<'a> {
     }
 }
 
-/// Where the answers of registered benchmarks appear once the suite has run.
+/// What assembling the registered benchmarks produced.
 ///
-/// A [`Report`] shows everything, but only as text. This is how a caller
-/// reaches one particular answer afterwards - to assert on it in a test, or
-/// to feed it somewhere - without parsing the report back.
-///
-/// Keyed by the name the benchmark registered under. Split by kind rather
-/// than mixed, because the three answers are different types and a token
-/// remembers which: that is exactly what stops a caller having to downcast.
+/// A registered benchmark's answer is read back by name through [`Report`]
+/// once the suite has run - nobody needs a handle to it here, so this counts
+/// what was added rather than holding it.
 #[derive(Debug, Default)]
-pub(crate) struct RegisteredTokens {
-    /// Flat benchmarks, by name.
-    pub flat: BTreeMap<String, Token<Stats>>,
-    /// Scaling benchmarks, by name.
-    pub scaling: BTreeMap<String, Token<ScalingStats>>,
-    /// Comparisons, by the name they were reported under. A group sharing
-    /// several inputs contributes one per input, named `group@input`.
-    pub comparisons: BTreeMap<String, Token<Comparisons>>,
+pub(crate) struct Assembled {
+    /// How many flat benchmarks were added.
+    pub flat: usize,
+    /// How many scaling benchmarks were added.
+    pub scaling: usize,
+    /// How many comparisons were added. A group sharing several inputs
+    /// contributes one per input.
+    pub comparisons: usize,
     /// Things worth saying that did not stop the run - a candidate no input
     /// matches, say. Errors come back through [`Suite::try_add_registered`]
     /// instead; these are the complaints that leave the rest of the run
@@ -849,9 +854,9 @@ impl<'a> Suite<'a> {
     /// Nothing is added when this returns `Err`: the registrations are
     /// checked in full before the first one is added, so a suite is never
     /// left holding half of a set that did not check out.
-    pub fn try_add_registered(
+    pub(crate) fn try_add_registered(
         &mut self,
-    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
+    ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let cands: Vec<&'static Candidate> = inventory::iter::<Candidate>().collect();
         let inputs: Vec<&'static Input> = inventory::iter::<Input>().collect();
@@ -868,7 +873,7 @@ impl<'a> Suite<'a> {
         regs: &[&'static Registered],
         cands: &[&'static Candidate],
         inputs: &[&'static Input],
-    ) -> Result<RegisteredTokens, Vec<crate::assemble::Diagnostic>> {
+    ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
         let (plan, problems) = crate::assemble::plan(regs, cands, inputs);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
@@ -881,20 +886,20 @@ impl<'a> Suite<'a> {
         }
 
         let cfg = self.cfg;
-        let mut tokens = RegisteredTokens {
+        let mut tokens = Assembled {
             warnings,
-            ..RegisteredTokens::default()
+            ..Assembled::default()
         };
 
         for r in plan.flat {
             match r.reg.kind {
                 Kind::Flat(add) => {
-                    let handle = add(&mut Adder(&mut *self), &r.name);
-                    tokens.flat.insert(r.name, handle.into_token());
+                    add(&mut *self, &r.name);
+                    tokens.flat += 1;
                 }
                 Kind::Scaling(add) => {
-                    let handle = add(&mut Adder(&mut *self), &r.name);
-                    tokens.scaling.insert(r.name, handle.into_token());
+                    add(&mut *self, &r.name);
+                    tokens.scaling += 1;
                 }
             }
         }
@@ -915,20 +920,20 @@ impl<'a> Suite<'a> {
                         .first()
                         .expect("assemble never builds a lane with no candidates");
                     let name = lane.flat_name(c, input);
-                    let handle = (c.reg.add_flat)(&mut Adder(&mut *self), &name, input.reg.make);
-                    tokens.flat.insert(name, handle.into_token());
+                    (c.reg.add_flat)(&mut *self, &name, input.reg.make);
+                    tokens.flat += 1;
                     continue;
                 }
                 // One generator per input, cloned per candidate, which is
                 // what makes the differences paired - see `ErasedInput`.
                 let make = input.reg.make;
-                let mut alt = Alternative(cfg.comparison_make_input(make));
+                let mut alt = cfg.comparison_make_input(make);
                 for c in &lane.candidates {
                     alt = (c.reg.add_alt)(alt, &c.name);
                 }
                 let name = lane.comparison_name(input);
-                let token = self.add_comparison(&name, alt.0);
-                tokens.comparisons.insert(name, token);
+                self.add_comparison(&name, alt);
+                tokens.comparisons += 1;
             }
         }
         tokens.lanes = plan.lanes;
@@ -2028,7 +2033,7 @@ mod per_benchmark_config {
 ///
 /// Registrations here are written by hand rather than by the macros - the
 /// same shims `#[scaling::bench]` and friends would generate against
-/// [`crate::registry::Adder`], written out so the registry/assembly path is
+/// [`crate::registry::Suite`], written out so the registry/assembly path is
 /// proved independently of the macro crate. `tests/macros.rs` checks that
 /// the macros produce the same thing from an attribute, so the two are
 /// worth keeping side by side: if one passes and the other fails, the fault
@@ -2042,7 +2047,7 @@ mod per_benchmark_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, Input, MakeInput};
+    use crate::registry::{Candidate, ErasedInput, Input, MakeInput};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -2050,8 +2055,8 @@ mod registered_by_hand {
         (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
     }
 
-    fn add_flat(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
-        adder.flat(name, || work(200))
+    fn add_flat(adder: &mut Suite<'_>, name: &str) {
+        adder.add(name, || work(200));
     }
 
     inventory::submit! {
@@ -2063,11 +2068,11 @@ mod registered_by_hand {
         }
     }
 
-    fn add_scaling(adder: &mut Adder<'_, '_>, name: &str) -> Handle<ScalingStats> {
+    fn add_scaling(adder: &mut Suite<'_>, name: &str) {
         // `nmin` is baked in here, since the shim signature has nowhere to
         // pass it - which is the whole reason it must be a literal at the
         // macro.
-        adder.scaling(name, |n: usize| work(n), 32)
+        adder.add_scaling(name, |n: usize| work(n), 32);
     }
 
     inventory::submit! {
@@ -2098,51 +2103,60 @@ mod registered_by_hand {
         }
     }
 
-    fn flat_baseline(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
-        adder.make_input(name, make, |e: &mut ErasedInput| {
+    fn flat_baseline(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
+        adder.add_make_input(name, make, |e: &mut ErasedInput| {
+            let v = e.get_mut::<Vec<u64>>();
+            v.sort();
+            v.len()
+        });
+    }
+
+    fn alt_baseline<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        name: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
             v.len()
         })
     }
 
-    fn alt_baseline<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |e: &mut ErasedInput| {
+    fn flat_unstable(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
+        adder.add_make_input(name, make, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
-            v.sort();
+            v.sort_unstable();
             v.len()
-        })
+        });
     }
 
-    fn flat_unstable(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
-        adder.make_input(name, make, |e: &mut ErasedInput| {
+    fn alt_unstable<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        name: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort_unstable();
             v.len()
         })
     }
 
-    fn alt_unstable<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |e: &mut ErasedInput| {
-            let v = e.get_mut::<Vec<u64>>();
-            v.sort_unstable();
-            v.len()
-        })
-    }
-
-    fn flat_slow(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
-        adder.make_input(name, make, |e: &mut ErasedInput| {
+    fn flat_slow(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
+        adder.add_make_input(name, make, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
             v.sort_unstable();
             v.sort();
             v.len()
-        })
+        });
     }
 
     /// Deliberately slower, so the comparison has something real to find.
-    fn alt_slow<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |e: &mut ErasedInput| {
+    fn alt_slow<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        name: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
             v.sort_unstable();
@@ -2201,21 +2215,19 @@ mod registered_by_hand {
         // `run` for why: one process-wide registry, shared with every other
         // `#[cfg(test)]` module in the crate.
         let mut suite = cfg.suite();
-        let tokens = suite.try_add_registered().unwrap();
+        suite.try_add_registered().unwrap();
         let report = suite.run();
 
-        let flat = tokens.flat["e2e::flat"]
-            .get()
-            .expect("the flat benchmark ran");
+        let flat = report.stats("e2e::flat").expect("the flat benchmark ran");
         assert!(flat.ns_per_iter > 0.0);
 
-        let scaling = tokens.scaling["e2e::scaling"]
-            .get()
+        let scaling = report
+            .scaling("e2e::scaling")
             .expect("the scaling benchmark ran");
         assert!(scaling.iterations > 0);
 
-        let cmps = tokens.comparisons["e2e-sort@data"]
-            .get()
+        let cmps = report
+            .comparison("e2e-sort@data")
             .expect("the comparison ran");
         // Three alternatives, two of them reported against the baseline.
         assert_eq!(cmps.stats().len(), 3);
@@ -2239,10 +2251,10 @@ mod registered_by_hand {
     fn the_declared_baseline_is_the_one_used() {
         let cfg = Config::default().with_max_time(Duration::from_millis(60));
         let mut suite = cfg.suite();
-        let tokens = suite.try_add_registered().unwrap();
-        suite.run();
+        suite.try_add_registered().unwrap();
+        let report = suite.run();
 
-        let cmps = tokens.comparisons["e2e-sort@data"].get().unwrap();
+        let cmps = report.comparison("e2e-sort@data").unwrap();
         let against: Vec<&str> = cmps.against_baseline().map(|(name, _)| name).collect();
         assert!(
             !against.contains(&"e2e::sort_stable"),
@@ -2260,14 +2272,14 @@ mod registered_by_hand {
         let cfg = Config::default().with_max_time(Duration::from_millis(60));
         let mut suite = cfg.suite();
         let by_hand = suite.add("e2e::by_hand", || work(150));
-        let tokens = suite.try_add_registered().unwrap();
+        suite.try_add_registered().unwrap();
         let after = suite.add("e2e::after", || work(150));
         let report = suite.run();
 
         assert!(by_hand.get().is_some(), "the hand-added one ran");
         assert!(after.get().is_some(), "so did the one added afterwards");
         assert!(
-            tokens.flat["e2e::flat"].get().is_some(),
+            report.stats("e2e::flat").is_some(),
             "so did the registered one"
         );
 
@@ -2348,18 +2360,18 @@ mod registered_by_hand {
 #[cfg(test)]
 mod bad_registrations {
     use super::*;
-    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, MakeInput};
+    use crate::registry::{Candidate, ErasedInput, MakeInput};
 
-    fn add(adder: &mut Adder<'_, '_>, name: &str) -> Handle<Stats> {
-        adder.flat(name, || (0..16u64).sum::<u64>())
+    fn add(adder: &mut Suite<'_>, name: &str) {
+        adder.add(name, || (0..16u64).sum::<u64>());
     }
 
-    fn flat(adder: &mut Adder<'_, '_>, name: &str, make: MakeInput) -> Handle<Stats> {
-        adder.make_input(name, make, |_: &mut ErasedInput| ())
+    fn flat(adder: &mut Suite<'_>, name: &str, make: MakeInput) {
+        adder.add_make_input(name, make, |_: &mut ErasedInput| ());
     }
 
-    fn alt<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |_| ())
+    fn alt<'a>(set: ComparisonSet<'a, ErasedInput>, name: &str) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |_| ())
     }
 
     // Two registrations under one name, which a report could not tell apart.
@@ -2465,7 +2477,7 @@ mod versions_and_rivals {
     #![allow(clippy::ptr_arg)]
 
     use super::*;
-    use crate::registry::{Adder, Alternative, Candidate, ErasedInput, Handle, Input};
+    use crate::registry::{Candidate, ErasedInput, Input};
     use std::any::TypeId;
 
     fn work(v: &[u64], rounds: usize) -> u64 {
@@ -2487,29 +2499,27 @@ mod versions_and_rivals {
         work(v, 3)
     }
 
-    fn add_flat_new(
-        adder: &mut Adder<'_, '_>,
-        name: &str,
-        make: fn() -> ErasedInput,
-    ) -> Handle<Stats> {
-        adder.make_input(name, make, |e: &mut ErasedInput| {
+    fn add_flat_new(adder: &mut Suite<'_>, name: &str, make: fn() -> ErasedInput) {
+        adder.add_make_input(name, make, |e: &mut ErasedInput| {
             mix_new(e.get_mut::<Vec<u64>>())
-        })
+        });
     }
-    fn add_flat_old(
-        adder: &mut Adder<'_, '_>,
-        name: &str,
-        make: fn() -> ErasedInput,
-    ) -> Handle<Stats> {
-        adder.make_input(name, make, |e: &mut ErasedInput| {
+    fn add_flat_old(adder: &mut Suite<'_>, name: &str, make: fn() -> ErasedInput) {
+        adder.add_make_input(name, make, |e: &mut ErasedInput| {
             mix_old(e.get_mut::<Vec<u64>>())
-        })
+        });
     }
-    fn add_alt_new<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
+    fn add_alt_new<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        name: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
     }
-    fn add_alt_old<'a>(set: Alternative<'a>, name: &str) -> Alternative<'a> {
-        set.add(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
+    fn add_alt_old<'a>(
+        set: ComparisonSet<'a, ErasedInput>,
+        name: &str,
+    ) -> ComparisonSet<'a, ErasedInput> {
+        set.add_input(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
     }
 
     fn make_data() -> ErasedInput {
@@ -2587,7 +2597,7 @@ mod versions_and_rivals {
         }
     }
 
-    fn run() -> RegisteredTokens {
+    fn run() -> (Assembled, Report) {
         let cfg = Config::default().with_max_time(Duration::from_millis(30));
         // Every `#[cfg(test)]` module in this crate shares one process-wide
         // `inventory` registry - restricted to this module's own names, so
@@ -2595,15 +2605,15 @@ mod versions_and_rivals {
         // `registered_by_hand`'s benchmarks on every call here.
         let mut suite = cfg.suite();
         let tokens = suite.try_add_registered().unwrap();
-        suite.run();
-        tokens
+        let report = suite.run();
+        (tokens, report)
     }
 
     /// Two versions of one function, and a rival, all measured against each
     /// other - and told apart, rather than colliding as duplicates.
     #[test]
     fn versions_and_rivals_are_all_measured_and_distinguished() {
-        let tokens = run();
+        let (tokens, report) = run();
         assert!(
             tokens.warnings.is_empty(),
             "a well-formed set of registrations should warn about nothing: {:?}",
@@ -2614,8 +2624,8 @@ mod versions_and_rivals {
                 .collect::<Vec<_>>(),
         );
 
-        let cmps = tokens.comparisons["mixing@data"]
-            .get()
+        let cmps = report
+            .comparison("mixing@data")
             .expect("the comparison ran");
         let names: Vec<&str> = cmps.names().collect();
         assert_eq!(names.len(), 3, "two of ours and one of theirs: {names:?}");
@@ -2628,10 +2638,9 @@ mod versions_and_rivals {
     /// the generator.
     #[test]
     fn the_redundant_input_is_measured_once() {
-        let tokens = run();
-        let matrix_entries: Vec<&String> = tokens
-            .comparisons
-            .keys()
+        let (_tokens, report) = run();
+        let matrix_entries: Vec<&str> = report
+            .names()
             .filter(|k| k.starts_with("mixing@"))
             .collect();
         assert_eq!(
@@ -2645,8 +2654,8 @@ mod versions_and_rivals {
     /// the right way round: the new code is reported *against* the old.
     #[test]
     fn the_old_version_is_what_the_new_one_is_measured_against() {
-        let tokens = run();
-        let cmps = tokens.comparisons["mixing@data"].get().unwrap();
+        let (_tokens, report) = run();
+        let cmps = report.comparison("mixing@data").unwrap();
         let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();
         assert!(
             !against.contains(&"mix@mycrate-0.8.0"),
