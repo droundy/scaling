@@ -589,8 +589,8 @@ pub use self::bench::Stats;
 /// timed with a plain `Instant` to measure the overhead of taking a benchmark.
 #[doc(hidden)]
 pub use self::bench::{bench, bench_clone_input, bench_make_input};
-pub use self::compare::Comparison;
-pub use self::kway::Comparisons;
+pub use self::compare::Timing;
+pub use self::kway::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
 
 /// Measure one closure's scaling, once, where you call it.
@@ -709,7 +709,7 @@ pub struct Config {
     ///
     /// A comparison reads this as a *sensitivity* rather than a precision:
     /// the smallest difference worth detecting, as a fraction of the
-    /// baseline. See [`Comparison::min_detectable_difference`], which is what
+    /// baseline. See [`Timing::min_detectable_difference`], which is what
     /// that floor came to on a result that reported no change.
     pub target_rel_error: f64,
     /// Stop once the standard error falls below this duration.
@@ -800,7 +800,7 @@ impl Config {
     /// Is `std_error` small enough that a difference the size of the goal
     /// would be *detected*?
     ///
-    /// This is the same predicate [`Comparison::is_changed`] applies, asked
+    /// This is the same predicate [`Timing::is_changed`] applies, asked
     /// of a hypothetical difference rather than the observed one, so a
     /// comparison stops exactly when the test it is about to run would fire
     /// at the goal. Deliberately independent of the difference actually

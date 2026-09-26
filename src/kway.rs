@@ -183,7 +183,7 @@ impl<I: 'static> InputGroup<I> {
     ///    [`Config::max_time`] stops it too, and marks the results.
     ///
     /// Each difference is accumulated per round rather than assembled from
-    /// two separately measured means - see [`Comparison::std_error`] for why
+    /// two separately measured means - see [`Timing::std_error`] for why
     /// that is much the better estimate.
     ///
     /// # Panics
@@ -196,7 +196,7 @@ impl<I: 'static> InputGroup<I> {
     /// call it directly, to check the sampling algorithm independently of a
     /// suite.
     #[cfg(test)]
-    pub(crate) fn run(self) -> Comparisons {
+    pub(crate) fn run(self) -> Timings {
         // Before pinning and before the machine lock, both of which have
         // effects that outlive a panic and the second of which blocks.
         assert!(
@@ -236,7 +236,7 @@ impl<I: 'static> InputGroup<I> {
     /// `z_alpha` is the Bonferroni limit for the family this set belongs to -
     /// its own `k - 1` when run alone, or the whole suite's total when run in
     /// one - and `seed` distinguishes its random stream from its siblings'.
-    pub(crate) async fn run_async(self, clock: &Clock, z_alpha: f64, seed: u64) -> Comparisons {
+    pub(crate) async fn run_async(self, clock: &Clock, z_alpha: f64, seed: u64) -> Timings {
         let InputGroup {
             cfg,
             mut make_input,
@@ -348,7 +348,7 @@ impl<I: 'static> InputGroup<I> {
                 }
             })
             .collect();
-        Comparisons {
+        Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
             stats,
             paired_std_errors,
@@ -443,7 +443,7 @@ async fn calibrate<I>(
 /// What running an input group measured: a [`Stats`] for every alternative,
 /// and every alternative's difference from the baseline when there is one.
 #[derive(Debug, Clone)]
-pub struct Comparisons {
+pub struct Timings {
     names: Vec<String>,
     stats: Vec<Stats>,
     /// Standard error of each alternative's difference from the baseline,
@@ -452,7 +452,17 @@ pub struct Comparisons {
     z_alpha: f64,
 }
 
-impl Comparisons {
+impl Timings {
+    #[cfg(test)]
+    pub(crate) fn test_singleton(stats: Stats) -> Self {
+        Timings {
+            names: vec!["nothing".to_string()],
+            stats: vec![stats],
+            paired_std_errors: vec![f64::NAN],
+            z_alpha: f64::NAN,
+        }
+    }
+
     /// The name of the baseline - the first alternative that was added.
     pub fn baseline_name(&self) -> &str {
         &self.names[0]
@@ -470,12 +480,12 @@ impl Comparisons {
     }
 
     /// Each alternative beyond the baseline, paired with its name, as a
-    /// [`Comparison`] against the baseline.
-    pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Comparison)> {
+    /// [`Timing`] against the baseline.
+    pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {
         (1..self.stats.len()).map(move |i| {
             (
                 self.names[i].as_str(),
-                Comparison::from_parts(
+                Timing::from_parts(
                     self.stats[0].clone(),
                     self.stats[i].clone(),
                     self.z_alpha,
@@ -491,7 +501,7 @@ impl Comparisons {
     }
 }
 
-impl Display for Comparisons {
+impl Display for Timings {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let width = self.names.iter().map(|n| n.len()).max().unwrap_or(0);
         writeln!(f, "{:width$}  {}  (baseline)", self.names[0], self.stats[0])?;

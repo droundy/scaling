@@ -110,18 +110,19 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::bench::Stats;
+    use crate::Timings;
     use std::cell::RefCell;
     use std::time::Duration;
 
     fn nothing() -> Found {
-        Found::Stats(Stats {
+        Found::Timing(Timings::test_singleton(Stats {
             ns_per_iter: 0.0,
             std_error: 0.0,
             iterations: 0,
             samples: 0,
             hit_limit: false,
             untrustworthy: false,
-        })
+        }))
     }
 
     async fn scripted(

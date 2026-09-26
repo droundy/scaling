@@ -193,7 +193,7 @@ impl Clone for ErasedInput {
 /// is, and assembly pairs them up within each shared group.
 ///
 /// "Candidate" rather than "row" because it is already this crate's word for
-/// one side of a measured difference - [`crate::Comparison`] holds a baseline
+/// one side of a measured difference - [`crate::Timing`] holds a baseline
 /// and a candidate.
 pub struct Candidate {
     /// Every group this belongs to. A candidate with no groups is not

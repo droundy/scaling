@@ -138,17 +138,15 @@ impl Machine {
 
 #[derive(Clone)]
 pub(crate) enum Found {
-    Stats(Stats),
     Scaling(ScalingStats),
-    Comparison(Comparisons),
+    Timing(Timings),
 }
 
 impl Display for Found {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Found::Stats(s) => write!(f, "{s}"),
             Found::Scaling(s) => write!(f, "{s}"),
-            Found::Comparison(c) => write!(f, "{c}"),
+            Found::Timing(c) => write!(f, "{c}"),
         }
     }
 }
@@ -235,7 +233,7 @@ impl Suite {
             .cfg
             .input_group_make_input_uncloned(make_input)
             .add_input(name, f);
-        self.add_single_input_group(name, group);
+        self.add_input_group(name, group);
     }
 
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
@@ -317,26 +315,7 @@ impl Suite {
             clock,
             Box::pin(async move {
                 let results = set.run_async(&mine, z_alpha.get(), seed).await;
-                Found::Comparison(results)
-            }),
-        );
-    }
-
-    fn add_single_input_group<I: 'static>(&mut self, name: &str, group: InputGroup<I>) {
-        assert_eq!(
-            group.len(),
-            1,
-            "a standalone input group has one alternative"
-        );
-        let budget = group.cfg().max_time;
-        let clock = Rc::new(Clock::new(budget));
-        let mine = clock.clone();
-        self.push(
-            name,
-            clock,
-            Box::pin(async move {
-                let result = group.run_async(&mine, f64::NAN, 0).await;
-                Found::Stats(result.stats()[0].clone())
+                Found::Timing(results)
             }),
         );
     }
@@ -459,17 +438,16 @@ impl Suite {
                 for c in &lane.candidates {
                     group = (c.reg.add_alt)(group, &c.name);
                 }
-                if lane.candidates.len() == 1 {
+                let name = if lane.candidates.len() == 1 {
                     let c = lane
                         .candidates
                         .first()
                         .expect("assemble never builds a lane with no candidates");
-                    let name = lane.flat_name(c, input);
-                    self.add_single_input_group(&name, group);
+                    lane.flat_name(c, input)
                 } else {
-                    let name = lane.comparison_name(input);
-                    self.add_input_group(&name, group);
-                }
+                    lane.comparison_name(input)
+                };
+                self.add_input_group(&name, group);
             }
         }
         tokens.lanes = plan.lanes;
@@ -528,9 +506,8 @@ impl Report {
     pub fn get<T: Clone + 'static>(&self, name: &str) -> Option<T> {
         let (_, found) = self.entries.iter().find(|(n, _)| n == name)?;
         let any: &dyn Any = match found {
-            Found::Stats(s) => s,
             Found::Scaling(s) => s,
-            Found::Comparison(c) => c,
+            Found::Timing(c) => c,
         };
         any.downcast_ref::<T>().cloned()
     }
@@ -553,7 +530,7 @@ impl Report {
     /// caller that does not know what it is looking at can simply ask.
     pub fn stats(&self, name: &str) -> Option<Stats> {
         match self.find(name)? {
-            Found::Stats(s) => Some(s),
+            Found::Timing(c) if c.stats().len() == 1 => Some(c.stats()[0].clone()),
             _ => None,
         }
     }
@@ -573,9 +550,9 @@ impl Report {
     /// every alternative's own measurement as
     /// well as its difference from the baseline, so this is what a script
     /// asking "which of these is actually fastest here" wants.
-    pub fn comparison(&self, name: &str) -> Option<Comparisons> {
+    pub fn comparison(&self, name: &str) -> Option<Timings> {
         match self.find(name)? {
-            Found::Comparison(c) => Some(c),
+            Found::Timing(c) if c.stats().len() > 1 => Some(c),
             _ => None,
         }
     }
@@ -583,15 +560,15 @@ impl Report {
     /// Every flat measurement, with its name, in the order they were added.
     pub fn all_stats(&self) -> impl Iterator<Item = (&str, Stats)> {
         self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Stats(s) => Some((name.as_str(), s.clone())),
+            Found::Timing(c) if c.stats().len() == 1 => Some((name.as_str(), c.stats()[0].clone())),
             _ => None,
         })
     }
 
     /// Every comparison, with its name, in the order they were added.
-    pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Comparisons)> {
+    pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Timings)> {
         self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Comparison(c) => Some((name.as_str(), c.clone())),
+            Found::Timing(c) if c.stats().len() > 1 => Some((name.as_str(), c.clone())),
             _ => None,
         })
     }
@@ -611,7 +588,7 @@ impl Display for Report {
             }
             let shown = found.to_string();
             // Trimmed because a multi-line result brings its own trailing
-            // newline - `Comparisons` writes every line with `writeln!` - and
+            // newline - `Timings` writes every line with `writeln!` - and
             // this loop supplies the separators itself. Leaving it produced a
             // blank line after any comparison that was not the last entry.
             let shown = shown.trim_end();
@@ -633,14 +610,14 @@ mod tests {
     use crate::testutil::{fixed_cost, mean_and_spread};
 
     fn nothing() -> Found {
-        Found::Stats(Stats {
+        Found::Timing(Timings::test_singleton(Stats {
             ns_per_iter: 0.0,
             std_error: 0.0,
             iterations: 0,
             samples: 0,
             hit_limit: false,
             untrustworthy: false,
-        })
+        }))
     }
 
     /// The budget is spent in poll time, and the benchmark learns about it at
@@ -824,7 +801,7 @@ mod tests {
     }
 
     /// A comparison that is not the last entry must not leave a blank line
-    /// behind it: `Comparisons` ends its own output with a newline, and this
+    /// behind it: `Timings` ends its own output with a newline, and this
     /// loop supplies the separators.
     ///
     /// A blank line is not merely untidy - anything parsing the table a line
@@ -849,16 +826,15 @@ mod tests {
         assert!(shown.lines().last().unwrap().starts_with("flat"), "{shown}");
     }
 
-    /// A singleton group produces ordinary per-alternative stats without a
-    /// difference against its own baseline.
+    /// A singleton group produces ordinary stats without a difference against
+    /// its own baseline.
     #[test]
     fn one_alternative_runs_without_a_comparison() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         suite.add_input_group("lonely", cfg.input_group().add("only", || 1u64 + 1));
-        let results = suite.run().comparison("lonely").expect("it was measured");
-        assert_eq!(results.stats().len(), 1);
-        assert_eq!(results.against_baseline().count(), 0);
+        let stats = suite.run().stats("lonely").expect("it was measured");
+        assert!(stats.ns_per_iter > 0.0);
     }
 
     /// An empty suite must run and report nothing, rather than dividing by

@@ -4,7 +4,7 @@ use std::fmt::{self, Display, Formatter};
 /// One alternative measured against another: the two [`Stats`] and the
 /// verdict built from them.
 #[derive(Debug, Clone)]
-pub struct Comparison {
+pub struct Timing {
     /// What the alternative this one is judged against measured.
     pub baseline: Stats,
     /// What this alternative measured.
@@ -19,13 +19,13 @@ pub struct Comparison {
     paired_std_error: f64,
 }
 
-impl Comparison {
+impl Timing {
     /// How much slower `candidate` measured than `baseline`, in nanoseconds.
     /// Negative when `candidate` was faster.
     pub fn difference_ns(&self) -> f64 {
         self.candidate.ns_per_iter - self.baseline.ns_per_iter
     }
-    /// Standard error of [`Comparison::difference_ns`].
+    /// Standard error of [`Timing::difference_ns`].
     ///
     /// Taken from the per-round differences rather than by combining the two
     /// halves. The halves are timed back to back under nearly identical
@@ -55,10 +55,10 @@ impl Comparison {
         }
         self.paired_std_error
     }
-    /// Whether [`Comparison::difference_ns`] is large enough, relative to
-    /// [`Comparison::std_error`], to call a real change rather than noise -
+    /// Whether [`Timing::difference_ns`] is large enough, relative to
+    /// [`Timing::std_error`], to call a real change rather than noise -
     /// judged against the family of comparisons this one was measured
-    /// alongside. See [`Comparison::min_detectable_difference`] for what
+    /// alongside. See [`Timing::min_detectable_difference`] for what
     /// "large enough" came to on this particular result.
     pub fn is_changed(&self) -> bool {
         crate::significant::is_significant(self.difference_ns(), self.std_error(), self.z_alpha)
@@ -76,7 +76,7 @@ impl Comparison {
         z_alpha: f64,
         paired_std_error: f64,
     ) -> Self {
-        Comparison {
+        Timing {
             baseline,
             candidate,
             z_alpha,
@@ -99,10 +99,10 @@ impl Comparison {
         self.z_alpha * self.std_error()
     }
 
-    /// [`Comparison::min_detectable_difference`] as a fraction of the
+    /// [`Timing::min_detectable_difference`] as a fraction of the
     /// baseline (`0.01` = 1%).
     ///
-    /// `NaN` wherever [`Comparison::min_detectable_difference`] is, and
+    /// `NaN` wherever [`Timing::min_detectable_difference`] is, and
     /// infinite when the baseline measured as zero, where a relative figure
     /// is undefined.
     pub fn min_detectable_rel(&self) -> f64 {
@@ -110,7 +110,7 @@ impl Comparison {
     }
 }
 
-impl Display for Comparison {
+impl Display for Timing {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         // Both halves are filled in together, so either would answer for the
         // pair - but combine them rather than depending on that. Reaching the
@@ -157,8 +157,8 @@ mod tests {
         }
     }
 
-    fn comparison(baseline: f64, candidate: f64, se_each: f64, planned: u64) -> Comparison {
-        Comparison {
+    fn comparison(baseline: f64, candidate: f64, se_each: f64, planned: u64) -> Timing {
+        Timing {
             baseline: stats(baseline, se_each),
             candidate: stats(candidate, se_each),
             z_alpha: crate::significant::bonferroni_z_limit(planned, crate::significant::FWER),

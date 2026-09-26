@@ -35,7 +35,7 @@ pub(super) const FWER: f64 = 0.05;
 /// Is `difference` big enough, against `std_error`, to call a change?
 ///
 /// Takes the limit rather than computing it, so that the sampling loop and
-/// [`crate::Comparison::is_changed`] are guaranteed to be asking the same
+/// [`crate::Timing::is_changed`] are guaranteed to be asking the same
 /// question: one is this predicate applied to the observed difference, the
 /// other is it applied to the smallest difference worth detecting.
 ///
