@@ -122,13 +122,10 @@ pub struct ErasedInput {
     value: Box<dyn Any>,
     /// `I::clone`, monomorphised where `I` was still known.
     clone_fn: fn(&dyn Any) -> Box<dyn Any>,
-    /// What `I` was, so that assembly can check a group agrees about it
-    /// before any downcast is attempted.
-    type_id: TypeId,
 }
 
 impl ErasedInput {
-    /// Erase `v`, remembering how to clone it and what it was.
+    /// Erase `v`, remembering how to clone it.
     pub fn new<I: Any + Clone>(v: I) -> Self {
         ErasedInput {
             value: Box::new(v),
@@ -142,13 +139,7 @@ impl ErasedInput {
                         .clone(),
                 )
             },
-            type_id: TypeId::of::<I>(),
         }
-    }
-
-    /// What was erased.
-    pub fn type_id(&self) -> TypeId {
-        self.type_id
     }
 
     /// The input, as the type it really is.
@@ -171,7 +162,6 @@ impl Clone for ErasedInput {
         ErasedInput {
             value: (self.clone_fn)(&*self.value),
             clone_fn: self.clone_fn,
-            type_id: self.type_id,
         }
     }
 }
@@ -288,15 +278,6 @@ mod tests {
         assert_eq!(b.get_mut::<Vec<i32>>().as_slice(), &[1, 2, 3, 4]);
     }
 
-    /// Cloning must not quietly forget what the input was, or a later
-    /// downcast would fail on a value that is perfectly fine.
-    #[test]
-    fn cloning_preserves_the_type() {
-        let a = ErasedInput::new(String::from("x"));
-        assert_eq!(a.clone().type_id(), a.type_id());
-        assert_eq!(a.type_id(), TypeId::of::<String>());
-    }
-
     /// The unit input, which is what a group with no declared generator
     /// uses. Worth its own case because it is the one every `comparison()`
     /// group takes, and because a zero-sized value is exactly where a
@@ -304,7 +285,6 @@ mod tests {
     #[test]
     fn the_unit_input_erases_like_any_other() {
         let mut a = ErasedInput::new(());
-        assert_eq!(a.type_id(), TypeId::of::<()>());
         let mut b = a.clone();
         *a.get_mut::<()>() = ();
         *b.get_mut::<()>() = ();
@@ -393,14 +373,5 @@ mod tests {
             crate_version: env!("CARGO_PKG_VERSION"),
             add: add_beta,
         }
-    }
-
-    /// Two different erased types must be distinguishable, since that is
-    /// what assembly checks a group with.
-    #[test]
-    fn different_types_are_distinguishable() {
-        let a = ErasedInput::new(vec![0u8]);
-        let b = ErasedInput::new(String::new());
-        assert_ne!(a.type_id(), b.type_id());
     }
 }
