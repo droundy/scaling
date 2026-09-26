@@ -385,6 +385,7 @@ async fn scaling_sweep(
     // slope either way, which is the exponent the cost behaves like over
     // the range measured whether or not a polynomial describes it exactly.
     // Rejection changes what we claim, not what we measured.
+    #[expect(clippy::neg_cmp_op_on_partial_ord)]
     let rejected = !(fit.chi2_per_dof <= CHI2_REJECT);
     ScalingStats {
         scaling: Some(Scaling {
@@ -576,8 +577,9 @@ fn weighted_poly_fit(ns: &[f64], means: &[f64], ses: &[f64], degree: usize) -> O
     // on - fabricating certainty out of a numerical breakdown. An
     // unidentifiable fit says so instead, the same way `invert` does.
     let mut se = Vec::with_capacity(terms);
-    for j in 0..terms {
-        let var = inv[j][j];
+    for (j, inv_j) in inv.iter().enumerate() {
+        let var = inv_j[j];
+        #[expect(clippy::neg_cmp_op_on_partial_ord)]
         if !(var > 0.0) || !var.is_finite() {
             return None;
         }
@@ -1138,11 +1140,11 @@ fn invert(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
         // rows of eight, so one small clone per column costs nothing worth
         // the borrow-splitting it saves.
         let pivot_row = m[col].clone();
-        for row in 0..n {
+        for (row, m_row) in m.iter_mut().enumerate() {
             if row != col {
-                let f = m[row][col];
+                let f = m_row[col];
                 if f != 0.0 {
-                    for (t, p) in m[row].iter_mut().zip(&pivot_row) {
+                    for (t, p) in m_row.iter_mut().zip(&pivot_row) {
                         *t -= f * p;
                     }
                 }
@@ -2225,8 +2227,8 @@ mod tests {
             let cfg = Config::relative(0.02).with_max_time(Duration::from_secs(60));
 
             // A real power law: identified, believed, and not flagged.
-            let mut clock = one_call(|n| 50.0 * n * n, 0.02, 1);
-            let stats = swept(&cfg, 1, |n| clock(n));
+            let clock = one_call(|n| 50.0 * n * n, 0.02, 1);
+            let stats = swept(&cfg, 1, clock);
             let scaling = stats.scaling.expect("a real power law is identified");
             assert_eq!(2, scaling.power);
             assert!(stats.goodness_of_fit > 0.9, "{}", stats.goodness_of_fit);
@@ -2240,8 +2242,8 @@ mod tests {
             // A cost no polynomial describes. It still reports the power it
             // behaves like - the slope does not need a polynomial to exist
             // - but says it could not vouch for the shape.
-            let mut clock = one_call(|n| 40.0 * n * (n + 1.0).ln(), 0.0005, 1);
-            let stats = swept(&cfg, 1, |n| clock(n));
+            let clock = one_call(|n| 40.0 * n * (n + 1.0).ln(), 0.0005, 1);
+            let stats = swept(&cfg, 1, clock);
             assert_eq!(
                 0.0, stats.goodness_of_fit,
                 "an N log N cost is not a polynomial and should say so"

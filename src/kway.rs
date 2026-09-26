@@ -46,6 +46,7 @@ type GenInput<I> = dyn FnMut() -> I + 'static;
 type Batch<I> = Box<dyn FnMut(&mut [I]) -> f64 + 'static>;
 
 /// Benchmarks sharing an input, gathered before any of them runs.
+#[expect(clippy::type_complexity)]
 pub struct InputGroup<I> {
     cfg: Config,
     make_input: Box<GenInput<I>>,
@@ -636,6 +637,7 @@ mod tests {
         const REPEATS: u64 = 8;
         let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(2));
         let mut ratios = Vec::new();
+        #[expect(clippy::unnecessary_fold)]
         for r in 0..REPEATS {
             let mut rng = XorShift(0x243f_6a88_85a3_08d3u64.wrapping_mul(r + 1) | 1);
             let results = cfg

@@ -1091,7 +1091,7 @@ mod tests {
         println!();
         println!("fib 200: {}", bench(|| fib(200)));
         println!("fib 500: {}", bench(|| fib(500)));
-        println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
+        println!("fib scaling: {}", bench_scaling(fib, 0));
         println!(
             "reverse: {}",
             bench_clone_input(vec![0; 100], |xs| xs.reverse())
