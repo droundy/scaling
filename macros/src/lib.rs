@@ -12,7 +12,7 @@
 //! above the attribute already strips the whole item before expansion, so a
 //! caller who wants benchmarks kept out of ordinary builds writes
 //!
-//! ```ignore
+//! ```no_run
 //! #[cfg(feature = "my-benchmarks")]
 //! #[scaling::bench]
 //! fn something() { ... }
@@ -39,7 +39,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 
 /// Register a benchmark, as `scaling::bench` would run it.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench]
 /// fn fib_200() -> usize { fib(200) }
 ///
@@ -68,7 +68,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// pattern none of the above can express, because every input above is
 /// prepared anew per call:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench]
 /// fn next_from_rng() -> impl FnMut() -> u64 {
 ///     let mut rng = StdRng::seed_from_u64(0);
@@ -91,7 +91,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// `&mut I`, or `I` by value, exactly as it would without a setup shape, to
 /// build its persistent state from.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench(input = 0u64)]
 /// fn next_from_seed(seed: &u64) -> impl FnMut() -> u64 {
 ///     let mut rng = StdRng::seed_from_u64(*seed);
@@ -119,7 +119,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// expensive part once behind an `Arc` inside `make_input`'s own closure,
 /// and pair it with a fresh per-call value as an ordinary tuple input.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench(make_input = {
 ///     let sorted: std::sync::Arc<Vec<u64>> = std::sync::Arc::new((0..1_000_000).collect());
 ///     move || (sorted.clone(), rand::random::<u64>() % 1_000_000)
@@ -165,7 +165,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// pairing that makes a comparison's error bar narrower than two separate
 /// measurements.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::input(group = "sort")]
 /// fn sort_data() -> Vec<i32> { random_vec(1000) }
 ///
@@ -181,7 +181,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// fixed-cost work, say - and prints under its own plain name rather than
 /// one qualified by an input:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench(group = "summing", baseline)]
 /// fn fold_sum() -> u64 { (0..200u64).fold(0, |a, x| a.wrapping_add(x)) }
 ///
@@ -198,7 +198,7 @@ use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Ty
 /// in the type its input argument names, and each listed type becomes its
 /// own registration:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench(group = "contains", types(Vec<u64>, std::collections::HashSet<u64>))]
 /// fn contains<T: Container>(c: &T) -> bool { c.contains(&0) }
 /// ```
@@ -224,7 +224,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Register a scaling benchmark, as `scaling::bench_scaling` would run it.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench_scaling(nmin = 100)]
 /// fn sort_n(n: usize) -> Vec<i32> { let mut v = random_n(n); v.sort(); v }
 /// ```
@@ -245,7 +245,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// region, the same idea as `#[bench(make_input = ...)]` but handed the size
 /// so it can build an input of exactly that size:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench_scaling(nmin = 8, make_input = |n: usize| random_n(n))]
 /// fn sort_n(v: &mut Vec<i32>) -> usize {
 ///     v.sort();
@@ -273,7 +273,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// size*: the first call at a given `n` runs it, every later call at that
 /// same `n` reuses what it returned.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench_scaling(nmin = 8)]
 /// fn sort_n(n: usize) -> impl FnMut() -> usize {
 ///     let mut v: Vec<u64> = random_n(n);
@@ -292,7 +292,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// sizes - behind an `Arc`, ordinary Rust with nothing new for this crate
 /// to support:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::bench_scaling(nmin = 1_000, make_input = {
 ///     let mut cache: HashMap<usize, std::sync::Arc<BigMap>> = HashMap::new();
 ///     move |n: usize| {
@@ -1045,7 +1045,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
 /// Register one input, shared by every candidate of a matching type in one
 /// or more of the named groups.
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::input(group = "sort", name = "reversed")]
 /// fn reversed() -> Vec<i32> { (0..10_000).rev().collect() }
 ///
@@ -1070,7 +1070,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
 /// function is generic in the type it returns and is registered once per
 /// listed type - the generic counterpart of a candidate's own `types(..)`:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::input(group = "contains", types(u8, u64, String))]
 /// fn one<T: Arbitrary>() -> T { T::arbitrary() }
 /// ```
@@ -1088,7 +1088,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
 /// so this is one of the few places the shape needs support from this crate
 /// rather than being written by hand with an `Arc`:
 ///
-/// ```ignore
+/// ```no_run
 /// #[scaling::input(group = "sort")]
 /// fn sort_data() -> impl FnMut() -> std::sync::Arc<Vec<i32>> {
 ///     let big = std::sync::Arc::new(random_vec(1_000_000));

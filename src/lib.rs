@@ -96,7 +96,7 @@ benchmark individually. Put `scaling` in `[dev-dependencies]` only -
 nothing under `[dependencies]` - and wrap the whole module in
 `#[cfg(test)]` instead of one attribute per function:
 
-```ignore
+```no_run
 #[cfg(test)]
 mod benches {
     #[scaling::bench]
@@ -175,7 +175,7 @@ than erroring.
 
 The binary that runs them is one line, and [`main!`] is the whole of it:
 
-```ignore
+```no_run
 // benches/bench.rs
 scaling::main!();
 ```
@@ -323,7 +323,7 @@ fn sorting(v: &mut Vec<i32>) { v.sort() }
 They can live anywhere in the crate, next to what they measure. The whole of
 the binary that runs them is:
 
-```ignore
+```no_run
 // benches/bench.rs
 scaling::main!();
 ```
@@ -557,7 +557,7 @@ pub use scaling_macros::{bench, bench_scaling, input};
 
 /// A whole benchmark binary, in one line.
 ///
-/// ```ignore
+/// ```no_run
 /// // benches/bench.rs, in its entirety
 /// scaling::main!();
 /// ```

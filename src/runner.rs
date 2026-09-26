@@ -4,7 +4,7 @@
 //! [`crate::main!`] runs every registered benchmark with the default
 //! [`Config`] and prints a table:
 //!
-//! ```ignore
+//! ```no_run
 //! // benches/bench.rs, in its entirety
 //! scaling::main!();
 //! ```

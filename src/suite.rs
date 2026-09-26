@@ -451,22 +451,7 @@ pub(crate) enum Found {
 /// A set of benchmarks measured together, their samples interleaved.
 ///
 /// Built internally by [`crate::runner`] from `#[scaling::bench]` and
-/// friends - not constructed directly, hence `ignore` below rather than a
-/// doctest.
-///
-/// ```ignore
-/// let cfg = scaling::Config::default();
-/// let mut suite = cfg.suite();
-/// let sort = suite.add("sort", || {
-///     let mut v = vec![5, 3, 1, 4, 2];
-///     v.sort();
-///     v
-/// });
-/// let sum = suite.add("sum", || (0..100u64).sum::<u64>());
-/// let report = suite.run();
-/// println!("{report}");
-/// # let _ = (sort.get().unwrap(), sum.get().unwrap());
-/// ```
+/// friends - not constructed directly.
 ///
 /// Every benchmark here gets [`Config::max_time`] of its *own* running time,
 /// so a suite of `n` may take `n` times as long as one benchmark - the same
@@ -539,17 +524,6 @@ impl<'a> Suite<'a> {
     /// simply never fills - the same thing that happens to any token when a
     /// suite is built and not run.
     ///
-    /// ```ignore
-    /// # use scaling::Filter;
-    /// let cfg = scaling::Config::default();
-    /// let mut suite = cfg.suite().with_filter(Filter::everything().matching("sort"));
-    /// let sorted = suite.add("sorting", || { let mut v = vec![3, 1, 2]; v.sort(); v });
-    /// let summed = suite.add("summing", || (0..10u64).sum::<u64>());
-    /// let report = suite.run();
-    /// assert!(sorted.get().is_some(), "kept");
-    /// assert!(summed.get().is_none(), "filtered out, so never measured");
-    /// # let _ = report;
-    /// ```
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = filter;
         self
@@ -566,17 +540,6 @@ impl<'a> Suite<'a> {
     /// answers [`Filter::is_listing`] - acted on by the caller rather than
     /// here, printing not being a library's business.
     ///
-    /// ```ignore
-    /// # let cfg = scaling::Config::default();
-    /// # let suite = cfg.suite();
-    /// if suite.filter().is_listing() {
-    ///     for name in suite.names() {
-    ///         println!("{name}");
-    ///     }
-    /// } else {
-    ///     println!("{}", suite.run());
-    /// }
-    /// ```
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(name, _)| name.as_str())
     }
@@ -693,18 +656,6 @@ impl<'a> Suite<'a> {
     /// suite holds. A benchmark cannot opt out of the family it is part of by
     /// bringing its own `Config`.
     ///
-    /// ```ignore
-    /// use std::time::Duration;
-    /// let cfg = scaling::Config::default();
-    /// // Declared before the suite, so it outlives it.
-    /// let quick = scaling::Config::relative(0.1)
-    ///     .with_max_time(Duration::from_millis(5));
-    /// let mut suite = cfg.suite();
-    /// let slow = suite.add_with(&quick, "slow_one", || (0..1000u64).sum::<u64>());
-    /// let rest = suite.add("rest", || (0..10u64).sum::<u64>());
-    /// let report = suite.run();
-    /// # let _ = (slow.get(), rest.get(), report);
-    /// ```
     pub fn add_make_input_with<G, F, I, O>(
         &mut self,
         cfg: &'a Config,
@@ -807,19 +758,6 @@ impl<'a> Suite<'a> {
     /// alternative met that movement inside the same round. That is also
     /// fair rather than merely necessary - one poll here runs `k` batches
     /// where a flat benchmark runs one, and it is producing `k` [`Stats`].
-    ///
-    /// ```ignore
-    /// let cfg = scaling::Config::default();
-    /// let mut suite = cfg.suite();
-    /// let hashing = suite.add_comparison(
-    ///     "hashing",
-    ///     cfg.comparison()
-    ///         .add("old", || (0..50u64).fold(0u64, |a, x| a ^ x))
-    ///         .add("new", || (0..50u64).sum::<u64>()),
-    /// );
-    /// let report = suite.run();
-    /// # let _ = (report, hashing.get().unwrap());
-    /// ```
     ///
     /// # Panics
     ///
