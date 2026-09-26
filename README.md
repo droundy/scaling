@@ -113,8 +113,8 @@ it exactly.
 
 Every benchmark declared anywhere in the crate is discovered, measured
 together with the default accuracy and budget, and printed as a table -
-that is what `scaling::main!()` above gives you. There is no `Config` to
-build, no list to add to and no printing to write.
+that is what `scaling::main!()` above gives you. The default run needs no
+configuration to build, no list to add to and no printing to write.
 
 Choosing a tighter accuracy target or time budget means building a
 [`Config`] and passing it to the runner in your own `main`:
