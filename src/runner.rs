@@ -191,7 +191,7 @@ pub fn run(options: Options) -> Outcome {
     }
 
     if suite.is_empty() {
-        eprintln!("{}", nothing_to_run(&tokens));
+        eprintln!("There are no benchmarks to run!");
         return Outcome::Measured;
     }
     eprintln!(
@@ -208,23 +208,6 @@ pub fn run(options: Options) -> Outcome {
     }
 
     Outcome::Measured
-}
-
-/// Why a run measured nothing, which is nearly always one of two things.
-fn nothing_to_run(tokens: &Assembled) -> String {
-    let registered = tokens.flat + tokens.scaling + tokens.comparisons;
-    if registered == 0 {
-        // The failure `inventory` actually produces: it collects through
-        // linker sections, so a module that was not compiled into this
-        // binary registers nothing and says nothing about it.
-        "no benchmarks are registered in this binary.\n\
-         Nothing carrying #[scaling::bench] or its siblings was linked in - check that the \
-         code holding them is compiled into this target, and that any #[cfg] written above \
-         the attribute is enabled here."
-            .to_string()
-    } else {
-        format!("no measurements were produced from the {registered} registered benchmarks")
-    }
 }
 
 /// Lanes with more than one input as grids, everything else as the report

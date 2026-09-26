@@ -366,13 +366,6 @@ impl Suite {
 /// what was added rather than holding it.
 #[derive(Debug, Default)]
 pub(crate) struct Assembled {
-    /// How many flat benchmarks were added.
-    pub flat: usize,
-    /// How many scaling benchmarks were added.
-    pub scaling: usize,
-    /// How many comparisons were added. A group sharing several inputs
-    /// contributes one per input.
-    pub comparisons: usize,
     /// Things worth saying that did not stop the run - a candidate no input
     /// matches, say. Errors come back through [`Suite::try_add_registered`]
     /// instead; these are the complaints that leave the rest of the run
@@ -450,11 +443,9 @@ impl Suite {
             match r.reg.kind {
                 Kind::Flat(add) => {
                     add(&mut *self, &r.name);
-                    tokens.flat += 1;
                 }
                 Kind::Scaling(add) => {
                     add(&mut *self, &r.name);
-                    tokens.scaling += 1;
                 }
             }
         }
@@ -475,11 +466,9 @@ impl Suite {
                         .expect("assemble never builds a lane with no candidates");
                     let name = lane.flat_name(c, input);
                     self.add_single_input_group(&name, group);
-                    tokens.flat += 1;
                 } else {
                     let name = lane.comparison_name(input);
                     self.add_input_group(&name, group);
-                    tokens.comparisons += 1;
                 }
             }
         }
