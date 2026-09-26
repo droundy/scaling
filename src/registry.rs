@@ -98,10 +98,10 @@ pub enum Kind {
     /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
     /// [`Suite::add_make_input`] - which of the three, and any input
     /// generator, is baked into the shim.
-    Flat(fn(&mut Suite<'_>, &str)),
+    Flat(fn(&mut Suite, &str)),
     /// Adds itself with [`Suite::add_scaling`] or [`Suite::add_scaling_gen`].
     /// `nmin` is baked in too, since this signature has nowhere to pass it.
-    Scaling(fn(&mut Suite<'_>, &str)),
+    Scaling(fn(&mut Suite, &str)),
 }
 
 inventory::collect!(Registered);
@@ -388,11 +388,11 @@ mod tests {
     // Two registrations, written the way generated code will write them.
     // Deliberately at item position in a test module: that is where
     // `submit!` has to work, and it is the arrangement a macro produces.
-    fn add_alpha(adder: &mut Suite<'_>, name: &str) {
+    fn add_alpha(adder: &mut Suite, name: &str) {
         adder.add(name, || (0..32u64).sum::<u64>());
     }
 
-    fn add_beta(adder: &mut Suite<'_>, name: &str) {
+    fn add_beta(adder: &mut Suite, name: &str) {
         adder.add_input(name, vec![3i32, 1, 2], |v: &mut Vec<i32>| v.sort());
     }
 

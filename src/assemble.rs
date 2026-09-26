@@ -912,7 +912,7 @@ mod tests {
     // Shim that does nothing. Assembly never calls it - it decides what
     // *would* be run - so a plan can be checked without a machine claim, a
     // benchmark, or a linker.
-    fn noop_flat(adder: &mut Suite<'_>, name: &str) {
+    fn noop_flat(adder: &mut Suite, name: &str) {
         adder.add(name, || ());
     }
 

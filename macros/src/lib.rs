@@ -658,7 +658,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __adder: &mut ::scaling::registry::Suite<'_>,
+                    __adder: &mut ::scaling::registry::Suite,
                     __name: &str,
                 ) {
                     #body;
@@ -732,7 +732,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             quote! {
                 #[doc(hidden)]
                 fn #shim(
-                    __adder: &mut ::scaling::registry::Suite<'_>,
+                    __adder: &mut ::scaling::registry::Suite,
                     __name: &str,
                 ) {
                     #body;

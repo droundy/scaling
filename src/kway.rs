@@ -47,7 +47,7 @@ type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
 
 /// Benchmarks sharing an input, gathered before any of them runs.
 pub struct InputGroup<'a, I> {
-    cfg: &'a Config,
+    cfg: Config,
     make_input: Box<GenInput<'a, I>>,
     clone_input: Option<Box<dyn Fn(&I) -> I + 'a>>,
     entries: Vec<Entry<'a, I>>,
@@ -61,9 +61,9 @@ struct Entry<'a, I> {
 impl Config {
     /// Create an InputGroup for testing.
     #[cfg(test)]
-    pub(crate) fn input_group(&self) -> InputGroup<'_, ()> {
+    pub(crate) fn input_group(&self) -> InputGroup<'static, ()> {
         InputGroup {
-            cfg: self,
+            cfg: self.clone(),
             make_input: Box::new(|| ()),
             clone_input: Some(Box::new(Clone::clone)),
             entries: Vec::new(),
@@ -86,14 +86,14 @@ impl Config {
     /// Like [`Config::input_group`]: this assembles a registered input group
     /// or matrix lane.
     pub(crate) fn input_group_make_input<'a, G, I: Clone + 'a>(
-        &'a self,
+        &self,
         make_input: G,
     ) -> InputGroup<'a, I>
     where
         G: FnMut() -> I + 'a,
     {
         InputGroup {
-            cfg: self,
+            cfg: self.clone(),
             make_input: Box::new(make_input),
             clone_input: Some(Box::new(Clone::clone)),
             entries: Vec::new(),
@@ -101,14 +101,14 @@ impl Config {
     }
 
     pub(crate) fn input_group_make_input_uncloned<'a, G, I>(
-        &'a self,
+        &self,
         make_input: G,
     ) -> InputGroup<'a, I>
     where
         G: FnMut() -> I + 'a,
     {
         InputGroup {
-            cfg: self,
+            cfg: self.clone(),
             make_input: Box::new(make_input),
             clone_input: None,
             entries: Vec::new(),
@@ -162,8 +162,8 @@ impl<'a, I: 'a> InputGroup<'a, I> {
     /// For [`Suite::add_input_group`], which sizes the group's clock and
     /// so needs the same `Config` the sampling loop will consult - the set
     /// carries its own, and it is not necessarily the suite's.
-    pub(crate) fn cfg(&self) -> &'a Config {
-        self.cfg
+    pub(crate) fn cfg(&self) -> &Config {
+        &self.cfg
     }
 
     /// Time them all, interleaved, and report each against the baseline.

@@ -36,20 +36,20 @@ pub(crate) fn block_on<F: Future>(clock: &Clock, future: F) -> F::Output {
 }
 
 /// One benchmark in flight.
-pub(crate) struct Task<'a> {
-    future: Pin<Box<dyn Future<Output = Found> + 'a>>,
+pub(crate) struct Task {
+    future: Pin<Box<dyn Future<Output = Found>>>,
     clock: Rc<Clock>,
     result: Option<Found>,
 }
 
 /// Round-robin over a set of benchmarks, one sample each per round.
-pub(crate) struct Scheduler<'a> {
-    tasks: Vec<Task<'a>>,
+pub(crate) struct Scheduler {
+    tasks: Vec<Task>,
     /// Xorshift state for the per-round starting offset.
     seed: u64,
 }
 
-impl<'a> Scheduler<'a> {
+impl Scheduler {
     pub(crate) fn new(seed: u64) -> Self {
         Scheduler {
             tasks: Vec::new(),
@@ -59,11 +59,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    pub(crate) fn push(
-        &mut self,
-        clock: Rc<Clock>,
-        future: Pin<Box<dyn Future<Output = Found> + 'a>>,
-    ) {
+    pub(crate) fn push(&mut self, clock: Rc<Clock>, future: Pin<Box<dyn Future<Output = Found>>>) {
         self.tasks.push(Task {
             future,
             clock,
@@ -142,7 +138,7 @@ mod tests {
         nothing()
     }
 
-    fn scheduler_of(yields: &[usize], seed: u64) -> (Scheduler<'static>, Rc<RefCell<Vec<usize>>>) {
+    fn scheduler_of(yields: &[usize], seed: u64) -> (Scheduler, Rc<RefCell<Vec<usize>>>) {
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut scheduler = Scheduler::new(seed);
         for (id, &count) in yields.iter().enumerate() {

@@ -143,9 +143,9 @@ pub(crate) enum Found {
     Comparison(Comparisons),
 }
 
-pub struct Suite<'a> {
-    cfg: &'a Config,
-    scheduler: Scheduler<'a>,
+pub struct Suite {
+    cfg: Config,
+    scheduler: Scheduler,
     names: Vec<String>,
     comparisons: u64,
     z_alpha: Rc<Cell<f64>>,
@@ -154,9 +154,9 @@ pub struct Suite<'a> {
 impl Config {
     /// Begin a suite of benchmarks to be measured together. What
     /// [`crate::runner`] calls, not what a benchmark is written against.
-    pub(crate) fn suite(&self) -> Suite<'_> {
+    pub(crate) fn suite(&self) -> Suite {
         Suite {
-            cfg: self,
+            cfg: self.clone(),
             // A fixed seed: what must vary is the starting position from one
             // round to the next, which it does. Varying it between runs as
             // well would only make a suite harder to reproduce.
@@ -170,7 +170,7 @@ impl Config {
     }
 }
 
-impl<'a> Suite<'a> {
+impl Suite {
     /// How many benchmarks have been added.
     pub(crate) fn len(&self) -> usize {
         self.names.len()
@@ -180,115 +180,49 @@ impl<'a> Suite<'a> {
         self.names.is_empty()
     }
 
-    fn push(
-        &mut self,
-        name: &str,
-        clock: Rc<Clock>,
-        future: Pin<Box<dyn Future<Output = Found> + 'a>>,
-    ) {
+    fn push(&mut self, name: &str, clock: Rc<Clock>, future: Pin<Box<dyn Future<Output = Found>>>) {
         self.names.push(name.to_string());
         self.scheduler.push(clock, future);
     }
 
-    /// The clock and [`Suite::push`] shared by every `add_*_with` method:
-    /// only the future `body` builds differs between them.
+    /// The clock and [`Suite::push`] shared by every benchmark task.
     fn add_task(
         &mut self,
         name: &str,
         max_time: Duration,
-        body: impl FnOnce(Rc<Clock>) -> Pin<Box<dyn Future<Output = Found> + 'a>>,
+        body: impl FnOnce(Rc<Clock>) -> Pin<Box<dyn Future<Output = Found>>> + 'static,
     ) {
         let clock = Rc::new(Clock::new(max_time));
         self.push(name, clock.clone(), body(clock));
     }
 
     /// Add a benchmark, as [`bench`](fn@bench) would run it.
-    pub fn add<F, O>(&mut self, name: &str, f: F)
+    pub fn add<F, O>(&mut self, name: &str, mut f: F)
     where
-        F: FnMut() -> O + 'a,
-        O: 'a,
+        F: FnMut() -> O + 'static,
     {
-        self.add_with(self.cfg, name, f)
-    }
-
-    /// [`Suite::add`], measured against `cfg` rather than the suite's own.
-    ///
-    /// See [`Suite::add_make_input_with`] for what a per-benchmark `Config`
-    /// is for and what it does not change.
-    pub(crate) fn add_with<F, O>(&mut self, cfg: &'a Config, name: &str, mut f: F)
-    where
-        F: FnMut() -> O + 'a,
-        O: 'a,
-    {
-        self.add_make_input_with(cfg, name, || (), move |_: &mut ()| f())
+        self.add_make_input(name, || (), move |_: &mut ()| f())
     }
 
     /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
     pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F)
     where
-        F: FnMut(&mut I) -> O + 'a,
-        I: Clone + 'a,
-        O: 'a,
+        F: FnMut(&mut I) -> O + 'static,
+        I: Clone + 'static,
     {
-        self.add_input_with(self.cfg, name, input, f)
-    }
-
-    /// [`Suite::add_input`], measured against `cfg` rather than the suite's
-    /// own. See [`Suite::add_make_input_with`].
-    pub(crate) fn add_input_with<F, I, O>(&mut self, cfg: &'a Config, name: &str, input: I, f: F)
-    where
-        F: FnMut(&mut I) -> O + 'a,
-        I: Clone + 'a,
-        O: 'a,
-    {
-        self.add_make_input_with(cfg, name, move || input.clone(), f)
+        self.add_make_input(name, move || input.clone(), f)
     }
 
     /// Add a benchmark over generated inputs, as [`bench_make_input`] would
     /// run it.
     pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F)
     where
-        G: FnMut() -> I + 'a,
-        F: FnMut(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
+        G: FnMut() -> I + 'static,
+        F: FnMut(&mut I) -> O + 'static,
+        I: 'static,
     {
-        self.add_make_input_with(self.cfg, name, make_input, f)
-    }
-
-    /// [`Suite::add_make_input`], measured against `cfg` rather than the
-    /// suite's own.
-    ///
-    /// One benchmark in a suite may want a different accuracy goal or a
-    /// different budget from the rest - a slow one nobody wants to spend the
-    /// default on, or a fickle one worth chasing further. The `Config` given
-    /// here governs this benchmark alone: its goals, and the budget its clock
-    /// is built from.
-    ///
-    /// It must outlive the suite, since the benchmark holds it until it runs.
-    /// A caller with several wants them somewhere stable - a `Vec<Config>`
-    /// declared before the suite will do - rather than built inline per call.
-    ///
-    /// # What it does not change
-    ///
-    /// The multiple-comparison threshold, which belongs to the whole suite
-    /// and is worked out in [`Suite::run`] from the number of comparisons the
-    /// suite holds. A benchmark cannot opt out of the family it is part of by
-    /// bringing its own `Config`.
-    ///
-    pub(crate) fn add_make_input_with<G, F, I, O>(
-        &mut self,
-        cfg: &'a Config,
-        name: &str,
-        make_input: G,
-        f: F,
-    ) where
-        G: FnMut() -> I + 'a,
-        F: FnMut(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
-    {
-        let group = cfg
+        let group = self
+            .cfg
             .input_group_make_input_uncloned(make_input)
             .add_input(name, f);
         self.add_single_input_group(name, group);
@@ -297,20 +231,10 @@ impl<'a> Suite<'a> {
     /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
     pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize)
     where
-        F: FnMut(usize) -> O + 'a,
-        O: 'a,
+        F: FnMut(usize) -> O + 'static,
     {
-        self.add_scaling_with(self.cfg, name, f, nmin)
-    }
-
-    /// [`Suite::add_scaling`], measured against `cfg` rather than the suite's
-    /// own. See [`Suite::add_make_input_with`].
-    pub(crate) fn add_scaling_with<F, O>(&mut self, cfg: &'a Config, name: &str, f: F, nmin: usize)
-    where
-        F: FnMut(usize) -> O + 'a,
-        O: 'a,
-    {
-        self.add_task(name, cfg.max_time, |clock| {
+        let cfg = self.cfg.clone();
+        self.add_task(name, cfg.max_time, move |clock| {
             Box::pin(async move { Found::Scaling(cfg.bench_scaling_async(&clock, f, nmin).await) })
         })
     }
@@ -319,30 +243,12 @@ impl<'a> Suite<'a> {
     /// [`bench_scaling_gen`] would run it.
     pub fn add_scaling_gen<G, F, I, O>(&mut self, name: &str, make_input: G, f: F, nmin: usize)
     where
-        G: FnMut(usize) -> I + 'a,
-        F: Fn(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
+        G: FnMut(usize) -> I + 'static,
+        F: Fn(&mut I) -> O + 'static,
+        I: 'static,
     {
-        self.add_scaling_gen_with(self.cfg, name, make_input, f, nmin)
-    }
-
-    /// [`Suite::add_scaling_gen`], measured against `cfg` rather than the
-    /// suite's own. See [`Suite::add_make_input_with`].
-    pub(crate) fn add_scaling_gen_with<G, F, I, O>(
-        &mut self,
-        cfg: &'a Config,
-        name: &str,
-        make_input: G,
-        f: F,
-        nmin: usize,
-    ) where
-        G: FnMut(usize) -> I + 'a,
-        F: Fn(&mut I) -> O + 'a,
-        I: 'a,
-        O: 'a,
-    {
-        self.add_task(name, cfg.max_time, |clock| {
+        let cfg = self.cfg.clone();
+        self.add_task(name, cfg.max_time, move |clock| {
             Box::pin(async move {
                 Found::Scaling(
                     cfg.bench_scaling_gen_async(&clock, make_input, f, nmin)
@@ -365,9 +271,9 @@ impl<'a> Suite<'a> {
     ///
     /// If the set holds no alternatives, or has multiple alternatives but no
     /// way to clone their shared inputs.
-    pub(crate) fn add_input_group<I>(&mut self, name: &str, set: InputGroup<'a, I>)
+    pub(crate) fn add_input_group<I: 'static>(&mut self, name: &str, set: InputGroup<'static, I>)
     where
-        I: 'a,
+        I: 'static,
     {
         let k = set.len();
         assert!(
@@ -409,7 +315,7 @@ impl<'a> Suite<'a> {
         );
     }
 
-    fn add_single_input_group<I: 'a>(&mut self, name: &str, group: InputGroup<'a, I>) {
+    fn add_single_input_group<I: 'static>(&mut self, name: &str, group: InputGroup<'static, I>) {
         assert_eq!(
             group.len(),
             1,
@@ -486,7 +392,7 @@ pub(crate) struct Assembled {
     pub lanes: Vec<crate::assemble::Lane>,
 }
 
-impl<'a> Suite<'a> {
+impl Suite {
     /// Add every benchmark registered anywhere in this binary, handing back
     /// what is wrong rather than panicking - what a runner printing
     /// diagnostics of its own should do.
@@ -534,7 +440,7 @@ impl<'a> Suite<'a> {
             return Err(fatal);
         }
 
-        let cfg = self.cfg;
+        let cfg = self.cfg.clone();
         let mut tokens = Assembled {
             warnings,
             ..Assembled::default()
@@ -812,15 +718,14 @@ mod tests {
     }
 
     #[test]
-    fn a_singleton_input_group_accepts_non_clone_borrowed_inputs() {
-        struct NonClone<'a>(&'a str);
+    fn a_singleton_input_group_accepts_non_clone_inputs() {
+        struct NonClone(String);
 
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
-        let backing = String::from("borrowed input");
         let mut suite = cfg.suite();
         suite.add_make_input(
             "non-clone",
-            || NonClone(backing.as_str()),
+            || NonClone(String::from("owned input")),
             |input| input.0.len(),
         );
         let stats = suite.run().stats("non-clone").expect("it was measured");
@@ -1458,32 +1363,9 @@ mod report_lookup {
 }
 
 #[cfg(test)]
-mod per_benchmark_config {
+mod comparison_config {
     use super::*;
     use std::time::Duration;
-
-    /// A per-benchmark `Config` governs that benchmark and nothing else.
-    ///
-    /// The budget is the visible half: a benchmark given a microsecond gives
-    /// up early and says so, while its neighbour on the suite's own generous
-    /// budget does not.
-    #[test]
-    fn a_per_benchmark_config_governs_only_that_benchmark() {
-        let cfg = Config::default().with_max_time(Duration::from_millis(500));
-        let stingy = Config::relative(1e-9).with_max_time(Duration::from_micros(1));
-        let mut suite = cfg.suite();
-        suite.add("ordinary", || (0..50u64).sum::<u64>());
-        suite.add_with(&stingy, "starved", || (0..50u64).sum::<u64>());
-        let report = suite.run();
-        assert!(
-            report.stats("starved").unwrap().hit_limit,
-            "the benchmark given a microsecond should have run out",
-        );
-        assert!(
-            !report.stats("ordinary").unwrap().hit_limit,
-            "its neighbour keeps the suite's budget",
-        );
-    }
 
     /// A comparison is measured against the `Config` it was built from, on
     /// every axis.
@@ -1527,29 +1409,33 @@ mod per_benchmark_config {
         );
     }
 
-    /// A benchmark cannot opt out of the family it is in by bringing its own
-    /// `Config`: the threshold belongs to the suite.
+    /// Comparison groups can use different configs, but the family-wise
+    /// threshold still counts every comparison in the suite.
     #[test]
-    fn a_per_benchmark_config_does_not_change_the_threshold() {
+    fn comparison_configs_do_not_change_the_suite_threshold() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
-        let other = Config::relative(0.5);
+        let other = Config::relative(0.5).with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
-        suite.add_with(&other, "flat", || (0..32u64).sum::<u64>());
-        for name in ["one", "two"] {
-            suite.add_input_group(
-                name,
-                cfg.input_group()
-                    .add("a", || (0..32u64).sum::<u64>())
-                    .add("b", || (0..32u64).sum::<u64>()),
-            );
-        }
+        suite.add_input_group(
+            "one",
+            cfg.input_group()
+                .add("a", || (0..32u64).sum::<u64>())
+                .add("b", || (0..32u64).sum::<u64>()),
+        );
+        suite.add_input_group(
+            "two",
+            other
+                .input_group()
+                .add("a", || (0..32u64).sum::<u64>())
+                .add("b", || (0..32u64).sum::<u64>()),
+        );
         let z = suite.z_alpha.clone();
         suite.run();
         assert_eq!(
             z.get(),
             Config::z_alpha_for(2),
             "the limit counts the suite's comparisons, whatever config each \
-             benchmark was measured under",
+             comparison group uses",
         );
     }
 }
@@ -1580,7 +1466,7 @@ mod registered_by_hand {
         (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
     }
 
-    fn add_flat(adder: &mut Suite<'_>, name: &str) {
+    fn add_flat(adder: &mut Suite, name: &str) {
         adder.add(name, || work(200));
     }
 
@@ -1593,7 +1479,7 @@ mod registered_by_hand {
         }
     }
 
-    fn add_scaling(adder: &mut Suite<'_>, name: &str) {
+    fn add_scaling(adder: &mut Suite, name: &str) {
         // `nmin` is baked in here, since the shim signature has nowhere to
         // pass it - which is the whole reason it must be a literal at the
         // macro.
@@ -1861,7 +1747,7 @@ mod bad_registrations {
     use super::*;
     use crate::registry::{Candidate, ErasedInput};
 
-    fn add(adder: &mut Suite<'_>, name: &str) {
+    fn add(adder: &mut Suite, name: &str) {
         adder.add(name, || (0..16u64).sum::<u64>());
     }
 

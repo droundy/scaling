@@ -131,7 +131,7 @@ pub fn main() -> ExitCode {
 /// Shared by [`run`] and [`measure`] so that the two cannot drift: what
 /// `measure` hands back is what `run` would have printed, assembled by the
 /// same code under the same options.
-fn assemble(options: &Options) -> Result<(Suite<'_>, Assembled), Vec<Diagnostic>> {
+fn assemble(options: &Options) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
     let mut suite = options.cfg.suite();
     let tokens = suite.try_add_registered()?;
     Ok((suite, tokens))
