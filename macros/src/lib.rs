@@ -668,7 +668,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         name: #name,
                         crate_name: ::core::env!("CARGO_PKG_NAME"),
                         crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        kind: ::scaling::registry::Kind::Flat(#shim),
+                        add: #shim,
                     }
                 }
             }
@@ -742,7 +742,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                         name: #name,
                         crate_name: ::core::env!("CARGO_PKG_NAME"),
                         crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        kind: ::scaling::registry::Kind::Scaling(#shim),
+                        add: #shim,
                     }
                 }
             }
@@ -859,9 +859,9 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         out.extend(quote! {
             #[doc(hidden)]
             fn #alt<'__s>(
-                __set: ::scaling::registry::InputGroup<'__s, ::scaling::registry::ErasedInput>,
+                __set: ::scaling::registry::InputGroup<::scaling::registry::ErasedInput>,
                 __name: &str,
-            ) -> ::scaling::registry::InputGroup<'__s, ::scaling::registry::ErasedInput> {
+            ) -> ::scaling::registry::InputGroup<::scaling::registry::ErasedInput> {
                 #alt_body
             }
             ::scaling::inventory::submit! {

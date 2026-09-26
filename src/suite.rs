@@ -44,7 +44,7 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
-use crate::registry::{Candidate, Input, Kind, Registered};
+use crate::registry::{Candidate, Input, Registered};
 use std::any::Any;
 use std::cell::Cell;
 use std::fmt::{self, Display, Formatter};
@@ -141,6 +141,16 @@ pub(crate) enum Found {
     Stats(Stats),
     Scaling(ScalingStats),
     Comparison(Comparisons),
+}
+
+impl Display for Found {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Found::Stats(s) => write!(f, "{s}"),
+            Found::Scaling(s) => write!(f, "{s}"),
+            Found::Comparison(c) => write!(f, "{c}"),
+        }
+    }
 }
 
 pub struct Suite {
@@ -271,10 +281,7 @@ impl Suite {
     ///
     /// If the set holds no alternatives, or has multiple alternatives but no
     /// way to clone their shared inputs.
-    pub(crate) fn add_input_group<I: 'static>(&mut self, name: &str, set: InputGroup<'static, I>)
-    where
-        I: 'static,
-    {
+    pub(crate) fn add_input_group<I: 'static>(&mut self, name: &str, set: InputGroup<I>) {
         let k = set.len();
         assert!(
             k > 0,
@@ -315,7 +322,7 @@ impl Suite {
         );
     }
 
-    fn add_single_input_group<I: 'static>(&mut self, name: &str, group: InputGroup<'static, I>) {
+    fn add_single_input_group<I: 'static>(&mut self, name: &str, group: InputGroup<I>) {
         assert_eq!(
             group.len(),
             1,
@@ -440,14 +447,7 @@ impl Suite {
         };
 
         for r in plan.flat {
-            match r.reg.kind {
-                Kind::Flat(add) => {
-                    add(&mut *self, &r.name);
-                }
-                Kind::Scaling(add) => {
-                    add(&mut *self, &r.name);
-                }
-            }
+            (r.reg.add)(&mut *self, &r.name);
         }
 
         for lane in &plan.lanes {
@@ -609,11 +609,7 @@ impl Display for Report {
             if i > 0 {
                 writeln!(f)?;
             }
-            let shown = match found {
-                Found::Stats(s) => s.to_string(),
-                Found::Scaling(s) => s.to_string(),
-                Found::Comparison(c) => c.to_string(),
-            };
+            let shown = found.to_string();
             // Trimmed because a multi-line result brings its own trailing
             // newline - `Comparisons` writes every line with `writeln!` - and
             // this loop supplies the separators itself. Leaving it produced a
@@ -1464,7 +1460,7 @@ mod registered_by_hand {
             name: "e2e::flat",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            kind: Kind::Flat(add_flat),
+            add: add_flat,
         }
     }
 
@@ -1480,7 +1476,7 @@ mod registered_by_hand {
             name: "e2e::scaling",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            kind: Kind::Scaling(add_scaling),
+            add: add_scaling,
         }
     }
 
@@ -1503,10 +1499,7 @@ mod registered_by_hand {
         }
     }
 
-    fn alt_baseline<'a>(
-        set: InputGroup<'a, ErasedInput>,
-        name: &str,
-    ) -> InputGroup<'a, ErasedInput> {
+    fn alt_baseline(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
@@ -1514,10 +1507,7 @@ mod registered_by_hand {
         })
     }
 
-    fn alt_unstable<'a>(
-        set: InputGroup<'a, ErasedInput>,
-        name: &str,
-    ) -> InputGroup<'a, ErasedInput> {
+    fn alt_unstable(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort_unstable();
@@ -1526,7 +1516,7 @@ mod registered_by_hand {
     }
 
     /// Deliberately slower, so the comparison has something real to find.
-    fn alt_slow<'a>(set: InputGroup<'a, ErasedInput>, name: &str) -> InputGroup<'a, ErasedInput> {
+    fn alt_slow(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| {
             let v = e.get_mut::<Vec<u64>>();
             v.sort();
@@ -1740,7 +1730,7 @@ mod bad_registrations {
         adder.add(name, || (0..16u64).sum::<u64>());
     }
 
-    fn alt<'a>(set: InputGroup<'a, ErasedInput>, name: &str) -> InputGroup<'a, ErasedInput> {
+    fn alt(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |_| ())
     }
 
@@ -1749,13 +1739,13 @@ mod bad_registrations {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        kind: Kind::Flat(add),
+        add,
     };
     static COLLIDES_2: Registered = Registered {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
-        kind: Kind::Flat(add),
+        add,
     };
 
     // A comparison group where two different candidates both claim the
@@ -1867,16 +1857,10 @@ mod versions_and_rivals {
         work(v, 3)
     }
 
-    fn add_alt_new<'a>(
-        set: InputGroup<'a, ErasedInput>,
-        name: &str,
-    ) -> InputGroup<'a, ErasedInput> {
+    fn add_alt_new(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| mix_new(e.get_mut::<Vec<u64>>()))
     }
-    fn add_alt_old<'a>(
-        set: InputGroup<'a, ErasedInput>,
-        name: &str,
-    ) -> InputGroup<'a, ErasedInput> {
+    fn add_alt_old(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
         set.add_input(name, |e: &mut ErasedInput| mix_old(e.get_mut::<Vec<u64>>()))
     }
 

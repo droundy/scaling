@@ -906,7 +906,7 @@ pub fn plan(
 mod tests {
     use super::lane_tests::*;
     use super::*;
-    use crate::registry::{Kind, Suite};
+    use crate::registry::Suite;
     use std::any::TypeId;
 
     // Shim that does nothing. Assembly never calls it - it decides what
@@ -922,7 +922,7 @@ mod tests {
             name,
             crate_name: "testcrate",
             crate_version: "1.0.0",
-            kind: Kind::Flat(noop_flat),
+            add: noop_flat,
         }
     }
 
@@ -1253,12 +1253,12 @@ mod pairing {
                         .collect::<Vec<u64>>(),
                 )
             })
-            .add_input("a", |e: &mut ErasedInput| {
+            .add_input("a", move |e: &mut ErasedInput| {
                 let v = e.get_mut::<Vec<u64>>();
                 rec_a.borrow_mut().push(v.clone());
                 sum(v)
             })
-            .add_input("b", |e: &mut ErasedInput| {
+            .add_input("b", move |e: &mut ErasedInput| {
                 let v = e.get_mut::<Vec<u64>>();
                 rec_b.borrow_mut().push(v.clone());
                 sum(v)
@@ -1913,7 +1913,6 @@ mod version_tests {
 mod review_regressions {
     use super::lane_tests::*;
     use super::*;
-    use crate::registry::Kind;
 
     /// `types(A, B)` makes several registrations of one name that differ in
     /// type. They are instantiations, not versions of each other, so
@@ -2050,9 +2049,9 @@ mod review_regressions {
             name,
             crate_name: "mycrate",
             crate_version: version,
-            kind: Kind::Flat(|a, n| {
+            add: |a, n| {
                 a.add(n, || ());
-            }),
+            },
         }
     }
 

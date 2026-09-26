@@ -26,7 +26,7 @@ const MAX_SAMPLES: usize = 1_000_000;
 
 /// A generator of inputs, type-erased so that all the alternatives can share
 /// one.
-type GenInput<'a, I> = dyn FnMut() -> I + 'a;
+type GenInput<I> = dyn FnMut() -> I + 'static;
 
 /// One alternative's timing loop, type-erased so that alternatives may
 /// differ in what they return.
@@ -43,25 +43,25 @@ type GenInput<'a, I> = dyn FnMut() -> I + 'a;
 /// own inputs and the cost varied with the input, the difference between two
 /// alternatives would carry the difference between two draws as well, and no
 /// amount of averaging distinguishes the two.
-type Batch<'a, I> = Box<dyn FnMut(&mut [I]) -> f64 + 'a>;
+type Batch<I> = Box<dyn FnMut(&mut [I]) -> f64 + 'static>;
 
 /// Benchmarks sharing an input, gathered before any of them runs.
-pub struct InputGroup<'a, I> {
+pub struct InputGroup<I> {
     cfg: Config,
-    make_input: Box<GenInput<'a, I>>,
-    clone_input: Option<Box<dyn Fn(&I) -> I + 'a>>,
-    entries: Vec<Entry<'a, I>>,
+    make_input: Box<GenInput<I>>,
+    clone_input: Option<Box<dyn Fn(&I) -> I + 'static>>,
+    entries: Vec<Entry<I>>,
 }
 
-struct Entry<'a, I> {
+struct Entry<I> {
     name: String,
-    batch: Batch<'a, I>,
+    batch: Batch<I>,
 }
 
 impl Config {
     /// Create an InputGroup for testing.
     #[cfg(test)]
-    pub(crate) fn input_group(&self) -> InputGroup<'static, ()> {
+    pub(crate) fn input_group(&self) -> InputGroup<()> {
         InputGroup {
             cfg: self.clone(),
             make_input: Box::new(|| ()),
@@ -85,12 +85,12 @@ impl Config {
     ///
     /// Like [`Config::input_group`]: this assembles a registered input group
     /// or matrix lane.
-    pub(crate) fn input_group_make_input<'a, G, I: Clone + 'a>(
+    pub(crate) fn input_group_make_input<G, I: Clone + 'static>(
         &self,
         make_input: G,
-    ) -> InputGroup<'a, I>
+    ) -> InputGroup<I>
     where
-        G: FnMut() -> I + 'a,
+        G: FnMut() -> I + 'static,
     {
         InputGroup {
             cfg: self.clone(),
@@ -100,12 +100,9 @@ impl Config {
         }
     }
 
-    pub(crate) fn input_group_make_input_uncloned<'a, G, I>(
-        &self,
-        make_input: G,
-    ) -> InputGroup<'a, I>
+    pub(crate) fn input_group_make_input_uncloned<G, I>(&self, make_input: G) -> InputGroup<I>
     where
-        G: FnMut() -> I + 'a,
+        G: FnMut() -> I + 'static,
     {
         InputGroup {
             cfg: self.clone(),
@@ -116,7 +113,7 @@ impl Config {
     }
 }
 
-impl<'a> InputGroup<'a, ()> {
+impl InputGroup<()> {
     /// Add an alternative that takes no input. The first one added is the
     /// baseline.
     ///
@@ -125,13 +122,13 @@ impl<'a> InputGroup<'a, ()> {
     #[cfg(test)]
     pub(crate) fn add<F, O>(self, name: &str, mut f: F) -> Self
     where
-        F: FnMut() -> O + 'a,
+        F: FnMut() -> O + 'static,
     {
         self.add_input(name, move |_: &mut ()| f())
     }
 }
 
-impl<'a, I: 'a> InputGroup<'a, I> {
+impl<I: 'static> InputGroup<I> {
     /// Add an alternative that takes the generated input. The first one
     /// added is the baseline.
     ///
@@ -142,7 +139,7 @@ impl<'a, I: 'a> InputGroup<'a, I> {
     /// [`run`]: InputGroup::run
     pub fn add_input<F, O>(mut self, name: &str, mut f: F) -> Self
     where
-        F: FnMut(&mut I) -> O + 'a,
+        F: FnMut(&mut I) -> O + 'static,
     {
         self.entries.push(Entry {
             name: name.to_string(),
@@ -382,9 +379,9 @@ fn clone_into<I>(master: &[I], xs: &mut Vec<I>, clone_input: &dyn Fn(&I) -> I) {
 /// Find a batch size whose measured duration, summed over every alternative,
 /// reaches [`SAMPLE_TIME`]: the same extrapolation
 /// [`Config::bench_make_input`] does, over a whole round.
-async fn calibrate<'a, I>(
-    make_input: &mut GenInput<'a, I>,
-    entries: &mut [Entry<'a, I>],
+async fn calibrate<I>(
+    make_input: &mut GenInput<I>,
+    entries: &mut [Entry<I>],
     master: &mut Vec<I>,
     xs: &mut Vec<I>,
     clone_input: Option<&dyn Fn(&I) -> I>,

@@ -4,8 +4,8 @@
 //! A benchmark in this crate is a closure, and a closure cannot be a
 //! `static`. [`inventory`] can only collect `'static` values with no captured
 //! environment, so what gets registered is not the benchmark but a plain
-//! `fn` item that knows how to add it - see [`Kind`](crate::registry::Kind)
-//! for why "add" rather than "run".
+//! `fn` item that knows how to add it - see `Registered::add` for why
+//! "add" rather than "run".
 //!
 //! Nothing here is written by hand. The attribute macros emit it, and it is
 //! documented so that what they emit can be read and checked rather than
@@ -21,10 +21,7 @@ pub use crate::suite::Suite;
 /// what assembly *decides* rather than what it *measures* - a plan or a lane
 /// can be built and inspected without a real alternative behind it.
 #[cfg(test)]
-pub(crate) fn noop_alt<'a>(
-    set: InputGroup<'a, ErasedInput>,
-    _: &str,
-) -> InputGroup<'a, ErasedInput> {
+pub(crate) fn noop_alt(set: InputGroup<ErasedInput>, _: &str) -> InputGroup<ErasedInput> {
     set
 }
 
@@ -52,56 +49,45 @@ pub struct Registered {
     /// versions of one crate - an old one pulled in as a dev-dependency to
     /// compare against.
     pub crate_version: &'static str,
-    /// How to add this benchmark to a suite.
-    pub kind: Kind,
-}
-
-/// How a registered benchmark joins a suite.
-///
-/// Each variant is a bare `fn` pointer, which is what makes these
-/// registrable: a `fn` item captures nothing and is `'static`, and `'static`
-/// outlives any `'a`, so one of these satisfies a suite's bounds whatever
-/// borrow the caller ends up with.
-///
-/// Always standalone - a function naming one or more `group`s registers a
-/// [`Candidate`] instead, never a `Registered`, so nothing here needs to
-/// carry group membership or baseline status. See [`Candidate`] for that
-/// side.
-///
-/// # Why these add rather than run
-///
-/// The obvious shape - `fn(&Config) -> Stats`, run it and hand back the
-/// answer - would be wrong. [`Config::bench`] and friends drive their
-/// sampling loop to completion with `block_on`, so a registry of those would
-/// run every benchmark start to finish, one after another. That is precisely
-/// what a suite exists not to do: its scheduler interleaves samples so that
-/// no benchmark is measured in a machine state its neighbours never saw.
-///
-/// So a shim is handed the suite and adds itself to it, and the sampling
-/// happens later, interleaved with everyone else's.
-///
-/// # Why no generics survive
-///
-/// A benchmark is generic in its closure, its input and its return type;
-/// none of that can appear here, because a registry holds one type. It does
-/// not need to: the macro that writes a shim knows the concrete types at the
-/// point it writes it, so `F`, `I` and `O` are resolved there and the shim
-/// that comes out has a fixed signature. What crosses the boundary is a
-/// function pointer, and the two result types a standalone benchmark can
-/// produce - [`Stats`], [`ScalingStats`] - are concrete already.
-///
-/// [`Stats`]: crate::Stats
-/// [`ScalingStats`]: crate::ScalingStats
-/// [`Config::bench`]: crate::Config::bench
-#[derive(Debug)]
-pub enum Kind {
-    /// Adds itself with [`Suite::add`], [`Suite::add_input`] or
-    /// [`Suite::add_make_input`] - which of the three, and any input
-    /// generator, is baked into the shim.
-    Flat(fn(&mut Suite, &str)),
-    /// Adds itself with [`Suite::add_scaling`] or [`Suite::add_scaling_gen`].
-    /// `nmin` is baked in too, since this signature has nowhere to pass it.
-    Scaling(fn(&mut Suite, &str)),
+    /// Adds itself with [`Suite::add`], [`Suite::add_input`],
+    /// [`Suite::add_make_input`], [`Suite::add_scaling`] or
+    /// [`Suite::add_scaling_gen`] - which one, and any input generator or
+    /// `nmin`, is baked into the shim, since this signature has nowhere to
+    /// pass them.
+    ///
+    /// A bare `fn` pointer, which is what makes this registrable: a `fn`
+    /// item captures nothing and is `'static`, and `'static` outlives any
+    /// `'a`, so it satisfies a suite's bounds whatever borrow the caller ends
+    /// up with.
+    ///
+    /// Always standalone - a function naming one or more `group`s registers a
+    /// [`Candidate`] instead, never a `Registered`, so nothing here needs to
+    /// carry group membership or baseline status. See [`Candidate`] for that
+    /// side.
+    ///
+    /// # Why this adds rather than runs
+    ///
+    /// The obvious shape - `fn(&Config) -> Stats`, run it and hand back the
+    /// answer - would be wrong. [`Config::bench`] and friends drive their
+    /// sampling loop to completion with `block_on`, so a registry of those
+    /// would run every benchmark start to finish, one after another. That is
+    /// precisely what a suite exists not to do: its scheduler interleaves
+    /// samples so that no benchmark is measured in a machine state its
+    /// neighbours never saw.
+    ///
+    /// So a shim is handed the suite and adds itself to it, and the sampling
+    /// happens later, interleaved with everyone else's.
+    ///
+    /// # Why no generics survive
+    ///
+    /// A benchmark is generic in its closure, its input and its return type;
+    /// none of that can appear here, because a registry holds one type. It
+    /// does not need to: the macro that writes a shim knows the concrete
+    /// types at the point it writes it, so `F`, `I` and `O` are resolved
+    /// there and the shim that comes out has a fixed signature.
+    ///
+    /// [`Config::bench`]: crate::Config::bench
+    pub add: fn(&mut Suite, &str),
 }
 
 inventory::collect!(Registered);
@@ -232,13 +218,12 @@ pub struct Candidate {
     pub crate_version: &'static str,
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
-    pub add_alt: for<'a> fn(InputGroup<'a, ErasedInput>, &str) -> InputGroup<'a, ErasedInput>,
+    pub add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
 }
 
 impl fmt::Debug for Candidate {
-    /// Hand-written for the same reason as [`Kind`]'s used to be: the shims
-    /// are noise as addresses, and what is worth seeing is what this
-    /// candidate is and where it came from.
+    /// Hand-written because the shims are noise as addresses, and what is
+    /// worth seeing is what this candidate is and where it came from.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Candidate")
             .field("groups", &self.groups)
@@ -353,9 +338,10 @@ mod tests {
     /// A shim adds its benchmark to a suite rather than running it, and the
     /// suite measures it like anything else.
     ///
-    /// This is the shape claim from [`Kind`] made concrete: the registration
-    /// is a `static`, the shim is a bare `fn`, and yet what comes out the far
-    /// end is a normal interleaved suite entry with a real measurement in it.
+    /// This is the shape claim from `Registered::add` made concrete: the
+    /// registration is a `static`, the shim is a bare `fn`, and yet what
+    /// comes out the far end is a normal interleaved suite entry with a real
+    /// measurement in it.
     #[test]
     fn a_registered_shim_adds_itself_and_is_measured() {
         use std::time::Duration;
@@ -366,13 +352,8 @@ mod tests {
             if !r.name.starts_with("registry-selftest::") {
                 continue;
             }
-            match r.kind {
-                Kind::Flat(add) => {
-                    add(&mut suite, r.name);
-                    added += 1;
-                }
-                _ => panic!("the self-test registrations are all flat"),
-            }
+            (r.add)(&mut suite, r.name);
+            added += 1;
         }
         assert_eq!(added, 2, "expected both self-test benchmarks");
         let shown = format!("{}", suite.run());
@@ -401,7 +382,7 @@ mod tests {
             name: "registry-selftest::alpha",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            kind: Kind::Flat(add_alpha),
+            add: add_alpha,
         }
     }
 
@@ -410,7 +391,7 @@ mod tests {
             name: "registry-selftest::beta",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
-            kind: Kind::Flat(add_beta),
+            add: add_beta,
         }
     }
 

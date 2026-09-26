@@ -36,7 +36,7 @@
 //! nothing else, without anybody having to remember to silence the rest.
 
 use crate::assemble::Lane;
-use crate::{Assembled, Config, Found, Report, Suite};
+use crate::{Assembled, Config, Report, Suite};
 
 /// What a failure to assemble the registered benchmarks comes back as.
 ///
@@ -251,12 +251,10 @@ fn table(report: &Report, tokens: &Assembled) -> String {
 
 /// One entry, as its own type prints it.
 fn render(report: &Report, name: &str) -> String {
-    match report.find(name) {
-        Some(Found::Stats(s)) => s.to_string(),
-        Some(Found::Scaling(s)) => s.to_string(),
-        Some(Found::Comparison(c)) => c.to_string(),
-        None => "(not measured)".to_string(),
-    }
+    report
+        .find(name)
+        .expect("name came from report.names()")
+        .to_string()
 }
 
 /// One cell of a matrix: what it measured, and how that compares.
