@@ -42,16 +42,6 @@
 //! # Why there is no runtime here
 //!
 //! A general executor would be the wrong tool, not merely a heavy one.
-//!
-//! * **The scheduling policy is the point.** Which benchmark runs next, and
-//!   in what order within a round, is the feature being built. A runtime's
-//!   ready queue would have to be fought rather than used.
-//! * **Runtimes park.** A general `block_on` sleeps the thread when every
-//!   task returns `Poll::Pending`, waiting for something outside to wake one.
-//!   Here there is no outside: `Pending` always means "I have had my turn",
-//!   never "I am blocked", so every pending task is immediately runnable and
-//!   parking would be a deadlock. That is also why the waker below can do
-//!   nothing at all.
 
 use super::*;
 use crate::registry::{Candidate, Input, Kind, Registered};
@@ -61,35 +51,12 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
-/// A `Waker` whose every operation is a no-op.
-///
-/// Sound because nothing in this crate ever blocks. The only source of
-/// `Poll::Pending` is [`Clock::yield_now`], which means "I have had my turn",
-/// so the scheduler already knows to poll the task again and has no use for
-/// being told. Nothing is ever registered, so nothing ever needs waking.
-fn noop_waker() -> Waker {
-    fn clone(_: *const ()) -> RawWaker {
-        raw()
-    }
-    fn noop(_: *const ()) {}
-    fn raw() -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    // SAFETY: every function in the vtable ignores the data pointer, so the
-    // null pointer is never dereferenced, and `clone` returns a `RawWaker`
-    // built from the same vtable and the same null pointer.
-    unsafe { Waker::from_raw(raw()) }
-}
+mod scheduler;
+pub(crate) use scheduler::block_on;
+use scheduler::Scheduler;
 
-/// Yields to the scheduler exactly once.
-///
-/// It does not wake the waker before returning `Pending`, as a general
-/// `yield_now` must: this crate's executor never parks, so there is nothing
-/// to wake it from.
 struct YieldOnce {
     yielded: bool,
 }
@@ -97,35 +64,19 @@ struct YieldOnce {
 impl Future for YieldOnce {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         if self.yielded {
-            Poll::Ready(())
+            std::task::Poll::Ready(())
         } else {
             self.yielded = true;
-            Poll::Pending
+            std::task::Poll::Pending
         }
     }
 }
 
-/// A benchmark's own clock, kept by the scheduler on its behalf.
-///
-/// [`Config::max_time`] is documented as wall-clock time rather than measured
-/// time, because it is a promise about how long the caller waits - a
-/// benchmark whose input is slow to build has still taken that long. Under
-/// interleaving a benchmark's wall-clock span is the *whole session*, so that
-/// reading no longer works, and the quantity that preserves the promise is
-/// how long this benchmark itself was running.
-///
-/// That is exactly the time the scheduler spends inside its `poll`, so the
-/// scheduler measures it and the benchmark no longer keeps an `Instant` of
-/// its own. Poll duration includes input construction, just as the wall clock
-/// did before.
 pub(crate) struct Clock {
-    /// When the poll now in progress began, if one is.
     poll_started: Cell<Option<Instant>>,
-    /// Own-time across every *completed* poll.
     spent: Cell<Duration>,
-    /// The budget, from [`Config::max_time`].
     max: Duration,
 }
 
@@ -138,19 +89,12 @@ impl Clock {
         }
     }
 
-    /// How long the poll now in progress has been running.
-    ///
-    /// This is what a benchmark with a long round consults to decide whether
-    /// to yield part-way through it, rather than holding the CPU for the
-    /// whole round.
     pub(crate) fn this_poll(&self) -> Duration {
         self.poll_started
             .get()
-            .map_or(Duration::ZERO, |t| t.elapsed())
+            .map_or(Duration::ZERO, |time| time.elapsed())
     }
 
-    /// Own-time so far, *including* the poll in progress - which is the
-    /// number a running benchmark needs, since it is asking about itself.
     pub(crate) fn spent(&self) -> Duration {
         self.spent.get() + self.this_poll()
     }
@@ -159,52 +103,27 @@ impl Clock {
         self.spent() >= self.max
     }
 
-    /// The whole budget this benchmark was given.
-    ///
-    /// Calibration sizes its probe ceiling as a fraction of this, so that a
-    /// benchmark on a short budget cannot spend all of it probing.
     pub(crate) fn budget(&self) -> Duration {
         self.max
     }
 
-    /// Give the scheduler a turn, and come back with whether there is budget
-    /// left to continue.
-    ///
-    /// The verdict is delivered *here* rather than by the scheduler dropping
-    /// the future, so that a benchmark which runs out can still return the
-    /// measurement it has, marked `hit_limit`, rather than vanishing.
     pub(crate) async fn yield_now(&self) -> bool {
         YieldOnce { yielded: false }.await;
         !self.exhausted()
     }
 
-    fn begin_poll(&self) {
+    pub(crate) fn begin_poll(&self) {
         self.poll_started.set(Some(Instant::now()));
     }
 
-    fn end_poll(&self) {
+    pub(crate) fn end_poll(&self) {
         if let Some(started) = self.poll_started.take() {
             self.spent.set(self.spent.get() + started.elapsed());
         }
     }
 }
 
-/// The machine, claimed for measuring, for as long as this value lives.
-///
-/// Every blocking entry point begins by pinning to the reserved CPUs and
-/// then serialising against every other benchmark on the machine, and the
-/// two belong together: pinning without the lock puts a benchmark on cores
-/// it has not claimed, and claiming without pinning serialises for nothing.
-/// Bundling them means a new entry point cannot copy half of it - dropping
-/// the guard would mean two benchmarks sharing one core, each measuring the
-/// other rather than itself, and nothing about the resulting numbers would
-/// look wrong.
-///
-/// A [`Suite`] takes one of these for the whole session rather than one per
-/// benchmark. The guard is re-entrant within a thread, so the benchmarks it
-/// interleaves cost nothing extra when they are also run individually.
 pub(crate) struct Machine {
-    /// Holds a lock to on the quiet cores.
     _exclusive: Option<quiet::Exclusive>,
 }
 
@@ -217,139 +136,6 @@ impl Machine {
     }
 }
 
-/// Drive one future to completion, polling it in a tight loop.
-///
-/// Spinning is right rather than lazy: a `Pending` from [`Clock::yield_now`]
-/// is immediately runnable, so there is nothing to wait for. This is what the
-/// blocking entry points - [`bench`] and friends - become, so that there is
-/// one sampling loop per kind of benchmark rather than a synchronous copy and
-/// an asynchronous one drifting apart.
-pub(crate) fn block_on<F: Future>(clock: &Clock, future: F) -> F::Output {
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
-    loop {
-        clock.begin_poll();
-        let polled = future.as_mut().poll(&mut cx);
-        clock.end_poll();
-        if let Poll::Ready(value) = polled {
-            return value;
-        }
-    }
-}
-
-/// One benchmark in flight.
-struct Task<'a> {
-    future: Pin<Box<dyn Future<Output = Found> + 'a>>,
-    clock: Rc<Clock>,
-    /// The future's own return value, once it has one - `None` until then,
-    /// and never touched again after. Replaces a separate `done` flag: a
-    /// task is done exactly when this is `Some`.
-    result: Option<Found>,
-}
-
-/// Round-robin over a set of benchmarks, one sample each per round.
-///
-/// Deliberately dumb: it does not weight by how long a benchmark's sample
-/// takes, or by how far any of them is from its accuracy target. A round is a
-/// poll of every benchmark still running, in a rotated order, and that is the
-/// whole policy.
-struct Scheduler<'a> {
-    tasks: Vec<Task<'a>>,
-    /// Xorshift state for the per-round starting offset.
-    seed: u64,
-}
-
-impl<'a> Scheduler<'a> {
-    fn new(seed: u64) -> Self {
-        Scheduler {
-            tasks: Vec::new(),
-            // Zero is a fixed point of xorshift, and would leave every round
-            // starting at position zero.
-            seed: seed | 1,
-        }
-    }
-
-    fn push(&mut self, clock: Rc<Clock>, future: Pin<Box<dyn Future<Output = Found> + 'a>>) {
-        self.tasks.push(Task {
-            future,
-            clock,
-            result: None,
-        });
-    }
-
-    fn next_rand(&mut self) -> u64 {
-        self.seed ^= self.seed << 13;
-        self.seed ^= self.seed >> 7;
-        self.seed ^= self.seed << 17;
-        self.seed
-    }
-
-    /// Put `live` into a fresh uniformly random order, Fisher-Yates.
-    ///
-    /// A *shuffle*, not a rotation. Rotating gives every benchmark a
-    /// different position each round but leaves the order they sit in
-    /// unchanged, so each one is always polled immediately after the same
-    /// neighbour: with A, B and C the only orders a rotation ever produces
-    /// are ABC, BCA and CAB, never ACB.
-    ///
-    /// That matters here in a way it does not inside a comparison, where
-    /// every alternative is the same size and shape. A suite's benchmarks are
-    /// not: if A has a large working set, then under a rotation B pays for
-    /// evicting it in every single sample and C never does, which is a
-    /// systematic difference between B and C that no amount of averaging
-    /// removes. It is the same kind of fixed-position artifact this scheduler
-    /// exists to destroy, one level down - so destroy it properly.
-    fn shuffle(&mut self, live: &mut [usize]) {
-        for i in (1..live.len()).rev() {
-            let j = (self.next_rand() % (i as u64 + 1)) as usize;
-            live.swap(i, j);
-        }
-    }
-
-    /// Poll every benchmark once per round until all of them finish.
-    ///
-    /// The order is redrawn every round, so no benchmark keeps a fixed
-    /// position *or* a fixed neighbour. Position matters for the reason it
-    /// mattered within a comparison - a fixed position samples a fixed phase
-    /// of whatever the machine does periodically, and this machine has a
-    /// measured moire at the scheduler tick - and the neighbour matters
-    /// because of what it leaves in the caches; see [`Scheduler::shuffle`].
-    ///
-    /// Finished benchmarks are retired *between* rounds rather than as they
-    /// finish, so that removing one cannot disturb the rest of the round's
-    /// order and skip somebody.
-    ///
-    /// Consumes the scheduler and hands back every result, in the order
-    /// tasks were pushed - never disturbed, since only `live` is shuffled
-    /// and pruned here, not `self.tasks` itself.
-    fn run(mut self) -> Vec<Found> {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let mut live: Vec<usize> = (0..self.tasks.len()).collect();
-        while !live.is_empty() {
-            self.shuffle(&mut live);
-            for &i in &live {
-                let task = &mut self.tasks[i];
-                task.clock.begin_poll();
-                if let Poll::Ready(value) = task.future.as_mut().poll(&mut cx) {
-                    task.result = Some(value);
-                }
-                task.clock.end_poll();
-            }
-            live.retain(|&i| self.tasks[i].result.is_none());
-        }
-        self.tasks
-            .into_iter()
-            .map(|t| t.result.expect("every task finished"))
-            .collect()
-    }
-}
-
-/// One measurement, as [`Report::find`] hands it back - whichever of the
-/// three concrete kinds a report can hold this one turned out to be, and
-/// also what every benchmark's own future resolves to: the scheduler
-/// collects these directly, in declaration order, once every task is done.
 #[derive(Clone)]
 pub(crate) enum Found {
     Stats(Stats),
@@ -357,36 +143,11 @@ pub(crate) enum Found {
     Comparison(Comparisons),
 }
 
-/// A set of benchmarks measured together, their samples interleaved.
-///
-/// Built internally by [`crate::runner`] from `#[scaling::bench]` and
-/// friends - not constructed directly.
-///
-/// Every benchmark here gets [`Config::max_time`] of its *own* running time,
-/// so a suite of `n` may take `n` times as long as one benchmark - the same
-/// arithmetic [`ComparisonSet`] uses for its `k` alternatives. What interleaving changes is not how long it takes but *when* each
-/// benchmark's samples are drawn: across the whole session rather than in one
-/// stretch of it, so that no benchmark is measured in a machine state its
-/// neighbours never saw.
 pub struct Suite<'a> {
     cfg: &'a Config,
     scheduler: Scheduler<'a>,
-    /// Names, in declaration order, zipped with [`Scheduler::run`]'s results
-    /// to build a [`Report`].
     names: Vec<String>,
-    /// Comparisons added so far, so [`Suite::run`] can fill in the plan.
     comparisons: u64,
-    /// The Bonferroni limit, shared with every comparison this suite holds.
-    ///
-    /// A cell because the comparisons are boxed as they are added, before the
-    /// total is known: [`Suite::run`] fills this in once, and every
-    /// comparison reads it when it starts sampling, which is strictly
-    /// afterwards. That ordering is the whole reason a suite can correct for
-    /// its own size without anyone promising the count in advance - and it is
-    /// why the read has to stay lazy. An eager one would hand every
-    /// comparison `NaN`, which fails silently: nothing is ever significant,
-    /// each spends its whole budget, and the report reads as a page of honest
-    /// "unchanged" results.
     z_alpha: Rc<Cell<f64>>,
 }
 
@@ -972,8 +733,6 @@ mod tests {
     use super::*;
     use crate::testutil::{fixed_cost, mean_and_spread};
 
-    /// A meaningless [`Found`], for tests that exercise the scheduler's
-    /// polling policy and could not care less what a task actually measures.
     fn nothing() -> Found {
         Found::Stats(Stats {
             ns_per_iter: 0.0,
@@ -983,151 +742,6 @@ mod tests {
             hit_limit: false,
             untrustworthy: false,
         })
-    }
-
-    /// A future that yields `n` times and then reports how many rounds it
-    /// took, appending its identity to a shared log every time it is polled.
-    /// Nothing here is timed, so these tests say the same thing on a busy
-    /// machine as on a quiet one.
-    async fn scripted(
-        id: usize,
-        yields: usize,
-        log: Rc<RefCell<Vec<usize>>>,
-        clock: Rc<Clock>,
-    ) -> Found {
-        for _ in 0..yields {
-            log.borrow_mut().push(id);
-            clock.yield_now().await;
-        }
-        log.borrow_mut().push(id);
-        nothing()
-    }
-
-    use std::cell::RefCell;
-
-    fn scheduler_of(yields: &[usize], seed: u64) -> (Scheduler<'static>, Rc<RefCell<Vec<usize>>>) {
-        let log = Rc::new(RefCell::new(Vec::new()));
-        let mut s = Scheduler::new(seed);
-        for (id, &n) in yields.iter().enumerate() {
-            let clock = Rc::new(Clock::new(Duration::from_secs(3600)));
-            let fut = scripted(id, n, log.clone(), clock.clone());
-            s.push(clock, Box::pin(fut));
-        }
-        (s, log)
-    }
-
-    /// The core scheduling promise: within a round, every benchmark still
-    /// running is polled exactly once. If this ever fails, some benchmark is
-    /// sampling a different stretch of the session than its neighbours, which
-    /// is the whole thing interleaving exists to prevent.
-    #[test]
-    fn every_round_polls_everyone_exactly_once() {
-        const N: usize = 5;
-        const ROUNDS: usize = 4;
-        let (s, log) = scheduler_of(&[ROUNDS; N], 0x243f_6a88_85a3_08d3);
-        s.run();
-        let log = log.borrow();
-        assert_eq!(log.len(), N * (ROUNDS + 1));
-        for round in log.chunks(N) {
-            let mut seen = round.to_vec();
-            seen.sort_unstable();
-            seen.dedup();
-            assert_eq!(seen.len(), N, "a round polled someone twice: {round:?}");
-        }
-    }
-
-    /// The starting position must actually move, or "shuffled order" is a
-    /// comment rather than a behaviour.
-    #[test]
-    fn the_starting_position_moves_between_rounds() {
-        let (s, log) = scheduler_of(&[20; 4], 0x9e37_79b9_7f4a_7c15);
-        s.run();
-        let log = log.borrow();
-        let firsts: Vec<usize> = log.chunks(4).map(|r| r[0]).collect();
-        let distinct = {
-            let mut f = firsts.clone();
-            f.sort_unstable();
-            f.dedup();
-            f.len()
-        };
-        assert!(
-            distinct > 1,
-            "every round started with the same benchmark: {firsts:?}"
-        );
-    }
-
-    /// Who a benchmark is polled *after* must vary too, not just where it
-    /// sits. A rotation moves every position while leaving the order intact,
-    /// so each benchmark keeps one fixed predecessor and therefore always
-    /// inherits the same neighbour's cache state - a systematic difference
-    /// between benchmarks that averaging cannot touch.
-    ///
-    /// With three benchmarks a rotation can only ever produce ABC, BCA and
-    /// CAB, in all of which A precedes B; this asserts that A is sometimes
-    /// preceded by each of the others, which no rotation can satisfy.
-    #[test]
-    fn the_neighbour_order_varies_too() {
-        const N: usize = 3;
-        let (s, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
-        s.run();
-        let log = log.borrow();
-        // Read adjacency straight off the flat log rather than within
-        // rounds, so the pairing across a round boundary counts too - the
-        // machine does not know where a round ended.
-        let mut predecessors: Vec<usize> =
-            log.windows(2).filter(|w| w[1] == 0).map(|w| w[0]).collect();
-        predecessors.sort_unstable();
-        predecessors.dedup();
-        // Both of the others must appear; a rotation would give exactly one,
-        // always the same one. Benchmark 0 may also follow *itself*, when it
-        // ends one round and begins the next - independent shuffles allow
-        // that, and it costs nothing: each round still polls everyone once.
-        assert!(
-            predecessors.contains(&1) && predecessors.contains(&2),
-            "benchmark 0 did not follow every other: {predecessors:?}"
-        );
-    }
-
-    /// Benchmarks finish at different times, and a short one leaving must not
-    /// cost its neighbour a turn. Retiring between rounds rather than during
-    /// one is what guarantees it.
-    #[test]
-    fn retiring_early_does_not_skip_a_neighbour() {
-        // Three benchmarks wanting very different numbers of rounds.
-        let (s, log) = scheduler_of(&[0, 3, 7], 0x2545_f491_4f6c_dd1d);
-        s.run();
-        let log = log.borrow();
-        let polls = |id: usize| log.iter().filter(|&&x| x == id).count();
-        // Each is polled once per yield plus once to finish.
-        assert_eq!(polls(0), 1);
-        assert_eq!(polls(1), 4);
-        assert_eq!(polls(2), 8);
-    }
-
-    /// An empty suite is a legitimate thing to ask for and must not hang or
-    /// divide by zero in the offset.
-    #[test]
-    fn an_empty_scheduler_finishes() {
-        let (s, log) = scheduler_of(&[], 1);
-        s.run();
-        assert!(log.borrow().is_empty());
-    }
-
-    /// `block_on` must reach the same answer as the scheduler would, since
-    /// every blocking entry point in the crate becomes a call to it.
-    #[test]
-    fn block_on_drives_a_yielding_future() {
-        let clock = Rc::new(Clock::new(Duration::from_secs(3600)));
-        let inner = clock.clone();
-        let n = block_on(&clock, async move {
-            let mut rounds = 0;
-            while rounds < 5 {
-                rounds += 1;
-                inner.yield_now().await;
-            }
-            rounds
-        });
-        assert_eq!(n, 5);
     }
 
     /// The budget is spent in poll time, and the benchmark learns about it at
