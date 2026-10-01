@@ -390,7 +390,9 @@ pub struct Lane {
     /// versions register one name they have to be told apart, and the name
     /// that distinguishes them is worked out from what else is present.
     pub candidates: Vec<Named<Candidate>>,
-    /// Inputs, sorted by name, one per name.
+    /// Inputs, sorted by name, one per name - except that the inputs one
+    /// `sizes(..)` registers, `sets@2` and `sets@10`, go in order of size
+    /// (see `input_order`).
     ///
     /// Unlike candidates, inputs are *deduplicated* across versions rather
     /// than disambiguated. Two versions of one implementation are the point
@@ -699,7 +701,7 @@ fn lanes_for_group(
             continue;
         }
 
-        is.sort_by(|a, b| a.name.cmp(&b.name));
+        is.sort_by(|a, b| input_order(&a.name, &b.name));
         cs.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Baseline: whoever said so, else the first by name. Several
@@ -779,6 +781,28 @@ fn source(r: &Registered) -> String {
     format!("{}@{} ({})", r.crate_name, r.crate_version, r.name)
 }
 
+/// The order of a lane's inputs: by name, except that the inputs one
+/// `sizes(..)` registers go by size - `sets@2` before `sets@10`, which is
+/// how anyone reading a grid of them expects its columns to run.
+///
+/// Registration does not carry the size anywhere but the name, as the
+/// `@N` suffix the macro appends, so that is where it is read from. A name
+/// with no such suffix - or one too long to be a size - sorts as plain
+/// text. Falls back on the whole name, so that `sets@01` and `sets@1` still
+/// have an order and the sort stays deterministic.
+fn input_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn key(name: &str) -> (&str, Option<u128>) {
+        match name.rsplit_once('@') {
+            Some((base, size)) if size.bytes().all(|b| b.is_ascii_digit()) => match size.parse() {
+                Ok(n) => (base, Some(n)),
+                Err(_) => (name, None),
+            },
+            _ => (name, None),
+        }
+    }
+    key(a).cmp(&key(b)).then_with(|| a.cmp(b))
+}
+
 /// Check a set of registrations and decide what to run.
 ///
 /// Returns every complaint it can find rather than the first, so that a
@@ -789,8 +813,10 @@ fn source(r: &Registered) -> String {
 /// Registrations arrive in whatever order the linker chose, which is not
 /// stable and not meaningful. Everything here is therefore sorted by name -
 /// the only ordering that is reproducible across builds and machines, and so
-/// the only one whose report can be diffed against yesterday's. This does
-/// not affect measurement: the scheduler reshuffles every round regardless.
+/// the only one whose report can be diffed against yesterday's. Inputs
+/// registered at several `sizes(..)` go by size rather than by text (see
+/// `input_order`). This does not affect measurement: the scheduler
+/// reshuffles every round regardless.
 ///
 /// # Multi-group membership
 ///
@@ -944,6 +970,38 @@ mod tests {
         let names: Vec<&str> = plan.flat.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["apple", "middle", "zebra"]);
         assert!(plan.lanes.is_empty());
+    }
+
+    /// The inputs one `sizes(..)` registers go by size, not as text - so
+    /// a grid's columns read `0 2 10 100` rather than `0 10 100 2`.
+    /// Different inputs still go by name, and an unsized one before its
+    /// sized namesakes.
+    #[test]
+    fn sized_inputs_come_out_in_numeric_order() {
+        let cs = leak_c(vec![
+            cand::<u8>("g", "a", "u8", true),
+            cand::<u8>("g", "b", "u8", false),
+        ]);
+        let is = leak_i(vec![
+            inp::<u8>("g", "sets@10", "u8"),
+            inp::<u8>("g", "other@3", "u8"),
+            inp::<u8>("g", "sets@2", "u8"),
+            inp::<u8>("g", "sets@100", "u8"),
+            inp::<u8>("g", "sets", "u8"),
+            inp::<u8>("g", "sets@0", "u8"),
+            inp::<u8>("g", "other@20", "u8"),
+        ]);
+        let (plan, problems) = plan(&[], &cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        let names: Vec<&str> = plan.lanes[0]
+            .inputs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["other@3", "other@20", "sets", "sets@0", "sets@2", "sets@10", "sets@100"],
+        );
     }
 
     /// Reversing the input must not change the plan: that is what "sorted"
