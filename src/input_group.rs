@@ -490,6 +490,12 @@ impl Timings {
 
 impl Display for Timings {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        // A standalone benchmark is measured as a group of one, but it is
+        // compared with nothing: its timing alone, on one line, so whoever
+        // prints it supplies the name once and no "baseline" appears.
+        if self.timings.len() == 1 {
+            return write!(f, "{}", self.timings[0]);
+        }
         let width = self.names.iter().map(|n| n.len()).max().unwrap_or(0);
         writeln!(
             f,
@@ -530,6 +536,20 @@ mod tests {
         let results = cfg.input_group().add("only", || 1u64).run();
         assert_eq!(results.stats().len(), 1);
         assert_eq!(results.against_baseline().count(), 0);
+    }
+
+    /// A group of one is compared with nothing, so it prints as its timing
+    /// alone: no name for the caller to repeat, no "baseline" label, and one
+    /// line, so it is not given a header of its own.
+    #[test]
+    fn one_alternative_prints_as_its_timing_alone() {
+        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let results = cfg.input_group().add("only", || 1u64).run();
+        let shown = results.to_string();
+        assert_eq!(shown, results.stats()[0].to_string());
+        assert!(!shown.contains("only"), "{shown}");
+        assert!(!shown.contains("baseline"), "{shown}");
+        assert!(!shown.contains('\n'), "{shown:?}");
     }
 
     #[test]
