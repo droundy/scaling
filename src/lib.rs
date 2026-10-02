@@ -726,6 +726,21 @@ pub struct Config {
     /// has still taken that long. A comparison allows this much per
     /// alternative, since each produces its own [`Stats`] and would otherwise
     /// get a fraction of the budget one benchmark gets for the same target.
+    ///
+    /// So building inputs counts against it. That means every call of
+    /// `make_input` or of an `#[input]` function, every clone handed to a
+    /// comparison's candidates, and dropping them afterwards, though none of
+    /// it counts towards the measurement. Two things do not count. One is
+    /// work done once before the benchmark starts, such as evaluating
+    /// `input = <value>` (each clone of that value still does). The other,
+    /// in a suite, is the time other benchmarks spend on their turns.
+    ///
+    /// The consequence is that an expensive input eats into the budget. The
+    /// run still ends on time, but with fewer samples, so a wider `±` and
+    /// likely [`Timing::hit_limit`]. When an input costs much more to build
+    /// than the function costs to run, raise `max_time` to match. The
+    /// deadline is checked between samples, so a run can overshoot it by
+    /// one sample's worth of input building and calls.
     pub max_time: Duration,
 }
 

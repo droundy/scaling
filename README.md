@@ -261,6 +261,11 @@ machine.
 Each benchmark still gets the full time budget of its own, so a suite of `n`
 may take `n` times as long as one benchmark.
 
+That budget is wall-clock time, and building inputs counts against it:
+`make_input`, `#[input]` functions, and the clones each candidate is handed.
+An input that is expensive next to the function it feeds leaves fewer
+samples, and so a wider `±`. If that happens, raise `max_time`.
+
 ## Quiescing the machine (Linux)
 
 The `±` figure covers noise `scaling` can see while sampling. It cannot see
