@@ -46,7 +46,7 @@
 use super::*;
 use crate::registry::{Candidate, Input, Registered};
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -152,10 +152,13 @@ impl Display for Found {
     }
 }
 
-/// The result of one scheduled benchmark task before it is arranged into groups.
+/// One cell of a [`Group`]: what a candidate measured on one input.
 #[derive(Debug, Clone, Copy)]
 pub enum Measurement {
+    /// A scaling law, from a benchmark that varied its own input size.
     Scaling(ScalingStats),
+    /// A timing. In a comparison, every candidate but the baseline carries
+    /// its [`Difference`] from the baseline.
     Timing(Timing),
 }
 
@@ -440,9 +443,12 @@ impl Suite {
 }
 
 /// One typed input axis entry in a [`Group`].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TypedInput {
+    /// The input's name. Empty for the implicit unit input of a group that
+    /// declares none.
     pub name: String,
+    /// The input's type, as the source spells it. Empty when there is none.
     pub type_name: String,
 }
 
@@ -452,11 +458,23 @@ pub struct TypedInput {
 /// Unsupported candidate/input combinations are `None`.
 #[derive(Debug, Clone)]
 pub struct Group {
+    /// The rows. A candidate that is the baseline of some column comes
+    /// first; the rest follow in the order their lanes were declared.
     pub candidates: Vec<String>,
+    /// The columns, sorted by name and then type.
     pub inputs: Vec<TypedInput>,
     /// Candidate-major rectangular data: `measurements[candidate][input]`.
     /// `None` means that candidate does not support that typed input.
     pub measurements: Vec<Vec<Option<Measurement>>>,
+    /// For each column, the row its other cells were compared against, or
+    /// `None` when that column compares nothing - a lone candidate has no
+    /// baseline. The baseline's own cell is an absolute time; every other
+    /// cell in the column carries its [`Difference`] from it.
+    ///
+    /// A baseline belongs to a column rather than the group because one
+    /// group can span several input types, and each type is its own
+    /// comparison with its own baseline.
+    pub baselines: Vec<Option<usize>>,
 }
 
 /// Everything a suite measured, keyed by logical group name.
@@ -465,95 +483,161 @@ pub struct Report {
     groups: BTreeMap<String, Group>,
 }
 
+/// One column of a group while it is being assembled.
+#[derive(Default)]
+struct Column {
+    baseline: Option<String>,
+    cells: BTreeMap<String, Measurement>,
+}
+
+/// A [`Group`] before its rows and columns are laid out.
+#[derive(Default)]
+struct GroupBuilder {
+    /// In the order first seen.
+    candidates: Vec<String>,
+    columns: BTreeMap<TypedInput, Column>,
+}
+
+impl GroupBuilder {
+    fn add(&mut self, input: TypedInput, results: Vec<(String, Measurement)>, compared: bool) {
+        let column = self.columns.entry(input).or_default();
+        column.baseline = compared
+            .then(|| results.first().map(|(name, _)| name.clone()))
+            .flatten();
+        for (candidate, measurement) in results {
+            if !self.candidates.contains(&candidate) {
+                self.candidates.push(candidate.clone());
+            }
+            column.cells.insert(candidate, measurement);
+        }
+    }
+
+    fn build(mut self) -> Group {
+        // Baselines first, so the row every percentage is measured against
+        // is at the top. The sort is stable, so everything else keeps its
+        // declaration order.
+        let columns = &self.columns;
+        self.candidates.sort_by_key(|candidate| {
+            !columns
+                .values()
+                .any(|column| column.baseline.as_ref() == Some(candidate))
+        });
+        let inputs = self.columns.keys().cloned().collect();
+        let baselines = self
+            .columns
+            .values()
+            .map(|column| {
+                let baseline = column.baseline.as_ref()?;
+                self.candidates.iter().position(|c| c == baseline)
+            })
+            .collect();
+        let measurements = self
+            .candidates
+            .iter()
+            .map(|candidate| {
+                self.columns
+                    .values()
+                    .map(|column| column.cells.get(candidate).copied())
+                    .collect()
+            })
+            .collect();
+        Group {
+            candidates: self.candidates,
+            inputs,
+            measurements,
+            baselines,
+        }
+    }
+}
+
 impl Report {
     fn new(entries: Vec<(String, Found)>, lanes: &[crate::assemble::Lane]) -> Self {
-        let mut grouped: BTreeMap<String, BTreeMap<TypedInput, BTreeMap<String, Measurement>>> =
-            BTreeMap::new();
+        let by_name: HashMap<&str, &Found> = entries
+            .iter()
+            .map(|(name, found)| (name.as_str(), found))
+            .collect();
+        let mut grouped: BTreeMap<String, GroupBuilder> = BTreeMap::new();
         let mut represented = BTreeSet::new();
 
         for lane in lanes {
             for input in &lane.inputs {
-                let entry_name = if lane.candidates.len() == 1 {
+                let single = lane.candidates.len() == 1;
+                let entry_name = if single {
                     lane.flat_name(&lane.candidates[0], input)
                 } else {
                     lane.comparison_name(input)
                 };
-                let Some((_, measurement)) = entries.iter().find(|(name, _)| *name == entry_name)
-                else {
+                let Some(found) = by_name.get(entry_name.as_str()) else {
                     continue;
                 };
-                let inputs = grouped.entry(lane.group.to_string()).or_default();
-                let candidates = inputs
-                    .entry(TypedInput {
+                // A lane's candidates are timed, so a scaling result here is
+                // not something a lane produces. If one turns up anyway it is
+                // left unclaimed, and so still shown below under its own name
+                // rather than dropped.
+                let results = match found {
+                    Found::Timing(timings) if single => timings
+                        .timings()
+                        .first()
+                        .map(|timing| {
+                            vec![(
+                                lane.candidates[0].name.clone(),
+                                Measurement::Timing(*timing),
+                            )]
+                        })
+                        .unwrap_or_default(),
+                    Found::Timing(timings) => timings.measurements(),
+                    Found::Scaling(scaling) if single => {
+                        vec![(
+                            lane.candidates[0].name.clone(),
+                            Measurement::Scaling(*scaling),
+                        )]
+                    }
+                    Found::Scaling(_) => continue,
+                };
+                grouped.entry(lane.group.to_string()).or_default().add(
+                    TypedInput {
                         name: input.name.clone(),
                         type_name: lane.type_name.to_string(),
-                    })
-                    .or_default();
-                match measurement {
-                    Found::Timing(timings) if lane.candidates.len() == 1 => {
-                        candidates.insert(
-                            lane.candidates[0].name.clone(),
-                            Measurement::Timing(*timings.timings().first().unwrap()),
-                        );
-                    }
-                    Found::Timing(_) | Found::Scaling(_) => continue,
-                }
+                    },
+                    results,
+                    !single,
+                );
                 represented.insert(entry_name);
             }
         }
 
-        for (name, measurement) in &entries {
+        // Whatever no lane claimed: standalone benchmarks, and groups built
+        // by hand with `add_input_group`. Each is a group of its own, under
+        // its own name, with the unit input.
+        for (name, found) in &entries {
             if represented.contains(name) {
                 continue;
             }
-            let inputs = grouped.entry(name.clone()).or_default();
-            let candidates = inputs
-                .entry(TypedInput {
-                    name: String::new(),
-                    type_name: String::new(),
-                })
-                .or_default();
-            match measurement {
-                Found::Timing(timings) => {
-                    candidates.insert(
-                        name.clone(),
-                        Measurement::Timing(*timings.timings().first().unwrap()),
-                    );
+            let (results, compared) = match found {
+                Found::Timing(timings) if timings.timings().len() > 1 => {
+                    (timings.measurements(), true)
                 }
+                Found::Timing(timings) => (
+                    timings
+                        .timings()
+                        .first()
+                        .map(|timing| vec![(name.clone(), Measurement::Timing(*timing))])
+                        .unwrap_or_default(),
+                    false,
+                ),
                 Found::Scaling(scaling) => {
-                    candidates.insert(name.clone(), Measurement::Scaling(*scaling));
+                    (vec![(name.clone(), Measurement::Scaling(*scaling))], false)
                 }
-            }
+            };
+            grouped
+                .entry(name.clone())
+                .or_default()
+                .add(TypedInput::default(), results, compared);
         }
 
         let groups = grouped
             .into_iter()
-            .map(|(name, by_input)| {
-                let inputs: Vec<TypedInput> = by_input.keys().cloned().collect();
-                let candidates: Vec<String> = by_input
-                    .values()
-                    .flat_map(|by_candidate| by_candidate.keys().cloned())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                let measurements = candidates
-                    .iter()
-                    .map(|candidate| {
-                        inputs
-                            .iter()
-                            .map(|input| by_input[input].get(candidate).cloned())
-                            .collect()
-                    })
-                    .collect();
-                (
-                    name,
-                    Group {
-                        candidates,
-                        inputs,
-                        measurements,
-                    },
-                )
-            })
+            .map(|(name, builder)| (name, builder.build()))
             .collect();
         Report { entries, groups }
     }
@@ -1092,6 +1176,96 @@ mod report_lookup {
         assert!(group.measurements[0][1].is_some());
         assert!(group.measurements[1][0].is_some());
         assert!(group.measurements[1][1].is_some());
+        // Only the `u32` column is a comparison, so only it has a baseline,
+        // and that baseline is the row that was put first.
+        assert_eq!(group.baselines, [None, Some(0)]);
+    }
+
+    /// A comparison reaches the group as one cell per candidate, each of the
+    /// others carrying its difference from the baseline.
+    #[test]
+    fn a_comparison_lane_keeps_every_candidate_and_its_difference() {
+        let timing = |ns_per_iter: f64| Timing {
+            ns_per_iter,
+            std_error: ns_per_iter * 0.01,
+            iterations: 1,
+            samples: 2,
+            hit_limit: false,
+            untrustworthy: false,
+            difference: None,
+        };
+        use crate::assemble::lane_tests::{cand, inp, leak_c, leak_i};
+        let candidates = leak_c(vec![
+            // Named so that the baseline is neither first alphabetically
+            // nor last.
+            cand::<u32>("sorting", "mid", "u32", true),
+            cand::<u32>("sorting", "alpha", "u32", false),
+            cand::<u32>("sorting", "zed", "u32", false),
+        ]);
+        let inputs = leak_i(vec![inp::<u32>("sorting", "reversed", "u32")]);
+        let (plan, problems) = crate::assemble::plan(&[], &candidates, &inputs);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plan.lanes.len(), 1);
+        let lane = &plan.lanes[0];
+        let baseline = timing(10.0);
+        let with_difference = |ns| {
+            let mut t = timing(ns);
+            t.difference = Some(crate::Difference::from_parts(&baseline, &t, 0.5, 0.12));
+            t
+        };
+        let names: Vec<&str> = lane.candidates.iter().map(|c| c.name.as_str()).collect();
+        let timings: Vec<Timing> = names
+            .iter()
+            .map(|n| {
+                if *n == "mid" {
+                    baseline
+                } else {
+                    with_difference(20.0)
+                }
+            })
+            .collect();
+        let entry = (
+            lane.comparison_name(&lane.inputs[0]),
+            Found::Timing(Timings::test_named(&names, &timings)),
+        );
+        let report = Report::new(vec![entry], &plan.lanes);
+        let (name, group) = report.groups().next().expect("the sorting group");
+        assert_eq!(name, "sorting");
+        assert_eq!(group.candidates, ["mid", "alpha", "zed"]);
+        assert_eq!(group.baselines, [Some(0)]);
+        let cell = |row: usize| match group.measurements[row][0] {
+            Some(Measurement::Timing(t)) => t,
+            other => panic!("expected a timing, got {other:?}"),
+        };
+        assert!(cell(0).difference.is_none(), "the baseline has none");
+        assert!(cell(1).difference.is_some());
+        assert!(cell(2).difference.is_some());
+    }
+
+    /// A group built by hand, which no lane knows about, keeps all of its
+    /// alternatives rather than only the baseline.
+    #[test]
+    fn a_hand_built_group_is_not_reduced_to_its_baseline() {
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
+        let mut suite = cfg.suite();
+        suite.add_input_group(
+            "sorting@reversed",
+            cfg.input_group()
+                .add("stable", || (0..64u64).sum::<u64>())
+                .add("unstable", || (0..640u64).sum::<u64>()),
+        );
+        suite.add("lonely", || (0..64u64).sum::<u64>());
+        let report = suite.run();
+        let groups: Vec<_> = report.groups().collect();
+        assert_eq!(groups.len(), 2);
+        let (name, group) = groups[0];
+        assert_eq!(name, "lonely");
+        assert_eq!(group.candidates, ["lonely"]);
+        assert_eq!(group.baselines, [None]);
+        let (name, group) = groups[1];
+        assert_eq!(name, "sorting@reversed");
+        assert_eq!(group.candidates, ["stable", "unstable"]);
+        assert_eq!(group.baselines, [Some(0)]);
     }
 
     /// Asking for the wrong type gives nothing rather than the wrong thing,

@@ -484,6 +484,14 @@ impl Timings {
         self.timings()
     }
 
+    /// Every alternative's name and measurement, baseline first.
+    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement)> {
+        self.names()
+            .map(str::to_string)
+            .zip(self.timings.iter().map(|t| crate::Measurement::Timing(*t)))
+            .collect()
+    }
+
     /// Each alternative beyond the baseline, paired with its name, as a
     /// [`Timing`] against the baseline.
     pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {

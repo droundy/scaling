@@ -48,6 +48,7 @@ fn render_group(name: &str, group: &Group) -> String {
     } else {
         name.to_string()
     };
+    let title = with_baseline(title, group, &input_columns);
     if let Some(shown) = render_matrix(&title, "candidate", &group.candidates, &labels, &values) {
         return shown;
     }
@@ -78,8 +79,9 @@ fn render_group(name: &str, group: &Group) -> String {
                 .iter()
                 .map(|&row| group.candidates[row].clone())
                 .collect();
+            let title = with_baseline(format!("{name} ({type_name})"), group, &columns);
             match render_matrix(
-                &format!("{name} ({type_name})"),
+                &title,
                 "candidate",
                 &candidates,
                 &facet_labels,
@@ -101,6 +103,38 @@ fn render_group(name: &str, group: &Group) -> String {
     }
 
     render_long(name, group)
+}
+
+/// A title that also says what the percentages beneath it are against.
+///
+/// Without it a cell like `-47.6%` is a number with no referent: the
+/// baseline's own cell is an absolute time that looks like any other.
+fn with_baseline(title: String, group: &Group, columns: &[usize]) -> String {
+    let mut baselines: Vec<(&str, &str)> = Vec::new();
+    for &column in columns {
+        if let Some(row) = group.baselines[column] {
+            let baseline = (
+                group.candidates[row].as_str(),
+                group.inputs[column].type_name.as_str(),
+            );
+            if !baselines.contains(&baseline) {
+                baselines.push(baseline);
+            }
+        }
+    }
+    let Some(&(first, _)) = baselines.first() else {
+        return title;
+    };
+    if baselines.iter().all(|(name, _)| *name == first) {
+        return format!("{title}  baseline: {first}");
+    }
+    // Each type is its own comparison, so say which baseline goes with
+    // which.
+    let each: Vec<String> = baselines
+        .iter()
+        .map(|(name, type_name)| format!("{name} ({type_name})"))
+        .collect();
+    format!("{title}  baselines: {}", each.join(", "))
 }
 
 fn input_label(input: &TypedInput, show_type: bool) -> String {
@@ -248,8 +282,10 @@ fn render_long(name: &str, group: &Group) -> String {
     let candidate_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(9).max(9);
     let type_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(4).max(4);
     let input_width = rows.iter().map(|row| row.2.len()).max().unwrap_or(5).max(5);
+    let all_columns: Vec<usize> = (0..group.inputs.len()).collect();
+    let title = with_baseline(name.to_string(), group, &all_columns);
     let mut out = format!(
-        "{name}\n{:<candidate_width$}  {:<type_width$}  {:<input_width$}  measurement\n",
+        "{title}\n{:<candidate_width$}  {:<type_width$}  {:<input_width$}  measurement\n",
         "candidate", "type", "input"
     );
     let mut last_candidate = "";
@@ -332,10 +368,11 @@ mod tests {
                 vec![Some(change(11.0, -10.0)), Some(change(12.01, 0.01))],
                 vec![Some(change(22.01, 0.01)), Some(change(10.1, -1.9))],
             ],
+            baselines: vec![Some(0), Some(0)],
         };
         let shown = render_group("sorting", &group);
         expect![[r#"
-            sorting (Vec<u64>)
+            sorting (Vec<u64>)  baseline: stable
             candidate         reversed           shuffled
             stable      22.0ns ± 0.2ns   12.00ns ± 0.12ns
             unstable     -47.6% ± 0.6%           (< 0.5%)
@@ -355,6 +392,7 @@ mod tests {
                 })
                 .collect(),
             measurements: vec![vec![Some(timing(22.0)); 8]],
+            baselines: vec![None; 8],
         };
         let shown = render_group("sorting", &group);
         expect![[r#"
@@ -397,6 +435,7 @@ mod tests {
                 candidates,
                 inputs,
                 measurements,
+                baselines: vec![None; 4],
             },
         );
         expect![[r#"
@@ -419,5 +458,52 @@ mod tests {
                                                     input_2_with_a_long_descriptive_name  12.00ns ± 0.12ns
                                                     input_3_with_a_long_descriptive_name  13.00ns ± 0.13ns
         "#]].assert_eq(&shown);
+    }
+
+    #[test]
+    fn a_comparison_names_its_baseline() {
+        let group = Group {
+            candidates: vec!["stable".into(), "unstable".into()],
+            inputs: vec![TypedInput {
+                name: String::new(),
+                type_name: String::new(),
+            }],
+            measurements: vec![vec![Some(timing(22.0))], vec![Some(change(30.0, 10.0))]],
+            baselines: vec![Some(0)],
+        };
+        let shown = render_group("sorting", &group);
+        assert!(shown.starts_with("sorting  baseline: stable\n"), "{shown}");
+        // A slowdown is marked as plainly as a speedup.
+        assert!(shown.contains("+"), "{shown}");
+    }
+
+    #[test]
+    fn each_type_names_its_own_baseline() {
+        let typed = |name: &str, type_name: &str| TypedInput {
+            name: name.into(),
+            type_name: type_name.into(),
+        };
+        let group = Group {
+            candidates: vec!["fast".into(), "small".into()],
+            inputs: vec![typed("random", "i32"), typed("random", "u32")],
+            measurements: vec![
+                vec![None, Some(timing(20.0))],
+                vec![Some(timing(5.0)), Some(change(25.0, 5.0))],
+            ],
+            baselines: vec![None, Some(0)],
+        };
+        let shown = render_group("codec", &group);
+        assert!(shown.starts_with("codec  baseline: fast\n"), "{shown}");
+    }
+
+    #[test]
+    fn a_lone_benchmark_prints_on_one_line() {
+        let group = Group {
+            candidates: vec!["lonely".into()],
+            inputs: vec![TypedInput::default()],
+            measurements: vec![vec![Some(timing(22.0))]],
+            baselines: vec![None],
+        };
+        assert_eq!(render_group("lonely", &group), "lonely  22.0ns ± 0.2ns\n");
     }
 }
