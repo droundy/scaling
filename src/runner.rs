@@ -152,10 +152,18 @@ pub fn run(options: Config) -> Outcome {
 
     let report = suite.run();
 
-    println!("{report}\n");
-    print!("{}", table(&report, &tokens));
+    print!("{}", stdout(&report, &tokens));
 
     Outcome::Measured
+}
+
+/// Everything [`run`] prints to stdout once the benchmarks are measured.
+///
+/// The table alone. It already prints every result the report holds, each
+/// one once, so printing the report above it as well showed every
+/// comparison twice.
+fn stdout(report: &Report, tokens: &Assembled) -> String {
+    table(report, tokens)
 }
 
 /// Lanes with more than one input as grids, everything else as the report
@@ -208,6 +216,9 @@ fn render(report: &Report, name: &str) -> String {
 /// One cell of a matrix: what it measured, and how that compares.
 struct Cell {
     ns: f64,
+    /// [`caveat`]'s mark for this measurement, so a grid does not drop the
+    /// `(limit)` and `(untrusted)` the list form would have shown.
+    caveat: &'static str,
     /// The difference from this input's baseline, as a percentage, and
     /// whether it cleared the run's threshold. `None` on the baseline row,
     /// and on a lane too small to have one.
@@ -237,6 +248,7 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
                 (candidate.name.clone(), input.name.clone()),
                 Cell {
                     ns: stats.ns_per_iter,
+                    caveat: caveat(&stats),
                     percent: None,
                 },
             );
@@ -247,11 +259,12 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
             };
             gridded.insert(entry);
             columns.push(input.name.clone());
-            let baseline = comparisons.stats()[0].ns_per_iter;
+            let baseline = comparisons.stats()[0];
             cells.insert(
                 (comparisons.baseline_name().to_string(), input.name.clone()),
                 Cell {
-                    ns: baseline,
+                    ns: baseline.ns_per_iter,
+                    caveat: caveat(&baseline),
                     percent: None,
                 },
             );
@@ -260,6 +273,7 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
                     (alt.to_string(), input.name.clone()),
                     Cell {
                         ns: c.ns_per_iter,
+                        caveat: caveat(&c),
                         percent: Some((
                             c.difference()
                                 .expect("candidate has a difference")
@@ -279,7 +293,7 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
         match cells.get(&(row.to_string(), column.to_string())) {
             None => ("-".to_string(), None),
             Some(cell) => (
-                short_time(cell.ns),
+                format!("{}{}", short_time(cell.ns), cell.caveat),
                 cell.percent.map(|(pct, changed)| {
                     if changed {
                         format!("{pct:+.1}%")
@@ -318,6 +332,11 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
     out.push('\n');
 
     let mut any_insignificant = false;
+    let (mut any_limit, mut any_untrusted) = (false, false);
+    for cell in cells.values() {
+        any_limit |= cell.caveat.contains('*');
+        any_untrusted |= cell.caveat.contains('?');
+    }
     for row in &rows {
         out.push_str(&format!("  {row:<width$}", width = label_width - 2));
         let mut percents = String::new();
@@ -344,14 +363,32 @@ fn grid(report: &Report, lane: &Lane, gridded: &mut BTreeSet<String>) -> Option<
     if any_insignificant {
         out.push_str("  (percentages in brackets did not clear this run's threshold)\n");
     }
+    if any_limit {
+        out.push_str("  * (limit): the time budget ran out before the target precision\n");
+    }
+    if any_untrusted {
+        out.push_str("  ? (untrusted): too few samples for the error bar to mean anything\n");
+    }
     Some(out)
+}
+
+/// The grid's short form of what [`Timing`](crate::Timing)'s `Display` spells
+/// out as `(limit)` and `(untrusted)`, appended to a cell's time: `*` and `?`
+/// respectively, explained in a note under the grid.
+fn caveat(t: &crate::Timing) -> &'static str {
+    match (t.hit_limit, t.untrustworthy) {
+        (true, true) => "*?",
+        (true, false) => "*",
+        (false, true) => "?",
+        (false, false) => "",
+    }
 }
 
 /// A time for a grid cell: one number, in the unit that suits it.
 ///
 /// No error bar, deliberately - a grid is for reading across and down, and
-/// two figures per cell defeats that. [`Format::List`] is where the `±`
-/// lives.
+/// two figures per cell defeats that. The `±` is in the [`Report`], which
+/// [`measure`] hands back.
 fn short_time(ns: f64) -> String {
     if !ns.is_finite() {
         return "-".to_string();
@@ -415,6 +452,10 @@ mod grids {
         type_id: TypeId::of::<Vec<u64>>,
         type_name: "Vec<u64>",
         make: unused_make,
+    };
+    static SORTED: Input = Input {
+        name: "sorted",
+        ..REVERSED
     };
 
     fn origin() -> Origin {
@@ -484,6 +525,61 @@ mod grids {
             gridded.contains("sorting@reversed"),
             "what the grid showed must not be printed again below it",
         );
+    }
+
+    /// What `run` prints shows each result once: a comparison drawn as a
+    /// grid, and one that is not, are not printed again as a list.
+    #[test]
+    fn run_prints_each_comparison_once() {
+        let mut lane = lane();
+        lane.inputs.push(Named {
+            name: "sorted".to_string(),
+            reg: &SORTED,
+            origin: origin(),
+        });
+        let tokens = Assembled {
+            lanes: vec![lane],
+            ..Assembled::default()
+        };
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
+        let mut suite = cfg.suite();
+        for input in ["reversed", "sorted"] {
+            suite.add_input_group(
+                &format!("sorting@{input}"),
+                cfg.input_group()
+                    .add("stable", || (0..64u64).sum::<u64>())
+                    .add("unstable", || (0..640u64).sum::<u64>()),
+            );
+        }
+        suite.add_input_group(
+            "summing",
+            cfg.input_group()
+                .add("by_loop", || (0..64u64).sum::<u64>())
+                .add("by_fold", || (0..640u64).sum::<u64>()),
+        );
+        let out = stdout(&suite.run(), &tokens);
+
+        assert_eq!(out.matches("unstable").count(), 1, "one grid row: {out}");
+        assert!(!out.contains("sorting@"), "no list of the gridded: {out}");
+        assert_eq!(out.matches("by_fold").count(), 1, "{out}");
+    }
+
+    /// A grid cell keeps the `(limit)` and `(untrusted)` the list form shows.
+    #[test]
+    fn a_grid_cell_marks_a_doubtful_measurement() {
+        let timing = |hit_limit, untrustworthy| crate::Timing {
+            ns_per_iter: 1.0,
+            std_error: 0.0,
+            iterations: 1,
+            samples: 1,
+            hit_limit,
+            untrustworthy,
+            difference: None,
+        };
+        assert_eq!(caveat(&timing(false, false)), "");
+        assert_eq!(caveat(&timing(true, false)), "*");
+        assert_eq!(caveat(&timing(false, true)), "?");
+        assert_eq!(caveat(&timing(true, true)), "*?");
     }
 
     /// An empty grid says less than no grid at all.
