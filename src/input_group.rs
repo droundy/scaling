@@ -455,6 +455,14 @@ impl Timings {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_named(names: &[&str], timings: &[Timing]) -> Self {
+        Timings {
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+            timings: timings.to_vec(),
+        }
+    }
+
     /// The name of the baseline - the first alternative that was added.
     pub fn baseline_name(&self) -> &str {
         &self.names[0]

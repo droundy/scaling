@@ -189,12 +189,13 @@ impl Timing {
             let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
             write!(
                 f,
-                "{value:>11} (± unknown, only {} sample{}){limit}",
+                "{value} (± unknown, only {} sample{}){limit}",
                 self.samples,
                 if self.samples == 1 { "" } else { "s" }
             )
         } else {
-            let (value, error) = value_and_error(self.ns_per_iter / div, self.std_error / div);
+            let (value, error) =
+                value_and_error(self.ns_per_iter / div, self.std_error / div, f.precision());
             let value = format!("{value}{unit}");
             let error = format!("{error}{unit}");
             // Deliberately no iteration or sample count. Those were worth
@@ -203,7 +204,7 @@ impl Timing {
             // states the precision outright they are just noise on a line
             // meant to be scanned in a column. Both remain on [`Timing`] for
             // anyone who wants them.
-            write!(f, "{value:>11} ± {error}{limit}")
+            write!(f, "{value} ± {error}{limit}")
         }
     }
 }

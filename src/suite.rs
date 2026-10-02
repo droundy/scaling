@@ -46,6 +46,7 @@
 use super::*;
 use crate::registry::{Candidate, Input, Registered};
 use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -135,7 +136,8 @@ impl Machine {
     }
 }
 
-#[derive(Clone)]
+/// The result of one scheduled benchmark task before it is arranged into groups.
+#[derive(Debug, Clone)]
 pub(crate) enum Found {
     Scaling(ScalingStats),
     Timing(Timings),
@@ -150,10 +152,27 @@ impl Display for Found {
     }
 }
 
+/// The result of one scheduled benchmark task before it is arranged into groups.
+#[derive(Debug, Clone, Copy)]
+pub enum Measurement {
+    Scaling(ScalingStats),
+    Timing(Timing),
+}
+
+impl Display for Measurement {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Measurement::Scaling(s) => write!(f, "{s}"),
+            Measurement::Timing(timing) => write!(f, "{timing}"),
+        }
+    }
+}
+
 pub struct Suite {
     cfg: Config,
     scheduler: Scheduler,
     names: Vec<String>,
+    lanes: Vec<crate::assemble::Lane>,
     comparisons: u64,
     z_alpha: Rc<Cell<f64>>,
 }
@@ -169,6 +188,7 @@ impl Config {
             // well would only make a suite harder to reproduce.
             scheduler: Scheduler::new(0x9E37_79B9_7F4A_7C15),
             names: Vec::new(),
+            lanes: Vec::new(),
             comparisons: 0,
             // `NaN` until `run` sets it. Nothing reads it before then, and a
             // suite holding no comparisons never reads it at all.
@@ -323,9 +343,8 @@ impl Suite {
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
         let results = self.scheduler.run();
-        Report {
-            entries: self.names.into_iter().zip(results).collect(),
-        }
+        let entries: Vec<(String, Found)> = self.names.into_iter().zip(results).collect();
+        Report::new(entries, &self.lanes)
     }
 }
 
@@ -337,18 +356,6 @@ pub(crate) struct Assembled {
     /// instead; these are the complaints that leave the rest of the run
     /// perfectly good.
     pub warnings: Vec<crate::assemble::Diagnostic>,
-    /// The comparison lanes as they were assembled, in the order they were
-    /// added.
-    ///
-    /// Here because a comparison reaches the report under one name while
-    /// holding several alternatives, and nothing else can say what they
-    /// were. A caller listing what would run - which is the only way to find
-    /// out what a binary registered - would otherwise print the comparison
-    /// and leave the reader guessing what is in it. A lane with more than
-    /// one input is also a grid, recoverable only from here: the report
-    /// holds one comparison per input under a flattened `group@input` name,
-    /// which is the right thing to *measure* and the wrong shape to read.
-    pub lanes: Vec<crate::assemble::Lane>,
 }
 
 impl Suite {
@@ -400,10 +407,7 @@ impl Suite {
         }
 
         let cfg = self.cfg.clone();
-        let mut tokens = Assembled {
-            warnings,
-            ..Assembled::default()
-        };
+        let tokens = Assembled { warnings };
 
         for r in plan.flat {
             (r.reg.add)(&mut *self, &r.name);
@@ -430,18 +434,139 @@ impl Suite {
                 self.add_input_group(&name, group);
             }
         }
-        tokens.lanes = plan.lanes;
-
+        self.lanes = plan.lanes;
         Ok(tokens)
     }
 }
 
-/// Everything a suite measured, in the order it was declared.
+/// One typed input axis entry in a [`Group`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypedInput {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Measurements for one logical group, arranged as a dense candidate-by-input table.
+///
+/// Rows align with [`Group::candidates`] and columns with [`Group::inputs`].
+/// Unsupported candidate/input combinations are `None`.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub candidates: Vec<String>,
+    pub inputs: Vec<TypedInput>,
+    /// Candidate-major rectangular data: `measurements[candidate][input]`.
+    /// `None` means that candidate does not support that typed input.
+    pub measurements: Vec<Vec<Option<Measurement>>>,
+}
+
+/// Everything a suite measured, keyed by logical group name.
 pub struct Report {
     entries: Vec<(String, Found)>,
+    groups: BTreeMap<String, Group>,
 }
 
 impl Report {
+    fn new(entries: Vec<(String, Found)>, lanes: &[crate::assemble::Lane]) -> Self {
+        let mut grouped: BTreeMap<String, BTreeMap<TypedInput, BTreeMap<String, Measurement>>> =
+            BTreeMap::new();
+        let mut represented = BTreeSet::new();
+
+        for lane in lanes {
+            for input in &lane.inputs {
+                let entry_name = if lane.candidates.len() == 1 {
+                    lane.flat_name(&lane.candidates[0], input)
+                } else {
+                    lane.comparison_name(input)
+                };
+                let Some((_, measurement)) = entries.iter().find(|(name, _)| *name == entry_name)
+                else {
+                    continue;
+                };
+                let inputs = grouped.entry(lane.group.to_string()).or_default();
+                let candidates = inputs
+                    .entry(TypedInput {
+                        name: input.name.clone(),
+                        type_name: lane.type_name.to_string(),
+                    })
+                    .or_default();
+                match measurement {
+                    Found::Timing(timings) if lane.candidates.len() == 1 => {
+                        candidates.insert(
+                            lane.candidates[0].name.clone(),
+                            Measurement::Timing(*timings.timings().first().unwrap()),
+                        );
+                    }
+                    Found::Timing(_) | Found::Scaling(_) => continue,
+                }
+                represented.insert(entry_name);
+            }
+        }
+
+        for (name, measurement) in &entries {
+            if represented.contains(name) {
+                continue;
+            }
+            let inputs = grouped.entry(name.clone()).or_default();
+            let candidates = inputs
+                .entry(TypedInput {
+                    name: String::new(),
+                    type_name: String::new(),
+                })
+                .or_default();
+            match measurement {
+                Found::Timing(timings) => {
+                    candidates.insert(
+                        name.clone(),
+                        Measurement::Timing(*timings.timings().first().unwrap()),
+                    );
+                }
+                Found::Scaling(scaling) => {
+                    candidates.insert(name.clone(), Measurement::Scaling(*scaling));
+                }
+            }
+        }
+
+        let groups = grouped
+            .into_iter()
+            .map(|(name, by_input)| {
+                let inputs: Vec<TypedInput> = by_input.keys().cloned().collect();
+                let candidates: Vec<String> = by_input
+                    .values()
+                    .flat_map(|by_candidate| by_candidate.keys().cloned())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let measurements = candidates
+                    .iter()
+                    .map(|candidate| {
+                        inputs
+                            .iter()
+                            .map(|input| by_input[input].get(candidate).cloned())
+                            .collect()
+                    })
+                    .collect();
+                (
+                    name,
+                    Group {
+                        candidates,
+                        inputs,
+                        measurements,
+                    },
+                )
+            })
+            .collect();
+        Report { entries, groups }
+    }
+}
+
+impl Report {
+    /// The measured groups, in name order.
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &Group)> + '_ {
+        self.groups
+            .iter()
+            .map(|(name, group)| (name.as_str(), group))
+    }
+
     /// What every entry is called, in the order they were added.
     ///
     /// The way to find out what a run produced when the names were not
@@ -499,7 +624,7 @@ impl Report {
     /// ```
     pub fn get_scaling(&self, name: &str) -> Option<ScalingStats> {
         if let Some((_, Found::Scaling(scaling))) = self.entries.iter().find(|(n, _)| n == name) {
-            Some(scaling.clone())
+            Some(*scaling)
         } else {
             None
         }
@@ -910,6 +1035,63 @@ mod report_lookup {
         assert!(stats.ns_per_iter > 0.0);
         assert!(report.contains("summing"));
         assert_eq!(report.names().collect::<Vec<_>>(), ["summing"]);
+    }
+
+    #[test]
+    fn typed_lanes_combine_into_one_dense_group() {
+        let timing = |ns_per_iter| Timing {
+            ns_per_iter,
+            std_error: 0.0,
+            iterations: 1,
+            samples: 2,
+            hit_limit: false,
+            untrustworthy: false,
+            difference: None,
+        };
+        use crate::assemble::lane_tests::{cand, inp, leak_c, leak_i};
+        let candidates = leak_c(vec![
+            cand::<u32>("codec", "fast", "u32", true),
+            cand::<u32>("codec", "small", "u32", false),
+            cand::<i32>("codec", "small", "i32", true),
+        ]);
+        let inputs = leak_i(vec![
+            inp::<u32>("codec", "random", "u32"),
+            inp::<i32>("codec", "random", "i32"),
+        ]);
+        let (plan, problems) = crate::assemble::plan(&[], &candidates, &inputs);
+        assert!(problems.is_empty(), "{problems:?}");
+        let entries: Vec<(String, Found)> = plan
+            .lanes
+            .iter()
+            .map(|lane| {
+                let input = &lane.inputs[0];
+                let name = if lane.candidates.len() == 1 {
+                    lane.flat_name(&lane.candidates[0], input)
+                } else {
+                    lane.comparison_name(input)
+                };
+                let names: Vec<&str> = lane.candidates.iter().map(|c| c.name.as_str()).collect();
+                let timings: Vec<Timing> = names
+                    .iter()
+                    .map(|candidate| timing(if *candidate == "fast" { 20.0 } else { 5.0 }))
+                    .collect();
+                (name, Found::Timing(Timings::test_named(&names, &timings)))
+            })
+            .collect();
+        let report = Report::new(entries, &plan.lanes);
+        let (group_name, group) = report
+            .groups()
+            .next()
+            .expect("the report contains the codec group");
+        assert_eq!(group_name, "codec");
+        assert_eq!(group.candidates, ["fast", "small"]);
+        assert_eq!(group.inputs.len(), 2);
+        assert_eq!(group.measurements.len(), 2);
+        assert_eq!(group.measurements[0].len(), 2);
+        assert!(group.measurements[0][0].is_none());
+        assert!(group.measurements[0][1].is_some());
+        assert!(group.measurements[1][0].is_some());
+        assert!(group.measurements[1][1].is_some());
     }
 
     /// Asking for the wrong type gives nothing rather than the wrong thing,

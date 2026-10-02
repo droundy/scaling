@@ -560,6 +560,7 @@ them the way a quiesced run's would be trusted.
 pub mod assemble;
 mod bench;
 mod difference;
+mod formatting;
 mod input_group;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
@@ -585,7 +586,7 @@ pub use self::bench::Timing;
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
-pub use self::suite::Report;
+pub use self::suite::{Group, Measurement, Report, TypedInput};
 
 pub(crate) use self::input_group::InputGroup;
 pub(crate) use self::suite::{Assembled, Suite};
@@ -865,11 +866,6 @@ impl Config {
 
 /// Pick a human-readable unit from a magnitude in nanoseconds, returning
 /// the divisor and its suffix.
-///
-/// We choose units ourselves rather than deferring to `Duration`'s `Debug`,
-/// which cannot help here: `Duration` has nanosecond resolution, so the
-/// error bar on a fast benchmark - 0.12 ns on a 71 ns function is entirely
-/// typical - would round to a useless `0ns`.
 fn unit_for(ns: f64) -> (f64, &'static str) {
     let magnitude = ns.abs();
     if magnitude < 1e3 {
@@ -883,35 +879,19 @@ fn unit_for(ns: f64) -> (f64, &'static str) {
     }
 }
 
-/// How many decimal places `x` needs to show two significant digits, which
-/// is all the precision an error bar ever deserves.
-fn error_decimals(x: f64) -> usize {
-    // The `is_finite` test comes first so that the comparison below never
-    // has to reason about NaN.
-    if !x.is_finite() || x <= 0.0 {
+/// How many decimal places `error` needs to show one significant digit.
+fn error_decimals(error: f64) -> usize {
+    if !error.is_finite() || error <= 0.0 {
         return 4;
     }
-    // The floor is zero, not one: an error of 25 in its own unit wants no
-    // decimals at all, and forcing one on it prints `25.0`, which is three
-    // significant digits claiming to be two.
-    (1 - x.log10().floor() as i64).clamp(0, 9) as usize
+    // The 0.5 below causes us to print `1.1` or `0.6` instead of `1`.
+    (-(0.5 * error).log10().floor() as i64).clamp(0, 9) as usize
 }
 
-/// A value and its error, formatted to the precision the error justifies:
-/// digits of the value beyond where the uncertainty starts are noise
-/// dressed up as signal, so `71.9858 ± 0.17` is really only known to
-/// `71.99 ± 0.17`, and printing the extra two digits would invite a reader
-/// to believe them.
-///
-/// The error switches to scientific notation below `1e-4` rather than
-/// spelling out a run of leading zeroes - an optimised-away benchmark can
-/// reach `0.000000021` - but the value keeps plain digits at the same
-/// decimal count, which is what the scientific notation stands in for.
-///
-/// Callers own the unit: this only picks how many digits to show, in
-/// whatever unit `value` and `error` already share.
-fn value_and_error(value: f64, error: f64) -> (String, String) {
-    let decimals = error_decimals(error);
+/// A value and its error, formatted to the precision the error justifies, with extra digits as
+/// requested by the formatter.
+fn value_and_error(value: f64, error: f64, precision: Option<usize>) -> (String, String) {
+    let decimals = error_decimals(error) + precision.unwrap_or(0);
     let error_str = if error > 0.0 && error < 1e-4 {
         format!("{error:.1e}")
     } else {
@@ -920,15 +900,7 @@ fn value_and_error(value: f64, error: f64) -> (String, String) {
     (format!("{value:.decimals$}"), error_str)
 }
 
-/// Running mean and variance of the per-iteration times, updated in O(1)
-/// per sample.
-///
-/// The sampling loop asks whether it can stop after *every* sample, so
-/// recomputing from a stored vector would make the loop O(k²) in the number
-/// of samples - fine at the default `sample_time`, but `sample_time` is a
-/// public knob and shrinking it puts the loop in a regime where it spends
-/// more of the budget on arithmetic than on measuring. Keeping the running
-/// figures also means the samples themselves never need storing.
+/// Running mean and variance of the per-iteration times.
 ///
 /// This is Welford's algorithm rather than accumulating `sum` and
 /// `sum_of_squares`, because the variance we want is a minute difference

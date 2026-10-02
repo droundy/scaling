@@ -79,12 +79,14 @@ impl Display for Timing {
             (false, false) => "",
         };
         if difference.is_changed() {
-            let rel_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
-            write!(f, "{:+.1}% ± {rel_error:.1}%{limit}", difference.percent())
+            let percent_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
+            let (value, error) =
+                value_and_error(difference.percent(), percent_error, f.precision());
+            write!(f, "{value}% ± {error}%{limit}")
         } else {
             let detectable = difference.min_detectable_rel() * 100.0;
             if detectable.is_finite() {
-                write!(f, "(unchanged, would detect {detectable:.1}%){limit}")
+                write!(f, "(< {detectable:.1}%){limit}")
             } else {
                 write!(f, "(unchanged){limit}")
             }
