@@ -461,7 +461,9 @@ pub struct Group {
     /// The rows. A candidate that is the baseline of some column comes
     /// first; the rest follow in the order their lanes were declared.
     pub candidates: Vec<String>,
-    /// The columns, sorted by name and then type.
+    /// The columns, in the order of the lanes they came from: one type's
+    /// inputs together, each lane's inputs as it ordered them - by name,
+    /// except that sized inputs go by size.
     pub inputs: Vec<TypedInput>,
     /// Candidate-major rectangular data: `measurements[candidate][input]`.
     /// `None` means that candidate does not support that typed input.
@@ -495,12 +497,22 @@ struct Column {
 struct GroupBuilder {
     /// In the order first seen.
     candidates: Vec<String>,
-    columns: BTreeMap<TypedInput, Column>,
+    /// In the order first seen, which is the order a lane puts its inputs
+    /// in: sorting them again here would undo the lane's ordering of sized
+    /// inputs, putting `sets@10` ahead of `sets@2`.
+    columns: Vec<(TypedInput, Column)>,
 }
 
 impl GroupBuilder {
     fn add(&mut self, input: TypedInput, results: Vec<(String, Measurement)>, compared: bool) {
-        let column = self.columns.entry(input).or_default();
+        let at = match self.columns.iter().position(|(seen, _)| *seen == input) {
+            Some(at) => at,
+            None => {
+                self.columns.push((input, Column::default()));
+                self.columns.len() - 1
+            }
+        };
+        let column = &mut self.columns[at].1;
         column.baseline = compared
             .then(|| results.first().map(|(name, _)| name.clone()))
             .flatten();
@@ -519,14 +531,18 @@ impl GroupBuilder {
         let columns = &self.columns;
         self.candidates.sort_by_key(|candidate| {
             !columns
-                .values()
-                .any(|column| column.baseline.as_ref() == Some(candidate))
+                .iter()
+                .any(|(_, column)| column.baseline.as_ref() == Some(candidate))
         });
-        let inputs = self.columns.keys().cloned().collect();
+        let inputs = self
+            .columns
+            .iter()
+            .map(|(input, _)| input.clone())
+            .collect();
         let baselines = self
             .columns
-            .values()
-            .map(|column| {
+            .iter()
+            .map(|(_, column)| {
                 let baseline = column.baseline.as_ref()?;
                 self.candidates.iter().position(|c| c == baseline)
             })
@@ -536,8 +552,8 @@ impl GroupBuilder {
             .iter()
             .map(|candidate| {
                 self.columns
-                    .values()
-                    .map(|column| column.cells.get(candidate).copied())
+                    .iter()
+                    .map(|(_, column)| column.cells.get(candidate).copied())
                     .collect()
             })
             .collect();
@@ -1240,6 +1256,47 @@ mod report_lookup {
         assert!(cell(0).difference.is_none(), "the baseline has none");
         assert!(cell(1).difference.is_some());
         assert!(cell(2).difference.is_some());
+    }
+
+    /// The columns of a group read in the order the lane put them in, so
+    /// inputs registered at several sizes run `2`, `10`, `100` and not
+    /// `10`, `100`, `2`.
+    #[test]
+    fn a_groups_columns_keep_the_lanes_order() {
+        let timing = |ns_per_iter: f64| Timing {
+            ns_per_iter,
+            std_error: 0.0,
+            iterations: 1,
+            samples: 2,
+            hit_limit: false,
+            untrustworthy: false,
+            difference: None,
+        };
+        use crate::assemble::lane_tests::{cand, inp, leak_c, leak_i};
+        let candidates = leak_c(vec![
+            cand::<u8>("sets", "a", "u8", true),
+            cand::<u8>("sets", "b", "u8", false),
+        ]);
+        let inputs = leak_i(vec![
+            inp::<u8>("sets", "sets@10", "u8"),
+            inp::<u8>("sets", "sets@2", "u8"),
+            inp::<u8>("sets", "sets@100", "u8"),
+        ]);
+        let (plan, problems) = crate::assemble::plan(&[], &candidates, &inputs);
+        assert!(problems.is_empty(), "{problems:?}");
+        let lane = &plan.lanes[0];
+        let entries = lane
+            .inputs
+            .iter()
+            .map(|input| {
+                let timings = Timings::test_named(&["a", "b"], &[timing(1.0), timing(2.0)]);
+                (lane.comparison_name(input), Found::Timing(timings))
+            })
+            .collect();
+        let report = Report::new(entries, &plan.lanes);
+        let (_, group) = report.groups().next().expect("the sets group");
+        let names: Vec<&str> = group.inputs.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["sets@2", "sets@10", "sets@100"]);
     }
 
     /// A group built by hand, which no lane knows about, keeps all of its
