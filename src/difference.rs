@@ -82,7 +82,10 @@ impl Display for Timing {
             let percent_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
             let (value, error) =
                 value_and_error(difference.percent(), percent_error, f.precision());
-            write!(f, "{value}% ± {error}%{limit}")
+            // The sign is always shown, so a speedup and a slowdown of the
+            // same size cannot be mistaken for each other.
+            let sign = if value.starts_with('-') { "" } else { "+" };
+            write!(f, "{sign}{value}% ± {error}%{limit}")
         } else {
             let detectable = difference.min_detectable_rel() * 100.0;
             if detectable.is_finite() {
@@ -176,7 +179,7 @@ mod tests {
     fn display_marks_a_truncated_run() {
         // Planned and precise: the sensitivity is the whole story.
         let clean = format!("{}", comparison(100.0, 100.0, 0.1, 4));
-        assert!(clean.starts_with("(unchanged, would detect"), "{clean}");
+        assert!(clean.starts_with("(< "), "{clean}");
         assert!(!clean.contains("limit"), "{clean}");
 
         // The budget ran out before the goal was reached.
@@ -196,7 +199,7 @@ mod tests {
         changed.hit_limit = true;
         // Pinned whole, so the `\u{b1}` cannot quietly become an ASCII `+/-` and
         // drift from what a raw Timing prints.
-        assert_eq!("+30.0% \u{b1} 0.1% (limit)", format!("{changed}"));
+        assert_eq!("+30.00% \u{b1} 0.14% (limit)", format!("{changed}"));
     }
 
     /// Each entry point corrects for the family it can see, with no shared

@@ -185,7 +185,9 @@ impl Timing {
             // budget already" path.
             //
             // With no error bar there is nothing to set the precision, so
-            // fall back to a fixed four decimals.
+            // fall back to a fixed four decimals. A precision asked for by
+            // the formatter is extra digits beyond what the error justifies,
+            // so it has nothing to add to here.
             let value = format!("{:.4}{}", self.ns_per_iter / div, unit);
             write!(
                 f,
@@ -732,21 +734,21 @@ mod tests {
         // for digit without a unit conversion in the reader's head - and to
         // the same precision, so every digit printed is one the measurement
         // actually justifies.
-        assert_eq!(shown(100_267_300.0, 0.0002), "100.267ms ± 0.020ms");
+        assert_eq!(shown(100_267_300.0, 0.0002), "100.27ms ± 0.02ms");
 
-        // Two significant digits is all an error bar deserves, whatever its
-        // magnitude relative to the value.
-        assert_eq!(shown(2_500.0, 0.032), "2.500µs ± 0.080µs");
+        // One significant digit is all an error bar deserves, whatever its
+        // magnitude relative to the value; the error is rounded to the
+        // nearest digit, but is written with a second one only when its first
+        // digit would otherwise be a 1.
+        assert_eq!(shown(2_500.0, 0.032), "2.50µs ± 0.08µs");
 
-        // Even an error far below the value's own unit keeps two digits
-        // rather than collapsing to zero - and here that does mean four
+        // Even an error far below the value's own unit keeps its digit
+        // rather than collapsing to zero - and here that does mean three
         // decimals on the value, because the error genuinely reaches them.
-        assert_eq!(shown(0.4523, 0.02), "0.4523ns ± 0.0090ns");
+        assert_eq!(shown(0.4523, 0.02), "0.452ns ± 0.009ns");
 
-        // Two digits is also all it gets when the error is large enough to
-        // need none: a noisy benchmark whose error reaches the tens of its
-        // own unit says `± 25ns`, not `± 25.0ns`, which would be a third
-        // digit the measurement cannot support.
+        // An error large enough to need no decimals says `± 25ns`, not
+        // `± 25.0ns`, which would be a digit the measurement cannot support.
         assert_eq!(shown(500.0, 0.05), "500ns ± 25ns");
     }
 

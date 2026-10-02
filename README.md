@@ -135,21 +135,26 @@ by name, since nobody wrote those names down: they come from the module and
 function each benchmark was declared in.
 
 For custom output, `Report::groups()` exposes each logical group's candidate
-rows, typed input columns, and dense measurements. A caller can choose which
-fields to print or join its own candidate metadata before formatting:
+rows, typed input columns, and dense measurements. Each column's
+`baselines` entry says which row the rest were compared against. A caller
+can choose which fields to print or join its own candidate metadata before
+formatting:
 
 ```rust,no_run
 use scaling::{runner, Config, Measurement};
 
 let report = runner::measure(&Config::default()).expect("registrations compose");
 for (group_name, group) in report.groups() {
-  for (candidate, measurements) in group.candidates.iter().zip(&group.measurements) {
-    for (input, value) in group.inputs.iter().zip(measurements) {
+    for (candidate, measurements) in group.candidates.iter().zip(&group.measurements) {
+        for (input, value) in group.inputs.iter().zip(measurements) {
             if let Some(Measurement::Timing(timing)) = value {
-        println!("{group_name} {candidate} {}<{}> {} ns", input.name, input.type_name, timing.ns_per_iter);
-      }
+                println!(
+                    "{group_name} {candidate} {}<{}> {} ns",
+                    input.name, input.type_name, timing.ns_per_iter
+                );
+            }
+        }
     }
-  }
 }
 ```
 
