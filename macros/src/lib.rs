@@ -1044,7 +1044,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     {
         return Err(syn::Error::new(
             func.sig.span(),
-            "a metrics function takes only `group` and `name`",
+            "a metrics function takes only `group`, `name` and `allocation`",
         ));
     }
     let params: Vec<&syn::PatType> = func

@@ -555,9 +555,15 @@ judging results from CI with that firmly in mind rather than trusting
 them the way a quiesced run's would be trusted.
 */
 
-/// Assembling registered benchmarks into a suite.
+/// Counting allocations, for metrics that report memory.
+///
+/// Public so that a benchmark binary can name `CountingAlloc` in a
+/// `#[global_allocator]`, but hidden from the documentation until it is
+/// settled where that belongs.
 #[doc(hidden)]
 pub mod alloc;
+/// Assembling registered benchmarks into a suite.
+#[doc(hidden)]
 pub mod assemble;
 mod bench;
 mod difference;
