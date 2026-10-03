@@ -853,11 +853,19 @@ impl Report {
 
     /// A comparison's results, by name.
     ///
-    /// A group sharing several inputs is reported under `group@input`; one
-    /// with just the one, under its own plain name. What comes back carries
-    /// every alternative's own measurement as
-    /// well as its difference from the baseline, so this is what a script
-    /// asking "which of these is actually fastest here" wants.
+    /// A comparison is one input's worth of a group whose candidates (two or
+    /// more) take that input's type. It is named `group@input`, after the
+    /// group and the input (the function's name, or its `name =`). A group
+    /// with no `#[scaling::input]` has no input to name, so it is just
+    /// `group`. If two inputs of different types in a group share a name, the
+    /// type follows: `group@input (Vec<u8>)`. A group with a single candidate
+    /// on an input is not a comparison; it is reached with [`Report::timing`]
+    /// as `group::candidate@input`. [`Report::names`] lists every name a run
+    /// produced.
+    ///
+    /// What comes back carries every alternative's own measurement as well as
+    /// its difference from the baseline, so this is what a script asking
+    /// "which of these is actually fastest here" wants.
     pub fn comparison(&self, name: &str) -> Option<Timings> {
         match self.find(name)? {
             Found::Timing(c) if c.timings().len() > 1 => Some(c),
@@ -865,8 +873,10 @@ impl Report {
         }
     }
 
-    /// Every flat measurement, with its name, in the order they were added.
-    pub fn all_stats(&self) -> impl Iterator<Item = (&str, Timing)> {
+    /// Every measurement that is a single [`Timing`], with its name, in the
+    /// order they were added: the flat benchmarks, and a group's candidates
+    /// that are alone on their input. See [`Report::timing`].
+    pub fn all_timings(&self) -> impl Iterator<Item = (&str, Timing)> {
         self.entries.iter().filter_map(|(name, found)| match found {
             Found::Timing(c) if c.timings().len() == 1 => Some((name.as_str(), c.timings()[0])),
             _ => None,
@@ -1511,7 +1521,7 @@ mod report_lookup {
         );
         let report = suite.run();
 
-        let flat: Vec<&str> = report.all_stats().map(|(n, _)| n).collect();
+        let flat: Vec<&str> = report.all_timings().map(|(n, _)| n).collect();
         assert_eq!(flat, ["one", "two"], "the comparison is not a `Stats`");
         let cmps: Vec<&str> = report.all_comparisons().map(|(n, _)| n).collect();
         assert_eq!(cmps, ["pair"]);
