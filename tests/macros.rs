@@ -252,18 +252,18 @@ fn every_written_benchmark_is_found_and_measured() {
             .unwrap_or_else(|| panic!("{name} not registered"))
             .to_string();
         assert!(
-            report.timing(&full).is_some(),
+            report.timing(&full).is_ok(),
             "{name} was registered but never measured",
         );
     }
-    assert!(report.timing("renamed").is_some());
+    assert!(report.timing("renamed").is_ok());
 
     let scaling_key = report
         .names()
         .find(|k| k.ends_with("scales"))
         .expect("the scaling benchmark registered")
         .to_string();
-    assert!(report.scaling(&scaling_key).is_some());
+    assert!(report.scaling(&scaling_key).is_ok());
 
     let gen_scaling_key = report
         .names()
@@ -271,7 +271,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the make_input scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&gen_scaling_key).is_some(),
+        report.scaling(&gen_scaling_key).is_ok(),
         "a scaling benchmark with make_input should measure just like one without",
     );
 
@@ -281,7 +281,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the &T scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&ref_scaling_key).is_some(),
+        report.scaling(&ref_scaling_key).is_ok(),
         "&T should measure exactly as &mut T does",
     );
 
@@ -291,7 +291,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the owned-input scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&owned_scaling_key).is_some(),
+        report.scaling(&owned_scaling_key).is_ok(),
         "T by value should measure exactly as &T and &mut T do",
     );
 
@@ -301,7 +301,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the setup-once scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&persistent_scaling_key).is_some(),
+        report.scaling(&persistent_scaling_key).is_ok(),
         "a scaling benchmark with a setup-once function should measure like any other",
     );
 

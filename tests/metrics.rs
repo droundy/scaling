@@ -117,7 +117,7 @@ fn report() -> scaling::Report {
 fn comparison(report: &scaling::Report, name: &str) -> scaling::Timings {
     report
         .comparison(name)
-        .unwrap_or_else(|| panic!("the comparison {name}"))
+        .unwrap_or_else(|error| panic!("the comparison {name}: {error}"))
 }
 
 #[test]

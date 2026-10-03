@@ -100,7 +100,7 @@ fn every_pairing_is_measured() {
     for input in ["reversed", "sorted"] {
         let cmps = report
             .comparison(&format!("sorting@{input}"))
-            .unwrap_or_else(|| panic!("sorting@{input} did not run"));
+            .unwrap_or_else(|error| panic!("sorting@{input} did not run: {error}"));
         assert_eq!(cmps.timings().len(), 3, "three candidates on {input}");
         assert_eq!(cmps.against_baseline().count(), 2);
     }
@@ -251,7 +251,7 @@ fn a_generic_candidate_is_registered_once_per_listed_type() {
     for input in ["text", "bytes"] {
         let cmps = report
             .comparison(&format!("generic@{input}"))
-            .unwrap_or_else(|| panic!("generic@{input} did not run"));
+            .unwrap_or_else(|error| panic!("generic@{input} did not run: {error}"));
         assert_eq!(
             cmps.timings().len(),
             2,

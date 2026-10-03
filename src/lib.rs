@@ -524,6 +524,7 @@ pub use self::difference::Difference;
 pub use self::input_group::Timings;
 pub(crate) use self::metrics::MetricColumn;
 pub use self::metrics::{MetricValue, Metrics};
+pub use self::names::NameError;
 pub use self::run::RegistrationError;
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::{Group, Report};

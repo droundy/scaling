@@ -4,7 +4,10 @@
 //! The full names are made here, in one place: [`comparison_name`] and
 //! [`candidate_name`] for what a group produces, and the benchmark's own name
 //! for a standalone one. A [`Report`](crate::Report) then accepts, as well as
-//! a full name, any shorter way of writing it that picks out exactly one thing.
+//! a full name, any shorter way of writing it that picks out exactly one thing,
+//! and says why when a name does not.
+
+use std::fmt::{self, Display, Formatter};
 
 /// What an [`Address`] stands for, which is also what the accessor that looks
 /// for it is asking after.
@@ -16,6 +19,26 @@ pub(crate) enum Kind {
     Comparison,
     /// A scaling benchmark.
     Scaling,
+}
+
+impl Kind {
+    /// What a name of this kind is, for a message.
+    fn described(self) -> &'static str {
+        match self {
+            Kind::Single => "one timing",
+            Kind::Comparison => "a comparison",
+            Kind::Scaling => "a scaling benchmark",
+        }
+    }
+
+    /// The `Report` method that gives a name of this kind.
+    fn accessor(self) -> &'static str {
+        match self {
+            Kind::Single => "timing",
+            Kind::Comparison => "comparison",
+            Kind::Scaling => "scaling",
+        }
+    }
 }
 
 /// One name a report knows, and the shorter ways of writing it.
@@ -159,21 +182,127 @@ fn forms_of(scope: Option<&str>, thing: &str, input: &str, type_name: Option<&st
     forms
 }
 
+/// Why a name found nothing.
+pub(crate) enum Miss {
+    /// Nothing is called that, in the kinds asked after.
+    Nothing,
+    /// More than one thing is: the full names of what fits.
+    Several(Vec<String>),
+}
+
 /// The address of `kinds` that `query` names: one whose full name it is, or
-/// else the only one that it is a shorter form of. `None` if nothing is, and
-/// also if more than one is, since guessing between them would be worse than
+/// else the only one that it is a shorter form of. Otherwise why not: nothing
+/// is, or more than one is, since guessing between them would be worse than
 /// saying so.
 pub(crate) fn resolve<'a>(
     addresses: &'a [Address],
     query: &str,
     kinds: &[Kind],
-) -> Option<&'a Address> {
+) -> Result<&'a Address, Miss> {
     let wanted = || addresses.iter().filter(|a| kinds.contains(&a.kind));
     // A full name is never ambiguous, whatever else it also abbreviates.
     if let Some(exact) = wanted().find(|a| a.full == query) {
-        return Some(exact);
+        return Ok(exact);
     }
-    let mut claimed = wanted().filter(|a| a.forms.iter().any(|form| form == query));
-    let first = claimed.next()?;
-    claimed.next().is_none().then_some(first)
+    let mut claimed: Vec<&Address> = wanted()
+        .filter(|a| a.forms.iter().any(|form| form == query))
+        .collect();
+    match claimed.len() {
+        0 => Err(Miss::Nothing),
+        1 => Ok(claimed.remove(0)),
+        _ => Err(Miss::Several(
+            claimed.into_iter().map(|a| a.full.clone()).collect(),
+        )),
+    }
 }
+
+/// Why a [`Report`](crate::Report) could not give what was asked for by name.
+///
+/// There are three reasons, and the message says which: nothing has that name;
+/// a shortened name fits more than one thing, which are listed so that more of
+/// the name can be given; or the name is the name of something else, a
+/// comparison asked for as a single timing, say.
+///
+/// Printing it, with `{}` or `{:?}`, gives the message, so `.expect("..")` on a
+/// failed lookup says what to fix. It is a [`std::error::Error`], so `?` works
+/// in a `main` that returns `Result<(), Box<dyn Error>>`.
+#[derive(Clone)]
+pub struct NameError {
+    message: String,
+}
+
+impl NameError {
+    /// `name` found nothing among `wanted`, which is listed by `lister`.
+    fn nothing(name: &str, wanted: Kind) -> Self {
+        let lister = match wanted {
+            Kind::Comparison => "`Report::all_comparisons`",
+            Kind::Single | Kind::Scaling => "`Report::names`",
+        };
+        NameError {
+            message: format!("nothing is called `{name}`; {lister} lists what ran"),
+        }
+    }
+
+    /// `name` fits each of `full_names`.
+    fn several(name: &str, full_names: &[String]) -> Self {
+        // A name can fit a great many things; the first few say enough.
+        const SHOWN: usize = 5;
+        let mut listed: Vec<String> = full_names
+            .iter()
+            .take(SHOWN)
+            .map(|full| format!("`{full}`"))
+            .collect();
+        if full_names.len() > SHOWN {
+            listed.push(format!("and {} more", full_names.len() - SHOWN));
+        }
+        NameError {
+            message: format!(
+                "`{name}` fits more than one thing: {}; use more of the name",
+                listed.join(", ")
+            ),
+        }
+    }
+
+    /// `name` is the name of a `found`, but a `wanted` was asked for.
+    fn elsewhere(name: &str, found: Kind, wanted: Kind) -> Self {
+        NameError {
+            message: format!(
+                "`{name}` is {}, not {}; ask for it with `Report::{}`",
+                found.described(),
+                wanted.described(),
+                found.accessor(),
+            ),
+        }
+    }
+
+    /// Why `query` found nothing of kind `wanted`, given what else is there.
+    pub(crate) fn because(addresses: &[Address], query: &str, wanted: Kind, miss: Miss) -> Self {
+        match miss {
+            Miss::Several(full_names) => NameError::several(query, &full_names),
+            Miss::Nothing => [Kind::Single, Kind::Scaling, Kind::Comparison]
+                .into_iter()
+                .filter(|kind| *kind != wanted)
+                .find(|kind| resolve(addresses, query, &[*kind]).is_ok())
+                .map_or_else(
+                    || NameError::nothing(query, wanted),
+                    |found| NameError::elsewhere(query, found, wanted),
+                ),
+        }
+    }
+}
+
+impl Display for NameError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// The same text as [`Display`], so that `unwrap` and `expect` show it as it
+/// reads rather than as a quoted string.
+impl fmt::Debug for NameError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for NameError {}

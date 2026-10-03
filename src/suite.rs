@@ -45,7 +45,7 @@
 
 use super::*;
 use crate::metrics::NO_METRICS;
-use crate::names::{self, Address, Kind};
+use crate::names::{self, Address, Kind, NameError};
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -570,8 +570,10 @@ impl Display for Group {
 /// standalone benchmark may be left off (`fib` for `bench::fib`) and so may the
 /// `group:` of a candidate. From the back, the ` (type)` may go, and so may the
 /// `@input`, when the group has only one. A name that fits more than one thing
-/// finds nothing, since a guess between them would be a wrong answer some of the
-/// time; the full name of one thing always finds it.
+/// is an error that lists them, since a guess between them would be a wrong
+/// answer some of the time; the full name of one thing always finds it. So when
+/// a short name that worked stops working, because an input or a candidate of
+/// the same name was added, the error names what it now fits.
 ///
 /// ```
 /// use scaling::Config;
@@ -597,18 +599,18 @@ impl Display for Group {
 /// assert_eq!(names, ["sorting:stable@reversed", "sorting:unstable@reversed", "sum"]);
 ///
 /// // A standalone benchmark, and one candidate of a group by its full name.
-/// assert!(report.timing("sum").is_some());
+/// assert!(report.timing("sum").is_ok());
 /// let unstable = report.timing("sorting:unstable@reversed").expect("it ran");
 /// // It was compared with the baseline, so it says by how much.
 /// assert!(unstable.difference().is_some());
 ///
 /// // The same candidate, by any name that only it fits.
-/// assert_eq!(report.timing("unstable"), Some(unstable));
-/// assert_eq!(report.timing("sorting:unstable"), Some(unstable));
+/// assert_eq!(report.timing("unstable").unwrap(), unstable);
+/// assert_eq!(report.timing("sorting:unstable").unwrap(), unstable);
 ///
 /// // The whole comparison is `group@input`, or just `group` with one input.
-/// assert!(report.comparison("sorting@reversed").is_some());
-/// assert!(report.comparison("sorting").is_some());
+/// assert!(report.comparison("sorting@reversed").is_ok());
+/// assert!(report.comparison("sorting").is_ok());
 ///
 /// // A group is also a table.
 /// assert_eq!(report.groups().map(|(name, _)| name).collect::<Vec<_>>(), ["sorting", "sum"]);
@@ -975,11 +977,23 @@ impl Report {
         // candidate is still found by each of the accessors that ask for one.
         [Kind::Single, Kind::Scaling, Kind::Comparison]
             .iter()
-            .any(|kind| self.resolve(name, &[*kind]).is_some())
+            .any(|kind| names::resolve(&self.addresses, name, &[*kind]).is_ok())
     }
 
-    fn resolve(&self, name: &str, kinds: &[Kind]) -> Option<&Address> {
-        names::resolve(&self.addresses, name, kinds)
+    /// The address of `name` as a `kind`, or why there is none.
+    fn lookup(&self, name: &str, kind: Kind) -> Result<&Address, NameError> {
+        names::resolve(&self.addresses, name, &[kind])
+            .map_err(|miss| NameError::because(&self.addresses, name, kind, miss))
+    }
+
+    /// The timings an address points into. Single timings and comparisons are
+    /// made from timed entries only, so this is a fact of how addresses are
+    /// built.
+    fn timings_at(&self, address: &Address) -> &Timings {
+        match &self.entries[address.entry].1 {
+            Found::Timing(timings) => timings,
+            Found::Scaling(_) => unreachable!("only scaling addresses point at a scaling result"),
+        }
     }
 
     /// The timing of one thing by name: a standalone benchmark, or one
@@ -991,8 +1005,11 @@ impl Report {
     /// A caller wanting every candidate on an input together asks for the
     /// [`comparison`](Report::comparison).
     ///
-    /// `None` if the name is not that of one timed thing - nothing has it, it
-    /// fits several, or it is a scaling benchmark or a comparison.
+    /// # Errors
+    ///
+    /// If the name is not that of one timed thing: nothing has it, it fits
+    /// several, or it is a scaling benchmark or a comparison. The
+    /// [`NameError`] says which, and lists what a short name fits.
     ///
     /// ```
     /// use scaling::Config;
@@ -1006,33 +1023,35 @@ impl Report {
     /// let timing = report.timing("sum_to_100").expect("it ran");
     /// assert!(timing.ns_per_iter > 0.0);
     /// ```
-    pub fn timing(&self, name: &str) -> Option<Timing> {
-        let address = self.resolve(name, &[Kind::Single])?;
-        match &self.entries[address.entry].1 {
-            Found::Timing(timings) => timings.timings().get(address.alt).copied(),
-            Found::Scaling(_) => None,
-        }
+    pub fn timing(&self, name: &str) -> Result<Timing, NameError> {
+        let address = self.lookup(name, Kind::Single)?;
+        Ok(self.timings_at(address).timings()[address.alt])
     }
 
     /// What one thing computed besides its time, by the names
     /// [`timing`](Report::timing) takes.
     ///
-    /// Empty if it computed nothing, and `None` if the name is not that of one
-    /// timed thing. See [`Metrics`] for reading what is in it.
-    pub fn metrics(&self, name: &str) -> Option<&Metrics> {
-        let address = self.resolve(name, &[Kind::Single])?;
-        match &self.entries[address.entry].1 {
-            Found::Timing(timings) => {
-                Some(timings.metrics().get(address.alt).unwrap_or(&NO_METRICS))
-            }
-            Found::Scaling(_) => None,
-        }
+    /// Empty if it computed nothing. See [`Metrics`] for reading what is in it.
+    ///
+    /// # Errors
+    ///
+    /// As [`timing`](Report::timing).
+    pub fn metrics(&self, name: &str) -> Result<&Metrics, NameError> {
+        let address = self.lookup(name, Kind::Single)?;
+        Ok(self
+            .timings_at(address)
+            .metrics()
+            .get(address.alt)
+            .unwrap_or(&NO_METRICS))
     }
 
     /// A scaling benchmark's measurement, by name.
     ///
-    /// `None` if nothing of that name was measured, or if it was measured but
-    /// is not a scaling benchmark.
+    /// # Errors
+    ///
+    /// If nothing of that name was measured, or it was measured but is not a
+    /// scaling benchmark, or a short name fits several. The [`NameError`] says
+    /// which.
     ///
     /// ```
     /// use scaling::Config;
@@ -1046,11 +1065,11 @@ impl Report {
     /// let scaling = report.scaling("sum_to_100").expect("it ran");
     /// assert!(scaling.iterations > 0);
     /// ```
-    pub fn scaling(&self, name: &str) -> Option<ScalingStats> {
-        let address = self.resolve(name, &[Kind::Scaling])?;
+    pub fn scaling(&self, name: &str) -> Result<ScalingStats, NameError> {
+        let address = self.lookup(name, Kind::Scaling)?;
         match &self.entries[address.entry].1 {
-            Found::Scaling(stats) => Some(*stats),
-            Found::Timing(_) => None,
+            Found::Scaling(stats) => Ok(*stats),
+            Found::Timing(_) => unreachable!("a scaling address points at a scaling result"),
         }
     }
 
@@ -1062,12 +1081,13 @@ impl Report {
     /// its difference from the baseline, so this is what a script asking
     /// "which of these is actually fastest here" wants. For one candidate on
     /// its own, ask [`timing`](Report::timing).
-    pub fn comparison(&self, name: &str) -> Option<Timings> {
-        let address = self.resolve(name, &[Kind::Comparison])?;
-        match &self.entries[address.entry].1 {
-            Found::Timing(timings) => Some(timings.clone()),
-            Found::Scaling(_) => None,
-        }
+    ///
+    /// # Errors
+    ///
+    /// As [`timing`](Report::timing).
+    pub fn comparison(&self, name: &str) -> Result<Timings, NameError> {
+        let address = self.lookup(name, Kind::Comparison)?;
+        Ok(self.timings_at(address).clone())
     }
 
     /// Every standalone benchmark and every group candidate, with its name and
@@ -1180,10 +1200,10 @@ mod tests {
         let report = suite.run();
         println!("{report}");
 
-        assert!(report.timing("flat").is_some());
-        assert!(report.timing("with input").is_some());
+        assert!(report.timing("flat").is_ok());
+        assert!(report.timing("with input").is_ok());
         assert!(
-            report.scaling("scaled").is_some(),
+            report.scaling("scaled").is_ok(),
             "the scaling benchmark reported"
         );
         assert_eq!(report.comparison("pair").unwrap().timings().len(), 2);
@@ -1677,17 +1697,17 @@ mod report_lookup {
         );
         let report = suite.run();
 
-        assert!(report.timing("flat").is_some());
+        assert!(report.timing("flat").is_ok());
         assert!(
-            report.comparison("flat").is_none(),
+            report.comparison("flat").is_err(),
             "a flat benchmark is not a comparison",
         );
-        assert!(report.comparison("pair").is_some());
+        assert!(report.comparison("pair").is_ok());
         assert!(
-            report.timing("pair").is_none(),
+            report.timing("pair").is_err(),
             "a comparison is not a flat benchmark",
         );
-        assert!(report.timing("never added").is_none());
+        assert!(report.timing("never added").is_err());
     }
 
     /// Each kind comes back as itself, from one report holding all three.
@@ -1705,8 +1725,8 @@ mod report_lookup {
         );
         let report = suite.run();
 
-        assert!(report.timing("flat").is_some());
-        assert!(report.scaling("scaled").is_some());
+        assert!(report.timing("flat").is_ok());
+        assert!(report.scaling("scaled").is_ok());
         let cmp = report.comparison("pair").expect("the comparison ran");
         assert_eq!(cmp.timings().len(), 2);
     }
@@ -2072,15 +2092,15 @@ mod registered_by_hand {
         let report = suite.run();
 
         assert!(
-            report.timing("e2e::by_hand").is_some(),
+            report.timing("e2e::by_hand").is_ok(),
             "the hand-added one ran"
         );
         assert!(
-            report.timing("e2e::after").is_some(),
+            report.timing("e2e::after").is_ok(),
             "so did the one added afterwards"
         );
         assert!(
-            report.timing("e2e::flat").is_some(),
+            report.timing("e2e::flat").is_ok(),
             "so did the registered one"
         );
 
@@ -2113,7 +2133,7 @@ mod registered_by_hand {
         assert_eq!(cmp.timings().len(), 3);
 
         // And the scaling benchmark, which is a third type again.
-        assert!(report.scaling("e2e::scaling").is_some());
+        assert!(report.scaling("e2e::scaling").is_ok());
     }
 
     /// The question the lookup exists to answer: is the implementation being

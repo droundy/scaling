@@ -129,7 +129,7 @@ fn count_elsewhere(_: ()) -> Metrics {
 fn counts(report: &scaling::Report, entry: &str) -> (f64, f64, f64, f64) {
     let m = report
         .metrics(entry)
-        .unwrap_or_else(|| panic!("the candidate {entry}"));
+        .unwrap_or_else(|error| panic!("the candidate {entry}: {error}"));
     let get = |name: &str| {
         m.get(name)
             .unwrap_or_else(|| panic!("{name} of {entry}"))
