@@ -622,7 +622,8 @@ windows is then predicted by
 The log of this prediction correlates with the log of the observed wander
 at 0.92, across 195 pairs in 13 unquiesced recordings. Refusing a pair
 whose prediction exceeds twice the goal refused every mixed pair across
-processes, and none of the mixed pairs it let through blew up.
+processes, at every goal. At four times the goal it let a few through,
+and some of those blew up.
 
 **The third pass, replayed.** The first rule tried counted the spread
 between two passes into the bar, and refused 2-26% of good clock-pair
