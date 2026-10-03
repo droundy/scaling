@@ -165,7 +165,7 @@ pub fn reserved_cpus() -> Option<String> {
 /// whenever a benchmark runs anywhere but the main thread - as it does in
 /// every `#[test]`, since the test harness gives each test its own thread.
 #[cfg(target_os = "linux")]
-pub fn current_affinity() -> Option<String> {
+pub(crate) fn current_affinity() -> Option<String> {
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
     let rc =
         unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
@@ -181,7 +181,7 @@ pub fn current_affinity() -> Option<String> {
 /// The CPUs this thread is currently allowed to run on. Always `None` on
 /// non-Linux platforms, which have no reservation to report against.
 #[cfg(not(target_os = "linux"))]
-pub fn current_affinity() -> Option<String> {
+pub(crate) fn current_affinity() -> Option<String> {
     None
 }
 
