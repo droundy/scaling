@@ -593,7 +593,7 @@ pub use self::bench::Timing;
 
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
-pub use self::metrics::{IntoMetric, Metric, MetricColumn, Metrics, Unit};
+pub use self::metrics::{MetricColumn, Metrics, Unit};
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::{Group, Measurement, Report, TypedInput};
 

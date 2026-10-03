@@ -576,11 +576,11 @@ impl GroupBuilder {
                 let Some((_, metrics)) = column.cells.get(candidate) else {
                     continue;
                 };
-                for metric in metrics.iter() {
-                    if !columns.iter().any(|c| c.name == metric.name) {
+                for (name, _, unit) in metrics.iter() {
+                    if !columns.iter().any(|c| c.name == name) {
                         columns.push(MetricColumn {
-                            name: metric.name.clone(),
-                            unit: metric.unit,
+                            name: name.to_string(),
+                            unit,
                             values: Vec::new(),
                         });
                     }
@@ -596,7 +596,7 @@ impl GroupBuilder {
                         .iter()
                         .map(|(_, cells)| {
                             let (_, metrics) = cells.cells.get(candidate)?;
-                            Some(metrics.get(&column.name)?.value)
+                            metrics.get(&column.name)
                         })
                         .collect()
                 })

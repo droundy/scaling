@@ -84,17 +84,17 @@ fn three_digits(x: f64) -> String {
 
 /// One named number about a cell.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Metric {
-    /// What the column is called.
-    pub name: String,
-    /// The value, in `unit`.
-    pub value: f64,
-    /// What it is counted in.
-    pub unit: Unit,
+struct Metric {
+    name: String,
+    value: f64,
+    unit: Unit,
 }
 
 /// What a value can be turned into a metric from: any number, or an
 /// `Option` of one, where `None` leaves the metric out.
+///
+/// Public only so that it can bound the methods of [`Metrics`]. It is not
+/// exported, so it cannot be named outside the crate, or implemented.
 pub trait IntoMetric {
     /// The value as an `f64`, or `None` to say there is none.
     fn into_metric(self) -> Option<f64>;
@@ -128,12 +128,13 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
 ///     .ratio("per item", out.len() as f64 / 16.0)
 ///     .value("throughput", 1.5e6)
 ///     .unit(Unit::Custom(" ops/s"));
-/// assert_eq!(metrics.get("size").unwrap().value, 2048.0);
+/// assert_eq!(metrics.get("size").unwrap(), 2048.0);
 /// assert_eq!(metrics.iter().count(), 3);
 /// ```
 ///
-/// A name given twice keeps the later value, in the earlier position. A value
-/// of `None` leaves the metric out, so it shows as missing in the table.
+/// A value can be any integer or float, or an `Option` of one. A name given
+/// twice keeps the later value, in the earlier position, and a value of `None`
+/// leaves the metric out, so it shows as missing in the table.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metrics {
     metrics: Vec<Metric>,
@@ -311,14 +312,20 @@ impl Metrics {
         self
     }
 
-    /// Every metric, in the order they were added.
-    pub fn iter(&self) -> impl Iterator<Item = &Metric> {
-        self.metrics.iter()
+    /// Every metric as its name, value and unit, in the order they were
+    /// added.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, f64, Unit)> {
+        self.metrics
+            .iter()
+            .map(|metric| (metric.name.as_str(), metric.value, metric.unit))
     }
 
-    /// The metric of this name, if there is one.
-    pub fn get(&self, name: &str) -> Option<&Metric> {
-        self.metrics.iter().find(|m| m.name == name)
+    /// The value of the metric of this name, if there is one.
+    pub fn get(&self, name: &str) -> Option<f64> {
+        self.metrics
+            .iter()
+            .find(|metric| metric.name == name)
+            .map(|metric| metric.value)
     }
 
     /// Whether there are no metrics.
@@ -384,7 +391,7 @@ mod tests {
             .bytes("a", 1usize)
             .bytes("b", 2usize)
             .bytes("a", 3usize);
-        let values: Vec<_> = m.iter().map(|m| (m.name.as_str(), m.value)).collect();
+        let values: Vec<_> = m.iter().map(|(name, value, _)| (name, value)).collect();
         assert_eq!(values, [("a", 3.0), ("b", 2.0)]);
     }
 
@@ -394,7 +401,7 @@ mod tests {
             .bytes("size", None::<usize>)
             .bytes("x", Some(4u8));
         assert!(m.get("size").is_none());
-        assert_eq!(m.get("x").unwrap().value, 4.0);
+        assert_eq!(m.get("x").unwrap(), 4.0);
     }
 
     #[test]
@@ -403,8 +410,9 @@ mod tests {
             .value("first", 1.0)
             .value("rate", 2.0)
             .unit(Unit::Custom("/s"));
-        assert_eq!(m.get("first").unwrap().unit, Unit::Custom(""));
-        assert_eq!(m.get("rate").unwrap().unit, Unit::Custom("/s"));
+        let unit = |name: &str| m.iter().find(|(n, _, _)| *n == name).unwrap().2;
+        assert_eq!(unit("first"), Unit::Custom(""));
+        assert_eq!(unit("rate"), Unit::Custom("/s"));
         // On an empty record there is nothing to change.
         assert!(Metrics::new().unit(Unit::Bytes).is_empty());
     }
@@ -426,10 +434,7 @@ mod tests {
             retained_bytes: -120,
         }));
         assert!(!m.wants_allocation());
-        let got: Vec<_> = m
-            .iter()
-            .map(|m| (m.name.as_str(), m.value, m.unit))
-            .collect();
+        let got: Vec<_> = m.iter().collect();
         assert_eq!(
             got,
             [
@@ -448,14 +453,14 @@ mod tests {
         let mut m = Metrics::new().peak_bytes().bytes("peak", 5usize);
         assert!(!m.wants_allocation());
         m.resolve_allocation(None);
-        assert_eq!(m.get("peak").unwrap().value, 5.0);
+        assert_eq!(m.get("peak").unwrap(), 5.0);
     }
 
     #[test]
     fn nothing_to_resolve_needs_no_counts() {
         let mut m = Metrics::new().bytes("size", 1usize);
         m.resolve_allocation(None);
-        assert_eq!(m.get("size").unwrap().value, 1.0);
+        assert_eq!(m.get("size").unwrap(), 1.0);
     }
 
     #[test]
