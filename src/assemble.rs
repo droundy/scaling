@@ -1588,7 +1588,7 @@ pub(crate) mod lane_tests {
 
     /// `candidate`, saying that it returns an `O` that a metrics function
     /// can take.
-    pub(crate) fn returning<O: 'static>(mut candidate: Candidate, ty: &'static str) -> Candidate {
+    pub(crate) fn returning<O: 'static>(mut candidate: Candidate) -> Candidate {
         fn no_metrics(
             set: crate::registry::InputGroup<ErasedInput>,
             _: &str,
@@ -1598,7 +1598,6 @@ pub(crate) mod lane_tests {
         }
         candidate.metrics = Some(crate::registry::CandidateMetrics {
             output_type: TypeId::of::<O>,
-            output_type_name: ty,
             add_alt: no_metrics,
         });
         candidate
@@ -2399,9 +2398,9 @@ mod metrics_pairing {
     /// `u32`, all on the unit input.
     fn candidates() -> Vec<&'static Candidate> {
         leak_c(vec![
-            returning::<Vec<u8>>(cand::<()>("g", "a", "()", true), "Vec<u8>"),
-            returning::<Vec<u8>>(cand::<()>("g", "b", "()", false), "Vec<u8>"),
-            returning::<u32>(cand::<()>("g", "c", "()", false), "u32"),
+            returning::<Vec<u8>>(cand::<()>("g", "a", "()", true)),
+            returning::<Vec<u8>>(cand::<()>("g", "b", "()", false)),
+            returning::<u32>(cand::<()>("g", "c", "()", false)),
         ])
     }
 
@@ -2522,7 +2521,7 @@ mod metrics_pairing {
     fn a_candidate_that_cannot_hand_on_its_output_has_no_function() {
         let cs = leak_c(vec![
             cand::<()>("g", "plain", "()", true),
-            returning::<u32>(cand::<()>("g", "typed", "()", false), "u32"),
+            returning::<u32>(cand::<()>("g", "typed", "()", false)),
         ]);
         let (plan, _) = plan_with_metrics(
             &[],

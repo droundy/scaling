@@ -732,12 +732,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     #body;
                 }
                 ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered {
-                        name: #name,
-                        crate_name: ::core::env!("CARGO_PKG_NAME"),
-                        crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        add: #shim,
-                    }
+                    ::scaling::registry::Registered::new(
+                        #name,
+                        ::core::env!("CARGO_PKG_NAME"),
+                        ::core::env!("CARGO_PKG_VERSION"),
+                        #shim,
+                    )
                 }
             }
         }
@@ -806,12 +806,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     #body;
                 }
                 ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered {
-                        name: #name,
-                        crate_name: ::core::env!("CARGO_PKG_NAME"),
-                        crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        add: #shim,
-                    }
+                    ::scaling::registry::Registered::new(
+                        #name,
+                        ::core::env!("CARGO_PKG_NAME"),
+                        ::core::env!("CARGO_PKG_VERSION"),
+                        #shim,
+                    )
                 }
             }
         }
@@ -930,7 +930,6 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         let metrics = match &output {
             Some(output) => {
                 let alt_metrics = format_ident!("__scaling_malt_metrics_{}_{}", fname, n);
-                let output_name = type_name(output);
                 out.extend(quote! {
                     #[doc(hidden)]
                     fn #alt_metrics(
@@ -938,12 +937,12 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                         __name: &str,
                         __metrics: &'static ::scaling::registry::MetricsFn,
                     ) -> ::scaling::registry::InputGroup<::scaling::registry::ErasedInput> {
-                        let __set = if __metrics.input_type.is_some() {
+                        let __set = if __metrics.reads_input() {
                             __set.add_input_metrics_with_input(
                                 __name,
                                 |__e: &mut ::scaling::registry::ErasedInput| #call,
                                 move |__before: &::scaling::registry::ErasedInput, __out: #output| {
-                                    (__metrics.eval)(
+                                    __metrics.call(
                                         ::core::option::Option::Some(__before),
                                         ::std::boxed::Box::new(__out),
                                     )
@@ -954,14 +953,14 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                                 __name,
                                 |__e: &mut ::scaling::registry::ErasedInput| #call,
                                 move |__out: #output| {
-                                    (__metrics.eval)(
+                                    __metrics.call(
                                         ::core::option::Option::None,
                                         ::std::boxed::Box::new(__out),
                                     )
                                 },
                             )
                         };
-                        if __metrics.allocation {
+                        if __metrics.counts_allocations() {
                             __set.counting_allocations()
                         } else {
                             __set
@@ -969,14 +968,13 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     }
                 });
                 quote! {
-                    ::core::option::Option::Some(::scaling::registry::CandidateMetrics {
-                        output_type: ::core::any::TypeId::of::<#output>,
-                        output_type_name: #output_name,
-                        add_alt: #alt_metrics,
-                    })
+                    .with_metrics(::scaling::registry::CandidateMetrics::new(
+                        ::core::any::TypeId::of::<#output>,
+                        #alt_metrics,
+                    ))
                 }
             }
-            None => quote!(::core::option::Option::None),
+            None => quote!(),
         };
         out.extend(quote! {
             #[doc(hidden)]
@@ -987,17 +985,16 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 #alt_body
             }
             ::scaling::inventory::submit! {
-                ::scaling::registry::Candidate {
-                    groups: #groups,
-                    name: #name,
-                    input_type: #ty_id,
-                    input_type_name: #ty_name,
-                    is_baseline: #baseline,
-                    crate_name: ::core::env!("CARGO_PKG_NAME"),
-                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    add_alt: #alt,
-                    metrics: #metrics,
-                }
+                ::scaling::registry::Candidate::new(
+                    #groups,
+                    #name,
+                    #ty_id,
+                    #ty_name,
+                    #baseline,
+                    ::core::env!("CARGO_PKG_NAME"),
+                    ::core::env!("CARGO_PKG_VERSION"),
+                    #alt,
+                ) #metrics
             }
         });
     }
@@ -1083,20 +1080,23 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     let allocation = args.allocation;
     let shim = format_ident!("__scaling_metrics_{}", fname);
     let output_name = type_name(&output);
-    let (input_type, input_name, call) = match &input {
+    let (reads_input, call) = match &input {
         Some(ty) => (
-            quote!(::core::option::Option::Some(::core::any::TypeId::of::<#ty>)),
-            type_name(ty),
+            {
+                let input_name = type_name(ty);
+                quote!(.reading_input(::core::any::TypeId::of::<#ty>, #input_name))
+            },
             quote!(#fname(
                 __pristine.expect("scaling: this metrics function reads the input, but none was kept - please report this bug").get::<#ty>(),
                 __output,
             )),
         ),
-        None => (
-            quote!(::core::option::Option::None),
-            quote!(""),
-            quote!(#fname(__output)),
-        ),
+        None => (quote!(), quote!(#fname(__output))),
+    };
+    let counts_allocations = if allocation {
+        quote!(.counting_allocations())
+    } else {
+        quote!()
     };
     Ok(quote! {
         #[allow(clippy::ptr_arg)]
@@ -1115,18 +1115,15 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             #call
         }
         ::scaling::inventory::submit! {
-            ::scaling::registry::MetricsFn {
-                groups: #groups,
-                name: #name,
-                output_type: ::core::any::TypeId::of::<#output>,
-                output_type_name: #output_name,
-                input_type: #input_type,
-                input_type_name: #input_name,
-                crate_name: ::core::env!("CARGO_PKG_NAME"),
-                crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                allocation: #allocation,
-                eval: #shim,
-            }
+            ::scaling::registry::MetricsFn::new(
+                #groups,
+                #name,
+                ::core::any::TypeId::of::<#output>,
+                #output_name,
+                ::core::env!("CARGO_PKG_NAME"),
+                ::core::env!("CARGO_PKG_VERSION"),
+                #shim,
+            ) #reads_input #counts_allocations
         }
     })
 }
@@ -1288,15 +1285,15 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         out.extend(quote! {
             #shim_body
             ::scaling::inventory::submit! {
-                ::scaling::registry::Input {
-                    groups: #groups,
-                    name: #name,
-                    crate_name: ::core::env!("CARGO_PKG_NAME"),
-                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    type_id: ::core::any::TypeId::of::<#ty>,
-                    type_name: #ty_name,
-                    make: #shim,
-                }
+                ::scaling::registry::Input::new(
+                    #groups,
+                    #name,
+                    ::core::env!("CARGO_PKG_NAME"),
+                    ::core::env!("CARGO_PKG_VERSION"),
+                    ::core::any::TypeId::of::<#ty>,
+                    #ty_name,
+                    #shim,
+                )
             }
         });
     }
