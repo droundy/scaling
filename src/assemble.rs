@@ -379,9 +379,9 @@ impl Display for Diagnostic {
             Diagnostic::AllocatorNotInstalled { name } => write!(
                 f,
                 "the metrics function `{name}` counts allocations, but \
-                 `scaling::alloc::CountingAlloc` is not the global allocator, so it would \
+                 `scaling::Allocator` is not the global allocator, so it would \
                  count nothing - add `#[global_allocator] static ALLOC: \
-                 scaling::alloc::CountingAlloc = scaling::alloc::CountingAlloc::new();`",
+                 scaling::Allocator = scaling::Allocator::new();`",
             ),
             Diagnostic::OrphanMetrics {
                 name,

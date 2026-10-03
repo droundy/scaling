@@ -276,32 +276,33 @@ numbers you want to see:
 
 ```rust,ignore
 #[global_allocator]
-static ALLOC: scaling::alloc::CountingAlloc = scaling::alloc::CountingAlloc::new();
+static ALLOC: scaling::Allocator = scaling::Allocator::new();
 
 #[scaling::metrics(group = "encode", allocation)]
 fn sizes(out: Vec<u8>) -> scaling::Metrics {
     scaling::Metrics::new()
         .bytes("size", out.len())
-        .peak_bytes()      // the most it held at once: a `peak` column
-        .allocations()     // how many times it asked for memory: `allocs`
-        .allocated_bytes() // how much it asked for in all: `allocated`
-        .retained_bytes()  // how much it still held when the call ended: `retained`
+        .peak_allocated_bytes()  // the most it held at once: `alloc peak`
+        .allocation_count()      // how many times it asked for memory: `alloc count`
+        .total_allocated_bytes() // how much it asked for in all: `alloc total`
+        .net_allocated_bytes()   // held at the end, net of what it freed: `alloc net`
 }
 ```
 
-A function can also read the counts itself, to build a metric of its own from
-them, with `Metrics::allocation_counts()`:
+A function can also read the numbers itself, to build a metric of its own from
+them, with `Metrics::allocations()`:
 
 ```rust,ignore
 #[scaling::metrics(group = "encode", allocation)]
 fn overhead(out: Vec<u8>) -> scaling::Metrics {
-    let held = scaling::Metrics::allocation_counts().map_or(0, |c| c.retained_bytes);
+    let held = scaling::Metrics::allocations().map_or(0, |a| a.net_allocated_bytes);
     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
 }
 ```
 
 It returns `None` in a function that is not marked `allocation`, since its run
-was not counted.
+was not counted, and `Metrics::allocator_installed()` says whether the
+allocator is in use.
 
 Only the candidate's own call is counted: not its input, which it was
 handed, and not what `sizes` does with the output. A program that asks for

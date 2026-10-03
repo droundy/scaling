@@ -1,53 +1,34 @@
-//! Counting allocations, so that a benchmark can report how much memory it
-//! used as well as how long it took.
-//!
-//! A library cannot install a global allocator for the program using it, so
-//! this takes one line in the benchmark binary:
-//!
-//! ```ignore
-//! #[global_allocator]
-//! static ALLOC: scaling::alloc::CountingAlloc = scaling::alloc::CountingAlloc::new();
-//! ```
-//!
-//! After that, a metrics function marked `allocation` is given the numbers
-//! for its candidate's run, and asks for the ones it wants to see with
-//! [`Metrics::peak_bytes`](crate::Metrics::peak_bytes) and the others beside
-//! it. Nothing here is needed to use those; [`measure`] is for counting
-//! some other piece of code.
-//!
-//! # What is counted
-//!
-//! Every allocation that goes through Rust's global allocator, made by the
-//! thread that is measuring. Memory the program gets some other way (a
-//! memory map, a C library's own `malloc`) is not seen, and neither are other
-//! threads' allocations: the counters are per thread, so a benchmark that
-//! hands its work to a thread pool is measured only for what it does itself.
-//!
-//! The counters are always running once the allocator is installed, which
-//! costs a few instructions on every allocation - including in a timing loop.
-//! A benchmark that allocates heavily is therefore a little slower than it
-//! would be without the allocator, and the baseline slows with the rest.
+//! Counting allocations: [`Allocator`], which counts, and [`Allocations`],
+//! what it counted. Both are exported at the crate root.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// What a stretch of code allocated.
+/// What a candidate allocated during its call: what
+/// [`Metrics::allocations`](crate::Metrics::allocations) returns, and what the
+/// allocation metrics show.
+///
+/// Only the candidate's own call, on its own thread, is counted. Its input is
+/// not, since it was handed that, and neither is what a metrics function does
+/// afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AllocStats {
-    /// The most memory it held at once, beyond what was already held when it
-    /// started.
-    pub peak_bytes: u64,
+pub struct Allocations {
     /// How many times it asked for memory: allocating, and growing or
     /// shrinking an allocation, each count once.
-    pub allocations: u64,
+    pub allocation_count: u64,
+    /// The most memory it held at once, beyond what was already held when it
+    /// started.
+    pub peak_allocated_bytes: u64,
     /// How much memory it asked for in all, counting what it asked for again
     /// each time. Growing an allocation counts only the growth.
-    pub allocated_bytes: u64,
-    /// How much more memory it held when it ended than when it began: what
-    /// it returned, and anything else it kept. Negative when it freed memory
-    /// it was holding to begin with. Counted before its result is dropped.
-    pub retained_bytes: i64,
+    pub total_allocated_bytes: u64,
+    /// How much more memory it held when it ended than when it began: what it
+    /// allocated less what it freed. That is usually what it returned, but
+    /// also anything it kept some other way, and it is negative when it freed
+    /// memory it was holding to begin with. Counted before its result is
+    /// dropped.
+    pub net_allocated_bytes: i64,
 }
 
 /// One thread's running totals. Plain cells: they are only ever touched by
@@ -79,33 +60,31 @@ thread_local! {
     /// The counts of the run whose metrics function is being called, for
     /// [`current`]. Apart from the counters above because it is only touched
     /// outside the allocator, where nothing stops it from being richer.
-    static CURRENT: Cell<Option<AllocStats>> = const { Cell::new(None) };
+    static CURRENT: Cell<Option<Allocations>> = const { Cell::new(None) };
 }
 
-/// Set by the first allocation through [`CountingAlloc`], which is how the
+/// Set by the first allocation through [`Allocator`], which is how the
 /// rest of the crate can tell that it is the global allocator.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Whether [`CountingAlloc`] is the global allocator.
-///
-/// Only meaningful once the program has allocated, which anything that has
-/// reached `main` has.
-pub fn installed() -> bool {
+/// Whether [`Allocator`] is the global allocator. See
+/// [`Metrics::allocator_installed`](crate::Metrics::allocator_installed).
+pub(crate) fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
 /// The counts of the run a metrics function is being called for, if it is
 /// being called for one that was counted. See
 /// [`Metrics::counts`](crate::Metrics::counts).
-pub(crate) fn current() -> Option<AllocStats> {
+pub(crate) fn current() -> Option<Allocations> {
     CURRENT.with(Cell::get)
 }
 
 /// Makes [`current`] return `stats` until it is dropped, and then what it
 /// returned before.
-pub(crate) struct Provided(Option<AllocStats>);
+pub(crate) struct Provided(Option<Allocations>);
 
-pub(crate) fn provide(stats: Option<AllocStats>) -> Provided {
+pub(crate) fn provide(stats: Option<Allocations>) -> Provided {
     Provided(CURRENT.with(|current| current.replace(stats)))
 }
 
@@ -117,20 +96,50 @@ impl Drop for Provided {
     }
 }
 
-/// A global allocator that counts, and otherwise leaves everything to the
-/// system's.
-pub struct CountingAlloc;
+/// A global allocator that counts what a benchmark allocates, and otherwise
+/// leaves everything to the system's.
+///
+/// A library cannot install a global allocator for the program using it, so
+/// this takes one line in the benchmark binary:
+///
+/// ```ignore
+/// #[global_allocator]
+/// static ALLOC: scaling::Allocator = scaling::Allocator::new();
+/// ```
+///
+/// After that, a metrics function marked `allocation` is given the numbers for
+/// its candidate's run, and asks for the ones it wants to see with
+/// [`Metrics::peak_allocated_bytes`](crate::Metrics::peak_allocated_bytes) and
+/// the others beside it, or reads them with
+/// [`Metrics::allocations`](crate::Metrics::allocations).
+///
+/// # What is counted
+///
+/// Every allocation that goes through Rust's global allocator, made by the
+/// thread that is running the candidate. Memory the program gets some other way
+/// (a memory map, a C library's own `malloc`) is not seen, and neither are other
+/// threads' allocations: the counters are per thread, so a benchmark that hands
+/// its work to a thread pool is counted only for what it does itself.
+///
+/// # What it costs
+///
+/// The counters run whenever the allocator is installed, not only on the run
+/// that is counted, which costs a few instructions on every allocation -
+/// including in a timing loop. A benchmark that allocates heavily is therefore a
+/// little slower than it would be without the allocator, and the baseline slows
+/// with the rest. There is no switch for it other than not installing it.
+pub struct Allocator;
 
-impl CountingAlloc {
-    /// For `static ALLOC: CountingAlloc = CountingAlloc::new();`.
+impl Allocator {
+    /// For `static ALLOC: Allocator = Allocator::new();`.
     pub const fn new() -> Self {
-        CountingAlloc
+        Allocator
     }
 }
 
-impl Default for CountingAlloc {
+impl Default for Allocator {
     fn default() -> Self {
-        CountingAlloc::new()
+        Allocator::new()
     }
 }
 
@@ -158,7 +167,7 @@ fn shrank(held: i64) {
 
 // SAFETY: every method defers to `System`, which is a correct allocator, and
 // only adds bookkeeping that does not allocate and cannot unwind.
-unsafe impl GlobalAlloc for CountingAlloc {
+unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
@@ -197,14 +206,14 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
 /// Run `f`, and report what it allocated.
 ///
-/// All zeros if [`CountingAlloc`] is not the global allocator, which
-/// [`installed`] says.
+/// All zeros if [`Allocator`] is not the global allocator, which
+/// [`Metrics::allocator_installed`](crate::Metrics::allocator_installed) says.
 ///
 /// # Nesting
 ///
 /// A `measure` inside another restarts the counting, so the outer one
 /// reports only what came after the inner one ended.
-pub fn measure<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
+pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocations) {
     let start = COUNTERS.with(|c| {
         c.peak.set(c.live.get());
         c.allocations.set(0);
@@ -214,11 +223,11 @@ pub fn measure<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
     let result = f();
     // Read while `result` is still alive: what the closure hands back is
     // part of what it kept.
-    let stats = COUNTERS.with(|c| AllocStats {
-        peak_bytes: (c.peak.get() - start).max(0) as u64,
-        allocations: c.allocations.get(),
-        allocated_bytes: c.allocated.get(),
-        retained_bytes: c.live.get() - start,
+    let stats = COUNTERS.with(|c| Allocations {
+        allocation_count: c.allocations.get(),
+        peak_allocated_bytes: (c.peak.get() - start).max(0) as u64,
+        total_allocated_bytes: c.allocated.get(),
+        net_allocated_bytes: c.live.get() - start,
     });
     (result, stats)
 }
@@ -227,10 +236,10 @@ pub fn measure<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
 mod tests {
     use super::*;
 
-    fn stats(retained: i64) -> AllocStats {
-        AllocStats {
-            retained_bytes: retained,
-            ..AllocStats::default()
+    fn stats(retained: i64) -> Allocations {
+        Allocations {
+            net_allocated_bytes: retained,
+            ..Allocations::default()
         }
     }
 

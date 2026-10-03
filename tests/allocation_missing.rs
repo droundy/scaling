@@ -16,7 +16,9 @@ fn twice() -> Vec<u8> {
 
 #[scaling::metrics(group = "build", allocation)]
 fn counted(out: Vec<u8>) -> Metrics {
-    Metrics::new().bytes("size", out.len()).peak_bytes()
+    Metrics::new()
+        .bytes("size", out.len())
+        .peak_allocated_bytes()
 }
 
 #[test]

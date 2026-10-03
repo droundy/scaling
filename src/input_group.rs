@@ -1050,13 +1050,13 @@ mod tests {
             .add_input_metrics(
                 "only",
                 |_: &mut ()| 1u8,
-                |_| Metrics::new().peak_bytes().allocations(),
+                |_| Metrics::new().peak_allocated_bytes().allocation_count(),
             )
             .counting_allocations()
             .run();
         let m = &timings.metrics()[0];
-        assert_eq!(m.get("peak").unwrap(), 0.0);
-        assert_eq!(m.get("allocs").unwrap(), 0.0);
+        assert_eq!(m.get("alloc peak").unwrap(), 0.0);
+        assert_eq!(m.get("alloc count").unwrap(), 0.0);
     }
 
     #[test]
@@ -1064,7 +1064,11 @@ mod tests {
     fn asking_for_allocations_of_an_uncounted_run_is_an_error() {
         quick()
             .input_group()
-            .add_input_metrics("only", |_: &mut ()| 1u8, |_| Metrics::new().peak_bytes())
+            .add_input_metrics(
+                "only",
+                |_: &mut ()| 1u8,
+                |_| Metrics::new().peak_allocated_bytes(),
+            )
             .run();
     }
 }

@@ -91,14 +91,14 @@ which counts to show:
 ```rust
 #[scaling::metrics(group = "serialize", allocation)]
 fn sizes(out: Vec<u8>) -> scaling::Metrics {
-    scaling::Metrics::new().bytes("size", out.len()).peak_bytes().allocations()
+    scaling::Metrics::new().bytes("size", out.len()).peak_allocated_bytes().allocation_count()
 }
 ```
 
 The harness counts the candidate's call on its one extra run, outside the
 timing, and fills the values in once the function has returned. The library
 cannot install a global allocator for the program using it, so
-`scaling::alloc::CountingAlloc` is one line in the benchmark binary.
+`scaling::Allocator` is one line in the benchmark binary.
 
 The same shape can carry other things measured around the run (an `elapsed`
 argument and `.elapsed()`, page faults): the attribute says what to observe,
@@ -193,11 +193,11 @@ postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
    is not done.
 4. Allocation counting, in place of the observer functions first planned:
    `allocation` as an argument of `#[scaling::metrics(..)]`, and
-   `Metrics::peak_bytes`, `allocations`, `allocated_bytes` and `retained_bytes` to choose which
+   `Metrics::allocation_count`, `peak_allocated_bytes`, `total_allocated_bytes` and `net_allocated_bytes` to choose which
    counts to show. The harness counts the candidate's own call on the extra
    run, and fills in the values after the function returns, so it is the same
    run whose output is analysed and the function's own allocations are not
-   counted. `scaling::alloc::CountingAlloc` is the allocator the program
+   counted. `scaling::Allocator` is the allocator the program
    installs, with per-thread counters; assembly refuses a program that asks
    for counts without it. Candidates whose output cannot be named have no
    metrics function and so no counts.

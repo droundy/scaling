@@ -14,6 +14,8 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 
+/// Counts what a closure allocates, for the tests of the counting allocator.
+pub use crate::alloc::measure as measure_allocations;
 pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
 
@@ -289,7 +291,7 @@ pub struct MetricsFn {
     pub crate_name: &'static str,
     pub crate_version: &'static str,
     /// Whether the candidate's run is counted for its allocations, which the
-    /// function can then ask to show. Needs [`crate::alloc::CountingAlloc`]
+    /// function can then ask to show. Needs [`crate::Allocator`]
     /// to be the global allocator.
     pub allocation: bool,
     /// Calls the function. The input is given when [`MetricsFn::input_type`]
