@@ -214,7 +214,7 @@ unsafe impl GlobalAlloc for Allocator {
 ///
 /// A `measure` inside another restarts the counting, so the outer one
 /// reports only what came after the inner one ended.
-pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocations) {
+pub(crate) fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocations) {
     let start = COUNTERS.with(|c| {
         c.peak.set(c.live.get());
         c.allocations.set(0);

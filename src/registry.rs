@@ -14,8 +14,6 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 
-/// Counts what a closure allocates, for the tests of the counting allocator.
-pub use crate::alloc::measure as measure_allocations;
 pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
 
