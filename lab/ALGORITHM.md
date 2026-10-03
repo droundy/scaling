@@ -452,7 +452,10 @@ the quiet machine's memory-pair blowups from 159 to 41.
 
 **Why refuse.** A number whose two measurements disagree beyond their error
 bars is not known to the precision asked for, whatever either bar says.
-Printing it with a caveat invites someone to act on it. The progression is
+Printing it with a caveat invites someone to act on it. Refusing means
+the result's status is "not reproducible", with the reason, instead of a
+number. What happens next - failing the run, retrying, or carrying on - is
+up to whatever consumed the result. The progression is
 natural:
 - a refusal is a failed measurement;
 - a retry is a refusal with a loop around it;
@@ -610,16 +613,15 @@ The lab's `replay.rs` has the first two as unit tests.
   relative to the canary, when it moves (section 4).
 - **A single function** stops on the uncertainty of its time per
   iteration, in whichever of those two it will be reported.
+- **The algorithm reports; the consumer decides.** Every result carries
+  its status: measured to the goal, out of time (`(limit)`), or not
+  reproducible, with the reason. The algorithm never exits, panics or
+  fails a run on its own account. Whether an unreproducible result should
+  fail `cargo test`, or be printed and ignored, is the caller's policy.
 
 ## Decisions still open
 
-1. **What failing loudly does.** When a result cannot be reproduced to its
-   goal, it is not printed as a number. That is the "fail loudly, a
-   refusal rather than a little message added to a number" from early in
-   the lab. Still open: whether that also makes the process exit non-zero,
-   failing `cargo test` or `cargo bench`, and whether some flag lets a
-   run through anyway.
-2. **Lone `bench()` calls.** Whether a single call outside a suite does two
+1. **Lone `bench()` calls.** Whether a single call outside a suite does two
    back-to-back passes, or one, by default.
 
 ---
@@ -733,6 +735,10 @@ There are two different failures, and they are reported differently:
       the CPU clock moved by up to 12% during the run
       ask for a looser goal, or quiesce the machine
   ```
+
+Either way the result says which happened, so code consuming it can
+decide what to do: fail a test, retry later, or carry on. `scaling` itself
+only reports.
 
 You can ask for a looser goal (`Config::relative(0.05)`), or for no goal at
 all - measure until the time limit and report whatever accuracy that buys.
