@@ -935,7 +935,7 @@ async fn measure_scaling(
     loop {
         let (means, ses): (Vec<f64>, Vec<f64>) = acc.iter().map(|a| a.mean_and_stderr()).unzip();
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
-        // The same floor `bench` uses, and for the same reason: six rounds
+        // The same floor an ordinary benchmark uses, and for the same reason: six rounds
         // of a benchmark at its measurable floor is under two milliseconds
         // of evidence, and a fit that agrees over six rounds by luck is
         // exactly the one that stops early and reports a narrow error bar.

@@ -1,7 +1,8 @@
 //! Measuring one or more alternatives over a shared input: [`InputGroup`].
 //!
 //! The reason to time all alternatives together rather than in pairs is the
-//! same reason a comparison's alternatives beat two separate [`bench`] calls.
+//! same reason a comparison's alternatives beat two separate benchmarks run one
+//! after the other.
 //! Whatever the machine does slowly - a clock drifting, a package warming -
 //! lands on every alternative within the same round and cancels out of the
 //! differences between them. Measured one after another instead, each would
@@ -12,16 +13,67 @@ use super::*;
 use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
-/// Never stop *voluntarily* on fewer rounds than this. See
-/// [`crate::MIN_SAMPLE_TIME`], which does most of the work.
-const MIN_SAMPLES: usize = 6;
+/// Never stop *voluntarily* on fewer rounds than this.
+///
+/// A standard deviation estimated from `k` points is itself uncertain by
+/// roughly `1/sqrt(2(k-1))` - about 32% at `k = 6`, and over 70% at
+/// `k = 2`. Stopping the instant a noisy estimate happens to dip below the
+/// target would systematically favour the runs that got lucky, so we
+/// require a handful of rounds before believing the standard error at all.
+/// [`crate::MIN_SAMPLE_TIME`] does most of the work, and this is the floor
+/// beneath it.
+///
+/// Note the emphasis: this is a floor on *concluding we are done*, not on
+/// reporting. The selection effect it defends against exists only when the
+/// standard error is the thing that stops us. If instead
+/// [`max_time`](crate::Config::with_max_time) runs out first - which is what
+/// happens to a slow function on a short budget - nothing has been selected
+/// for, and the error bar from the three or four rounds we did manage is
+/// honest, wide, and a good deal more use than none at all. So a
+/// budget-forced stop reports whatever standard error it has (and sets
+/// [`Timing::hit_limit`]).
+///
+/// Not a knob: callers control accuracy with [`Config::relative`] and
+/// [`Config::absolute`], and cost with
+/// [`max_time`](crate::Config::with_max_time), and no useful benchmark wants
+/// a different answer here.
+pub(crate) const MIN_SAMPLES: usize = 6;
 
 /// How long one round - a batch of every alternative - should take.
 /// Calibration picks the batch size aiming for this.
+///
+/// Long enough that the two `Instant::now()` calls bracketing a round - on
+/// the order of 100 ns together - stay a rounding error against it, at about
+/// 0.1%, which is far below any accuracy worth asking for.
+///
+/// It was 1ms, and shortening it is nearly free. A benchmark stops when the
+/// standard error of the mean is small enough, and that error is set by the
+/// spread *between* samples, which for the benchmarks measured here is
+/// dominated by drift the batch size does not affect - so the same number
+/// of samples is needed either way, and each one costs a tenth as much:
+///
+/// ```none
+///                    reported at 1ms / at 100us      wall at 1ms / at 100us
+///   empty closure         0.5921 / 0.5933 ns             8.9 / 1.5 ms
+///   ~3ns of arithmetic    2.6236 / 2.6594 ns            13.2 / 1.4 ms
+///   ~2.9us of arithmetic  2880.7 / 2883.6 ns            10.7 / 1.4 ms
+///   noisy 1.7us workload  1753.2 / 1766.1 ns            10.3 / 5.9 ms
+/// ```
+///
+/// The answers are unchanged and the run-to-run spread is no worse; only
+/// the cost moves. The exception is a benchmark taking an input,
+/// which report about 20% lower, because a smaller batch means a smaller
+/// input vector to index into - that lookup is harness overhead
+/// rather than the benchmark, so measuring less of it is a gain, but it is
+/// a visible change in what those two report.
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
-/// A backstop on the round count, so the accumulators cannot grow without
-/// bound.
+/// A backstop on the round count, so the vector of samples cannot grow
+/// without bound.
+///
+/// This is about memory, not about the measurement: `max_time` is the real
+/// budget, and at [`SAMPLE_TIME`] it allows ~100_000 rounds, ten times
+/// below this.
 const MAX_SAMPLES: usize = 1_000_000;
 
 /// A generator of inputs, type-erased so that all the alternatives can share
@@ -358,7 +410,7 @@ impl<I: 'static> InputGroup<I> {
         let _machine = Machine::claim();
         // `k` times the budget, because `k` timings come out of this: at the
         // single budget each alternative would get a `k`th of the wall clock
-        // a lone `bench` call is allowed, for the same target.
+        // a lone benchmark is allowed, for the same target.
         let clock = Clock::new(self.cfg.max_time * self.entries.len().max(1) as u32);
         // A family of `k - 1`: one comparison is reported per alternative
         // beyond the baseline, and nothing outside this set shares the
@@ -571,8 +623,16 @@ fn clone_into<I>(master: &[I], xs: &mut Vec<I>, clone_input: &dyn Fn(&I) -> I) {
 }
 
 /// Find a batch size whose measured duration, summed over every alternative,
-/// reaches [`SAMPLE_TIME`]: the same extrapolation
-/// [`Config::bench_make_input`] does, over a whole round.
+/// reaches [`SAMPLE_TIME`].
+///
+/// Returns the batch size and how many iterations of each alternative the
+/// probes ran, which count towards [`Timing::iterations`] even though their
+/// timings are discarded.
+///
+/// Calibration yields between probes, so that in a suite it is interleaved
+/// like everything else. Doing it eagerly instead would put every
+/// benchmark's choice of batch size at the very start of the session, in the
+/// one thermal state interleaving exists to stop trusting.
 async fn calibrate<I>(
     make_input: &mut GenInput<I>,
     entries: &mut [Entry<I>],
@@ -581,10 +641,30 @@ async fn calibrate<I>(
     clone_input: Option<&dyn Fn(&I) -> I>,
     clock: &Clock,
 ) -> (usize, u64) {
+    // A ceiling on the *total* cost of one probe, setup as well as timing.
+    // Ordinarily the extrapolation below is driven by the timed portion
+    // approaching `SAMPLE_TIME`, but when a benchmark's cost is optimised
+    // away that portion never grows however large `unit` gets - while untimed
+    // input construction does, unboundedly, and before the budget check can
+    // ever run, since the allocation is itself what takes the time. A
+    // hundredth of the budget rather than some large fraction of it, to bound
+    // memory as well: on fast hardware a looser ceiling buys proportionally
+    // more allocation before it fires.
     let probe_ceiling_ns = (clock.budget() / 100)
         .max(Duration::from_millis(5))
         .as_secs_f64()
         * 1e9;
+    // Two more ceilings on `unit`, needing no timing at all, whichever is
+    // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with the
+    // benchmark *and* the input both trivial (`|| {}`, an input of `()`) the
+    // optimiser can delete the whole batch, so the time reads as ~0 however
+    // large `unit` grows. `MAX_CALIBRATION_BYTES` covers an `I` whose
+    // per-clone cost is real but too small for `probe_ceiling_ns` to catch
+    // before millions of copies - an array, a plain struct - since `size_of`
+    // sees a `Vec` or `String` as its inline handle only. That last case is
+    // left to the wall-clock ceiling above, which bounds it only indirectly:
+    // between the three every `I` has some backstop and none has a hard
+    // guarantee, so keep inputs small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -615,6 +695,11 @@ async fn calibrate<I>(
         // age, and it does not matter which part of it was slow.
         let total_ns = probe_start.elapsed().as_secs_f64() * 1e9;
         probed += unit as u64;
+        // Accept immediately, without ever retrying at this size, as soon as
+        // *any* ceiling is reached: reaching the target is the ordinary case,
+        // `probe_ceiling_ns` is what saves us when construction dominates, and
+        // `unit_cap` is the timing-blind backstop above. Retrying here would
+        // just re-pay the same large cost for no benefit.
         if timed_ns >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
@@ -626,6 +711,12 @@ async fn calibrate<I>(
         if !clock.yield_now().await {
             return (unit, probed);
         }
+        // Extrapolate from whichever cost is closer to its own ceiling: the
+        // timed portion approaching the target, or the *total* probe cost
+        // approaching `probe_ceiling_ns`. Both factors are ceilings on how
+        // much bigger the *next* probe should be, so growth decelerates
+        // smoothly as either limit is approached instead of overshooting it by
+        // up to 100x.
         let factor_time = (target / timed_ns.max(1.0)).clamp(2.0, 100.0);
         let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
         unit = ((unit as f64 * factor_time.min(factor_safety)).ceil() as usize)

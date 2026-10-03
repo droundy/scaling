@@ -2,8 +2,8 @@
 //!
 //! The reason to run fifty benchmarks together rather than one after another
 //! is the same reason a comparison's alternatives beat two separate
-//! [`bench`] calls, and the reason [`InputGroup`] beats pairwise comparisons
-//! in pairs. Run in
+//! benchmarks run one after the other, and the reason [`InputGroup`] beats
+//! pairwise comparisons in pairs. Run in
 //! sequence, benchmark #1 samples the machine at t=0 and #50 samples it at
 //! t=500s, by which time the package is warmer and the clock has drifted;
 //! their numbers are then not comparable, and neither is either of them
@@ -229,7 +229,7 @@ impl Suite {
         self.push(name, clock.clone(), body(clock));
     }
 
-    /// Add a benchmark, as [`bench`](fn@bench) would run it.
+    /// Add a benchmark.
     pub fn add<F, O>(&mut self, name: &str, mut f: F)
     where
         F: FnMut() -> O + 'static,
@@ -237,7 +237,7 @@ impl Suite {
         self.add_make_input(name, || (), move |_: &mut ()| f())
     }
 
-    /// Add a benchmark over a mutable input, as [`bench_clone_input`] would run it.
+    /// Add a benchmark over a mutable input, cloned afresh for each call.
     pub fn add_input<F, I, O>(&mut self, name: &str, input: I, f: F)
     where
         F: FnMut(&mut I) -> O + 'static,
@@ -246,8 +246,7 @@ impl Suite {
         self.add_make_input(name, move || input.clone(), f)
     }
 
-    /// Add a benchmark over generated inputs, as [`bench_make_input`] would
-    /// run it.
+    /// Add a benchmark over generated inputs, a fresh one for each call.
     pub fn add_make_input<G, F, I, O>(&mut self, name: &str, make_input: G, f: F)
     where
         G: FnMut() -> I + 'static,

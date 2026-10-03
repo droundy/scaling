@@ -445,10 +445,9 @@ own input. This has the desired effect, but looks a bit weird.
 
 This applies equally to [`bench_scaling`] and to a comparison's
 alternatives, not just to a plain `#[bench]`: every timed call, whichever
-of the three it is, is protected by [`std::hint::black_box`] the same way -
-a comparison's own timing loop is shared with [`bench`] rather than having
-its own, so there is one place this is done rather than three. A scaling
-benchmark has one further wrinkle: the size `N` itself is also passed
+of the three it is, is protected by [`std::hint::black_box`] the same way.
+(A plain `#[bench]` runs as a comparison of one alternative, so those two
+share their timing loop.) A scaling benchmark has one further wrinkle: the size `N` itself is also passed
 through `black_box` before the call, not just the result afterward -
 without that, the optimiser can see `N` as a literal within one round and
 hoist the call out on that basis alone, the same elimination this caveat
@@ -1097,8 +1096,17 @@ impl Running {
         self.m2 += delta * (x - self.mean);
     }
 
-    /// Mean, and the standard error *of that mean*, in nanoseconds. See
-    /// [`Config::bench_make_input`] for why batching does not bias this.
+    /// Mean, and the standard error *of that mean*, in nanoseconds.
+    ///
+    /// Batching does not bias this. Because each sample already averages
+    /// `unit` iterations, `sd(x) = sigma_iter / sqrt(unit)`, so the standard
+    /// error of the mean over `k` samples equals `sigma_iter / sqrt(k * unit)`:
+    /// the standard error over all `k * unit` raw iterations. The stopping
+    /// rule is therefore correct regardless of what `unit` calibration picked,
+    /// and needs no assumption about the shape of the noise: a
+    /// randomized-input benchmark has `var(batch) ∝ unit` while a
+    /// deterministic one has roughly constant per-sample jitter, and this
+    /// estimator is right for both.
     ///
     /// The error is absolute rather than relative because that is the
     /// primitive quantity: it needs nothing but the samples, whereas
