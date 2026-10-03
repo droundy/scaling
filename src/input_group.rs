@@ -951,7 +951,7 @@ mod tests {
         let sizes: Vec<f64> = timings
             .metrics()
             .iter()
-            .map(|m| m.get("size").expect("each has a size"))
+            .map(|m| m.get("size").expect("each has a size").as_f64())
             .collect();
         assert_eq!(sizes, [100.0, 400.0]);
     }
@@ -971,7 +971,7 @@ mod tests {
             .run();
         assert_eq!(timings.metrics().len(), 2);
         assert!(timings.metrics()[0].is_empty());
-        assert_eq!(timings.metrics()[1].get("items").unwrap(), 8.0);
+        assert_eq!(timings.metrics()[1].get("items").unwrap().as_f64(), 8.0);
     }
 
     /// A group that asks for nothing carries nothing.
@@ -1006,8 +1006,8 @@ mod tests {
             .add_input("other", |v: &mut Vec<u8>| v.len())
             .run();
         let m = &timings.metrics()[0];
-        assert_eq!(m.get("before").unwrap(), 3.0);
-        assert_eq!(m.get("after").unwrap(), 4.0);
+        assert_eq!(m.get("before").unwrap().as_f64(), 3.0);
+        assert_eq!(m.get("after").unwrap().as_f64(), 4.0);
     }
 
     /// A lone alternative has no need of a clonable input unless its
@@ -1023,7 +1023,7 @@ mod tests {
                 |len| Metrics::new().count("len", len),
             )
             .run();
-        assert_eq!(timings.metrics()[0].get("len").unwrap(), 5.0);
+        assert_eq!(timings.metrics()[0].get("len").unwrap().as_f64(), 5.0);
     }
 
     #[test]
@@ -1050,8 +1050,8 @@ mod tests {
             .counting_allocations()
             .run();
         let m = &timings.metrics()[0];
-        assert_eq!(m.get("alloc peak").unwrap(), 0.0);
-        assert_eq!(m.get("alloc count").unwrap(), 0.0);
+        assert_eq!(m.get("alloc peak").unwrap().as_f64(), 0.0);
+        assert_eq!(m.get("alloc count").unwrap().as_f64(), 0.0);
     }
 
     #[test]

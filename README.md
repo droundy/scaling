@@ -267,9 +267,11 @@ things that do not vary from run to run, such as a size. A group has one
 metrics function for each type its candidates return; a second for the same
 type is reported as a contradiction. A candidate that returns another type,
 or one that cannot be named in a registration (`impl Trait`, a borrow, or a
-generic parameter), is measured as usual and has no metrics. Build the numbers with
-`Metrics::bytes`, `count`, `ratio`, `percent` and `seconds`, or `value`
-followed by `unit` for anything else.
+generic parameter), is measured as usual and has no metrics. Build the numbers
+with `Metrics::bytes`, `count`, `ratio` and `percent`, which say what a bare
+number is counted in, or with `Metrics::add`, which takes any integer, float or
+`Duration`, or a `MetricValue` made with its own constructors. A metric that is
+not defined is simply not added, and shows as `-` in the table.
 
 ### Counting allocations
 

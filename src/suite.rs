@@ -579,8 +579,7 @@ impl GroupBuilder {
         }
     }
 
-    /// One column per metric name met in any cell, taking its unit
-    /// from the first cell that has it.
+    /// One column per metric name met in any cell.
     fn metric_columns(&self) -> Vec<MetricColumn> {
         let mut columns: Vec<MetricColumn> = Vec::new();
         for candidate in &self.candidates {
@@ -588,11 +587,10 @@ impl GroupBuilder {
                 let Some((_, metrics)) = column.cells.get(candidate) else {
                     continue;
                 };
-                for (name, _, unit) in metrics.iter() {
+                for (name, _) in metrics.iter() {
                     if !columns.iter().any(|c| c.name == name) {
                         columns.push(MetricColumn {
                             name: name.to_string(),
-                            unit,
                             values: Vec::new(),
                         });
                     }
@@ -1410,7 +1408,13 @@ mod report_lookup {
         assert_eq!(group.candidates, ["wide", "narrow"]);
         assert_eq!(group.metrics.len(), 1);
         assert_eq!(group.metrics[0].name, "size");
-        assert_eq!(group.metrics[0].values, [[Some(4096.0)], [Some(1024.0)]]);
+        assert_eq!(
+            group.metrics[0].values,
+            [
+                [Some(crate::MetricValue::bytes(4096))],
+                [Some(crate::MetricValue::bytes(1024))]
+            ]
+        );
         let table = report.to_string();
         assert!(table.contains("4.00KiB"), "{table}");
         assert!(table.contains("1.00KiB (-75%)"), "{table}");

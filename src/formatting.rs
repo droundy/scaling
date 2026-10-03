@@ -491,10 +491,14 @@ fn metric_cell(group: &Group, metric: usize, row: usize, column: usize) -> Strin
     let Some(value) = metric.values[row][column] else {
         return "-".to_string();
     };
-    let mut shown = metric.unit.format(value);
+    let mut shown = value.to_string();
     if let Some(baseline) = group.baselines[column].filter(|&baseline| baseline != row) {
-        if let Some(base) = metric.values[baseline][column].filter(|base| *base != 0.0) {
-            let percent = (value - base) / base.abs() * 100.0;
+        // A difference needs both to be counted in the same unit.
+        if let Some(base) = metric.values[baseline][column]
+            .filter(|base| value.same_kind(base) && base.as_f64() != 0.0)
+        {
+            let base = base.as_f64();
+            let percent = (value.as_f64() - base) / base.abs() * 100.0;
             if percent.is_finite() {
                 let digits = if percent.abs() < 10.0 { 1 } else { 0 };
                 shown.push_str(&format!(" ({percent:+.digits$}%)"));
@@ -518,7 +522,7 @@ impl std::fmt::Display for Format {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Difference, MetricColumn, Unit};
+    use crate::{Difference, MetricColumn, MetricValue};
 
     use super::*;
     use expect_test::expect;
@@ -716,12 +720,15 @@ mod tests {
         assert_eq!(render_group("lonely", &group), "lonely  22.0ns ± 0.2ns\n");
     }
 
-    fn column(name: &str, unit: Unit, values: Vec<Vec<Option<f64>>>) -> MetricColumn {
+    fn column(name: &str, values: Vec<Vec<Option<MetricValue>>>) -> MetricColumn {
         MetricColumn {
             name: name.into(),
-            unit,
             values,
         }
+    }
+
+    fn bytes(size: f64) -> Option<MetricValue> {
+        Some(MetricValue::bytes(size))
     }
 
     fn serializers() -> Group {
@@ -741,17 +748,19 @@ mod tests {
             metrics: vec![
                 column(
                     "size",
-                    Unit::Bytes,
                     vec![
-                        vec![Some(1992294.0)],
-                        vec![Some(755_000.0)],
-                        vec![Some(802_000.0)],
+                        vec![bytes(1992294.0)],
+                        vec![bytes(755_000.0)],
+                        vec![bytes(802_000.0)],
                     ],
                 ),
                 column(
                     "ratio",
-                    Unit::Ratio,
-                    vec![vec![Some(0.31)], vec![Some(0.52)], vec![None]],
+                    vec![
+                        vec![Some(MetricValue::ratio(0.31))],
+                        vec![Some(MetricValue::ratio(0.52))],
+                        vec![None],
+                    ],
                 ),
             ],
         }
@@ -782,8 +791,8 @@ mod tests {
         group.measurements[0].push(Some(timing(40.0)));
         group.measurements[1].push(Some(change(30.0, -10.0)));
         group.measurements[2].push(None);
-        group.metrics[0].values[0].push(Some(2048.0));
-        group.metrics[0].values[1].push(Some(512.0));
+        group.metrics[0].values[0].push(bytes(2048.0));
+        group.metrics[0].values[1].push(bytes(512.0));
         group.metrics[0].values[2].push(None);
         group.metrics[1].values[0].push(None);
         group.metrics[1].values[1].push(None);
@@ -857,8 +866,8 @@ mod tests {
         group.measurements[0].push(Some(timing(40.0)));
         group.measurements[1].push(Some(change(30.0, -10.0)));
         group.measurements[2].push(None);
-        group.metrics[0].values[0].push(Some(2048.0));
-        group.metrics[0].values[1].push(Some(512.0));
+        group.metrics[0].values[0].push(bytes(2048.0));
+        group.metrics[0].values[1].push(bytes(512.0));
         group.metrics[0].values[2].push(None);
         group.metrics[1].values[0].push(None);
         group.metrics[1].values[1].push(None);
@@ -924,12 +933,35 @@ mod tests {
     fn add_metrics(group: &mut Group, count: usize) {
         for i in 0..count {
             let values = (0..group.candidates.len())
-                .map(|row| vec![Some((i * 10 + row) as f64)])
+                .map(|row| vec![Some(MetricValue::count(i * 10 + row))])
                 .collect();
             group
                 .metrics
-                .push(column(&format!("another_metric_{i}"), Unit::Count, values));
+                .push(column(&format!("another_metric_{i}"), values));
         }
+    }
+
+    /// A difference needs both values counted in the same unit; a cell that
+    /// disagrees with its baseline on that is shown as it is, with none.
+    #[test]
+    fn a_difference_is_shown_only_between_values_of_one_kind() {
+        let mut group = serializers();
+        group.metrics = vec![column(
+            "size",
+            vec![
+                vec![bytes(2048.0)],
+                vec![Some(MetricValue::from(1024))],
+                vec![bytes(1024.0)],
+            ],
+        )];
+        let shown = render_group("serialize", &group);
+        assert!(shown.contains("2.00KiB"), "{shown}");
+        // The count of 1024 is not a size, so it has no percentage against 2KiB.
+        let postcard = shown.lines().find(|l| l.starts_with("postcard")).unwrap();
+        assert!(postcard.trim_end().ends_with("1024"), "{postcard}");
+        // The size is, and halves it.
+        let bincode = shown.lines().find(|l| l.starts_with("bincode")).unwrap();
+        assert!(bincode.contains("1.00KiB (-50%)"), "{bincode}");
     }
 
     #[test]
@@ -940,7 +972,10 @@ mod tests {
             inputs: vec![TypedInput::default()],
             measurements: vec![vec![Some(timing(22.0))]],
             baselines: vec![None],
-            metrics: vec![column("allocations", Unit::Count, vec![vec![Some(3.0)]])],
+            metrics: vec![column(
+                "allocations",
+                vec![vec![Some(MetricValue::count(3))]],
+            )],
         };
         let shown = render_group("lonely", &group);
         expect![[r#"

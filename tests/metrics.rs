@@ -127,7 +127,7 @@ fn a_group_wide_function_gives_metrics_to_every_candidate_it_fits() {
         let results = comparison(&report, &format!("encode@{input}"));
         let candidates: Vec<&str> = results.names().collect();
         assert_eq!(candidates, ["plain", "doubled", "lazy", "length_only"]);
-        let size = |candidate: usize| results.metrics()[candidate].get("size");
+        let size = |candidate: usize| results.metrics()[candidate].get("size").map(|v| v.as_f64());
         assert_eq!(size(0), Some(sizes[0]), "{input}");
         assert_eq!(size(1), Some(sizes[1]), "{input}");
         // These return other types, so the function does not apply.
@@ -150,7 +150,11 @@ fn a_function_that_reads_the_input_sees_it_as_it_began() {
     let results = comparison(&report, "expansion@words");
     let candidates: Vec<&str> = results.names().collect();
     assert_eq!(candidates, ["same", "twice"]);
-    let growth = |candidate: usize| results.metrics()[candidate].get("growth");
+    let growth = |candidate: usize| {
+        results.metrics()[candidate]
+            .get("growth")
+            .map(|v| v.as_f64())
+    };
     assert_eq!(growth(0), Some(1.0));
     assert_eq!(growth(1), Some(2.0));
 }
@@ -162,7 +166,11 @@ fn one_function_can_serve_several_groups() {
         let results = comparison(&report, &format!("{name}@shared_text"));
         let candidates: Vec<&str> = results.names().collect();
         assert_eq!(candidates, ["first", "second"], "{name}");
-        let length = |candidate: usize| results.metrics()[candidate].get("length");
+        let length = |candidate: usize| {
+            results.metrics()[candidate]
+                .get("length")
+                .map(|v| v.as_f64())
+        };
         assert_eq!(length(0), Some(15.0), "{name}");
         assert_eq!(length(1), Some(3.0), "{name}");
     }

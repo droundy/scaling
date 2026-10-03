@@ -131,7 +131,11 @@ fn counts(report: &scaling::Report, entry: &str) -> (f64, f64, f64, f64) {
         .get_timings(entry)
         .unwrap_or_else(|| panic!("the entry {entry}"));
     let m = &timings.metrics()[0];
-    let get = |name: &str| m.get(name).unwrap_or_else(|| panic!("{name} of {entry}"));
+    let get = |name: &str| {
+        m.get(name)
+            .unwrap_or_else(|| panic!("{name} of {entry}"))
+            .as_f64()
+    };
     (
         get("alloc count"),
         get("alloc peak"),
@@ -255,7 +259,7 @@ fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
     let candidates: Vec<&str> = results.names().collect();
     assert_eq!(candidates, ["at_once", "in_pieces"]);
     let metrics = results.metrics();
-    let names: Vec<&str> = metrics[0].iter().map(|(name, _, _)| name).collect();
+    let names: Vec<&str> = metrics[0].iter().map(|(name, _)| name).collect();
     assert_eq!(
         names,
         [
@@ -266,7 +270,7 @@ fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
             "alloc net"
         ]
     );
-    let value = |candidate: usize, metric: &str| metrics[candidate].get(metric).unwrap();
+    let value = |candidate: usize, metric: &str| metrics[candidate].get(metric).unwrap().as_f64();
 
     // One allocation of exactly the size asked for.
     assert_eq!(value(0, "alloc peak"), 10_000.0);
@@ -292,7 +296,11 @@ fn a_metrics_function_can_read_the_counts_to_build_its_own_metric() {
     let results = report.comparison("kept").expect("the kept comparison");
     let candidates: Vec<&str> = results.names().collect();
     assert_eq!(candidates, ["exact", "padded"]);
-    let held = |candidate: usize| results.metrics()[candidate].get("held per byte");
+    let held = |candidate: usize| {
+        results.metrics()[candidate]
+            .get("held per byte")
+            .map(|v| v.as_f64())
+    };
     // 8000 bytes held for 8000 bytes returned, and 32000 held for 8000.
     assert_eq!(held(0), Some(1.0));
     assert_eq!(held(1), Some(4.0));
@@ -304,5 +312,8 @@ fn a_function_not_marked_allocation_has_no_counts() {
     let results = report
         .get_timings("uncounted::lone")
         .expect("the lone candidate");
-    assert_eq!(results.metrics()[0].get("had counts"), Some(0.0));
+    assert_eq!(
+        results.metrics()[0].get("had counts").map(|v| v.as_f64()),
+        Some(0.0)
+    );
 }
