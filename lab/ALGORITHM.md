@@ -20,7 +20,7 @@ answer. Where something below has *not* been checked that way, it says so.
 
 1. **Calibrate** each function into two batch sizes, `N` and `2N`, with the
    larger batch at most 20 us. A function too slow for that gets `1` and
-   `2`, or just `1` if a call takes more than half a second.
+   `2`, or just `1` if a call takes more than a millisecond.
 2. **Measure in rounds.** Each round times every function in the set once,
    in a fresh random order, each at one of its two batch sizes picked by a
    coin flip. A CPU canary is a member of every round. Nobody leaves early.
