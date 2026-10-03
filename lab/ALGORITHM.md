@@ -75,9 +75,12 @@ until the next doubling would exceed **20 us**. Re-time the last size three
 times and take the median. The rungs are the last two sizes, `N` and `2N`,
 and the lower one has to be at least 100 ns.
 
-- If one call already exceeds 20 us, the rungs are `1` and `2`, as long as
-  two calls take at most a second.
-- If two calls take more than a second, the only rung is `1`.
+- If one call already exceeds 20 us, the rungs are `1` and `2`.
+- If one call exceeds **1 ms**, the only rung is `1`. Against a known
+  answer, at 0.23-0.95 ms a call, one rung cost 25-40% fewer calls than
+  subtracting two, and was no less accurate. The fixed cost one rung
+  leaves in - up to about 570 ns with real neighbours - is under 0.06% of
+  a millisecond.
 
 **Why two rungs.** Every timed batch carries a fixed cost that does not
 scale with `n`: the clock reads, the call, and rewarming whatever the
@@ -116,8 +119,8 @@ because its pages had not yet been faulted in. One probe is one probe.
 
 **Two paths, not four.** Every function leaves calibration with either one
 rung or two, and everything downstream handles both cases with the same
-model. The one-rung case is only for calls over half a second, where the
-fixed cost is a part in a million and needs no subtracting.
+model. The one-rung case is for calls over a millisecond, where the fixed
+cost is under 0.06% and subtracting it costs more noise than it removes.
 
 ## 2. Rounds
 
@@ -547,7 +550,7 @@ factors for large ones: "twice as fast", not "50% less time".
 | --- | --- | --- |
 | batch ceiling | 20 us | tick contamination swept against a known answer |
 | batch floor | 100 ns | ~370 ns harness cost per measurement |
-| second rung for slow calls | if `2 t(1) <= 1 s` | a cost decision, not measured |
+| one rung only | calls over 1 ms | known-answer test: one rung 25-40% cheaper at 0.23-0.95 ms, no less accurate |
 | trim | 25% each end | swept 0/10/25/40%; any trim removes tick bias, 25% matches the reference |
 | rounds per block | >= 15 | each block needs both rungs of both functions |
 | blocks | 8 to 20 | 8 removes lucky-small stops; smaller blocks cost more |
@@ -578,6 +581,15 @@ factors for large ones: "twice as fast", not "50% less time".
   measured `str_find` 0.6-2.3% high throughout, against its own bar of
   about 0.2%. Running the benchmark again, as a new process, is the only
   way to see one.
+- **A long CPU-bound call does not share its round's clock, unquiesced.**
+  At 4 ms a call and above, `slow_cpu` ran 17-18% faster per link than the
+  short canary batches in the same rounds. Below 2 ms it matched to 0.4%.
+  Ratios between a slow CPU-bound function and a fast one, and a slow
+  function's bogo-nanoseconds, are biased by that much on an unpinned
+  machine (PROBLEMS.md, "Slow functions"). An untested remedy is a canary
+  matched in duration: the same chain run for about as long as the
+  function's sample, as `slow_cpu` is. Ratios between alternatives of
+  similar length are unaffected.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.

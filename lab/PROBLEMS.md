@@ -637,6 +637,62 @@ promise clock-bound ratios to about 1-2%, and not tighter.
 
 ---
 
+## Slow functions, against a known answer
+
+`slow_cpu` runs the canary's own multiply-add chain, `LAB_SLOW_ITERS`
+links per call. Every link goes through `black_box`, as the canary's batch
+loop does, so its true ratio to the canary is exactly its link count.
+Without the `black_box` the compiler folded eight links into one, and a
+250,000-link call took 28 us where the chain predicts 228 us. There were
+four call lengths, each in two separate 3-minute processes, unpinned, on
+mains, with the machine in use.
+
+**At 0.23-0.95 ms a call, the interrupt and preemption tax is small:**
++0.06% to +0.18% over the exact ratio, measured one rung at a time.
+
+**One rung beats two for slow calls.** Subtracting `n = 1` from `n = 2`
+removes a fixed cost that is already negligible: about 50 ns of harness
+against hundreds of microseconds. Meanwhile it doubles the noise and
+costs 1.5 calls a round instead of one. Replayed trials:
+
+| call | goal | calls spent, two rungs | calls spent, one rung | median offset, two | median offset, one |
+| --- | --- | --- | --- | --- | --- |
+| 0.23 ms | 1% | 378-620 | 308-403 | +0.05 to +0.19% | +0.03 to +0.06% |
+| 0.23 ms | 0.5% | 626-1188 | 453-714 | +0.08 to +0.16% | +0.03 to +0.09% |
+| 0.95 ms | 1% | 375-979 | 286-683 | 0.00 to +1.14% | +0.13 to +0.52% |
+| 0.95 ms | 0.5% | 799-1257 | 482-891 | +0.02 to +0.36% | +0.07 to +0.26% |
+
+One rung costs 25-40% fewer calls and is no less accurate. The fixed cost
+it leaves in is the 300-570 ns a measurement can carry with real
+neighbours (problem 3), which is under 0.06% of a 1 ms call.
+
+**Unpinned, a long CPU-bound call runs about 20% faster than the short
+batches in the same rounds.** At 3.75 ms a call and above, `slow_cpu`
+measured 17-18% below its exact ratio to the canary, in every run:
+
+- **Below about 2 ms nothing happens.** At 1 ms a call, rounds with
+  1.9 ms calls showed -0.1 to -0.4%.
+- **Above about 4 ms everything shifts.** In runs of 3.75 ms calls and
+  longer, every call was 17-18% faster per link than the canary, whatever
+  its length.
+- **It is the short batches that slow.** The canary went from 0.94 to
+  1.12-1.13 ns a link, and `f64_sin` slowed with it: its ratio to the
+  canary stayed at 14.2-14.3 links, while its ratio to `slow_cpu` went from
+  14.2 to 17.3.
+- **It needs a CPU-bound long call.** It happened without `f64_sin` in the
+  round, and with the old folded loop at 4.8 ms a call. It did not happen
+  in the noisy pair recordings, where 4-6 ms `copy_64mb` calls - which are
+  memory-bound - shared every round with a canary reading 0.91 ns.
+
+So on a machine whose clock is free to move, "everything in one round
+runs under the same clock" fails between a long CPU-bound call and the
+short batches around it. A slow function's bogo-nanoseconds measured
+against the 20 us canary would be about 20% low. Whether this is the
+clock or the cycles is untested. It needs the same run on a pinned,
+fixed-clock core: if the offset vanishes there, it is frequency.
+
+---
+
 ## How they interact
 
 - (1) causes much of (3): composition changes the clock, and the clock

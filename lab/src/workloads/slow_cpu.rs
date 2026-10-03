@@ -48,6 +48,21 @@ impl Workload {
         // this workload's true ratio to the canary is exactly
         // `LAB_SLOW_ITERS` - a known answer for the slow regime, whatever
         // the clock is doing.
+        if std::env::var("LAB_SLOW_FOLDED").is_ok() {
+            // The old loop, which the compiler folds eight links at a time:
+            // kept as a switch for telling its effects on neighbours apart
+            // from the `black_box` version's.
+            return Workload::simple("slow_cpu", Kind::Payload, move || {
+                let mut v = x.get();
+                for _ in 0..n {
+                    v = v
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                }
+                x.set(v);
+                v
+            });
+        }
         Workload::simple("slow_cpu", Kind::Payload, move || {
             for _ in 0..n {
                 let v = x
