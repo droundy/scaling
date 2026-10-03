@@ -300,8 +300,14 @@ fn bytes_text(size: f64, figures: usize) -> String {
 /// # Reading one back
 ///
 /// [`get`](Metrics::get) gives a value by name and [`iter`](Metrics::iter) every
-/// name and value in the order they were added. A script gets one record for
-/// each alternative from `Timings::metrics`.
+/// name and value in the order they were added.
+///
+/// A script reads a candidate's record from the [`Report`](crate::Report) by its
+/// name, as `report.metrics("encode:json@text")?`, and a shorter name such as
+/// `"json"` does when only one candidate has it; see
+/// [Names](crate::Report#names). To walk every candidate of a comparison
+/// together, [`Timings::metrics`](crate::Timings::metrics) gives the records in
+/// the order of its `names`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metrics {
     entries: Vec<(String, Entry)>,
