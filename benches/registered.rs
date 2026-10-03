@@ -106,6 +106,6 @@ fn sizes(out: Vec<u8>) -> scaling::Metrics {
     scaling::Metrics::new().bytes("size", out.len())
 }
 
-fn main() -> std::process::ExitCode {
+fn main() -> Result<(), scaling::RegistrationError> {
     scaling::Config::default().run_and_print()
 }

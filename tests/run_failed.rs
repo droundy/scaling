@@ -1,11 +1,11 @@
 //! Registrations that contradict each other: `Config::run` says what is wrong
-//! and `Config::run_and_print` exits with `2` instead of measuring anything.
+//! and `Config::run_and_print` fails the same way instead of measuring
+//! anything.
 //!
 //! Its own binary because the registry is the binary's: these two benchmarks
 //! share a name, which would make every run in a file with other tests fail.
 
 use scaling::Config;
-use std::process::ExitCode;
 
 #[scaling::bench(name = "same")]
 fn first() -> u64 {
@@ -29,9 +29,10 @@ fn run_says_what_does_not_compose() {
 }
 
 #[test]
-fn run_and_print_exits_with_two_and_measures_nothing() {
-    let code = Config::default().run_and_print();
-    // `ExitCode` has no `PartialEq` on every Rust this crate supports, so this
-    // compares how they print.
-    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(2)));
+fn run_and_print_fails_the_same_way_and_measures_nothing() {
+    let said = match Config::default().run_and_print() {
+        Ok(()) => panic!("two benchmarks called `same` should not compose"),
+        Err(error) => error.to_string(),
+    };
+    assert!(said.contains("same"), "{said}");
 }

@@ -178,7 +178,9 @@ mod benches {
     #[test]
     #[ignore] // a real run needs --release; plain `cargo test` should not pay for it
     fn run() {
-        scaling::Config::default().run_and_print();
+        scaling::Config::default()
+            .run_and_print()
+            .expect("the benchmarks are registered consistently");
     }
 }
 ```

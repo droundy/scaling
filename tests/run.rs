@@ -5,18 +5,10 @@
 //! [`Config`]; these build one directly, so what is exercised is everything
 //! that call would reach. Registrations are written with the attributes rather
 //! than by hand, because the thing under test is the whole path from an
-//! attribute to an exit status.
+//! attribute to the printed results.
 
 use scaling::Config;
-use std::process::ExitCode;
 use std::time::Duration;
-
-/// Whether two exit codes are the same one. `ExitCode` has no `PartialEq` on
-/// every Rust this crate supports, so this compares how they print, which is
-/// the same for the same code whatever the format.
-fn same_code(a: ExitCode, b: ExitCode) -> bool {
-    format!("{a:?}") == format!("{b:?}")
-}
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
@@ -77,18 +69,19 @@ fn quick() -> Config {
 
 #[test]
 fn a_run_measures_what_was_registered() {
-    let code = quick().run_and_print();
-    assert!(same_code(code, ExitCode::SUCCESS), "{code:?}");
+    quick()
+        .run_and_print()
+        .expect("these registrations compose");
 }
 
 /// A script can measure and then read the numbers, rather than reading a
 /// printout of them.
 ///
 /// This is the path that has to survive the removal of the hand-assembled
-/// API: `run_and_print` prints and returns an exit status, which answers "did
-/// anything regress" but not "which of these is actually fastest here". Names are how
-/// results are reached, because nobody wrote them down - they come from the
-/// module and function a benchmark was declared in.
+/// API: `run_and_print` prints, which answers "did anything regress" but not
+/// "which of these is actually fastest here". Names are how results are
+/// reached, because nobody wrote them down - they come from the module and
+/// function a benchmark was declared in.
 #[test]
 fn a_script_can_read_the_numbers_it_measured() {
     let report = quick().run().expect("these registrations compose");

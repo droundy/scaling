@@ -32,7 +32,7 @@ The binary that runs them is a `main` of one call:
 
 ```rust
 // benches/bench.rs, in its entirety
-fn main() -> std::process::ExitCode {
+fn main() -> Result<(), scaling::RegistrationError> {
     scaling::Config::default().run_and_print()
 }
 ```
@@ -125,7 +125,7 @@ by hand, still in your own `main`:
 ```rust,no_run
 use scaling::Config;
 
-fn main() -> std::process::ExitCode {
+fn main() -> Result<(), scaling::RegistrationError> {
     Config::default()
         .with_max_time(std::time::Duration::from_secs(1))
         .run_and_print()

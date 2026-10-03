@@ -4,15 +4,16 @@
 use crate::assemble::Diagnostic;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
-use std::process::ExitCode;
 
 /// Why [`Config::run`] measured nothing: the registered benchmarks contradict
 /// each other.
 ///
 /// Printing it, with `{}` or `{:?}`, lists every contradiction found, one to a
-/// line, so `.expect("..")` on a failed run says what to fix. What to fix is
-/// in your own `#[scaling::bench]`, `#[scaling::input]` and
-/// `#[scaling::metrics]` attributes, which is why this carries only the text.
+/// line, so `.expect("..")` on a failed run says what to fix, and so does a
+/// `main` that returns it, which prints `Error: ` and the list and exits with
+/// status 1. What to fix is in your own `#[scaling::bench]`,
+/// `#[scaling::input]` and `#[scaling::metrics]` attributes, which is why this
+/// carries only the text.
 #[derive(Clone)]
 pub struct RegistrationError {
     problems: Vec<String>,
@@ -40,14 +41,13 @@ impl std::error::Error for RegistrationError {}
 
 impl Config {
     /// Discover every benchmark registered in this binary, measure them
-    /// together, print the results, and give back the exit status for `main` to
-    /// return.
+    /// together, and print the results.
     ///
     /// It is the whole of a benchmark binary:
     ///
     /// ```no_run
     /// // benches/bench.rs, in its entirety
-    /// fn main() -> std::process::ExitCode {
+    /// fn main() -> Result<(), scaling::RegistrationError> {
     ///     scaling::Config::default().run_and_print()
     /// }
     /// ```
@@ -58,7 +58,7 @@ impl Config {
     /// ```no_run
     /// use scaling::Config;
     ///
-    /// fn main() -> std::process::ExitCode {
+    /// fn main() -> Result<(), scaling::RegistrationError> {
     ///     Config::default()
     ///         .with_max_time(std::time::Duration::from_secs(1))
     ///         .run_and_print()
@@ -75,28 +75,23 @@ impl Config {
     /// # What it prints where
     ///
     /// Results go to stdout, everything else to stderr: how many benchmarks
-    /// are about to run, warnings about registrations that went unused, the
-    /// reason a run measured nothing. So redirecting only stdout captures the
-    /// results and nothing else, without anybody having to remember to silence
-    /// the rest.
+    /// are about to run, and warnings about registrations that went unused. So
+    /// redirecting only stdout captures the results and nothing else, without
+    /// anybody having to remember to silence the rest.
     ///
-    /// # Its exit status means something
+    /// # Errors
     ///
-    /// Zero, unless the run never started because registrations contradict each
-    /// other, which gives `2` and prints what is wrong to stderr. [`Config::run`]
-    /// hands the same text back as a [`RegistrationError`].
-    pub fn run_and_print(&self) -> ExitCode {
-        let suite = match self.assemble() {
-            Ok(suite) => suite,
-            Err(error) => {
-                eprintln!("{error}");
-                return ExitCode::from(2);
-            }
-        };
+    /// [`RegistrationError`] if the run never started because the registered
+    /// benchmarks cannot be put together, and nothing is measured. It is the
+    /// same error [`Config::run`] returns, and it is not printed here: a `main`
+    /// that returns it prints it to stderr and exits with a nonzero status, and
+    /// a test that calls `.expect("..")` on it fails with it.
+    pub fn run_and_print(&self) -> Result<(), RegistrationError> {
+        let suite = self.assemble()?;
 
         if suite.is_empty() {
             eprintln!("There are no benchmarks to run!");
-            return ExitCode::SUCCESS;
+            return Ok(());
         }
         eprintln!(
             "measuring {} benchmark{}",
@@ -108,7 +103,7 @@ impl Config {
 
         print!("{report}");
 
-        ExitCode::SUCCESS
+        Ok(())
     }
 
     /// Discover and measure, handing back the results rather than printing
@@ -117,7 +112,7 @@ impl Config {
     /// For a benchmark-driven script rather than a benchmark run: "is the fast
     /// path actually being taken under these conditions?" is a question you
     /// answer by measuring and then *looking at* the numbers, and
-    /// [`run_and_print`] prints them and returns a verdict. [`Report`] reaches
+    /// [`run_and_print`] prints them instead. [`Report`] reaches
     /// them by name - [`Report::timing`], [`Report::comparison`],
     /// [`Report::scaling`] - which is what makes this usable without knowing
     /// in advance what a run will hold.

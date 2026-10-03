@@ -531,9 +531,8 @@ impl Display for Group {
 
 /// What a run measured, reached by name.
 ///
-/// [`Config::run`] hands one back; [`Config::run_and_print`] prints it and
-/// returns an exit status instead. Printing a `Report` with `{}` gives the
-/// same tables.
+/// [`Config::run`] hands one back; [`Config::run_and_print`] prints it instead.
+/// Printing a `Report` with `{}` gives the same tables.
 ///
 /// # Two ways to look
 ///
