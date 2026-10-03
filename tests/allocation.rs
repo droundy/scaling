@@ -22,6 +22,7 @@ fn measure_reports_what_a_closure_allocated() {
     assert_eq!(stats.peak_bytes, 10_000);
     assert_eq!(stats.allocations, 1);
     assert_eq!(stats.allocated_bytes, 10_000);
+    assert_eq!(stats.retained_bytes, 10_000);
 }
 
 #[test]
@@ -37,6 +38,27 @@ fn memory_freed_before_the_end_still_counts_towards_the_peak() {
     assert_eq!(stats.peak_bytes, 10_000);
     assert_eq!(stats.allocations, 3);
     assert_eq!(stats.allocated_bytes, 13_000);
+    // All of it was freed again.
+    assert_eq!(stats.retained_bytes, 0);
+}
+
+#[test]
+fn what_is_kept_is_counted_and_what_was_freed_is_not() {
+    let (_kept, stats) = alloc::measure(|| {
+        let scratch = vec![0u8; 4_000];
+        drop(scratch);
+        vec![0u8; 100]
+    });
+    assert_eq!(stats.retained_bytes, 100);
+    assert!(stats.peak_bytes >= 4_000);
+}
+
+#[test]
+fn freeing_what_was_held_before_is_negative() {
+    let held = vec![0u8; 50_000];
+    let ((), stats) = alloc::measure(|| drop(held));
+    assert_eq!(stats.retained_bytes, -50_000);
+    assert_eq!(stats.peak_bytes, 0);
 }
 
 #[test]
@@ -100,6 +122,7 @@ fn counted(out: Vec<u8>) -> Metrics {
         .peak_bytes()
         .allocations()
         .allocated_bytes()
+        .retained_bytes()
 }
 
 fn report() -> scaling::Report {
@@ -116,19 +139,23 @@ fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
         .expect("the build group");
     assert_eq!(group.candidates, ["at_once", "in_pieces"]);
     let names: Vec<&str> = group.metrics.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, ["size", "peak", "allocs", "allocated"]);
+    assert_eq!(names, ["size", "peak", "allocs", "allocated", "retained"]);
     let value = |metric: usize, candidate: usize| group.metrics[metric].values[candidate][0];
 
     // One allocation of exactly the size asked for.
     assert_eq!(value(1, 0), Some(10_000.0));
     assert_eq!(value(2, 0), Some(1.0));
     assert_eq!(value(3, 0), Some(10_000.0));
+    // And all of it is still held, as the output.
+    assert_eq!(value(4, 0), Some(10_000.0));
 
     // Grown a piece at a time: several requests, the peak at least the
     // final size, and more asked for in all than ever held at once.
     assert!(value(2, 1).unwrap() > 1.0, "{:?}", value(2, 1));
     assert!(value(1, 1).unwrap() >= 10_000.0, "{:?}", value(1, 1));
     assert!(value(3, 1).unwrap() >= value(1, 1).unwrap());
+    // What is kept is the output, with whatever room it grew to.
+    assert!(value(4, 1).unwrap() >= 10_000.0, "{:?}", value(4, 1));
     // Not the million bytes the metrics function itself allocated.
     assert!(value(1, 1).unwrap() < 100_000.0);
 }

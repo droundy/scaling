@@ -148,6 +148,7 @@ enum Counted {
     PeakBytes,
     Allocations,
     AllocatedBytes,
+    RetainedBytes,
 }
 
 impl Metrics {
@@ -243,6 +244,14 @@ impl Metrics {
         self.counted("allocated", Unit::Bytes, Counted::AllocatedBytes)
     }
 
+    /// How much more memory the candidate held when its call ended than when
+    /// it began, as a `retained` metric: what it returned, and anything else
+    /// it kept. Negative if it freed memory it was handed. See
+    /// [`Metrics::peak_bytes`] for what that needs.
+    pub fn retained_bytes(self) -> Self {
+        self.counted("retained", Unit::Bytes, Counted::RetainedBytes)
+    }
+
     /// Whether any of the metrics wait on a counted run.
     #[cfg(test)]
     pub(crate) fn wants_allocation(&self) -> bool {
@@ -266,10 +275,11 @@ impl Metrics {
         );
         for (at, which) in self.counted.drain(..) {
             self.metrics[at].value = match which {
-                Counted::PeakBytes => stats.peak_bytes,
-                Counted::Allocations => stats.allocations,
-                Counted::AllocatedBytes => stats.allocated_bytes,
-            } as f64;
+                Counted::PeakBytes => stats.peak_bytes as f64,
+                Counted::Allocations => stats.allocations as f64,
+                Counted::AllocatedBytes => stats.allocated_bytes as f64,
+                Counted::RetainedBytes => stats.retained_bytes as f64,
+            };
         }
     }
 
@@ -387,12 +397,14 @@ mod tests {
             .peak_bytes()
             .count("items", 3u32)
             .allocations()
-            .allocated_bytes();
+            .allocated_bytes()
+            .retained_bytes();
         assert!(m.wants_allocation());
         m.resolve_allocation(Some(crate::alloc::AllocStats {
             peak_bytes: 400,
             allocations: 7,
             allocated_bytes: 900,
+            retained_bytes: -120,
         }));
         assert!(!m.wants_allocation());
         let got: Vec<_> = m
@@ -407,6 +419,7 @@ mod tests {
                 ("items", 3.0, Unit::Count),
                 ("allocs", 7.0, Unit::Count),
                 ("allocated", 900.0, Unit::Bytes),
+                ("retained", -120.0, Unit::Bytes),
             ]
         );
     }

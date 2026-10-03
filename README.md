@@ -285,6 +285,7 @@ fn sizes(out: Vec<u8>) -> scaling::Metrics {
         .peak_bytes()      // the most it held at once: a `peak` column
         .allocations()     // how many times it asked for memory: `allocs`
         .allocated_bytes() // how much it asked for in all: `allocated`
+        .retained_bytes()  // how much it still held when the call ended: `retained`
 }
 ```
 

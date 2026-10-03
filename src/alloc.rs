@@ -44,6 +44,10 @@ pub struct AllocStats {
     /// How much memory it asked for in all, counting what it asked for again
     /// each time. Growing an allocation counts only the growth.
     pub allocated_bytes: u64,
+    /// How much more memory it held when it ended than when it began: what
+    /// it returned, and anything else it kept. Negative when it freed memory
+    /// it was holding to begin with. Counted before its result is dropped.
+    pub retained_bytes: i64,
 }
 
 /// One thread's running totals. Plain cells: they are only ever touched by
@@ -178,10 +182,13 @@ pub fn measure<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
         c.live.get()
     });
     let result = f();
+    // Read while `result` is still alive: what the closure hands back is
+    // part of what it kept.
     let stats = COUNTERS.with(|c| AllocStats {
         peak_bytes: (c.peak.get() - start).max(0) as u64,
         allocations: c.allocations.get(),
         allocated_bytes: c.allocated.get(),
+        retained_bytes: c.live.get() - start,
     });
     (result, stats)
 }

@@ -193,7 +193,7 @@ postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
    is not done.
 4. Allocation counting, in place of the observer functions first planned:
    `allocation` as an argument of `#[scaling::metrics(..)]`, and
-   `Metrics::peak_bytes`, `allocations` and `allocated_bytes` to choose which
+   `Metrics::peak_bytes`, `allocations`, `allocated_bytes` and `retained_bytes` to choose which
    counts to show. The harness counts the candidate's own call on the extra
    run, and fills in the values after the function returns, so it is the same
    run whose output is analysed and the function's own allocations are not
