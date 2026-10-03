@@ -22,14 +22,13 @@ fn counted(out: Vec<u8>) -> Metrics {
 }
 
 #[test]
-fn asking_for_counts_without_the_allocator_is_a_fatal_diagnostic() {
-    let problems = match scaling::runner::measure(&scaling::Config::default()) {
+fn asking_for_counts_without_the_allocator_is_an_error() {
+    let said = match scaling::Config::default().run() {
         Ok(_) => panic!("it should not have run"),
-        Err(problems) => problems,
+        Err(error) => error.to_string(),
     };
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(problems[0].is_fatal());
-    let said = problems[0].to_string();
+    let problems = said.lines().filter(|l| l.starts_with("  - ")).count();
+    assert_eq!(problems, 1, "{said}");
     assert!(
         said.contains("counted") && said.contains("global_allocator"),
         "{said}"

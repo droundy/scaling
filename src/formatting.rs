@@ -3,14 +3,17 @@ use std::collections::BTreeSet;
 
 const MAX_TABLE_WIDTH: usize = 100;
 
-pub(crate) fn render_group(name: &str, group: &Group) -> String {
+/// A group as its table. `figures` is how many significant figures to show
+/// the metrics to, and the default if there is none; timings always show the
+/// digits their error justifies.
+pub(crate) fn render_group(name: &str, group: &Group, figures: Option<usize>) -> String {
     if !group.metrics.is_empty() {
         if stacks(group) {
-            if let Some(shown) = render_stacked(name, group) {
+            if let Some(shown) = render_stacked(name, group, figures) {
                 return shown;
             }
         }
-        return render_with_metrics(name, group);
+        return render_with_metrics(name, group, figures);
     }
     if group.candidates.len() == 1 && group.inputs.len() == 1 {
         let input = &group.inputs[0];
@@ -97,7 +100,7 @@ pub(crate) fn render_group(name: &str, group: &Group) -> String {
     }
 
     let all_columns: Vec<usize> = (0..group.inputs.len()).collect();
-    render_long(name, group, &all_columns)
+    render_long(name, group, &all_columns, figures)
 }
 
 /// The title of a grid: the group, and the type of its inputs when they all
@@ -277,14 +280,14 @@ fn format_matrix(
 /// The form that always fits, since it grows downwards: used when neither
 /// orientation of a table does. Any metrics follow the measurement as
 /// further columns.
-fn render_long(name: &str, group: &Group, columns: &[usize]) -> String {
+fn render_long(name: &str, group: &Group, columns: &[usize], figures: Option<usize>) -> String {
     let mut rows = Vec::new();
     for (candidate, candidate_name) in group.candidates.iter().enumerate() {
         for &input in columns {
             let details = &group.inputs[input];
             let shown = group.measurements[candidate][input];
             let metrics: Vec<String> = (0..group.metrics.len())
-                .map(|metric| metric_cell(group, metric, candidate, input))
+                .map(|metric| metric_cell(group, metric, candidate, input, figures))
                 .collect();
             if shown.is_none() && metrics.iter().all(|m| m == "-") {
                 continue;
@@ -372,7 +375,7 @@ fn stacks(group: &Group) -> bool {
 /// `None` when it is too wide for the page. Unlike a plain grid it is not
 /// turned on its side, because then the metrics would be the columns and the
 /// lines under each time would no longer line up.
-fn render_stacked(name: &str, group: &Group) -> Option<String> {
+fn render_stacked(name: &str, group: &Group, figures: Option<usize>) -> Option<String> {
     let types: BTreeSet<&str> = group
         .inputs
         .iter()
@@ -399,7 +402,7 @@ fn render_stacked(name: &str, group: &Group) -> Option<String> {
             values.push(
                 columns
                     .iter()
-                    .map(|&column| metric_cell(group, metric, row, column))
+                    .map(|&column| metric_cell(group, metric, row, column, figures))
                     .collect(),
             );
         }
@@ -417,7 +420,7 @@ fn render_stacked(name: &str, group: &Group) -> Option<String> {
 /// A table to an input rather than one grid because the metrics are what
 /// there is to read across, and a cell that held a time and several metrics
 /// for each input would not be readable.
-fn render_with_metrics(name: &str, group: &Group) -> String {
+fn render_with_metrics(name: &str, group: &Group, figures: Option<usize>) -> String {
     let mut out = String::new();
     for column in 0..group.inputs.len() {
         let rows: Vec<usize> = (0..group.candidates.len())
@@ -446,7 +449,7 @@ fn render_with_metrics(name: &str, group: &Group) -> String {
                 std::iter::once(Format(group.measurements[row][column]).to_string())
                     .chain(
                         (0..group.metrics.len())
-                            .map(|metric| metric_cell(group, metric, row, column)),
+                            .map(|metric| metric_cell(group, metric, row, column, figures)),
                     )
                     .collect()
             })
@@ -459,7 +462,7 @@ fn render_with_metrics(name: &str, group: &Group) -> String {
             &headings,
             &values,
         )
-        .unwrap_or_else(|| render_long(name, group, &[column]));
+        .unwrap_or_else(|| render_long(name, group, &[column], figures));
         if !out.is_empty() {
             out.push('\n');
         }
@@ -486,15 +489,28 @@ fn input_title(name: &str, input: &TypedInput) -> String {
 ///
 /// The difference needs no significance test, since a metric is computed
 /// rather than sampled, so it is always shown.
-fn metric_cell(group: &Group, metric: usize, row: usize, column: usize) -> String {
+fn metric_cell(
+    group: &Group,
+    metric: usize,
+    row: usize,
+    column: usize,
+    figures: Option<usize>,
+) -> String {
     let metric = &group.metrics[metric];
     let Some(value) = metric.values[row][column] else {
         return "-".to_string();
     };
-    let mut shown = metric.unit.format(value);
+    let mut shown = match figures {
+        Some(figures) => format!("{value:.figures$}"),
+        None => value.to_string(),
+    };
     if let Some(baseline) = group.baselines[column].filter(|&baseline| baseline != row) {
-        if let Some(base) = metric.values[baseline][column].filter(|base| *base != 0.0) {
-            let percent = (value - base) / base.abs() * 100.0;
+        // A difference needs both to be counted in the same unit.
+        if let Some(base) = metric.values[baseline][column]
+            .filter(|base| value.same_kind(base) && base.as_f64() != 0.0)
+        {
+            let base = base.as_f64();
+            let percent = (value.as_f64() - base) / base.abs() * 100.0;
             if percent.is_finite() {
                 let digits = if percent.abs() < 10.0 { 1 } else { 0 };
                 shown.push_str(&format!(" ({percent:+.digits$}%)"));
@@ -518,10 +534,15 @@ impl std::fmt::Display for Format {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Difference, MetricColumn, Unit};
+    use crate::{Difference, MetricColumn, MetricValue};
 
     use super::*;
     use expect_test::expect;
+
+    /// A group as its table, with the default figures for its metrics.
+    fn render_group(name: &str, group: &Group) -> String {
+        super::render_group(name, group, None)
+    }
 
     fn timing(ns_per_iter: f64) -> Measurement {
         Measurement::Timing(crate::Timing {
@@ -716,12 +737,15 @@ mod tests {
         assert_eq!(render_group("lonely", &group), "lonely  22.0ns ± 0.2ns\n");
     }
 
-    fn column(name: &str, unit: Unit, values: Vec<Vec<Option<f64>>>) -> MetricColumn {
+    fn column(name: &str, values: Vec<Vec<Option<MetricValue>>>) -> MetricColumn {
         MetricColumn {
             name: name.into(),
-            unit,
             values,
         }
+    }
+
+    fn bytes(size: f64) -> Option<MetricValue> {
+        Some(MetricValue::bytes(size))
     }
 
     fn serializers() -> Group {
@@ -741,17 +765,19 @@ mod tests {
             metrics: vec![
                 column(
                     "size",
-                    Unit::Bytes,
                     vec![
-                        vec![Some(1992294.0)],
-                        vec![Some(755_000.0)],
-                        vec![Some(802_000.0)],
+                        vec![bytes(1992294.0)],
+                        vec![bytes(755_000.0)],
+                        vec![bytes(802_000.0)],
                     ],
                 ),
                 column(
                     "ratio",
-                    Unit::Ratio,
-                    vec![vec![Some(0.31)], vec![Some(0.52)], vec![None]],
+                    vec![
+                        vec![Some(MetricValue::ratio(0.31))],
+                        vec![Some(MetricValue::ratio(0.52))],
+                        vec![None],
+                    ],
                 ),
             ],
         }
@@ -782,8 +808,8 @@ mod tests {
         group.measurements[0].push(Some(timing(40.0)));
         group.measurements[1].push(Some(change(30.0, -10.0)));
         group.measurements[2].push(None);
-        group.metrics[0].values[0].push(Some(2048.0));
-        group.metrics[0].values[1].push(Some(512.0));
+        group.metrics[0].values[0].push(bytes(2048.0));
+        group.metrics[0].values[1].push(bytes(512.0));
         group.metrics[0].values[2].push(None);
         group.metrics[1].values[0].push(None);
         group.metrics[1].values[1].push(None);
@@ -857,8 +883,8 @@ mod tests {
         group.measurements[0].push(Some(timing(40.0)));
         group.measurements[1].push(Some(change(30.0, -10.0)));
         group.measurements[2].push(None);
-        group.metrics[0].values[0].push(Some(2048.0));
-        group.metrics[0].values[1].push(Some(512.0));
+        group.metrics[0].values[0].push(bytes(2048.0));
+        group.metrics[0].values[1].push(bytes(512.0));
         group.metrics[0].values[2].push(None);
         group.metrics[1].values[0].push(None);
         group.metrics[1].values[1].push(None);
@@ -924,12 +950,35 @@ mod tests {
     fn add_metrics(group: &mut Group, count: usize) {
         for i in 0..count {
             let values = (0..group.candidates.len())
-                .map(|row| vec![Some((i * 10 + row) as f64)])
+                .map(|row| vec![Some(MetricValue::count(i * 10 + row))])
                 .collect();
             group
                 .metrics
-                .push(column(&format!("another_metric_{i}"), Unit::Count, values));
+                .push(column(&format!("another_metric_{i}"), values));
         }
+    }
+
+    /// A difference needs both values counted in the same unit; a cell that
+    /// disagrees with its baseline on that is shown as it is, with none.
+    #[test]
+    fn a_difference_is_shown_only_between_values_of_one_kind() {
+        let mut group = serializers();
+        group.metrics = vec![column(
+            "size",
+            vec![
+                vec![bytes(2048.0)],
+                vec![Some(MetricValue::from(1024))],
+                vec![bytes(1024.0)],
+            ],
+        )];
+        let shown = render_group("serialize", &group);
+        assert!(shown.contains("2.00KiB"), "{shown}");
+        // The count of 1024 is not a size, so it has no percentage against 2KiB.
+        let postcard = shown.lines().find(|l| l.starts_with("postcard")).unwrap();
+        assert!(postcard.trim_end().ends_with("1024"), "{postcard}");
+        // The size is, and halves it.
+        let bincode = shown.lines().find(|l| l.starts_with("bincode")).unwrap();
+        assert!(bincode.contains("1.00KiB (-50%)"), "{bincode}");
     }
 
     #[test]
@@ -940,7 +989,10 @@ mod tests {
             inputs: vec![TypedInput::default()],
             measurements: vec![vec![Some(timing(22.0))]],
             baselines: vec![None],
-            metrics: vec![column("allocations", Unit::Count, vec![vec![Some(3.0)]])],
+            metrics: vec![column(
+                "allocations",
+                vec![vec![Some(MetricValue::count(3))]],
+            )],
         };
         let shown = render_group("lonely", &group);
         expect![[r#"

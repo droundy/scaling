@@ -18,7 +18,10 @@ libc = "0.2"
 
 [dependencies]
 inventory = "0.3.21"
-scaling-macros = { version = "0.9.0", path = "macros" }
+# Pinned exactly: the macros write struct literals of this crate's registration
+# types into the user's crate, so a macros release that is not this crate's
+# own would not compile against it. Bump the two versions together.
+scaling-macros = { version = "=0.9.0", path = "macros" }
 
 [dev-dependencies]
 expect-test = "1.5.1"
@@ -27,8 +30,8 @@ expect-test = "1.5.1"
 members = [".", "macros"]
 
 # A benchmark binary shaped the way one using this crate is meant to be:
-# benchmarks declared where they are written, and `scaling::main!()` for the
-# whole program.
+# benchmarks declared where they are written, and a `main` of one call,
+# `Config::default().run_and_print()`, for the whole program.
 [[bench]]
 name = "registered"
 harness = false

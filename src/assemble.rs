@@ -8,12 +8,13 @@
 //! could not have been said immediately - the same reasoning a comparison set
 //! already applies when it checks its alternative count before claiming.
 //!
-//! [`plan`](crate::assemble::plan) is therefore a pure function over slices:
+//! [`plan_with_metrics`] is therefore a pure function over slices:
 //! it takes registrations
 //! and returns either a plan or a list of complaints, touching nothing and
 //! measuring nothing. That makes every diagnostic below testable without a
 //! benchmark, a machine claim, or a linker.
 
+use crate::names;
 use crate::registry::{Candidate, ErasedInput, Input, MetricsFn, Registered};
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -235,6 +236,7 @@ pub(crate) fn resolve_versions<T: 'static>(
 /// about, because the whole point of collecting registrations from anywhere
 /// is that the reader does not know where they all are.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Diagnostic {
     /// Two registrations claim the same name, so a report could not tell
     /// their rows apart.
@@ -462,7 +464,7 @@ pub struct Lane {
     /// A group with candidates but no registered input at all gets a single
     /// synthetic entry here whose `name` is empty - the unit input every
     /// no-input group has always implicitly taken. `comparison_name` and
-    /// `flat_name` both recognise that empty name and omit the `@input`
+    /// `candidate_name` both recognise that empty name and omit the `@input`
     /// suffix it would otherwise produce, which is what keeps a plain
     /// `group = "sort"` declaration, with no `#[input]` anywhere, printing
     /// as `sort` rather than `sort@`. A group with a real, named
@@ -486,38 +488,47 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// What a cell of this lane is called.
-    ///
-    /// A lane with two or more candidates is named for the group and input.
-    /// A lone candidate is named for the candidate as well, since it has no
-    /// baseline to compare against - see [`Lane::flat_name`].
-    ///
-    /// The type is appended only when [`Lane::needs_type_suffix`] says
-    /// another lane of this group has an input of the same name - two lanes
-    /// each with a `small` input, say. Without that, `group@small` from one
-    /// lane collides with `group@small` from the other: both resolve to the
-    /// same report entry, and the second silently overwrites the first's
-    /// result.
+    /// The type to tell this lane's names apart by, when
+    /// [`Lane::needs_type_suffix`] says another lane of the group has an input
+    /// of the same name - two lanes each with a `small` input, say. Without
+    /// that, `group@small` from one lane collides with `group@small` from the
+    /// other: both resolve to the same report entry, and the second silently
+    /// overwrites the first's result.
+    fn type_suffix(&self) -> Option<&str> {
+        self.needs_type_suffix.then_some(self.type_name)
+    }
+
+    /// What the comparison of this lane's candidates on `input` is called:
+    /// `group@input`, with the type if it is needed. See [`names`].
     pub fn comparison_name(&self, input: &Named<Input>) -> String {
-        if input.name.is_empty() {
-            if self.needs_type_suffix {
-                format!("{} ({})", self.group, self.type_name)
-            } else {
-                self.group.to_string()
-            }
-        } else if self.needs_type_suffix {
-            format!("{}@{} ({})", self.group, input.name, self.type_name)
-        } else {
-            format!("{}@{}", self.group, input.name)
+        names::comparison_name(self.group, &input.name, self.type_suffix())
+    }
+
+    /// What `candidate` is called on `input`: `group:candidate@input`, with
+    /// the type if it is needed. See [`names`].
+    pub fn candidate_name(&self, candidate: &str, input: &Named<Input>) -> String {
+        names::candidate_name(self.group, candidate, &input.name, self.type_suffix())
+    }
+
+    /// What the report entry for `input` is called. A lane with two or more
+    /// candidates is named for the group and input, since it is a comparison.
+    /// A lone candidate has no baseline to compare against, so it is named for
+    /// the candidate as well.
+    pub fn entry_name(&self, input: &Named<Input>) -> String {
+        match self.candidates.as_slice() {
+            [only] => self.candidate_name(&only.name, input),
+            _ => self.comparison_name(input),
         }
     }
 
-    pub fn flat_name(&self, candidate: &Named<Candidate>, input: &Named<Input>) -> String {
-        if input.name.is_empty() {
-            format!("{}::{}", self.group, candidate.name)
-        } else {
-            format!("{}::{}@{}", self.group, candidate.name, input.name)
-        }
+    /// The shorter ways to write [`Lane::comparison_name`].
+    pub(crate) fn comparison_forms(&self, input: &Named<Input>) -> Vec<String> {
+        names::comparison_forms(self.group, &input.name, self.type_suffix())
+    }
+
+    /// The shorter ways to write [`Lane::candidate_name`].
+    pub(crate) fn candidate_forms(&self, candidate: &str, input: &Named<Input>) -> Vec<String> {
+        names::candidate_forms(self.group, candidate, &input.name, self.type_suffix())
     }
 }
 
@@ -545,9 +556,9 @@ fn unit_input() -> Named<Input> {
 
 /// Partition one group's candidates and inputs into lanes and pair them up.
 ///
-/// Pure, like [`plan`], and for the same reason: everything that can be
-/// wrong is decided before the machine is claimed. `group` is fixed for the
-/// whole call - [`plan`] calls this once per group name, having already
+/// Pure, like [`plan_with_metrics`], and for the same reason: everything that
+/// can be wrong is decided before the machine is claimed. `group` is fixed for
+/// the whole call - [`plan_with_metrics`] calls this once per group name, having already
 /// exploded every candidate and input across the (possibly several) groups
 /// it belongs to.
 ///
@@ -889,6 +900,7 @@ fn input_order(a: &str, b: &str) -> std::cmp::Ordering {
 /// with each other. So the first step here explodes every candidate and
 /// input across each group it names, before anything is paired up; from
 /// that point on, each group name is handled entirely independently.
+#[cfg(test)]
 pub fn plan(
     regs: &[&'static Registered],
     candidates: &[&'static Candidate],
@@ -897,7 +909,7 @@ pub fn plan(
     plan_with_metrics(regs, candidates, inputs, &[])
 }
 
-/// [`plan`], and each candidate is also paired with the metrics function
+/// `plan`, and each candidate is also paired with the metrics function
 /// that applies to it.
 ///
 /// A metrics function applies to a candidate when it names one of the
@@ -1586,7 +1598,7 @@ pub(crate) mod lane_tests {
 
     /// `candidate`, saying that it returns an `O` that a metrics function
     /// can take.
-    pub(crate) fn returning<O: 'static>(mut candidate: Candidate, ty: &'static str) -> Candidate {
+    pub(crate) fn returning<O: 'static>(mut candidate: Candidate) -> Candidate {
         fn no_metrics(
             set: crate::registry::InputGroup<ErasedInput>,
             _: &str,
@@ -1596,7 +1608,6 @@ pub(crate) mod lane_tests {
         }
         candidate.metrics = Some(crate::registry::CandidateMetrics {
             output_type: TypeId::of::<O>,
-            output_type_name: ty,
             add_alt: no_metrics,
         });
         candidate
@@ -1931,10 +1942,7 @@ pub(crate) mod lane_tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].candidates.len(), 1);
-        assert_eq!(
-            lanes[0].flat_name(&lanes[0].candidates[0], &lanes[0].inputs[0]),
-            "m::only@i"
-        );
+        assert_eq!(lanes[0].entry_name(&lanes[0].inputs[0]), "m:only@i");
     }
 
     #[test]
@@ -2397,9 +2405,9 @@ mod metrics_pairing {
     /// `u32`, all on the unit input.
     fn candidates() -> Vec<&'static Candidate> {
         leak_c(vec![
-            returning::<Vec<u8>>(cand::<()>("g", "a", "()", true), "Vec<u8>"),
-            returning::<Vec<u8>>(cand::<()>("g", "b", "()", false), "Vec<u8>"),
-            returning::<u32>(cand::<()>("g", "c", "()", false), "u32"),
+            returning::<Vec<u8>>(cand::<()>("g", "a", "()", true)),
+            returning::<Vec<u8>>(cand::<()>("g", "b", "()", false)),
+            returning::<u32>(cand::<()>("g", "c", "()", false)),
         ])
     }
 
@@ -2520,7 +2528,7 @@ mod metrics_pairing {
     fn a_candidate_that_cannot_hand_on_its_output_has_no_function() {
         let cs = leak_c(vec![
             cand::<()>("g", "plain", "()", true),
-            returning::<u32>(cand::<()>("g", "typed", "()", false), "u32"),
+            returning::<u32>(cand::<()>("g", "typed", "()", false)),
         ]);
         let (plan, _) = plan_with_metrics(
             &[],

@@ -1,123 +1,249 @@
 //! Extra numbers computed alongside a timing: how many bytes a serializer
 //! wrote, how well its output compresses, how much memory it peaked at.
 //!
-//! A [`Metrics`] is a record of named numbers about one cell - one candidate
-//! on one input. A group's [`MetricColumn`]s hold the same numbers laid out
-//! like its measurements, one per candidate and input, so a table can show
-//! them beside the time. Neither the columns nor the group is exposed: a
+//! A [`Metrics`] is a record of named [`MetricValue`]s about one cell - one
+//! candidate on one input. A group's [`MetricColumn`]s hold the same numbers
+//! laid out like its measurements, one per candidate and input, so a table can
+//! show them beside the time. Neither the columns nor the group is exposed: a
 //! script reads the numbers by name through `Timings::metrics`.
 //!
 //! Each number is exact rather than sampled, so it has no error bar and
 //! nothing here asks whether a difference is significant.
 
-/// What a metric is counted in, which is all that decides how it is printed.
-///
-/// [`Metrics::bytes`], [`Metrics::count`] and the others each pick one; this is
-/// what [`Metrics::unit`] takes, to change the unit of the number just added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unit {
-    /// Bytes, printed in the largest binary unit that keeps it above one:
-    /// `812B`, `1.90MiB`.
-    Bytes,
-    /// A plain count, printed whole when it is whole.
-    Count,
-    /// A dimensionless number, such as a compression ratio.
-    Ratio,
-    /// A percentage, printed with a `%`.
-    Percent,
-    /// A duration in seconds, printed in the unit that suits it, as a
-    /// timing is.
-    Seconds,
-    /// Anything else: the text is printed straight after the number, so
-    /// `"ops/s"` gives `1.23ops/s` and `" ops/s"` gives `1.23 ops/s`.
-    Custom(&'static str),
+use std::fmt::{self, Write as _};
+use std::time::Duration;
+
+/// A number and what it is counted in, which together decide how it is
+/// printed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Value {
+    /// A size, printed in the largest binary unit that keeps it above one.
+    /// Held as a float so that a mean size need not be rounded.
+    Bytes(f64),
+    /// A whole number: a count, or a signed difference of counts.
+    Integer(i128),
+    /// A dimensionless number, such as a ratio.
+    Float(f64),
+    /// A percentage.
+    Percent(f64),
+    /// A duration.
+    Time(Duration),
 }
 
-impl Unit {
-    /// `value` as this unit prints it.
-    ///
-    /// Three significant digits, which is as much as anyone reads off a
-    /// table; a metric that needs more can be a [`Unit::Custom`] on a
-    /// rescaled value.
-    pub fn format(self, value: f64) -> String {
-        if !value.is_finite() {
-            return "-".to_string();
-        }
-        match self {
-            Unit::Bytes => {
-                const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-                let mut scaled = value;
-                let mut unit = 0;
-                while scaled.abs() >= 1024.0 && unit + 1 < UNITS.len() {
-                    scaled /= 1024.0;
-                    unit += 1;
-                }
-                if unit == 0 && scaled.fract() == 0.0 {
-                    format!("{scaled}B")
+/// One number about a cell, together with what it is counted in.
+///
+/// Numeric types convert to one - integers to whole numbers, floats to
+/// plain numbers, a [`Duration`] to a time - and the constructors make the
+/// others. It prints in the unit that suits it, to three significant figures
+/// unless a precision says otherwise (`1.90MiB`, `12.5ms`, `0.312`). A timing
+/// knows from its error how many of its digits mean anything; nothing does for
+/// a metric, so three is only a reasonable default, and a precision is a number
+/// of significant figures:
+///
+/// ```
+/// use scaling::MetricValue;
+/// use std::time::Duration;
+///
+/// assert_eq!(MetricValue::bytes(2048usize).to_string(), "2.00KiB");
+/// assert_eq!(MetricValue::from(12).to_string(), "12");
+/// assert_eq!(MetricValue::from(0.31234).to_string(), "0.312");
+/// assert_eq!(MetricValue::percent(12.345).to_string(), "12.3%");
+/// assert_eq!(MetricValue::from(Duration::from_micros(12500)).to_string(), "12.5ms");
+///
+/// // A precision is the number of significant figures, trailing zeros included.
+/// assert_eq!(format!("{:.5}", MetricValue::from(0.31234)), "0.31234");
+/// assert_eq!(format!("{:.2}", MetricValue::bytes(1992294)), "1.9MiB");
+/// assert_eq!(format!("{:.1}", MetricValue::percent(12.345)), "12%");
+///
+/// // Width, fill and alignment are honoured.
+/// assert_eq!(format!("{:>8}", MetricValue::bytes(812)), "    812B");
+/// ```
+///
+/// A whole number is always written in full, whatever the precision. A value
+/// that is not a finite number prints as `-`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetricValue(Value);
+
+impl MetricValue {
+    /// A size in bytes. A float is kept as it is, so a mean size is not
+    /// rounded; it prints in the largest binary unit that keeps it above one,
+    /// as `812B` or `1.90MiB`.
+    pub fn bytes(size: impl Into<MetricValue>) -> Self {
+        MetricValue(Value::Bytes(size.into().as_f64()))
+    }
+
+    /// A whole number, such as a count. A float is rounded to the nearest
+    /// whole number.
+    pub fn count(n: impl Into<MetricValue>) -> Self {
+        match n.into().0 {
+            Value::Integer(i) => MetricValue(Value::Integer(i)),
+            other => {
+                let x = MetricValue(other).as_f64();
+                if x.is_finite() {
+                    MetricValue(Value::Integer(x.round() as i128))
                 } else {
-                    format!("{}{}", three_digits(scaled), UNITS[unit])
+                    MetricValue(Value::Float(x))
                 }
             }
-            Unit::Count => {
-                if value.fract() == 0.0 && value.abs() < 1e15 {
-                    format!("{value}")
-                } else {
-                    three_digits(value)
-                }
-            }
-            Unit::Ratio => three_digits(value),
-            Unit::Percent => format!("{}%", three_digits(value)),
-            Unit::Seconds => {
-                let (divisor, unit) = crate::unit_for(value * 1e9);
-                format!("{}{unit}", three_digits(value * 1e9 / divisor))
-            }
-            Unit::Custom(suffix) => format!("{}{suffix}", three_digits(value)),
         }
+    }
+
+    /// A dimensionless number, such as a ratio. Unlike [`count`](MetricValue::count)
+    /// it stays a float, so a table shows its difference from a baseline only
+    /// against other plain numbers.
+    pub fn ratio(x: impl Into<MetricValue>) -> Self {
+        MetricValue(Value::Float(x.into().as_f64()))
+    }
+
+    /// A percentage, so `12.3` prints as `12.3%`.
+    pub fn percent(x: impl Into<MetricValue>) -> Self {
+        MetricValue(Value::Percent(x.into().as_f64()))
+    }
+
+    /// A duration, printed in the unit that suits it, as a timing is.
+    pub fn time(d: Duration) -> Self {
+        MetricValue(Value::Time(d))
+    }
+
+    /// The number, in bytes, whole units, or seconds, as the kind it is; the
+    /// way to compare values or read one back.
+    pub fn as_f64(&self) -> f64 {
+        match self.0 {
+            Value::Bytes(x) | Value::Float(x) | Value::Percent(x) => x,
+            Value::Integer(i) => i as f64,
+            Value::Time(d) => d.as_secs_f64(),
+        }
+    }
+
+    /// Whether `other` is counted in the same unit, which is what a
+    /// difference between the two needs.
+    pub(crate) fn same_kind(&self, other: &MetricValue) -> bool {
+        std::mem::discriminant(&self.0) == std::mem::discriminant(&other.0)
     }
 }
 
-/// `x` to three significant digits, without a trailing exponent.
-fn three_digits(x: f64) -> String {
-    if x == 0.0 {
-        return "0".to_string();
-    }
-    let decimals = (2 - x.abs().log10().floor() as i64).clamp(0, 9) as usize;
-    format!("{x:.decimals$}")
-}
-
-/// One named number about a cell.
-#[derive(Debug, Clone, PartialEq)]
-struct Metric {
-    name: String,
-    value: f64,
-    unit: Unit,
-}
-
-/// What a value can be turned into a metric from: any number, or an
-/// `Option` of one, where `None` leaves the metric out.
-///
-/// Public only so that it can bound the methods of [`Metrics`]. It is not
-/// exported, so it cannot be named outside the crate, or implemented.
-pub trait IntoMetric {
-    /// The value as an `f64`, or `None` to say there is none.
-    fn into_metric(self) -> Option<f64>;
-}
-
-macro_rules! numeric_metrics {
+macro_rules! whole_numbers {
     ($($t:ty),*) => {$(
-        impl IntoMetric for $t {
-            fn into_metric(self) -> Option<f64> {
-                Some(self as f64)
+        impl From<$t> for MetricValue {
+            fn from(n: $t) -> Self {
+                MetricValue(Value::Integer(n as i128))
             }
         }
     )*};
 }
-numeric_metrics!(f64, f32, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+whole_numbers!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, i128);
 
-impl<T: IntoMetric> IntoMetric for Option<T> {
-    fn into_metric(self) -> Option<f64> {
-        self.and_then(IntoMetric::into_metric)
+macro_rules! floating_numbers {
+    ($($t:ty),*) => {$(
+        impl From<$t> for MetricValue {
+            fn from(x: $t) -> Self {
+                MetricValue(Value::Float(x as f64))
+            }
+        }
+    )*};
+}
+floating_numbers!(f32, f64);
+
+impl From<Duration> for MetricValue {
+    fn from(d: Duration) -> Self {
+        MetricValue(Value::Time(d))
     }
+}
+
+impl fmt::Display for MetricValue {
+    /// The value in the unit that suits it, to three significant figures
+    /// unless a precision says how many: `{:.5}` gives `1.9000MiB`. Width, fill
+    /// and alignment are honoured as well.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let figures = f.precision().unwrap_or(DEFAULT_FIGURES);
+        let text = match self.0 {
+            Value::Bytes(size) => bytes_text(size, figures),
+            Value::Integer(n) => n.to_string(),
+            Value::Float(x) => figures_text(x, figures),
+            Value::Percent(x) if x.is_finite() => format!("{}%", figures_text(x, figures)),
+            Value::Percent(_) => "-".to_string(),
+            Value::Time(d) => {
+                let ns = d.as_secs_f64() * 1e9;
+                let (divisor, unit) = crate::unit_for(ns);
+                format!("{}{unit}", figures_text(ns / divisor, figures))
+            }
+        };
+        pad(f, &text)
+    }
+}
+
+/// `text` with the width, fill and alignment `f` asks for. Not
+/// [`Formatter::pad`](std::fmt::Formatter::pad), which would read a precision as a length to cut the
+/// text to.
+fn pad(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    let Some(width) = f.width() else {
+        return f.write_str(text);
+    };
+    let shown = text.chars().count();
+    let Some(gap) = width.checked_sub(shown).filter(|gap| *gap > 0) else {
+        return f.write_str(text);
+    };
+    let (before, after) = match f.align() {
+        Some(fmt::Alignment::Left) => (0, gap),
+        Some(fmt::Alignment::Center) => (gap / 2, gap - gap / 2),
+        // A number reads best against the right edge.
+        Some(fmt::Alignment::Right) | None => (gap, 0),
+    };
+    for _ in 0..before {
+        f.write_char(f.fill())?;
+    }
+    f.write_str(text)?;
+    for _ in 0..after {
+        f.write_char(f.fill())?;
+    }
+    Ok(())
+}
+
+/// How many significant figures a metric is shown to when nobody says. A
+/// timing's error says how many of its digits mean anything; nothing says so for
+/// a metric, and three tell candidates apart without claiming much.
+const DEFAULT_FIGURES: usize = 3;
+
+/// `x` rounded to `figures` significant figures and written in plain decimals,
+/// trailing zeros included: three figures of 2 are `2.00`.
+fn figures_text(x: f64, figures: usize) -> String {
+    if !x.is_finite() {
+        return "-".to_string();
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    let figures = figures.max(1);
+    // `{:e}` does the rounding, carrying into the next power of ten when it
+    // has to (9.996 to three figures is 10.0), so how many decimals the figures
+    // reach is read from what it wrote.
+    let scientific = format!("{x:.*e}", figures - 1);
+    let exponent: i64 = scientific
+        .rsplit('e')
+        .next()
+        .and_then(|exponent| exponent.parse().ok())
+        .expect("`{:e}` ends in an exponent");
+    let decimals = (figures as i64 - 1 - exponent).max(0) as usize;
+    format!("{x:.decimals$}")
+}
+
+fn bytes_text(size: f64, figures: usize) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if !size.is_finite() {
+        return "-".to_string();
+    }
+    let mut scaled = size;
+    let mut unit = 0;
+    while scaled.abs() >= 1024.0 && unit + 1 < UNITS.len() {
+        scaled /= 1024.0;
+        unit += 1;
+    }
+    // A whole number of bytes is exact, and written in full like any whole
+    // number.
+    if unit == 0 && scaled.fract() == 0.0 {
+        return format!("{scaled}B");
+    }
+    format!("{}{}", figures_text(scaled, figures), UNITS[unit])
 }
 
 /// A record of named numbers about one cell - one candidate on one input -
@@ -126,36 +252,38 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
 /// it next.
 ///
 /// ```
-/// use scaling::{Metrics, Unit};
+/// use scaling::{MetricValue, Metrics};
+/// use std::time::Duration;
 ///
 /// let out = vec![0u8; 2048];
 /// let metrics = Metrics::new()
 ///     .bytes("size", out.len())
 ///     .ratio("per item", out.len() as f64 / 16.0)
-///     .value("throughput", 1.5e6)
-///     .unit(Unit::Custom(" ops/s"));
-/// assert_eq!(metrics.get("size").unwrap(), 2048.0);
+///     .add("setup", Duration::from_millis(12));
+/// assert_eq!(metrics.get("size"), Some(MetricValue::bytes(2048)));
 /// assert_eq!(metrics.iter().count(), 3);
 /// ```
 ///
 /// # Adding numbers
 ///
-/// Each method adds one, taking its name, so the name is a column of the table.
-/// The method says what the number is counted in, which is all that decides how
-/// it is printed, to three significant digits:
+/// [`add`](Metrics::add) takes a name, which is a column of the table, and
+/// anything that converts to a [`MetricValue`]: an integer, a float, a
+/// [`Duration`], or a value built with one of its constructors. A bare number
+/// carries no unit, so the wrappers say it by name:
 ///
-/// | method | counted in | printed as |
+/// | method | is | printed as |
 /// |---|---|---|
-/// | [`bytes`](Metrics::bytes) | bytes | `812B`, `1.90MiB` |
-/// | [`count`](Metrics::count) | a count | `12`, or three digits if not whole |
-/// | [`ratio`](Metrics::ratio) | nothing | `0.312` |
-/// | [`percent`](Metrics::percent) | percent | `12.3%` |
-/// | [`seconds`](Metrics::seconds) | seconds | `12.5ms`, in the unit that suits it |
-/// | [`value`](Metrics::value) | no unit yet | give it one with [`unit`](Metrics::unit) |
+/// | [`bytes`](Metrics::bytes) | a size | `812B`, `1.90MiB` |
+/// | [`count`](Metrics::count) | a whole number | `12` |
+/// | [`ratio`](Metrics::ratio) | a plain number | `0.312` |
+/// | [`percent`](Metrics::percent) | a percentage | `12.3%` |
 ///
-/// A value can be any integer or float, or an `Option` of one: `None` leaves
-/// the metric out, so it shows as missing in the table. A name given twice
-/// keeps the later value, in the earlier position.
+/// These read the number they are given, so a [`Duration`] passed to `count` is
+/// its seconds, and a [`MetricValue`] loses the unit it had; to keep a time as a
+/// time, pass it to [`add`](Metrics::add).
+///
+/// A metric that is not defined is simply not added, and shows as `-` in the
+/// table. A name given twice keeps the later value, in the earlier position.
 ///
 /// # Allocation numbers
 ///
@@ -172,17 +300,28 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
 /// # Reading one back
 ///
 /// [`get`](Metrics::get) gives a value by name and [`iter`](Metrics::iter) every
-/// name, value and [`Unit`] in the order they were added. A script gets one
-/// record for each alternative from `Timings::metrics`.
+/// name and value in the order they were added.
+///
+/// A script reads a candidate's record from the [`Report`](crate::Report) by its
+/// name, as `report.metrics("encode:json@text")?`, and a shorter name such as
+/// `"json"` does when only one candidate has it; see
+/// [Names](crate::Report#names). To walk every candidate of a comparison
+/// together, [`Timings::metrics`](crate::Timings::metrics) gives the records in
+/// the order of its `names`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metrics {
-    metrics: Vec<Metric>,
-    /// Metrics whose values are not known until the run has been counted:
-    /// the index of each, in `metrics`, and which count it is.
-    counted: Vec<(usize, Counted)>,
+    entries: Vec<(String, Entry)>,
 }
 
-/// Which of an alternative's [`Allocations`] a metric shows.
+/// What a name stands for in a [`Metrics`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Entry {
+    Value(MetricValue),
+    /// A number not known until the run has been counted.
+    Counted(Counted),
+}
+
+/// Which of an alternative's [`Allocations`](crate::Allocations) a metric shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Counted {
     AllocationCount,
@@ -191,74 +330,50 @@ enum Counted {
     NetAllocatedBytes,
 }
 
+/// What an alternative that computed nothing has, for a caller that is handed a
+/// reference.
+pub(crate) static NO_METRICS: Metrics = Metrics::new();
+
 impl Metrics {
     /// An empty record.
-    pub fn new() -> Self {
-        Metrics::default()
+    pub const fn new() -> Self {
+        Metrics {
+            entries: Vec::new(),
+        }
     }
 
-    fn push(mut self, name: &str, value: impl IntoMetric, unit: Unit) -> Self {
-        let Some(value) = value.into_metric() else {
-            return self;
-        };
-        let metric = Metric {
-            name: name.to_string(),
-            value,
-            unit,
-        };
-        match self.metrics.iter().position(|m| m.name == name) {
-            Some(at) => {
-                self.metrics[at] = metric;
-                // A value given outright replaces one that was to be counted.
-                self.counted.retain(|(i, _)| *i != at);
-            }
-            None => self.metrics.push(metric),
+    fn put(mut self, name: &str, entry: Entry) -> Self {
+        match self.entries.iter_mut().find(|(n, _)| n == name) {
+            Some((_, existing)) => *existing = entry,
+            None => self.entries.push((name.to_string(), entry)),
         }
         self
     }
 
-    /// A metric to be filled in from the counted run, once there is one.
-    fn counted(mut self, name: &str, unit: Unit, which: Counted) -> Self {
-        self = self.push(name, f64::NAN, unit);
-        let at = self
-            .metrics
-            .iter()
-            .position(|m| m.name == name)
-            .expect("just added");
-        self.counted.retain(|(i, _)| *i != at);
-        self.counted.push((at, which));
-        self
+    /// Add a number under `name`: an integer, a float, a [`Duration`], or a
+    /// [`MetricValue`] built with the unit it is counted in.
+    pub fn add(self, name: &str, value: impl Into<MetricValue>) -> Self {
+        self.put(name, Entry::Value(value.into()))
     }
 
-    /// A size in bytes.
-    pub fn bytes(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Bytes)
+    /// A size in bytes. See [`MetricValue::bytes`].
+    pub fn bytes(self, name: &str, size: impl Into<MetricValue>) -> Self {
+        self.add(name, MetricValue::bytes(size))
     }
 
-    /// A count.
-    pub fn count(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Count)
+    /// A whole number. See [`MetricValue::count`].
+    pub fn count(self, name: &str, n: impl Into<MetricValue>) -> Self {
+        self.add(name, MetricValue::count(n))
     }
 
-    /// A dimensionless number.
-    pub fn ratio(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Ratio)
+    /// A dimensionless number. See [`MetricValue::ratio`].
+    pub fn ratio(self, name: &str, x: impl Into<MetricValue>) -> Self {
+        self.add(name, MetricValue::ratio(x))
     }
 
-    /// A percentage.
-    pub fn percent(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Percent)
-    }
-
-    /// A duration in seconds.
-    pub fn seconds(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Seconds)
-    }
-
-    /// A number in no particular unit, to be given one with
-    /// [`Metrics::unit`].
-    pub fn value(self, name: &str, value: impl IntoMetric) -> Self {
-        self.push(name, value, Unit::Custom(""))
+    /// A percentage. See [`MetricValue::percent`].
+    pub fn percent(self, name: &str, x: impl Into<MetricValue>) -> Self {
+        self.add(name, MetricValue::percent(x))
     }
 
     /// How many times the candidate asked for memory, as an `alloc count`
@@ -269,20 +384,20 @@ impl Metrics {
     /// allocator. Only the candidate's own call is counted, so memory it was
     /// handed, such as its input, is not.
     pub fn allocation_count(self) -> Self {
-        self.counted("alloc count", Unit::Count, Counted::AllocationCount)
+        self.put("alloc count", Entry::Counted(Counted::AllocationCount))
     }
 
     /// The most memory the candidate held at once, as an `alloc peak` metric.
     /// See [`Metrics::allocation_count`] for what that needs.
     pub fn peak_allocated_bytes(self) -> Self {
-        self.counted("alloc peak", Unit::Bytes, Counted::PeakAllocatedBytes)
+        self.put("alloc peak", Entry::Counted(Counted::PeakAllocatedBytes))
     }
 
     /// How much memory the candidate asked for in all, as an `alloc total`
     /// metric: what it asked for again each time it did, not what it held at the
     /// most. See [`Metrics::allocation_count`] for what that needs.
     pub fn total_allocated_bytes(self) -> Self {
-        self.counted("alloc total", Unit::Bytes, Counted::TotalAllocatedBytes)
+        self.put("alloc total", Entry::Counted(Counted::TotalAllocatedBytes))
     }
 
     /// How much more memory the candidate held when its call ended than when it
@@ -291,7 +406,7 @@ impl Metrics {
     /// way, and it is negative if it freed memory it was handed. See
     /// [`Metrics::allocation_count`] for what that needs.
     pub fn net_allocated_bytes(self) -> Self {
-        self.counted("alloc net", Unit::Bytes, Counted::NetAllocatedBytes)
+        self.put("alloc net", Entry::Counted(Counted::NetAllocatedBytes))
     }
 
     /// What the candidate allocated, for a metric computed from it.
@@ -322,7 +437,9 @@ impl Metrics {
     /// Whether any of the metrics wait on a counted run.
     #[cfg(test)]
     pub(crate) fn wants_allocation(&self) -> bool {
-        !self.counted.is_empty()
+        self.entries
+            .iter()
+            .any(|(_, entry)| matches!(entry, Entry::Counted(_)))
     }
 
     /// Fill in the metrics that wait on a counted run.
@@ -332,52 +449,42 @@ impl Metrics {
     /// If there are some, and `stats` is `None`: the run was not counted,
     /// so what they would show is nothing at all.
     pub(crate) fn resolve_allocation(&mut self, stats: Option<crate::alloc::Allocations>) {
-        if self.counted.is_empty() {
-            return;
-        }
-        let stats = stats.expect(
-            "a metrics function asks for allocation numbers (`allocation_count`, \
-             `peak_allocated_bytes`, `total_allocated_bytes` or `net_allocated_bytes`), but \
-             the run was not counted - say `allocation` in its #[scaling::metrics(..)]",
-        );
-        for (at, which) in self.counted.drain(..) {
-            self.metrics[at].value = match which {
-                Counted::AllocationCount => stats.allocation_count as f64,
-                Counted::PeakAllocatedBytes => stats.peak_allocated_bytes as f64,
-                Counted::TotalAllocatedBytes => stats.total_allocated_bytes as f64,
-                Counted::NetAllocatedBytes => stats.net_allocated_bytes as f64,
+        for (_, entry) in &mut self.entries {
+            let Entry::Counted(which) = *entry else {
+                continue;
             };
+            let stats = stats.expect(
+                "a metrics function asks for allocation numbers (`allocation_count`, \
+                 `peak_allocated_bytes`, `total_allocated_bytes` or `net_allocated_bytes`), but \
+                 the run was not counted - say `allocation` in its #[scaling::metrics(..)]",
+            );
+            *entry = Entry::Value(match which {
+                Counted::AllocationCount => MetricValue::from(stats.allocation_count),
+                Counted::PeakAllocatedBytes => MetricValue::bytes(stats.peak_allocated_bytes),
+                Counted::TotalAllocatedBytes => MetricValue::bytes(stats.total_allocated_bytes),
+                Counted::NetAllocatedBytes => MetricValue::bytes(stats.net_allocated_bytes),
+            });
         }
     }
 
-    /// Changes the unit of the metric added last. Does nothing on an empty
-    /// record.
-    pub fn unit(mut self, unit: Unit) -> Self {
-        if let Some(last) = self.metrics.last_mut() {
-            last.unit = unit;
-        }
-        self
+    /// Every metric as its name and value, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, MetricValue)> {
+        self.entries.iter().filter_map(|(name, entry)| match entry {
+            Entry::Value(value) => Some((name.as_str(), *value)),
+            Entry::Counted(_) => None,
+        })
     }
 
-    /// Every metric as its name, value and unit, in the order they were
-    /// added.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, f64, Unit)> {
-        self.metrics
-            .iter()
-            .map(|metric| (metric.name.as_str(), metric.value, metric.unit))
-    }
-
-    /// The value of the metric of this name, if there is one.
-    pub fn get(&self, name: &str) -> Option<f64> {
-        self.metrics
-            .iter()
-            .find(|metric| metric.name == name)
-            .map(|metric| metric.value)
+    /// The metric of this name, if there is one.
+    pub fn get(&self, name: &str) -> Option<MetricValue> {
+        self.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, value)| value)
     }
 
     /// Whether there are no metrics.
     pub fn is_empty(&self) -> bool {
-        self.metrics.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -387,49 +494,131 @@ impl Metrics {
 pub(crate) struct MetricColumn {
     /// What the metric is called.
     pub(crate) name: String,
-    /// What it is counted in.
-    pub(crate) unit: Unit,
     /// `values[candidate][input]`, aligned with the group's measurements.
     /// `None` where that cell produced no such metric.
-    pub(crate) values: Vec<Vec<Option<f64>>>,
+    pub(crate) values: Vec<Vec<Option<MetricValue>>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn bytes_pick_the_unit_that_keeps_them_above_one() {
-        assert_eq!(Unit::Bytes.format(0.0), "0B");
-        assert_eq!(Unit::Bytes.format(812.0), "812B");
-        assert_eq!(Unit::Bytes.format(1023.0), "1023B");
-        assert_eq!(Unit::Bytes.format(1024.0), "1.00KiB");
-        assert_eq!(Unit::Bytes.format(612.0 * 1024.0), "612KiB");
-        assert_eq!(Unit::Bytes.format(1.9 * 1024.0 * 1024.0), "1.90MiB");
-        assert_eq!(Unit::Bytes.format(37.5 * 1024.0 * 1024.0), "37.5MiB");
-        assert_eq!(Unit::Bytes.format(1.5), "1.50B");
+    fn shown(value: impl Into<MetricValue>) -> String {
+        value.into().to_string()
     }
 
     #[test]
-    fn other_units_print_three_digits() {
-        assert_eq!(Unit::Count.format(12.0), "12");
-        assert_eq!(Unit::Count.format(1_234_567.0), "1234567");
-        assert_eq!(Unit::Count.format(0.5), "0.500");
-        assert_eq!(Unit::Ratio.format(0.31234), "0.312");
-        assert_eq!(Unit::Ratio.format(41.23), "41.2");
-        assert_eq!(Unit::Percent.format(12.345), "12.3%");
-        assert_eq!(Unit::Seconds.format(0.0125), "12.5ms");
-        assert_eq!(Unit::Seconds.format(2.0), "2.00s");
-        assert_eq!(Unit::Custom("ops/s").format(1234.5), "1234ops/s");
-        assert_eq!(Unit::Custom(" ops/s").format(1.5), "1.50 ops/s");
+    fn bytes_pick_the_unit_that_keeps_them_above_one() {
+        assert_eq!(shown(MetricValue::bytes(0)), "0B");
+        assert_eq!(shown(MetricValue::bytes(812)), "812B");
+        assert_eq!(shown(MetricValue::bytes(1023)), "1023B");
+        assert_eq!(shown(MetricValue::bytes(1024)), "1.00KiB");
+        assert_eq!(shown(MetricValue::bytes(612 * 1024)), "612KiB");
+        assert_eq!(shown(MetricValue::bytes(1.9 * 1024.0 * 1024.0)), "1.90MiB");
+        assert_eq!(shown(MetricValue::bytes(37.5 * 1024.0 * 1024.0)), "37.5MiB");
+        assert_eq!(shown(MetricValue::bytes(1.5)), "1.50B");
+        assert_eq!(shown(MetricValue::bytes(-1536)), "-1.50KiB");
+    }
+
+    #[test]
+    fn the_other_kinds_print_three_figures() {
+        assert_eq!(shown(12), "12");
+        assert_eq!(shown(1_234_567u64), "1234567");
+        assert_eq!(shown(-4), "-4");
+        assert_eq!(shown(0.5), "0.500");
+        assert_eq!(shown(0.31234), "0.312");
+        assert_eq!(shown(41.23), "41.2");
+        assert_eq!(shown(MetricValue::ratio(2)), "2.00");
+        assert_eq!(shown(MetricValue::percent(12.345)), "12.3%");
+        assert_eq!(shown(Duration::from_micros(12500)), "12.5ms");
+        assert_eq!(shown(Duration::from_secs(2)), "2.00s");
+        assert_eq!(shown(Duration::ZERO), "0ns");
     }
 
     #[test]
     fn a_value_that_is_not_a_number_prints_as_missing() {
-        for unit in [Unit::Bytes, Unit::Count, Unit::Ratio, Unit::Seconds] {
-            assert_eq!(unit.format(f64::NAN), "-");
-            assert_eq!(unit.format(f64::INFINITY), "-");
+        for value in [
+            MetricValue::bytes(f64::NAN),
+            MetricValue::ratio(f64::INFINITY),
+            MetricValue::percent(f64::NAN),
+            MetricValue::from(f64::NEG_INFINITY),
+        ] {
+            assert_eq!(value.to_string(), "-");
         }
+    }
+
+    #[test]
+    fn a_precision_means_significant_figures() {
+        assert_eq!(format!("{:.2}", MetricValue::bytes(1992294)), "1.9MiB");
+        assert_eq!(format!("{:.5}", MetricValue::bytes(812.5)), "812.50B");
+        assert_eq!(format!("{:.1}", MetricValue::from(2.6)), "3");
+        assert_eq!(format!("{:.4}", MetricValue::percent(12.345)), "12.35%");
+        assert_eq!(
+            format!("{:.4}", MetricValue::from(Duration::from_micros(12500))),
+            "12.50ms"
+        );
+        // Rounding up into the next power of ten, and values too small for the
+        // figures to be in the first few decimals.
+        assert_eq!(format!("{:.3}", MetricValue::from(9.996)), "10.0");
+        assert_eq!(format!("{:.3}", MetricValue::from(0.0000999)), "0.0000999");
+        assert_eq!(
+            format!("{:.3}", MetricValue::from(1e-12)),
+            "0.00000000000100"
+        );
+        // A whole number is written in full.
+        assert_eq!(format!("{:.1}", MetricValue::from(1234)), "1234");
+    }
+
+    #[test]
+    fn width_fill_and_alignment_are_honoured() {
+        let v = MetricValue::bytes(812);
+        assert_eq!(format!("{v:>8}"), "    812B");
+        assert_eq!(format!("{v:<8}|"), "812B    |");
+        assert_eq!(format!("{v:^8}|"), "  812B  |");
+        assert_eq!(format!("{v:*>8}"), "****812B");
+        assert_eq!(format!("{v:8}"), "    812B");
+        assert_eq!(format!("{v:2}"), "812B");
+        assert_eq!(format!("{:>9.2}", MetricValue::bytes(1992294)), "   1.9MiB");
+    }
+
+    #[test]
+    fn numbers_convert_to_the_kind_that_suits_them() {
+        assert_eq!(MetricValue::from(3usize), MetricValue::count(3));
+        assert_eq!(MetricValue::from(3u8), MetricValue::from(3i64));
+        assert_eq!(MetricValue::from(0.5f32), MetricValue::ratio(0.5));
+        assert_ne!(MetricValue::from(2), MetricValue::ratio(2));
+        assert_eq!(MetricValue::count(2.6), MetricValue::from(3));
+        assert_eq!(
+            MetricValue::time(Duration::from_secs(1)),
+            Duration::from_secs(1).into()
+        );
+        assert_eq!(MetricValue::bytes(3).as_f64(), 3.0);
+        assert_eq!(MetricValue::time(Duration::from_millis(1500)).as_f64(), 1.5);
+        assert!(MetricValue::bytes(1).same_kind(&MetricValue::bytes(2.5)));
+        assert!(!MetricValue::bytes(1).same_kind(&MetricValue::from(1)));
+    }
+
+    #[test]
+    fn the_wrappers_say_what_a_bare_number_does_not() {
+        let m = Metrics::new()
+            .bytes("size", 10usize)
+            .count("items", 3.0)
+            .ratio("ratio", 2)
+            .percent("share", 12.5)
+            .add("setup", Duration::from_millis(5))
+            .add("plain", 7);
+        let got: Vec<_> = m.iter().map(|(n, v)| (n, v.to_string())).collect();
+        assert_eq!(
+            got,
+            [
+                ("size", "10B".to_string()),
+                ("items", "3".to_string()),
+                ("ratio", "2.00".to_string()),
+                ("share", "12.5%".to_string()),
+                ("setup", "5.00ms".to_string()),
+                ("plain", "7".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -438,30 +627,17 @@ mod tests {
             .bytes("a", 1usize)
             .bytes("b", 2usize)
             .bytes("a", 3usize);
-        let values: Vec<_> = m.iter().map(|(name, value, _)| (name, value)).collect();
+        let values: Vec<_> = m.iter().map(|(name, v)| (name, v.as_f64())).collect();
         assert_eq!(values, [("a", 3.0), ("b", 2.0)]);
     }
 
     #[test]
-    fn none_leaves_the_metric_out() {
-        let m = Metrics::new()
-            .bytes("size", None::<usize>)
-            .bytes("x", Some(4u8));
-        assert!(m.get("size").is_none());
-        assert_eq!(m.get("x").unwrap(), 4.0);
-    }
-
-    #[test]
-    fn unit_changes_the_last_metric_only() {
-        let m = Metrics::new()
-            .value("first", 1.0)
-            .value("rate", 2.0)
-            .unit(Unit::Custom("/s"));
-        let unit = |name: &str| m.iter().find(|(n, _, _)| *n == name).unwrap().2;
-        assert_eq!(unit("first"), Unit::Custom(""));
-        assert_eq!(unit("rate"), Unit::Custom("/s"));
-        // On an empty record there is nothing to change.
-        assert!(Metrics::new().unit(Unit::Bytes).is_empty());
+    fn an_absent_metric_is_simply_absent() {
+        let m = Metrics::new().bytes("x", 4u8);
+        assert_eq!(m.get("size"), None);
+        assert_eq!(m.get("x"), Some(MetricValue::bytes(4)));
+        assert!(Metrics::new().is_empty());
+        assert!(!m.is_empty());
     }
 
     #[test]
@@ -474,6 +650,8 @@ mod tests {
             .total_allocated_bytes()
             .net_allocated_bytes();
         assert!(m.wants_allocation());
+        // Until the run has been counted, they have no value to read.
+        assert_eq!(m.get("alloc peak"), None);
         m.resolve_allocation(Some(crate::alloc::Allocations {
             peak_allocated_bytes: 400,
             allocation_count: 7,
@@ -485,12 +663,12 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("size", 10.0, Unit::Bytes),
-                ("alloc peak", 400.0, Unit::Bytes),
-                ("items", 3.0, Unit::Count),
-                ("alloc count", 7.0, Unit::Count),
-                ("alloc total", 900.0, Unit::Bytes),
-                ("alloc net", -120.0, Unit::Bytes),
+                ("size", MetricValue::bytes(10)),
+                ("alloc peak", MetricValue::bytes(400)),
+                ("items", MetricValue::count(3)),
+                ("alloc count", MetricValue::count(7)),
+                ("alloc total", MetricValue::bytes(900)),
+                ("alloc net", MetricValue::bytes(-120)),
             ]
         );
     }
@@ -502,14 +680,14 @@ mod tests {
             .bytes("alloc peak", 5usize);
         assert!(!m.wants_allocation());
         m.resolve_allocation(None);
-        assert_eq!(m.get("alloc peak").unwrap(), 5.0);
+        assert_eq!(m.get("alloc peak"), Some(MetricValue::bytes(5)));
     }
 
     #[test]
     fn nothing_to_resolve_needs_no_counts() {
         let mut m = Metrics::new().bytes("size", 1usize);
         m.resolve_allocation(None);
-        assert_eq!(m.get("size").unwrap(), 1.0);
+        assert_eq!(m.get("size"), Some(MetricValue::bytes(1)));
     }
 
     #[test]

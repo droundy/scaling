@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// not, since it was handed that, and neither is what a metrics function does
 /// afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Allocations {
     /// How many times it asked for memory: allocating, and growing or
     /// shrinking an allocation, each count once.
@@ -75,7 +76,7 @@ pub(crate) fn installed() -> bool {
 
 /// The counts of the run a metrics function is being called for, if it is
 /// being called for one that was counted. See
-/// [`Metrics::counts`](crate::Metrics::counts).
+/// [`Metrics::allocations`](crate::Metrics::allocations).
 pub(crate) fn current() -> Option<Allocations> {
     CURRENT.with(Cell::get)
 }
@@ -213,7 +214,7 @@ unsafe impl GlobalAlloc for Allocator {
 ///
 /// A `measure` inside another restarts the counting, so the outer one
 /// reports only what came after the inner one ended.
-pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocations) {
+pub(crate) fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocations) {
     let start = COUNTERS.with(|c| {
         c.peak.set(c.live.get());
         c.allocations.set(0);

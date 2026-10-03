@@ -58,7 +58,7 @@ impl Config {
     }
 
     /// The generated-input scaling sweep, which yields between rounds. See
-    /// [`Config::bench_scaling_gen`].
+    /// `Config::bench_scaling_gen`.
     pub(crate) async fn bench_scaling_gen_async<G, F, I, O>(
         &self,
         clock: &Clock,
@@ -87,6 +87,7 @@ impl Config {
 
 /// Statistics for a benchmark run determining the scaling of a function.
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[non_exhaustive]
 pub struct ScalingStats {
     /// The scaling law, if one was found.
     ///
@@ -102,10 +103,10 @@ pub struct ScalingStats {
     /// nothing to compare. It plays the same role for a scaling benchmark
     /// that [`Timing::untrustworthy`](crate::Timing::untrustworthy) plays for
     /// a flat one: a statement about the budget bumping into the noise
-    /// floor, not a verdict on the code. Nothing in [`crate::runner`] fails
+    /// floor, not a verdict on the code. Nothing in [`Config::run_and_print`](crate::Config::run_and_print) fails
     /// a run over it, so a script wanting to gate on it checks
     /// `scaling.is_none()` itself. If you expected a real law and see
-    /// `None`, a longer [`Config::max_time`](crate::Config::max_time) or a
+    /// `None`, a longer [`max_time`](crate::Config::with_max_time) or a
     /// wider `nmin` range is usually the fix, not a sign the function has
     /// no scaling behavior at all.
     pub scaling: Option<Scaling>,
@@ -163,6 +164,7 @@ impl ScalingStats {
 }
 /// The timing and scaling results (without statistics) for a benchmark.
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[non_exhaustive]
 pub struct Scaling {
     /// The scaling power.
     ///
@@ -933,7 +935,7 @@ async fn measure_scaling(
     loop {
         let (means, ses): (Vec<f64>, Vec<f64>) = acc.iter().map(|a| a.mean_and_stderr()).unzip();
         let fit = scaling_fit(&ns, &means, &ses, max_degree);
-        // The same floor `bench` uses, and for the same reason: six rounds
+        // The same floor an ordinary benchmark uses, and for the same reason: six rounds
         // of a benchmark at its measurable floor is under two milliseconds
         // of evidence, and a fit that agrees over six rounds by luck is
         // exactly the one that stops early and reports a narrow error bar.

@@ -7,7 +7,7 @@ A lightweight benchmarking library which:
 * tells you whether two implementations really differ, correcting for how
   many such questions you asked;
 * lets a whole benchmark suite be declared where it belongs and run from a
-  one-line binary;
+  tiny binary;
 * has a very simple API!
 
 Put an attribute on a function and it is a benchmark. These can live
@@ -28,11 +28,13 @@ fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
 fn sort(xs: &mut Vec<i32>) { xs.sort() }
 ```
 
-The binary that runs them is one line:
+The binary that runs them is a `main` of one call:
 
 ```rust
 // benches/bench.rs, in its entirety
-scaling::main!();
+fn main() -> Result<(), scaling::RegistrationError> {
+    scaling::Config::default().run_and_print()
+}
 ```
 
 ```toml
@@ -113,27 +115,41 @@ it exactly.
 
 Every benchmark declared anywhere in the crate is discovered, measured
 together with the default accuracy and budget, and printed as a table -
-that is what `scaling::main!()` above gives you. The default run needs no
-configuration to build, no list to add to and no printing to write.
+that is what `Config::default().run_and_print()` above gives you. The default
+run needs no configuration to build, no list to add to and no printing to
+write.
 
-`scaling::main!()` takes no arguments, so choosing a tighter accuracy target or
-time budget means building a [`Config`] and passing it to the runner in your
-own `main`:
+Choosing a tighter accuracy target or time budget means building the [`Config`]
+by hand, still in your own `main`:
 
 ```rust,no_run
-use scaling::{runner, Config};
+use scaling::Config;
 
-fn main() -> std::process::ExitCode {
-    let config = Config::default()
-      .with_max_time(std::time::Duration::from_secs(1));
-    runner::run(config).into()
+fn main() -> Result<(), scaling::RegistrationError> {
+    Config::default()
+        .with_max_time(std::time::Duration::from_secs(1))
+        .run_and_print()
 }
 ```
 
-`runner::measure(&config)` hands back the results instead of printing them,
-for a script that wants to look at the numbers rather than show them - reached
-by name, since nobody wrote those names down: they come from the module and
-function each benchmark was declared in.
+`config.run()` hands back a [`Report`] instead of printing, for a script that
+wants to look at the numbers rather than show them. Nobody wrote the names down:
+a standalone benchmark is named for its module and function, and a candidate of
+a group `group:candidate@input`. A shorter name will do wherever it fits only
+one.
+
+```rust
+use scaling::Config;
+
+#[scaling::bench]
+fn sum() -> u64 {
+    (0..100u64).sum()
+}
+
+let report = Config::default().run().expect("registrations compose");
+let timing = report.timing("sum").expect("it ran");
+println!("{:.0} ns per call", timing.ns_per_iter);
+```
 
 For custom output, `Report::groups()` gives each logical group as a `Group`,
 in name order. A `Group` prints itself as a table, and `println!("{report}")`
@@ -141,9 +157,9 @@ prints every group, so choosing the order, or printing only some, is ordinary
 code:
 
 ```rust,no_run
-use scaling::{runner, Config};
+use scaling::Config;
 
-let report = runner::measure(&Config::default()).expect("registrations compose");
+let report = Config::default().run().expect("registrations compose");
 let mut groups: Vec<_> = report.groups().collect();
 // Put the group called "summing" first, then the rest as they come.
 groups.sort_by_key(|(name, _)| *name != "summing");
@@ -265,9 +281,11 @@ things that do not vary from run to run, such as a size. A group has one
 metrics function for each type its candidates return; a second for the same
 type is reported as a contradiction. A candidate that returns another type,
 or one that cannot be named in a registration (`impl Trait`, a borrow, or a
-generic parameter), is measured as usual and has no metrics. Build the numbers with
-`Metrics::bytes`, `count`, `ratio`, `percent` and `seconds`, or `value`
-followed by `unit` for anything else.
+generic parameter), is measured as usual and has no metrics. Build the numbers
+with `Metrics::bytes`, `count`, `ratio` and `percent`, which say what a bare
+number is counted in, or with `Metrics::add`, which takes any integer, float or
+`Duration`, or a `MetricValue` made with its own constructors. A metric that is
+not defined is simply not added, and shows as `-` in the table.
 
 ### Counting allocations
 
