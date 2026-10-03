@@ -495,10 +495,13 @@ Two things make separate processes harsher than one long recording:
 A second pass in the same process catches the episodes, but not the fixed
 offsets.
 
+**A suite of one.** A single `bench()` call is a suite with one function
+in it, and gets no special case: two passes, and a third if they
+disagree. With nothing else to run in between, its passes are back to
+back. That catches fewer drift blowups - 60-71% rather than 72-100% - but
+all of the statistical ones.
+
 **Not yet validated:**
-- A lone `bench()` call outside a suite has no gap to borrow. It can only
-  do its two passes back to back, which catches fewer drift blowups (60-71%
-  rather than 72-100%) but all of the statistical ones.
 - The random-effects rule was replayed with all three passes at a √2
   looser goal. A third pass at the full goal might do better.
 
@@ -619,10 +622,10 @@ The lab's `replay.rs` has the first two as unit tests.
   fails a run on its own account. Whether an unreproducible result should
   fail `cargo test`, or be printed and ignored, is the caller's policy.
 
-## Decisions still open
+- **No special case for one function.** A lone `bench()` call is a suite
+  of one, measured exactly like any other suite.
 
-1. **Lone `bench()` calls.** Whether a single call outside a suite does two
-   back-to-back passes, or one, by default.
+All the decisions this design raised are now made.
 
 ---
 
