@@ -91,7 +91,7 @@ impl Config {
     /// path actually being taken under these conditions?" is a question you
     /// answer by measuring and then *looking at* the numbers, and
     /// [`run_and_print`] prints them and returns a verdict. [`Report`] reaches
-    /// them by name - [`Report::stats`], [`Report::comparison`],
+    /// them by name - [`Report::timing`], [`Report::comparison`],
     /// [`Report::scaling`] - which is what makes this usable without knowing
     /// in advance what a run will hold.
     ///

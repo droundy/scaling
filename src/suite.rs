@@ -807,7 +807,7 @@ impl Report {
     /// One measurement, whichever concrete kind it turns out to be - a
     /// single scan over the report's entries, for a caller (formatting
     /// output, say) that would otherwise need one scan per kind it tries in
-    /// turn, as [`Report::stats`]/[`Report::scaling`]/[`Report::comparison`]
+    /// turn, as [`Report::timing`]/[`Report::scaling`]/[`Report::comparison`]
     /// each do their own.
     pub(crate) fn find(&self, name: &str) -> Option<Found> {
         self.entries
@@ -820,7 +820,7 @@ impl Report {
     ///
     /// `None` if that name was something else - a comparison, say - so a
     /// caller that does not know what it is looking at can simply ask.
-    pub fn stats(&self, name: &str) -> Option<Timing> {
+    pub fn timing(&self, name: &str) -> Option<Timing> {
         match self.find(name)? {
             Found::Timing(c) if c.timings().len() == 1 => Some(c.timings()[0]),
             _ => None,
@@ -963,8 +963,8 @@ mod tests {
         let report = suite.run();
         println!("{report}");
 
-        assert!(report.stats("flat").is_some());
-        assert!(report.stats("with input").is_some());
+        assert!(report.timing("flat").is_some());
+        assert!(report.timing("with input").is_some());
         assert!(
             report.scaling("scaled").is_some(),
             "the scaling benchmark reported"
@@ -983,7 +983,7 @@ mod tests {
             || NonClone(String::from("owned input")),
             |input| input.0.len(),
         );
-        let stats = suite.run().stats("non-clone").expect("it was measured");
+        let stats = suite.run().timing("non-clone").expect("it was measured");
         assert!(stats.ns_per_iter > 0.0);
     }
 
@@ -1136,7 +1136,7 @@ mod tests {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         suite.add_input_group("lonely", cfg.input_group().add("only", || 1u64 + 1));
-        let stats = suite.run().stats("lonely").expect("it was measured");
+        let stats = suite.run().timing("lonely").expect("it was measured");
         assert!(stats.ns_per_iter > 0.0);
     }
 
@@ -1216,7 +1216,7 @@ mod report_lookup {
         suite.add("summing", || (0..64u64).sum::<u64>());
         let report = suite.run();
 
-        let stats = report.stats("summing").expect("it was measured");
+        let stats = report.timing("summing").expect("it was measured");
         assert!(stats.ns_per_iter > 0.0);
         assert!(report.contains("summing"));
         assert_eq!(report.names().collect::<Vec<_>>(), ["summing"]);
@@ -1461,17 +1461,17 @@ mod report_lookup {
         );
         let report = suite.run();
 
-        assert!(report.stats("flat").is_some());
+        assert!(report.timing("flat").is_some());
         assert!(
             report.comparison("flat").is_none(),
             "a flat benchmark is not a comparison",
         );
         assert!(report.comparison("pair").is_some());
         assert!(
-            report.stats("pair").is_none(),
+            report.timing("pair").is_none(),
             "a comparison is not a flat benchmark",
         );
-        assert!(report.stats("never added").is_none());
+        assert!(report.timing("never added").is_none());
     }
 
     /// Each kind comes back as itself, from one report holding all three.
@@ -1489,7 +1489,7 @@ mod report_lookup {
         );
         let report = suite.run();
 
-        assert!(report.stats("flat").is_some());
+        assert!(report.timing("flat").is_some());
         assert!(report.scaling("scaled").is_some());
         let cmp = report.comparison("pair").expect("the comparison ran");
         assert_eq!(cmp.timings().len(), 2);
@@ -1791,7 +1791,7 @@ mod registered_by_hand {
         suite.try_add_registered().unwrap();
         let report = suite.run();
 
-        let flat = report.stats("e2e::flat").expect("the flat benchmark ran");
+        let flat = report.timing("e2e::flat").expect("the flat benchmark ran");
         assert!(flat.ns_per_iter > 0.0);
 
         let scaling = report
@@ -1852,15 +1852,15 @@ mod registered_by_hand {
         let report = suite.run();
 
         assert!(
-            report.stats("e2e::by_hand").is_some(),
+            report.timing("e2e::by_hand").is_some(),
             "the hand-added one ran"
         );
         assert!(
-            report.stats("e2e::after").is_some(),
+            report.timing("e2e::after").is_some(),
             "so did the one added afterwards"
         );
         assert!(
-            report.stats("e2e::flat").is_some(),
+            report.timing("e2e::flat").is_some(),
             "so did the registered one"
         );
 
@@ -1883,7 +1883,7 @@ mod registered_by_hand {
         let report = suite.run();
 
         let stats = report
-            .stats("e2e::flat")
+            .timing("e2e::flat")
             .expect("the flat benchmark's measurement comes back");
         assert!(stats.ns_per_iter > 0.0);
 

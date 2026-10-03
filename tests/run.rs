@@ -108,7 +108,7 @@ fn a_script_can_read_the_numbers_it_measured() {
         "ten times the work should measure slower, not faster",
     );
 
-    assert!(report.stats("flat").is_some());
+    assert!(report.timing("flat").is_some());
 }
 
 /// Registrations that do not compose come back as a list rather than a

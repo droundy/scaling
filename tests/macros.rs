@@ -252,11 +252,11 @@ fn every_written_benchmark_is_found_and_measured() {
             .unwrap_or_else(|| panic!("{name} not registered"))
             .to_string();
         assert!(
-            report.stats(&full).is_some(),
+            report.timing(&full).is_some(),
             "{name} was registered but never measured",
         );
     }
-    assert!(report.stats("renamed").is_some());
+    assert!(report.timing("renamed").is_some());
 
     let scaling_key = report
         .names()
