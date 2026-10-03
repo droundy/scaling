@@ -1310,7 +1310,10 @@ mod tests {
         for name in ["pair", "trio"] {
             for (alt, cmp) in report.comparison(name).unwrap().against_baseline() {
                 assert!(
-                    cmp.min_detectable_difference().is_finite(),
+                    cmp.difference()
+                        .expect("it was compared")
+                        .min_detectable_difference()
+                        .is_finite(),
                     "{alt} was judged against a NaN threshold",
                 );
             }

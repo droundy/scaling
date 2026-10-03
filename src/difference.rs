@@ -165,12 +165,13 @@ mod tests {
         // The standard error the stopping rule is aiming for.
         let se = goal / Config::z_alpha_for(4);
         let c = comparison(baseline, baseline, se / 2.0f64.sqrt(), 4);
+        let d = c.difference().expect("it was compared");
         assert!(
-            (c.min_detectable_difference() - goal).abs() < 1e-9,
+            (d.min_detectable_difference() - goal).abs() < 1e-9,
             "expected {goal}, got {}",
-            c.min_detectable_difference()
+            d.min_detectable_difference()
         );
-        assert!((c.min_detectable_rel() - cfg.target_rel_error).abs() < 1e-12);
+        assert!((d.min_detectable_rel() - cfg.target_rel_error).abs() < 1e-12);
     }
 
     /// A run cut off by the budget must never be mistaken for a clean "no

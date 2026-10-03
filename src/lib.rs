@@ -887,7 +887,7 @@ impl Config {
     ///
     /// A comparison reads this as a *sensitivity* rather than a precision: the
     /// smallest difference worth detecting, as a fraction of the baseline. See
-    /// [`Timing::min_detectable_difference`], which is what that floor came to
+    /// [`Difference::min_detectable_difference`], which is what that floor came to
     /// on a result that reported no change.
     ///
     /// `0.0` disables the relative goal, leaving the absolute one

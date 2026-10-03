@@ -147,22 +147,6 @@ impl Timing {
     pub fn is_changed(&self) -> bool {
         self.difference.as_ref().is_some_and(Difference::is_changed)
     }
-
-    pub fn difference_ns(&self) -> f64 {
-        self.difference.as_ref().map_or(f64::NAN, |d| d.ns)
-    }
-
-    pub fn min_detectable_difference(&self) -> f64 {
-        self.difference
-            .as_ref()
-            .map_or(f64::NAN, Difference::min_detectable_difference)
-    }
-
-    pub fn min_detectable_rel(&self) -> f64 {
-        self.difference
-            .as_ref()
-            .map_or(f64::NAN, Difference::min_detectable_rel)
-    }
 }
 
 impl Timing {

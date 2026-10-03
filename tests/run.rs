@@ -104,7 +104,7 @@ fn a_script_can_read_the_numbers_it_measured() {
         .expect("one alternative beyond the baseline");
     assert_eq!(name, "slow");
     assert!(
-        against.difference_ns() > 0.0,
+        against.difference().expect("it was compared").ns > 0.0,
         "ten times the work should measure slower, not faster",
     );
 
