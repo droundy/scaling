@@ -4,13 +4,16 @@
 //! A [`Metrics`] is a record of named numbers about one cell - one candidate
 //! on one input. A group's [`MetricColumn`]s hold the same numbers laid out
 //! like its measurements, one per candidate and input, so a table can show
-//! them beside the time.
+//! them beside the time. Neither the columns nor the group is exposed: a
+//! script reads the numbers by name through `Timings::metrics`.
 //!
 //! Each number is exact rather than sampled, so it has no error bar and
 //! nothing here asks whether a difference is significant.
 
-/// What a metric is counted in, which is all that decides how it is
-/// printed.
+/// What a metric is counted in, which is all that decides how it is printed.
+///
+/// [`Metrics::bytes`], [`Metrics::count`] and the others each pick one; this is
+/// what [`Metrics::unit`] takes, to change the unit of the number just added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     /// Bytes, printed in the largest binary unit that keeps it above one:
@@ -117,7 +120,10 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
     }
 }
 
-/// A record of named numbers about one cell, built a field at a time.
+/// A record of named numbers about one cell - one candidate on one input -
+/// built a field at a time. It is what a [`metrics`](macro@crate::metrics)
+/// function returns, and the crate docs for that attribute say what happens to
+/// it next.
 ///
 /// ```
 /// use scaling::{Metrics, Unit};
@@ -132,9 +138,42 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
 /// assert_eq!(metrics.iter().count(), 3);
 /// ```
 ///
-/// A value can be any integer or float, or an `Option` of one. A name given
-/// twice keeps the later value, in the earlier position, and a value of `None`
-/// leaves the metric out, so it shows as missing in the table.
+/// # Adding numbers
+///
+/// Each method adds one, taking its name, so the name is a column of the table.
+/// The method says what the number is counted in, which is all that decides how
+/// it is printed, to three significant digits:
+///
+/// | method | counted in | printed as |
+/// |---|---|---|
+/// | [`bytes`](Metrics::bytes) | bytes | `812B`, `1.90MiB` |
+/// | [`count`](Metrics::count) | a count | `12`, or three digits if not whole |
+/// | [`ratio`](Metrics::ratio) | nothing | `0.312` |
+/// | [`percent`](Metrics::percent) | percent | `12.3%` |
+/// | [`seconds`](Metrics::seconds) | seconds | `12.5ms`, in the unit that suits it |
+/// | [`value`](Metrics::value) | no unit yet | give it one with [`unit`](Metrics::unit) |
+///
+/// A value can be any integer or float, or an `Option` of one: `None` leaves
+/// the metric out, so it shows as missing in the table. A name given twice
+/// keeps the later value, in the earlier position.
+///
+/// # Allocation numbers
+///
+/// Four more methods stand for numbers that are not known until the candidate
+/// has run: [`peak_allocated_bytes`](Metrics::peak_allocated_bytes) (column
+/// `alloc peak`), [`allocation_count`](Metrics::allocation_count) (`alloc
+/// count`), [`total_allocated_bytes`](Metrics::total_allocated_bytes) (`alloc
+/// total`) and [`net_allocated_bytes`](Metrics::net_allocated_bytes) (`alloc
+/// net`). They need `allocation` in the attribute and the counting
+/// [`Allocator`](crate::Allocator) installed; [`Metrics::allocations`] reads the
+/// same numbers, to compute another from them, and
+/// [`Metrics::allocator_installed`] says whether the allocator is in use.
+///
+/// # Reading one back
+///
+/// [`get`](Metrics::get) gives a value by name and [`iter`](Metrics::iter) every
+/// name, value and [`Unit`] in the order they were added. A script gets one
+/// record for each alternative from `Timings::metrics`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metrics {
     metrics: Vec<Metric>,

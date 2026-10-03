@@ -26,7 +26,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Type};
 
-/// Register a benchmark.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -36,7 +36,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Register a scaling benchmark.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -830,8 +830,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     })
 }
 
-/// Register one input, shared by every candidate of a matching type in one
-/// or more of the named groups.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -1005,19 +1004,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     Ok(out)
 }
 
-/// Register a function that computes extra numbers from what the candidates
-/// of a group returned.
-///
-/// ```ignore
-/// #[scaling::metrics(group = "serialize")]
-/// fn sizes(out: Vec<u8>) -> scaling::Metrics {
-///     scaling::Metrics::new().bytes("size", out.len())
-/// }
-/// ```
-///
-/// It takes the output by value, and optionally the input as it was before
-/// the candidate ran, as `&I` first. It applies to every candidate of the
-/// group that returns that type.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn metrics(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);

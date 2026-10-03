@@ -227,7 +227,8 @@ comparison instead, with no grid to read.
 A timing is not always the whole story about a candidate. A serializer is also
 judged by how many bytes it wrote, and a compressor by what it saved.
 `#[scaling::metrics]` computes extra numbers from what the candidates of a
-group returned, and they are printed beside the time:
+group returned, and they are printed beside the time. This is the short tour;
+[`#[scaling::metrics]`] is the reference for everything it accepts:
 
 ```rust
 use scaling::Metrics;
