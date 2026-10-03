@@ -32,7 +32,7 @@ enum Value {
 
 /// One number about a cell, together with what it is counted in.
 ///
-/// Anything numeric converts to one - integers to whole numbers, floats to
+/// Numeric types convert to one - integers to whole numbers, floats to
 /// plain numbers, a [`Duration`] to a time - and the constructors make the
 /// others. It prints to three significant digits in the unit that suits it
 /// (`1.90MiB`, `12.5ms`, `0.312`), or to a fixed number of decimals when asked:
