@@ -491,9 +491,7 @@ them the way a quiesced run's would be trusted.
 */
 
 mod alloc;
-/// Assembling registered benchmarks into a suite.
-#[doc(hidden)]
-pub mod assemble;
+mod assemble;
 mod bench;
 mod difference;
 mod formatting;
@@ -510,7 +508,9 @@ mod run;
 mod scaling;
 mod suite;
 pub(crate) use bench::time_loop;
-pub(crate) use suite::{block_on, Clock, Machine};
+pub(crate) use suite::Clock;
+#[cfg(test)]
+pub(crate) use suite::{block_on, Machine};
 pub(crate) mod significant;
 
 // Use `self::` because `scaling` is also the crate name; without it, doctests
@@ -1016,6 +1016,7 @@ impl Config {
 
     /// Is a measurement of `ns_per_iter` with standard error `std_error`
     /// (both in nanoseconds) precise enough to stop?
+    #[cfg(test)]
     fn accuracy_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
         // A standard error of exactly zero means every sample agreed to the
         // limit of the timer's resolution, and no further sampling can

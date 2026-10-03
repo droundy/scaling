@@ -329,8 +329,8 @@ pub struct Input {
     /// Which crate registered it, and at what version.
     ///
     /// Inputs carry this for the opposite reason candidates do: not to tell
-    /// several versions apart, but to pick one of them. See
-    /// [`crate::assemble::Lane::inputs`].
+    /// several versions apart, but to pick one of them. See `Lane::inputs` in
+    /// the assembly code.
     pub crate_name: &'static str,
     pub crate_version: &'static str,
     /// The type it produces, which is what candidates are paired to it on.

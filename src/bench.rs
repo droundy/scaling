@@ -9,7 +9,9 @@
 use super::*;
 use std::fmt::{self, Formatter};
 use std::hint::black_box;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// Never stop *voluntarily* on fewer samples than this.
 ///
@@ -31,6 +33,7 @@ use std::time::{Duration, Instant};
 /// Not a knob: callers control accuracy with [`Config::relative`] and
 /// [`Config::absolute`], and cost with [`Config::max_time`], and no useful
 /// benchmark wants a different answer here.
+#[cfg(test)]
 const MIN_SAMPLES: usize = 6;
 
 /// How long one sample should take: calibration picks a batch size aiming
@@ -60,6 +63,7 @@ const MIN_SAMPLES: usize = 6;
 /// input vector to index into - that lookup is harness overhead
 /// rather than the benchmark, so measuring less of it is a gain, but it is
 /// a visible change in what those two report.
+#[cfg(test)]
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
 /// A backstop on the number of samples, so the vector of them cannot grow
@@ -68,6 +72,7 @@ const SAMPLE_TIME: Duration = Duration::from_micros(100);
 /// This is about memory, not about the measurement: `max_time` is the real
 /// budget, and at [`SAMPLE_TIME`] it allows ~100_000 samples, ten times
 /// below this.
+#[cfg(test)]
 const MAX_SAMPLES: usize = 1_000_000;
 
 /// A benchmark's measured timing.
@@ -241,8 +246,8 @@ impl Config {
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
-    #[doc(hidden)]
-    pub fn bench_clone_input<F, I, O>(&self, input: I, f: F) -> Timing
+    #[cfg(test)]
+    pub(crate) fn bench_clone_input<F, I, O>(&self, input: I, f: F) -> Timing
     where
         F: FnMut(&mut I) -> O,
         I: Clone,
@@ -304,8 +309,8 @@ impl Config {
     /// Hidden alongside the free function of the same name: it is the
     /// same one-shot measurement with an accuracy chosen. See
     /// [`crate::bench`] for why they are still reachable.
-    #[doc(hidden)]
-    pub fn bench_make_input<G, F, I, O>(&self, make_input: G, f: F) -> Timing
+    #[cfg(test)]
+    pub(crate) fn bench_make_input<G, F, I, O>(&self, make_input: G, f: F) -> Timing
     where
         G: FnMut() -> I,
         F: FnMut(&mut I) -> O,
@@ -327,6 +332,7 @@ impl Config {
     /// Neither pinning nor the exclusive guard is taken here. The caller owns
     /// them, so that a suite claims the machine once for the whole session
     /// rather than once per benchmark.
+    #[cfg(test)]
     pub(crate) async fn bench_make_input_async<G, F, I, O>(
         &self,
         clock: &Clock,
@@ -436,6 +442,7 @@ impl Config {
 /// one benchmark call can leave enough of a mark on process-wide allocator
 /// state to detectably perturb the *timing* of an unrelated benchmark run
 /// immediately afterward in the same process.
+#[cfg(test)]
 fn time_batch<G, F, I, O>(
     make_input: &mut G,
     f: &mut F,
@@ -483,6 +490,7 @@ where
 /// like everything else. Doing it eagerly instead would put every
 /// benchmark's choice of batch size at the very start of the session, in the
 /// one thermal state interleaving exists to stop trusting.
+#[cfg(test)]
 async fn calibrate<G, F, I, O>(
     make_input: &mut G,
     f: &mut F,

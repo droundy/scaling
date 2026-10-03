@@ -54,6 +54,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod scheduler;
+#[cfg(test)]
 pub(crate) use scheduler::block_on;
 use scheduler::Scheduler;
 

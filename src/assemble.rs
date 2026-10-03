@@ -889,6 +889,7 @@ fn input_order(a: &str, b: &str) -> std::cmp::Ordering {
 /// with each other. So the first step here explodes every candidate and
 /// input across each group it names, before anything is paired up; from
 /// that point on, each group name is handled entirely independently.
+#[cfg(test)]
 pub fn plan(
     regs: &[&'static Registered],
     candidates: &[&'static Candidate],
