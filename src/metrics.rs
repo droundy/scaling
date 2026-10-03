@@ -197,13 +197,28 @@ fn digits(x: f64, precision: Option<usize>) -> String {
     }
 }
 
-/// `x` to three significant digits, without a trailing exponent.
+/// `x` to three significant digits, in decimals unless it is too small for nine
+/// of them to show three, and then in scientific notation (`1.00e-12`) rather
+/// than as a row of zeros.
 fn three_digits(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string();
     }
-    let decimals = (2 - x.abs().log10().floor() as i64).clamp(0, 9) as usize;
-    format!("{x:.decimals$}")
+    // Rounding to three significant digits comes first, and the exponent is
+    // read from the result, so that a carry into the next power of ten (9.996
+    // is 10.0, not 10.00) is already in it.
+    let scientific = format!("{x:.2e}");
+    let exponent: i32 = scientific
+        .rsplit('e')
+        .next()
+        .and_then(|exponent| exponent.parse().ok())
+        .expect("`{:e}` ends in an exponent");
+    let decimals = 2 - exponent;
+    if decimals > 9 {
+        scientific
+    } else {
+        format!("{x:.*}", decimals.max(0) as usize)
+    }
 }
 
 fn bytes_text(size: f64, precision: Option<usize>) -> String {
