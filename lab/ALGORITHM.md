@@ -581,21 +581,24 @@ factors for large ones: "twice as fast", not "50% less time".
   measured `str_find` 0.6-2.3% high throughout, against its own bar of
   about 0.2%. Running the benchmark again, as a new process, is the only
   way to see one.
-- **Long CPU-bound neighbours slow short CPU-bound work by about 20%.**
-  With 4-10 ms CPU-bound calls in the rounds, the short batches - canary
-  and `f64_sin` alike - cost about 20% more cycles than with sub-ms calls.
-  Below 2 ms the difference is at most 1.7%. This holds pinned at a fixed
-  clock, survives the two-rung subtraction, and is not caused by
-  memory-bound long calls. It biases short functions' absolute times in a
-  mixed suite, ratios between long and short functions, and slow
-  functions' bogo-nanoseconds (PROBLEMS.md, "Slow functions"). Untested
-  remedies:
-  - measure short and long CPU-bound functions in separate suites;
-  - for slow functions, use a canary matched in duration - the same chain
-    run for about as long as the function's sample, as `slow_cpu` is - so
-    that both sides are in the same state.
+- **Long CPU-bound calls do not share the clock of the short batches
+  around them.** With 4-10 ms CPU-bound calls in the rounds, the short
+  batches - canary and `f64_sin` alike - ran at a clock about 23% lower
+  than the long calls. That was confirmed with the reference-cycle
+  counter, on a reserved core with turbo off. Below 2 ms the difference
+  was at most 3%. A call's clock ramps over its first millisecond or so.
+  Long memory-bound calls do not cause the dip.
 
-  Ratios between alternatives of similar length are unaffected.
+  What it biases:
+  - ratios between a long CPU-bound function and a short one;
+  - a slow function's bogo-nanoseconds measured against the 20 us canary;
+  - short functions' nanoseconds in a suite that also holds long ones.
+
+  **Remedy, tested in part:** a canary matched in duration. For a function
+  whose sample runs longer than about 0.2 ms, run the canary's chain - as
+  `slow_cpu` does - for about the same time. A 2.4-4.8 ms chain matched a
+  9.5 ms call to 0.1-0.6% (PROBLEMS.md, "Slow functions"). Ratios between
+  alternatives of similar length need no remedy.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.

@@ -166,6 +166,7 @@ pub fn named(name: &str) -> Workload {
         "cpu_canary" => Workload::cpu_canary(),
         "mem_canary" => Workload::mem_canary(),
         "slow_cpu" => Workload::slow_cpu(),
+        "slow_cpu2" => Workload::slow_cpu2(),
         _ => {
             let mut pool = payloads::all();
             pool.remove(name).unwrap_or_else(|| {

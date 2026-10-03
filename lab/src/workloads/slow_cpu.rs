@@ -36,7 +36,22 @@ fn interior() -> u64 {
 
 impl Workload {
     pub fn slow_cpu() -> Self {
-        let n = interior();
+        Self::slow_cpu_named("slow_cpu", interior())
+    }
+
+    /// A second chain of its own length (`LAB_SLOW2_ITERS`), for putting
+    /// two different call lengths in one round: whether a call of one
+    /// length runs at the clock of a call of another is the question a
+    /// canary matched in duration has to answer.
+    pub fn slow_cpu2() -> Self {
+        let n = std::env::var("LAB_SLOW2_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1_000_000);
+        Self::slow_cpu_named("slow_cpu2", n)
+    }
+
+    fn slow_cpu_named(name: &'static str, n: u64) -> Self {
         // Carried across calls like the canaries do, so the chain cannot be
         // constant-folded and each call genuinely depends on the last.
         let x = Cell::new(0x243F6A8885A308D3u64);
@@ -52,7 +67,7 @@ impl Workload {
             // The old loop, which the compiler folds eight links at a time:
             // kept as a switch for telling its effects on neighbours apart
             // from the `black_box` version's.
-            return Workload::simple("slow_cpu", Kind::Payload, move || {
+            return Workload::simple(name, Kind::Payload, move || {
                 let mut v = x.get();
                 for _ in 0..n {
                     v = v
@@ -63,7 +78,7 @@ impl Workload {
                 v
             });
         }
-        Workload::simple("slow_cpu", Kind::Payload, move || {
+        Workload::simple(name, Kind::Payload, move || {
             for _ in 0..n {
                 let v = x
                     .get()

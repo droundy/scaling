@@ -684,28 +684,56 @@ measured 17-18% below its exact ratio to the canary, in every run:
   in the noisy pair recordings, where 4-6 ms `copy_64mb` calls - which are
   memory-bound - shared every round with a canary reading 0.91 ns.
 
-**It is cycles, not the clock: the same happens pinned at a fixed clock.**
-On reserved CPU 2, with the performance governor, no turbo and 1.7 GHz:
+**It survives pinning.** On reserved CPU 2, with the performance governor,
+no turbo and a nominal 1.7 GHz:
 
 | `slow_cpu` call | canary, ns a link | `f64_sin`, ns | `slow_cpu`, ns a link |
 | --- | --- | --- | --- |
 | 0.6 ms | 2.400 | 33.85 | 2.366 |
 | 9.5 ms | 2.896 | 41.19 | 2.371 |
 
-`slow_cpu` stays at exactly 4.0 cycles a link. The short batches move
+`slow_cpu` stays at the same cost per link. The short batches move
 together, by about 22%. That is a step between discrete states, not a
 widening:
 - **0.6 ms calls:** almost every canary batch ran at 2.359 or 2.400 ns a
-  link, 4.0 or 4.07 cycles.
-- **9.5 ms calls:** almost every one ran at 2.89 ns, 4.9 cycles.
+  link.
+- **9.5 ms calls:** almost every one ran at 2.89 ns.
 
 The two-rung subtraction keeps the shift: the per-link slope is 2.864 ns
-against 2.359 ns. So this is problem 3 - the number moves with the company
-it keeps - in a large new form. **A long CPU-bound neighbour makes short
-CPU-bound work cost about 20% more cycles**, on a quiet machine too, and
-subtraction does not remove it. Long memory-bound neighbours do not:
-`copy_64mb` at 4-6 ms shared every round of the pair recordings, with the
-canary at 2.359 ns quiet. The mechanism is not identified.
+against 2.359 ns.
+
+**It is the clock, even pinned with turbo off.** Hardware
+counters, sampled per symbol with `perf record`, show the canary's code at
+the same cycles per instruction in both setups: 0.583 against 0.590. The
+reference-cycle counter ticks at a fixed rate, so actual cycles per
+reference cycle measure the clock during each piece of code:
+
+| setup | `slow_cpu` | canary |
+| --- | --- | --- |
+| 0.6 ms calls | 1.101 | 1.069 |
+| 9.5 ms calls | 1.118 | 0.865 |
+
+With long calls in the rounds, the short batches run at a clock 23% lower
+than the long calls beside them. The "fixed" 1.7 GHz of a reserved core
+with the performance governor and no turbo is fixed only on average. On
+this i5-1240P, power management moves it by a fifth over milliseconds.
+
+**A call's clock ramps over its first millisecond or so.** A second chain,
+`slow_cpu2`, of its own length, was run in rounds alongside a 9.5 ms
+`slow_cpu`. Its cost per link relative to `slow_cpu`:
+
+| `slow_cpu2` call | `slow_cpu2` | canary, 20 us |
+| --- | --- | --- |
+| 0.26 ms | +5.9% | +18.9% |
+| 0.97 ms | +1.4% | +19.4% |
+| 2.4 ms | +0.6% | +22.5% |
+| 4.8 ms | +0.1% | +22.5% |
+
+So a canary matched in duration works: a chain run for a few
+milliseconds sees the clock of a long call to within half a percent,
+where the 20 us canary is off by a fifth. Long memory-bound neighbours did
+not cause the dip. `copy_64mb` at 4-6 ms shared every round of the pair
+recordings, with the canary at 2.359 ns quiet.
 
 What it breaks:
 - **Absolute times** of short functions measured in a suite that also
