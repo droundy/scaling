@@ -544,6 +544,60 @@ pass, at a mean of about one per 200 trials.
 
 ---
 
+## On battery
+
+Seven separate 5-minute processes measured the same five payloads and the
+canary, with `LAB_RUNGS=top2`. That is 23,000-36,000 rounds each, in
+`day/collect/battery-{quiet,noisy}`.
+
+**Quiet still works on battery.** With CPU 2 reserved, the clock held at
+1.7 GHz throughout. Two separate quiet processes agreed to 0.01-0.13% in
+nanoseconds on every workload; the canary read 2.359 and 2.358 ns.
+
+**Unquiesced, nanoseconds do not reproduce, and cycles do.** There were
+four unpinned processes, with turbo and the powersave governor, and the
+battery fell from 66% to 45% over 20 minutes. The clock spent its time at
+either 1.6-1.7 GHz or 4.1-4.4 GHz, and the processes' average canary times
+were 0.91-1.15 ns a link. Cycles - 4 times the ratio to the canary - for
+the clock-bound payloads spread 0.13-0.76% across the four processes,
+against 6.8-8.8% in nanoseconds. For the memory-bound payloads it reverses:
+cycles spread 4-5%, nanoseconds 2-3%. Against the logged frequency, the
+canary is 4.04-4.08 cycles a link at every clock, so cycles are a real unit
+to within about 2% and reproducible far more tightly than that.
+
+**One process can be off by more than its bar.** Ratios measured over a
+whole process compared against each other:
+
+- `cpu_canary / str_find` and `str_find / urandom_read`: process 1 sat
+  1.7-1.9% from the other three, 4x the bar each process claimed.
+- `cpu_canary / f64_sin`, `cpu_canary / urandom_read` and
+  `f64_sin / urandom_read`: the processes agreed within their bars, at
+  0.6-0.8x.
+
+Within one process the shift is constant, so no bar and no second pass in
+the same process can see it. The likely cause is layout. Each process puts
+inputs and code at different addresses, which is what made the memory
+canary read 20% differently between processes.
+
+**`f64_sin` wanders on battery.** Trials from different processes, each at
+a goal √2 looser and combined in pairs, against the mean of the four
+processes:
+
+| goal | clock/clock pass pairs that disagree | combined still blown |
+| --- | --- | --- |
+| 2% | 19% | 11 of 360 |
+| 1% | 32% | 37 of 360 |
+| 0.5% | 38% | 68 of 360 |
+
+Nearly all the disagreements and blowups are pairs containing `f64_sin`.
+`cpu_canary / urandom_read` disagreed in 0-5% of pass pairs, at every goal.
+So the two-pass check does its job here: it flags the unstable pairs, which
+then go to a third pass or a refusal, rather than giving a confident wrong
+number. Mixed and memory pairs disagree in 45-75% of pass pairs at every
+goal, and should be refused unquiesced.
+
+---
+
 ## How they interact
 
 - (1) causes much of (3): composition changes the clock, and the clock

@@ -149,9 +149,10 @@ which is problem 3. A member that stops changes the composition for
 everyone still measuring, by percent-scale amounts unquiesced.
 
 **Why the canary.** It is a dependent multiply-add chain held in registers.
-On the quiet machine it reads to 0.02%, and on this machine it costs
-exactly 4 core cycles a link: 2.36 ns at 1.7 GHz, and 0.912 ns at turbo,
-which is 4.0 cycles if turbo was 4.4 GHz. It is cheap, at one batch of at
+On the quiet machine it reads to 0.02%. On this machine it costs 4 core
+cycles a link, a multiply and an add: against the logged clock frequency
+it reads 4.04-4.08 at every clock from 1.6 to 4.4 GHz, with a 10-90%
+range of under 0.01 within a run. It is cheap, at one batch of at
 most 20 us per round, and it earns its place twice:
 - it turns any function's time into cycles (section 4);
 - it shows how much the clock moved, which is what a refusal message needs
@@ -256,7 +257,28 @@ rule uses is:
   crate can already detect;
 - **cycles** otherwise.
 
-This rule is a proposal. The lab has not scored the cycles path on its own.
+**Measured on battery** (PROBLEMS.md, "On battery"). There were four
+separate 5-minute processes, unpinned, with turbo and the powersave
+governor: an ordinary laptop. The clock bounced between 1.6 and 4.4 GHz,
+and the processes' average clocks differed by 25%.
+
+| workload | spread of ns across processes | spread of cycles |
+| --- | --- | --- |
+| `f64_sin` | 7.7% | 0.33% |
+| `urandom_read` | 8.8% | 0.13% |
+| `str_find` | 6.8% | 0.76% |
+| `btree_miss` | 1.9% | 5.1% |
+| `copy_64mb` | 2.6% | 4.4% |
+
+For clock-bound code, cycles are 10-60x more reproducible than
+nanoseconds. For memory-bound code they are worse, as predicted.
+
+Cycles also travel between operating points. `f64_sin` measured 57.5
+cycles quiet at 1.7 GHz and 58.5 on battery with turbo, `str_find` 0.8%
+apart, and `urandom_read` 0.5%.
+
+The stopping rule above, which picks nanoseconds or cycles as the primary
+number, is still a proposal.
 
 ## 5. The error bar
 
@@ -411,8 +433,15 @@ goal is a different case: it is printed, and marked `(limit)`.
 **Not yet validated:**
 - The third-pass and refusal rules have not been replayed. The two-pass
   numbers above have.
-- The replay emulates a second pass within one recording, not across
-  separate processes.
+- **Separate processes see what one process cannot** (PROBLEMS.md, "On
+  battery"). Of four unpinned processes on battery, one measured
+  `str_find`'s ratio to the canary 1.7% away from the other three. That is
+  four times the bar each process claimed, and it held for the whole run.
+  A second pass inside the same process would have agreed with the first.
+  The cause may be layout - which addresses a process's inputs and code
+  land at - as with the memory canary's 20% between processes. A suite's
+  two passes in one process catch drift, but only rerunning the binary
+  catches this.
 - A lone `bench()` call outside a suite has no gap to borrow. It can only
   do its two passes back to back, which catches fewer drift blowups (60-71%
   rather than 72-100%) but all of the statistical ones.
@@ -445,7 +474,7 @@ factors for large ones: "twice as fast", not "50% less time".
 | blocks | 8 to 20 | 8 removes lucky-small stops; smaller blocks cost more |
 | first check | 120 rounds | 8 blocks x 15 |
 | check growth | 1.3x | at most 30% overshoot |
-| canary | 4 cycles a link | measured at two clocks on this machine; verify per architecture |
+| canary | 4 cycles a link | 4.04-4.08 against the logged clock, 1.6-4.4 GHz; verify per architecture |
 | passes | 2, at a √2 looser goal | replayed, 1.2-1.3x the cost |
 | disagreement | > 2 combined bars | replayed: 3-7% of good clock-pair results trigger it |
 | default goal | 1% | the crate's existing default |
@@ -488,7 +517,8 @@ The lab's `replay.rs` has the first two as unit tests.
 
 ## Decisions still open
 
-1. **Cycles or bogo-nanoseconds.** Cycles are a real unit. Nanoseconds at a
+1. **Cycles or bogo-nanoseconds.** Cycles are a real unit, and on battery
+   they reproduced 10-60x better than nanoseconds for clock-bound code. Nanoseconds at a
    nominal clock are friendlier and fake.
 2. **The primary quantity for a single function**, if the proposed rule in
    section 4 proves too blunt.
@@ -496,7 +526,10 @@ The lab's `replay.rs` has the first two as unit tests.
    exit) by default, and what flag allows it through.
 4. **The third-pass rule.** It needs replaying with three trials per
    comparison before it is trusted.
-5. **Lone `bench()` calls.** Whether a single call outside a suite does two
+5. **Separate processes.** Whether to recommend running a benchmark
+   binary twice, or have the crate re-exec itself for its second pass, so
+   that process-level shifts are caught too.
+6. **Lone `bench()` calls.** Whether a single call outside a suite does two
    back-to-back passes, or one, by default.
 
 ---
