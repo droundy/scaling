@@ -491,9 +491,7 @@ fn metric_cell(group: &Group, metric: usize, row: usize, column: usize) -> Strin
     let Some(value) = metric.values[row][column] else {
         return "-".to_string();
     };
-    // Three significant figures: enough to tell the candidates apart, and the
-    // same number of them whatever the unit.
-    let mut shown = format!("{value:.3}");
+    let mut shown = value.to_string();
     if let Some(baseline) = group.baselines[column].filter(|&baseline| baseline != row) {
         // A difference needs both to be counted in the same unit.
         if let Some(base) = metric.values[baseline][column]

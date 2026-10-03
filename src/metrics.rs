@@ -34,25 +34,26 @@ enum Value {
 ///
 /// Numeric types convert to one - integers to whole numbers, floats to
 /// plain numbers, a [`Duration`] to a time - and the constructors make the
-/// others. It prints in the unit that suits it, with every digit it needs
-/// (`1.5KiB`, `12.5ms`, `0.31234`), and a precision is a number of significant
-/// figures:
+/// others. It prints in the unit that suits it, to three significant figures
+/// unless a precision says otherwise (`1.90MiB`, `12.5ms`, `0.312`). A timing
+/// knows from its error how many of its digits mean anything; nothing does for
+/// a metric, so three is only a reasonable default, and a precision is a number
+/// of significant figures:
 ///
 /// ```
 /// use scaling::MetricValue;
 /// use std::time::Duration;
 ///
-/// assert_eq!(MetricValue::bytes(2048usize).to_string(), "2KiB");
+/// assert_eq!(MetricValue::bytes(2048usize).to_string(), "2.00KiB");
 /// assert_eq!(MetricValue::from(12).to_string(), "12");
-/// assert_eq!(MetricValue::from(0.31234).to_string(), "0.31234");
-/// assert_eq!(MetricValue::percent(12.345).to_string(), "12.345%");
+/// assert_eq!(MetricValue::from(0.31234).to_string(), "0.312");
+/// assert_eq!(MetricValue::percent(12.345).to_string(), "12.3%");
 /// assert_eq!(MetricValue::from(Duration::from_micros(12500)).to_string(), "12.5ms");
 ///
 /// // A precision is the number of significant figures, trailing zeros included.
-/// assert_eq!(format!("{:.3}", MetricValue::from(0.31234)), "0.312");
-/// assert_eq!(format!("{:.3}", MetricValue::bytes(1992294)), "1.90MiB");
-/// assert_eq!(format!("{:.3}", MetricValue::bytes(2048usize)), "2.00KiB");
-/// assert_eq!(format!("{:.2}", MetricValue::percent(12.345)), "12%");
+/// assert_eq!(format!("{:.5}", MetricValue::from(0.31234)), "0.31234");
+/// assert_eq!(format!("{:.2}", MetricValue::bytes(1992294)), "1.9MiB");
+/// assert_eq!(format!("{:.1}", MetricValue::percent(12.345)), "12%");
 ///
 /// // Width, fill and alignment are honoured.
 /// assert_eq!(format!("{:>8}", MetricValue::bytes(812)), "    812B");
@@ -66,7 +67,7 @@ pub struct MetricValue(Value);
 impl MetricValue {
     /// A size in bytes. A float is kept as it is, so a mean size is not
     /// rounded; it prints in the largest binary unit that keeps it above one,
-    /// as `812B` or `1.9MiB`.
+    /// as `812B` or `1.90MiB`.
     pub fn bytes(size: impl Into<MetricValue>) -> Self {
         MetricValue(Value::Bytes(size.into().as_f64()))
     }
@@ -150,11 +151,11 @@ impl From<Duration> for MetricValue {
 }
 
 impl fmt::Display for MetricValue {
-    /// The value in the unit that suits it, with every digit it needs. A
-    /// precision is a number of significant figures, so `{:.3}` gives `1.90MiB`
-    /// and `0.312`; width, fill and alignment are honoured as well.
+    /// The value in the unit that suits it, to three significant figures
+    /// unless a precision says how many: `{:.5}` gives `1.9000MiB`. Width, fill
+    /// and alignment are honoured as well.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let figures = f.precision();
+        let figures = f.precision().unwrap_or(DEFAULT_FIGURES);
         let text = match self.0 {
             Value::Bytes(size) => bytes_text(size, figures),
             Value::Integer(n) => n.to_string(),
@@ -198,25 +199,21 @@ fn pad(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     Ok(())
 }
 
-/// `x` with every digit it needs, or with `figures` significant figures when
-/// that is asked for.
-fn figures_text(x: f64, figures: Option<usize>) -> String {
+/// How many significant figures a metric is shown to when nobody says. A
+/// timing's error says how many of its digits mean anything; nothing says so for
+/// a metric, and three tell candidates apart without claiming much.
+const DEFAULT_FIGURES: usize = 3;
+
+/// `x` rounded to `figures` significant figures and written in plain decimals,
+/// trailing zeros included: three figures of 2 are `2.00`.
+fn figures_text(x: f64, figures: usize) -> String {
     if !x.is_finite() {
         return "-".to_string();
     }
     if x == 0.0 {
         return "0".to_string();
     }
-    match figures {
-        // The shortest decimal that reads back as `x`.
-        None => x.to_string(),
-        Some(figures) => significant(x, figures.max(1)),
-    }
-}
-
-/// `x` rounded to `figures` significant figures and written in plain decimals,
-/// trailing zeros included: three figures of 2 are `2.00`.
-fn significant(x: f64, figures: usize) -> String {
+    let figures = figures.max(1);
     // `{:e}` does the rounding, carrying into the next power of ten when it
     // has to (9.996 to three figures is 10.0), so how many decimals the figures
     // reach is read from what it wrote.
@@ -230,7 +227,7 @@ fn significant(x: f64, figures: usize) -> String {
     format!("{x:.decimals$}")
 }
 
-fn bytes_text(size: f64, figures: Option<usize>) -> String {
+fn bytes_text(size: f64, figures: usize) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
     if !size.is_finite() {
         return "-".to_string();
@@ -240,6 +237,11 @@ fn bytes_text(size: f64, figures: Option<usize>) -> String {
     while scaled.abs() >= 1024.0 && unit + 1 < UNITS.len() {
         scaled /= 1024.0;
         unit += 1;
+    }
+    // A whole number of bytes is exact, and written in full like any whole
+    // number.
+    if unit == 0 && scaled.fract() == 0.0 {
+        return format!("{scaled}B");
     }
     format!("{}{}", figures_text(scaled, figures), UNITS[unit])
 }
@@ -504,29 +506,26 @@ mod tests {
         assert_eq!(shown(MetricValue::bytes(0)), "0B");
         assert_eq!(shown(MetricValue::bytes(812)), "812B");
         assert_eq!(shown(MetricValue::bytes(1023)), "1023B");
-        assert_eq!(shown(MetricValue::bytes(1024)), "1KiB");
+        assert_eq!(shown(MetricValue::bytes(1024)), "1.00KiB");
         assert_eq!(shown(MetricValue::bytes(612 * 1024)), "612KiB");
+        assert_eq!(shown(MetricValue::bytes(1.9 * 1024.0 * 1024.0)), "1.90MiB");
         assert_eq!(shown(MetricValue::bytes(37.5 * 1024.0 * 1024.0)), "37.5MiB");
-        assert_eq!(shown(MetricValue::bytes(1.5)), "1.5B");
-        assert_eq!(shown(MetricValue::bytes(-1536)), "-1.5KiB");
-        assert_eq!(
-            format!("{:.3}", MetricValue::bytes(1.9 * 1024.0 * 1024.0)),
-            "1.90MiB"
-        );
+        assert_eq!(shown(MetricValue::bytes(1.5)), "1.50B");
+        assert_eq!(shown(MetricValue::bytes(-1536)), "-1.50KiB");
     }
 
     #[test]
-    fn the_other_kinds_print_every_digit_they_need() {
+    fn the_other_kinds_print_three_figures() {
         assert_eq!(shown(12), "12");
         assert_eq!(shown(1_234_567u64), "1234567");
         assert_eq!(shown(-4), "-4");
-        assert_eq!(shown(0.5), "0.5");
-        assert_eq!(shown(0.31234), "0.31234");
-        assert_eq!(shown(41.23), "41.23");
-        assert_eq!(shown(MetricValue::ratio(2)), "2");
-        assert_eq!(shown(MetricValue::percent(12.345)), "12.345%");
+        assert_eq!(shown(0.5), "0.500");
+        assert_eq!(shown(0.31234), "0.312");
+        assert_eq!(shown(41.23), "41.2");
+        assert_eq!(shown(MetricValue::ratio(2)), "2.00");
+        assert_eq!(shown(MetricValue::percent(12.345)), "12.3%");
         assert_eq!(shown(Duration::from_micros(12500)), "12.5ms");
-        assert_eq!(shown(Duration::from_secs(2)), "2s");
+        assert_eq!(shown(Duration::from_secs(2)), "2.00s");
         assert_eq!(shown(Duration::ZERO), "0ns");
     }
 
@@ -544,10 +543,10 @@ mod tests {
 
     #[test]
     fn a_precision_means_significant_figures() {
-        assert_eq!(format!("{:.3}", MetricValue::bytes(1992294)), "1.90MiB");
-        assert_eq!(format!("{:.5}", MetricValue::bytes(812)), "812.00B");
+        assert_eq!(format!("{:.2}", MetricValue::bytes(1992294)), "1.9MiB");
+        assert_eq!(format!("{:.5}", MetricValue::bytes(812.5)), "812.50B");
         assert_eq!(format!("{:.1}", MetricValue::from(2.6)), "3");
-        assert_eq!(format!("{:.3}", MetricValue::percent(12.345)), "12.3%");
+        assert_eq!(format!("{:.4}", MetricValue::percent(12.345)), "12.35%");
         assert_eq!(
             format!("{:.4}", MetricValue::from(Duration::from_micros(12500))),
             "12.50ms"
@@ -608,9 +607,9 @@ mod tests {
             [
                 ("size", "10B".to_string()),
                 ("items", "3".to_string()),
-                ("ratio", "2".to_string()),
+                ("ratio", "2.00".to_string()),
                 ("share", "12.5%".to_string()),
-                ("setup", "5ms".to_string()),
+                ("setup", "5.00ms".to_string()),
                 ("plain", "7".to_string()),
             ]
         );
