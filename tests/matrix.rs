@@ -6,7 +6,7 @@
 //! thing distributed registration buys which hand assembly cannot: a central
 //! list of pairings is exactly what there is nowhere to put.
 //!
-//! Driven through [`scaling::runner::measure`] rather than `Config::suite` -
+//! Driven through [`Config::run`] rather than `Config::suite` -
 //! see `tests/macros.rs`'s doc comment for why.
 
 use scaling::Config;
@@ -88,7 +88,7 @@ fn total_folded(v: &mut Vec<u64>) -> u64 {
 
 fn run() -> scaling::Report {
     let config = Config::default().with_max_time(Duration::from_millis(30));
-    scaling::runner::measure(&config).expect("these registrations compose")
+    config.run().expect("these registrations compose")
 }
 
 /// The cross-product forms itself, and every cell is a comparison.

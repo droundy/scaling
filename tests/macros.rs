@@ -8,13 +8,12 @@
 //! keeping side by side: if one passes and the other fails, the fault is in
 //! the macro rather than in the registry.
 //!
-//! Driven through [`scaling::runner::measure`] rather than `Config::suite`:
+//! Driven through [`Config::run`] rather than `Config::suite`:
 //! building a `Suite` is `pub(crate)`, so an ordinary integration test -
 //! which links `scaling` the way any downstream crate would - has no way to
 //! get hold of one and can only ever reach the registry through the
 //! runner's public entry point.
 
-use scaling::runner::measure;
 use scaling::Config;
 use std::time::Duration;
 
@@ -234,7 +233,7 @@ fn options(max_time_ms: u64) -> Config {
 
 #[test]
 fn every_written_benchmark_is_found_and_measured() {
-    let report = measure(&options(50)).expect("these registrations compose");
+    let report = options(50).run().expect("these registrations compose");
 
     for name in [
         "plain",
@@ -340,7 +339,7 @@ fn every_written_benchmark_is_found_and_measured() {
 /// in different modules do not collide.
 #[test]
 fn names_default_to_the_module_path() {
-    let report = measure(&options(20)).expect("these registrations compose");
+    let report = options(20).run().expect("these registrations compose");
 
     assert!(
         report.names().any(|k| k.ends_with("::plain")),
@@ -361,7 +360,7 @@ fn names_default_to_the_module_path() {
 /// if it is the baseline that is the `baseline` word doing it.
 #[test]
 fn the_declared_baseline_is_used() {
-    let report = measure(&options(20)).expect("these registrations compose");
+    let report = options(20).run().expect("these registrations compose");
 
     let cmps = report.comparison("sorting@sorting_data").unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();

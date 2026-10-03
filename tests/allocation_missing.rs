@@ -23,7 +23,7 @@ fn counted(out: Vec<u8>) -> Metrics {
 
 #[test]
 fn asking_for_counts_without_the_allocator_is_a_fatal_diagnostic() {
-    let problems = match scaling::runner::measure(&scaling::Config::default()) {
+    let problems = match scaling::Config::default().run() {
         Ok(_) => panic!("it should not have run"),
         Err(problems) => problems,
     };

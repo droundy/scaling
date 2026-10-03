@@ -205,7 +205,7 @@ postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
    installs, with per-thread counters; assembly refuses a program that asks
    for counts without it. Candidates whose output cannot be named have no
    metrics function and so no counts.
-5. Options: a `Config` switch to skip metrics, a runner flag
+5. Options: a `Config` switch to skip metrics, a flag for the run
    to select them.
 
 ## Open questions

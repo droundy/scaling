@@ -3,7 +3,7 @@
 //! Its own test binary because a global allocator is the whole program's:
 //! installing it in the library's unit tests would slow every test there.
 //!
-//! Driven through [`scaling::runner::measure`] for the reason `tests/macros.rs`
+//! Driven through [`Config::run`] for the reason `tests/macros.rs`
 //! gives.
 
 use scaling::registry::measure_allocations as measure;
@@ -160,7 +160,7 @@ fn peeks(_out: Vec<u8>) -> Metrics {
 
 fn report() -> scaling::Report {
     let cfg = Config::relative(0.1).with_max_time(Duration::from_millis(50));
-    scaling::runner::measure(&cfg).expect("the registrations compose")
+    cfg.run().expect("the registrations compose")
 }
 
 #[test]

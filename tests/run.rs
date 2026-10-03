@@ -1,14 +1,22 @@
-//! The runner, driven the way `scaling::main!()` drives it.
+//! `Config::run_and_print` and `Config::run`, driven the way a benchmark
+//! binary's `main` drives them.
 //!
-//! `scaling::main!()` reads the command line and calls
-//! [`scaling::runner::run`]; these build the same [`Config`] directly, so
-//! what is exercised is everything that macro would reach. Registrations are
-//! written with the attributes rather than by hand, because the thing under
-//! test is the whole path from an attribute to an exit status.
+//! A benchmark binary's `main` calls [`Config::run_and_print`] on the default
+//! [`Config`]; these build one directly, so what is exercised is everything
+//! that call would reach. Registrations are written with the attributes rather
+//! than by hand, because the thing under test is the whole path from an
+//! attribute to an exit status.
 
-use scaling::runner::{measure, run, Outcome};
 use scaling::Config;
+use std::process::ExitCode;
 use std::time::Duration;
+
+/// Whether two exit codes are the same one. `ExitCode` has no `PartialEq` on
+/// every Rust this crate supports, so this compares how they print, which is
+/// the same for the same code whatever the format.
+fn same_code(a: ExitCode, b: ExitCode) -> bool {
+    format!("{a:?}") == format!("{b:?}")
+}
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
@@ -69,21 +77,21 @@ fn quick() -> Config {
 
 #[test]
 fn a_run_measures_what_was_registered() {
-    let outcome = run(quick());
-    assert_eq!(outcome, Outcome::Measured);
+    let code = quick().run_and_print();
+    assert!(same_code(code, ExitCode::SUCCESS), "{code:?}");
 }
 
 /// A script can measure and then read the numbers, rather than reading a
 /// printout of them.
 ///
 /// This is the path that has to survive the removal of the hand-assembled
-/// API: `run` prints and returns a verdict, which answers "did anything
-/// regress" but not "which of these is actually fastest here". Names are how
+/// API: `run_and_print` prints and returns an exit status, which answers "did
+/// anything regress" but not "which of these is actually fastest here". Names are how
 /// results are reached, because nobody wrote them down - they come from the
 /// module and function a benchmark was declared in.
 #[test]
 fn a_script_can_read_the_numbers_it_measured() {
-    let report = measure(&quick()).expect("these registrations compose");
+    let report = quick().run().expect("these registrations compose");
 
     let comparison = report
         .comparison("regressing@regressing_input")
@@ -106,10 +114,10 @@ fn a_script_can_read_the_numbers_it_measured() {
 /// Registrations that do not compose come back as a list rather than a
 /// panic, so a script can say what is wrong in its own words.
 #[test]
-fn measure_hands_back_what_it_could_not_assemble() {
+fn run_hands_back_what_it_could_not_assemble() {
     // Nothing here contradicts anything, so this is the `Ok` half; the `Err`
     // half is covered against deliberately broken registrations in
     // `suite::bad_registrations` (src/suite.rs), which cannot share a
     // binary with these.
-    assert!(measure(&quick()).is_ok());
+    assert!(quick().run().is_ok());
 }

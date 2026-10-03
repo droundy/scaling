@@ -182,7 +182,7 @@ pub struct Suite {
 
 impl Config {
     /// Begin a suite of benchmarks to be measured together. What
-    /// [`crate::runner`] calls, not what a benchmark is written against.
+    /// [`Config::run`] calls, not what a benchmark is written against.
     pub(crate) fn suite(&self) -> Suite {
         Suite {
             cfg: self.clone(),
@@ -785,14 +785,14 @@ impl Report {
     /// `None` if nothing of that name was measured, if it was measured but
     /// is of another type, or if the suite has not run.
     /// ```
-    /// use scaling::{runner, Config};
+    /// use scaling::Config;
     ///
     /// #[scaling::bench(name = "sum_to_100")]
     /// fn my_benchmark() -> u64 {
     ///     (0..100u64).sum()
     /// }
     ///
-    /// let report = runner::measure(&Config::default()).expect("the registrations compose");
+    /// let report = Config::default().run().expect("the registrations compose");
     /// let timings = report.get_timings("sum_to_100").expect("it ran");
     /// let timing = timings.timings()[0];
     /// assert!(timing.ns_per_iter > 0.0);
@@ -810,14 +810,14 @@ impl Report {
     /// `None` if nothing of that name was measured, if it was measured but
     /// is of another type, or if the suite has not run.
     /// ```
-    /// use scaling::{runner, Config};
+    /// use scaling::Config;
     ///
     /// #[scaling::bench_scaling(name = "sum_to_100", nmin = 32)]
     /// fn my_benchmark(n: usize) -> u64 {
     ///     (0..n as u64).sum()
     /// }
     ///
-    /// let report = runner::measure(&Config::default()).expect("the registrations compose");
+    /// let report = Config::default().run().expect("the registrations compose");
     /// let scaling = report.get_scaling("sum_to_100").expect("it ran");
     /// assert!(scaling.iterations > 0);
     /// ```

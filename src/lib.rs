@@ -178,7 +178,7 @@ mod benches {
     #[test]
     #[ignore] // a real run needs --release; plain `cargo test` should not pay for it
     fn run() {
-        scaling::runner::run(Default::default());
+        scaling::Config::default().run_and_print();
     }
 }
 ```
@@ -187,12 +187,11 @@ and run with `cargo test --release -- --ignored run`. An ordinary `cargo
 build` never sees `#[cfg(test)]` code at all, so it never touches
 `scaling`, `inventory`, or anything either depends on - the same zero cost
 to a normal build the feature route buys, bought instead by `#[cfg(test)]`,
-something every Rust crate already uses, at the cost of [`main!`] and the
-ordinary `cargo bench` CLI: `#[test]` functions are not run by `cargo
-bench` on stable Rust, so this route goes through `cargo test` instead
-(hence `--release`, since `cargo test`'s own default profile is
-unoptimised) and calls [`crate::runner::run`] by hand rather than through
-[`main!`].
+something every Rust crate already uses, at the cost of the ordinary `cargo
+bench` CLI: `#[test]` functions are not run by `cargo bench` on stable Rust,
+so this route goes through `cargo test` instead (hence `--release`, since
+`cargo test`'s own default profile is unoptimised) rather than through a
+`main` of your own.
 
 ## Comparing against your own history
 
@@ -250,8 +249,8 @@ fn current(v: &mut Vec<u64>) { my_crate::sort(v) }
 
 `baseline` names the released version, so the report reads the way a
 regression check should: the code being written is measured *against* what
-already shipped, not the other way around. See [`crate::runner`]'s module
-docs for the one sharp edge this has: it stops working if two different
+already shipped, not the other way around. There is one sharp edge: it stops
+working if two different
 versions of `scaling` itself ever end up anywhere in the dependency graph,
 since registration is keyed on the literal monomorphized type `inventory`
 collects, and two `scaling` versions split the registry silently rather
@@ -507,7 +506,7 @@ pub mod quiet;
 /// code rather than written by hand, and their shapes are not yet stable.
 #[doc(hidden)]
 pub mod registry;
-pub mod runner;
+mod run;
 mod scaling;
 mod suite;
 pub(crate) use bench::time_loop;
@@ -520,6 +519,7 @@ pub(crate) mod significant;
 pub use self::bench::Timing;
 
 pub use self::alloc::{Allocations, Allocator};
+pub use self::assemble::Diagnostic;
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
 pub(crate) use self::metrics::MetricColumn;
@@ -773,42 +773,11 @@ pub use scaling_macros::input;
 ///
 /// # Reading them back
 ///
-/// A script that measured with [`runner::measure`] gets each alternative's
+/// A script that measured with [`Config::run`] gets each alternative's
 /// record from [`Timings::metrics`], in the order of [`Timings::names`]:
 /// `report.comparison("encode@text")?.metrics()[0].get("size")`. A candidate
 /// with no metrics has an empty record.
 pub use scaling_macros::metrics;
-
-/// A whole benchmark binary, in one line.
-///
-/// ```no_run
-/// // benches/bench.rs, in its entirety
-/// scaling::main!();
-/// ```
-///
-/// This expands to a `main` that discovers all registered benchmarks in the
-/// binary, measures them with the default [`Config`], and prints the table.
-/// For custom budgets or settings, build a [`Config`] manually and call
-/// [`runner::run`] or [`runner::measure`] from your own `main`.
-///
-/// "This binary" means it literally: everything `#[scaling::bench]` and its
-/// siblings mark, anywhere in your crate's own `src/` - which the compiler
-/// links into every target regardless - is discovered automatically. A second
-/// *file* under `benches/` is not automatically part of it; Cargo treats each
-/// top-level file there as its own separate binary with its own `main`.
-///
-/// # Its exit status means something
-///
-/// Zero unless the run never started because registrations contradict each
-/// other, which exits `2` instead.
-#[macro_export]
-macro_rules! main {
-    () => {
-        fn main() -> ::std::process::ExitCode {
-            $crate::runner::main()
-        }
-    };
-}
 
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;

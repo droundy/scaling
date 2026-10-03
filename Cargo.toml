@@ -27,8 +27,8 @@ expect-test = "1.5.1"
 members = [".", "macros"]
 
 # A benchmark binary shaped the way one using this crate is meant to be:
-# benchmarks declared where they are written, and `scaling::main!()` for the
-# whole program.
+# benchmarks declared where they are written, and a `main` of one call,
+# `Config::default().run_and_print()`, for the whole program.
 [[bench]]
 name = "registered"
 harness = false
