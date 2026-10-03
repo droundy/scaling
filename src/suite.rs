@@ -529,7 +529,75 @@ impl Display for Group {
     }
 }
 
-/// Everything a suite measured, keyed by logical group name.
+/// What a run measured, reached by name.
+///
+/// [`Config::run`] hands one back; [`Config::run_and_print`] prints it and
+/// returns an exit status instead. Printing a `Report` with `{}` gives the
+/// same tables.
+///
+/// # Two ways to look
+///
+/// By **entry**: there is one entry for each standalone benchmark, and for each
+/// input of each group. [`timing`](Report::timing),
+/// [`comparison`](Report::comparison), [`scaling`](Report::scaling),
+/// [`get_timings`](Report::get_timings), [`contains`](Report::contains),
+/// [`names`](Report::names), [`all_timings`](Report::all_timings) and
+/// [`all_comparisons`](Report::all_comparisons) take or give an entry's name.
+///
+/// By **group**: [`groups`](Report::groups) gives each group as a [`Group`],
+/// which prints itself as a table, keyed by the group's own name. It is the
+/// only place a group's name is used on its own.
+///
+/// # Names
+///
+/// The name of an entry says what it is:
+///
+/// | entry | name |
+/// |---|---|
+/// | a standalone benchmark | `module::function`, or its `name = ".."` |
+/// | a comparison: an input of a group, with two or more candidates | `group@input`, or just `group` if the group has no `#[scaling::input]` |
+/// | a candidate alone on an input of its group | `group::candidate@input`, or `group::candidate` with no input |
+///
+/// where `input` and `candidate` are the function's name, or its `name = ".."`.
+/// Two further rules apply when names would otherwise collide: if two inputs of
+/// different types in one group share a name, the type follows the comparison's
+/// name, as in `group@input (Vec<u8>)`; and if one name is registered by more
+/// than one crate or version, as when benchmarking against an older release of
+/// your own crate, the least that tells them apart is added, as `name@crate`,
+/// `name@version` or `name@crate-version`.
+///
+/// Nobody writes these names down, so [`names`](Report::names) lists what a run
+/// produced.
+///
+/// ```
+/// use scaling::Config;
+/// use std::time::Duration;
+///
+/// #[scaling::bench(name = "sum")]
+/// fn sum() -> u64 { (0..100u64).sum() }
+///
+/// #[scaling::input(group = "sorting", name = "reversed")]
+/// fn reversed() -> Vec<u64> { (0..64u64).rev().collect() }
+///
+/// #[scaling::bench(group = "sorting", baseline)]
+/// fn stable(v: &mut Vec<u64>) { v.sort() }
+///
+/// #[scaling::bench(group = "sorting")]
+/// fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
+///
+/// let config = Config::relative(0.1).with_max_time(Duration::from_millis(50));
+/// let report = config.run().expect("the registrations compose");
+///
+/// let mut names: Vec<&str> = report.names().collect();
+/// names.sort();
+/// assert_eq!(names, ["sorting@reversed", "sum"]);
+///
+/// assert!(report.timing("sum").is_some());
+/// assert!(report.comparison("sorting@reversed").is_some());
+/// // The group's own name is only for `groups`.
+/// assert!(report.comparison("sorting").is_none());
+/// assert_eq!(report.groups().map(|(name, _)| name).collect::<Vec<_>>(), ["sorting", "sum"]);
+/// ```
 pub struct Report {
     entries: Vec<(String, Found)>,
     groups: BTreeMap<String, Group>,
@@ -757,19 +825,18 @@ impl Report {
 }
 
 impl Report {
-    /// The measured groups, in name order. A [`Group`] prints itself as a
-    /// table; a caller that wants them in another order can collect and sort.
+    /// The measured groups, in the order of their group names, each as the
+    /// name and the [`Group`], which prints itself as a table. A caller that
+    /// wants another order can collect and sort. A standalone benchmark is a
+    /// group of its own, under its entry name.
     pub fn groups(&self) -> impl Iterator<Item = (&str, &Group)> + '_ {
         self.groups
             .iter()
             .map(|(name, group)| (name.as_str(), group))
     }
 
-    /// What every entry is called, in the order they were added.
-    ///
-    /// The way to find out what a run produced when the names were not
-    /// written by hand - a registered benchmark is called after its module
-    /// and function, and a group's cell after its group and input.
+    /// What every entry is called, in the order they were added: the names the
+    /// other methods take. See [Names](Report#names) for how they are made up.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(name, _)| name.as_str())
     }
@@ -816,7 +883,8 @@ impl Report {
             .map(|(_, found)| found.clone())
     }
 
-    /// A flat benchmark's measurement, by name.
+    /// A single measurement, by name: a standalone benchmark, or a group's
+    /// candidate that is alone on its input. See [Names](Report#names).
     ///
     /// `None` if that name was something else - a comparison, say - so a
     /// caller that does not know what it is looking at can simply ask.
@@ -851,17 +919,8 @@ impl Report {
         }
     }
 
-    /// A comparison's results, by name.
-    ///
-    /// A comparison is one input's worth of a group whose candidates (two or
-    /// more) take that input's type. It is named `group@input`, after the
-    /// group and the input (the function's name, or its `name =`). A group
-    /// with no `#[scaling::input]` has no input to name, so it is just
-    /// `group`. If two inputs of different types in a group share a name, the
-    /// type follows: `group@input (Vec<u8>)`. A group with a single candidate
-    /// on an input is not a comparison; it is reached with [`Report::timing`]
-    /// as `group::candidate@input`. [`Report::names`] lists every name a run
-    /// produced.
+    /// A comparison's results, by name: an input of a group with two or more
+    /// candidates, named `group@input`. See [Names](Report#names).
     ///
     /// What comes back carries every alternative's own measurement as well as
     /// its difference from the baseline, so this is what a script asking
