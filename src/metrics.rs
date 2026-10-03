@@ -256,6 +256,10 @@ fn bytes_text(size: f64, precision: Option<usize>) -> String {
 /// | [`ratio`](Metrics::ratio) | a plain number | `0.312` |
 /// | [`percent`](Metrics::percent) | a percentage | `12.3%` |
 ///
+/// These read the number they are given, so a [`Duration`] passed to `count` is
+/// its seconds, and a [`MetricValue`] loses the unit it had; to keep a time as a
+/// time, pass it to [`add`](Metrics::add).
+///
 /// A metric that is not defined is simply not added, and shows as `-` in the
 /// table. A name given twice keeps the later value, in the earlier position.
 ///
