@@ -1,0 +1,627 @@
+# Measuring a time, and a ratio of times
+
+This is the algorithm the lab has converged on, written to be implemented
+cleanly in `scaling` itself. Part 1 is the design: what each step does, why,
+and the evidence for it. Part 2 is a first draft of the user documentation
+for the implementation.
+
+The evidence lives in [PROBLEMS.md](PROBLEMS.md). The numbers quoted here
+come from the six `top2` pair recordings in `day/collect/pairs-{quiet,noisy}`:
+about 250,000 rounds each, on one machine (hybrid Intel, P-cores, quiet
+pinned at 1.7 GHz or noisy with turbo to 4.4 GHz). Scoring replays the
+algorithm from many starting points against each recording's own long-run
+answer. Where something below has *not* been checked that way, it says so.
+
+---
+
+# Part 1: design
+
+## The algorithm on one page
+
+1. **Calibrate** each function into two batch sizes, `N` and `2N`, with the
+   larger batch at most 20 us. A function too slow for that gets `1` and
+   `2`, or just `1` if a call takes more than half a second.
+2. **Measure in rounds.** Each round times every function in the set once,
+   in a fresh random order, each at one of its two batch sizes picked by a
+   coin flip. A CPU canary is a member of every round. Nobody leaves early.
+3. **Estimate a ratio** between two functions from rounds they shared:
+   - Take the log of each round's time ratio.
+   - Fit a two-way model over those logs.
+   - Exponentiate and subtract the batch sizes.
+
+   The clock cancels inside each round, and the fixed cost per measurement
+   cancels in the subtraction.
+4. **Estimate an absolute time** for each function by subtracting its two
+   batch sizes. Its ratio to the canary gives the same time in core cycles,
+   which holds still when the clock does not.
+5. **Put an error bar on everything by batch means, on a log scale:**
+   - Cut the rounds into at least 8 contiguous blocks of at least 15
+     rounds, and at most 20 blocks.
+   - Estimate in each block.
+   - The spread of the logs is the bar, read as a factor.
+6. **Stop** when every number the user asked about is known to within the
+   goal as a factor. Check first at 120 rounds, then every 1.3x more.
+7. **Measure everything twice**, as two whole passes over the suite, each
+   at a goal √2 looser, and combine them. Two passes that disagree get a
+   third. A result that still cannot meet its goal is refused, not printed.
+8. **Report a ratio in words people use:**
+   - a percentage when it is small;
+   - a factor when it is large;
+   - the uncertainty as `±` a percentage.
+
+   Absolute times always go alongside.
+
+Each step answers a specific failure. The rest of Part 1 takes them in
+order.
+
+## Vocabulary
+
+- **Iteration**: one call of the function.
+- **Batch**: `n` iterations timed together. Its time is one *sample*.
+- **Rung**: a batch size. Every function here has one or two.
+- **Round**: one sample of every function in the set, in random order.
+- **Pass**: one complete measurement of the whole suite, to a goal.
+- **Goal**: the uncertainty asked for, as a fraction: 1% means "known to
+  within a factor of 1.01".
+- **Blowup**: a result more than 4x the goal from the truth while claiming
+  to have met the goal. An honest one-sigma bar does this about 1 time in
+  16,000. It is the failure this design is built to prevent.
+
+## 1. Calibration: two batch sizes per function
+
+**What.** Run one untimed batch, then time batches of `n = 1, 2, 4, ...`
+until the next doubling would exceed **20 us**. Re-time the last size three
+times and take the median. The rungs are the last two sizes, `N` and `2N`,
+and the lower one has to be at least 100 ns.
+
+- If one call already exceeds 20 us, the rungs are `1` and `2`, as long as
+  two calls take at most a second.
+- If two calls take more than a second, the only rung is `1`.
+
+**Why two rungs.** Every timed batch carries a fixed cost that does not
+scale with `n`: the clock reads, the call, and rewarming whatever the
+neighbours evicted. Divided by `n`, it looks like part of the
+per-iteration cost.
+
+- It is a genuine constant (PROBLEMS.md, 2).
+- It depends on which other functions share the round: 300-570 ns from real
+  neighbours (PROBLEMS.md, 3).
+- `(t(2N) - t(N)) / N` removes it exactly. On `cpu_canary` the composition
+  spread fell from 18.69% to 0.05% against a 0.01% null.
+
+**Why the top two, not the widest pair.** Batch time is not linear in `n` at
+the bottom of a ladder. `cpu_canary`'s local slope is 5.30 ns from `n = 1`
+to 64, then flat at 2.36 ns. The top two rungs are in the linear regime and
+still span `N` iterations of lever arm.
+
+**Why 20 us.** A scheduler tick adds about 5 us to whatever batch it lands
+in, and the chance of landing is the batch length over the tick period.
+
+- At 20 us about 2% of batches are hit, and a trimmed mean discards them.
+- At 100 us 17% are hit, and trimming leaves a bias.
+- Past 1 ms every batch is hit.
+
+Sweeping the ceiling against a known answer put the boundary at 20 us.
+Nothing is lost: lever arm comes from the *ratio* of the two batch sizes,
+not from their duration.
+
+**Why 100 ns at the bottom.** The harness costs about 370 ns per
+measurement outside the timer, so below that the machine time buys almost
+no information.
+
+**Why the median of three.** Calibration runs first, and the first execution
+is the coldest. `copy_64mb`'s first call took 47 ms against a true 6.4 ms,
+because its pages had not yet been faulted in. One probe is one probe.
+
+**Two paths, not four.** Every function leaves calibration with either one
+rung or two, and everything downstream handles both cases with the same
+model. The one-rung case is only for calls over half a second, where the
+fixed cost is a part in a million and needs no subtracting.
+
+## 2. Rounds
+
+**What.**
+- Each round runs every function in the set once, in a fresh random
+  permutation.
+- Each function independently draws one of its two rungs with equal
+  probability.
+- The CPU canary is always a member.
+- The set never changes during a pass. Every member runs every round until
+  the pass stops.
+
+**Why rounds.** Everything in one round runs under the same clock, the same
+thermal state and the same neighbours. Interleaving is what lets a ratio
+cancel the machine's movement. Comparing two functions measured one after
+the other compares two different machines.
+
+**Why a fresh permutation.** Position matters: a memory-heavy neighbour
+immediately before leaves a cold cache. A random order removes position as
+a bias. Alternating sweeps were tried, and they replace the bias with a
+period-2 oscillation.
+
+**Why random rungs, at equal odds.** Over a block of rounds each function
+sees both rungs about equally, so every block has the same design. Drawing
+rungs unevenly made a block's estimate depend on which rungs it happened
+to get. Under additive noise that made the claimed bar 80-200x too large.
+
+**Why nobody leaves early.** A member's cost depends on its neighbours,
+which is problem 3. A member that stops changes the composition for
+everyone still measuring, by percent-scale amounts unquiesced.
+
+**Why the canary.** It is a dependent multiply-add chain held in registers.
+On the quiet machine it reads to 0.02%, and on this machine it costs
+exactly 4 core cycles a link: 2.36 ns at 1.7 GHz, and 0.912 ns at turbo,
+which is 4.0 cycles if turbo was 4.4 GHz. It is cheap, at one batch of at
+most 20 us per round, and it earns its place twice:
+- it turns any function's time into cycles (section 4);
+- it shows how much the clock moved, which is what a refusal message needs
+  to say (section 7).
+
+A memory canary was built and dropped. It measured something, but nothing
+in the algorithm had a use for it.
+
+## 3. The ratio between two functions
+
+This is the measurement that matters most. "How much faster is the new
+implementation" is a ratio, and so is "before and after" when both versions
+of a crate are linked into one benchmark.
+
+**What.** For functions A and B, take every round. Each round gives a cell,
+the pair of rungs `(n_A, n_B)`, and a value, `ln t_A - ln t_B`.
+
+1. Within each of the (up to) four cells, take the **25% trimmed mean**,
+   discarding a quarter from each end.
+2. Fit the additive model `cell(n_A, n_B) = alpha(n_A) - beta(n_B)`, by
+   least squares weighted by cell counts. Backfitting converges in a few
+   dozen sweeps, and nothing is extrapolated.
+3. `exp(alpha)` and `exp(beta)` are then each function's batch times, up to
+   one shared factor. The slopes are
+
+       s_A = (exp(alpha(2N_A)) - exp(alpha(N_A))) / N_A
+       s_B = (exp(beta(2N_B))  - exp(beta(N_B)))  / N_B
+
+   and the ratio is `R = s_A / s_B`. The shared factor cancels.
+
+A function with one rung contributes one level, and its "slope" is
+`exp(level) / n`. A block missing a cell it needs returns no estimate.
+
+For a set of `k` functions, every ratio of interest - usually each
+candidate against one baseline - is its own pairwise estimate from the
+same rounds. Pairwise ratios do not multiply exactly (`R_AC` is close to
+`R_AB * R_BC`, but not equal), and nothing should assume they do.
+
+**Why logs within a round.** The clock multiplies every time in a round by
+the same factor, and a log difference removes it exactly, whatever rungs
+the two were on.
+
+**Why the model, rather than subtracting each function's rungs and then
+dividing.** That obvious estimator works on a quiet machine. On a noisy one
+its subtraction pairs samples from different rounds, so it subtracts two
+different clocks. For a clock-bound function, about one such pair of
+samples in ten came out negative, and its bar described a steady clock that
+was not there. Fitting in log space
+first means no subtraction ever straddles two clocks. The subtraction still
+happens, as `exp` then subtract, so the fixed cost per measurement is still
+removed. Only the clock is handled in logs.
+
+Clock/clock pairs, both with the 8-block bar of section 5. "Bar/sd" is
+the claimed bar over the real spread of results; 1 is honest.
+
+| machine | estimator | cells passing | blowups | coverage | median bar/sd |
+| --- | --- | --- | --- | --- | --- |
+| quiet | subtract, then divide | 54 of 54 | 0.04% | 70% | 1.05 |
+| quiet | log model (this) | 54 of 54 | 0.01% | 74% | 1.15 |
+| noisy | subtract, then divide | 26 of 54 | 1.63% | 54% | 0.67 |
+| noisy | log model (this) | 51 of 54 | 0.14% | 71% | 1.03 |
+
+On the quiet machine the two are equally good. On the noisy one, only the
+log model's bar is honest.
+
+**Why trim.** A tick lands on about one batch in fifty and adds microseconds
+to it. A symmetric 25% trim keeps the centre where it is under symmetric
+noise and discards one-sided excursions. Trimming only the top was tried,
+and it biases low by about the size of the tick bias it removes.
+
+**Limits:**
+- **Only functions alike in how they respond to the clock.** Two clock-bound
+  functions, or two memory-bound ones, share what a round did to them. A
+  clock-bound function against a memory-bound one does not, and on a noisy
+  machine their true ratio moves: `btree_miss / f64_sin` has an rms spread
+  of 3-16% over 13-second windows. There is no fixed answer to find, and the
+  two-pass check in section 7 is what notices.
+- **It assumes the fixed cost scales with the clock too.** It mostly does,
+  since it is instructions and cache refills.
+
+## 4. Absolute times: nanoseconds and cycles
+
+Ratios are the precise measurement, but people also need the absolute
+number: whether a function's speed matters at all is a question about
+nanoseconds against, say, a network round trip.
+
+**Nanoseconds.** For each function, `(T(2N) - T(N)) / N`, where `T` is the
+25% trimmed mean of that rung's samples. On a quiet machine this is the
+better number. Dividing by the canary only adds the canary's own noise
+there: 2.6-3.6% against 0.03% raw for `instant_now` in an earlier sweep.
+
+**Cycles.** The ratio of the function to the canary, from section 3,
+multiplied by 4 cycles a link, is the function's cost in core cycles. A
+clock-bound function's cycle count holds still when the clock moves, which
+its nanoseconds cannot. It replaces the "bogo-nanoseconds" idea with a real
+unit. For a memory-bound function it is not a fixed number on a noisy
+machine, for the reason given in section 3.
+
+**Which one is primary.** Both are always reported. The one the stopping
+rule uses is:
+- **nanoseconds** when a `quiet-bench` reservation is in effect, which the
+  crate can already detect;
+- **cycles** otherwise.
+
+This rule is a proposal. The lab has not scored the cycles path on its own.
+
+## 5. The error bar
+
+**What.** Cut the rounds so far into `b` contiguous blocks, in order, with
+`b = clamp(rounds / 15, 8, 20)`. Compute the estimate in each block and take
+its log. The bar is the standard error of those logs,
+
+    sigma = sd(ln R_1 .. ln R_b) / sqrt(b)
+
+and it reads as a factor: the result is `R` times or divided by `e^sigma`.
+For small `sigma` that is the familiar `±sigma` as a fraction. The same
+recipe works for an absolute time, whose block estimate is the two-rung
+subtraction within the block.
+
+**Why batch means, rather than a formula.** Consecutive rounds are not
+independent: they share a clock state, a cache state and a scheduler phase.
+A textbook standard error assumes they are, and comes out confidently too
+small. The spread of contiguous block estimates absorbs whatever is
+correlated within a block. It also needs no formula for the error of a
+ratio of two noisy slopes, which would assume away exactly that
+correlation.
+
+**Why logs.** On a log scale A/B and B/A are one measurement: their logs are
+exact negatives, with the same spread. On a linear scale the two
+orientations of one pair stopped at different points and scored
+differently, and a unit test now checks that they do not. Being 2% high and
+2% low also count alike, as factors.
+
+**Why at least 8 blocks.** The bar is itself an estimate, and from 4 blocks
+it has 3 degrees of freedom. A bar that uncertain comes out under half its
+true size about one time in seven. The stopping rule looks at it over and
+over, so it stops on exactly those lucky-small bars. That was most of the
+blowups between clock-bound pairs:
+- more than half stopped at the 60-round floor, against a quarter of all
+  trials;
+- every block was shifted the same way;
+- the next 60 rounds were usually fine.
+
+Simulated iid noise, with no machine at all, reproduces the rate:
+0.3-1.5%. Eight blocks:
+
+| clock/clock pairs | blowups, 4 blocks | blowups, 8 blocks |
+| --- | --- | --- |
+| quiet | 33 of 10,731 | 1 of 10,742 |
+| noisy | 46 of 10,348 | 14 of 10,328 |
+
+It also raises coverage from 65-68% to 68-79%.
+
+**Why 15 rounds a block.** Each block's estimate needs both rungs of both
+functions, so blocks have to be big enough to almost always have them.
+Smaller blocks with the same minimum count were tried, to lower the floor.
+They cost *more* rounds, not fewer: a block of a few rounds leaves one or
+two samples per cell to trim, its estimate is noisier than the full one,
+and the bar overstates the error. A cutoff that tightens as blocks get
+fewer, from a chi-square bound on the bar, also works, but costs at least
+as much for the same safety (PROBLEMS.md, "Why a ratio blows up").
+
+**Why at most 20.** As data accumulates, blocks should grow longer rather
+than only more numerous, so that each outlasts more of the correlation.
+
+## 6. Stopping
+
+**What.** Check at 120 rounds, the floor of 8 blocks of 15, and then each
+time the round count has grown by 1.3x. Stop when every number the user
+asked about has a bar `sigma <= ln(1 + goal)`, or when the time budget runs
+out.
+
+What the user asked about:
+- for a comparison set, each candidate's ratio to the baseline;
+- for a single function, its primary absolute time (section 4).
+
+**Why geometric checks.** Recomputing every bar after every round is
+quadratic, and looking more often only gives a noisy bar more chances to
+dip. 1.3x costs at most 30% overshoot.
+
+**Why the goal as a factor.** It is the same test for A/B and B/A. At goals
+of a few percent, `ln(1 + goal)` and `goal` differ by under 1%, so a user's
+"1%" means what they think it means.
+
+**What a stop costs.** On the quiet machine's clock-bound pairs, the mean
+rounds per trial were 156 at a 2% goal, 342 at 1% and 905 at 0.5%. A round
+of five functions took about 13 ms, and a round of just two functions and
+the canary is far cheaper. The 8-block floor accounts for most of the
+2%-goal cost and almost none of the 0.5%.
+
+## 7. Two passes, and refusing
+
+Everything above sees only the noise inside one measurement. Some of the
+machine's variation is slower than that:
+
+- `btree_miss` has whole minutes in which it runs 1.5-4% slow, even on the
+  quiet machine, while `cpu_canary` is flat to 0.0%;
+- clock-matched ratios on the noisy machine wander 0.3-1.8% over 13
+  seconds.
+
+Every block of a measurement sees the same episode, so no bar computed from
+inside it can include that variation. With 8 blocks in place, this is
+what is left: of the noisy machine's clock/clock blowups, 43% ran 2,438
+rounds or more, against 5% of all trials.
+
+**What:**
+1. Run the whole suite once at a per-pass goal of
+   `sigma <= sqrt(2) * ln(1 + goal)`.
+2. Run the whole suite again, the same way.
+3. For each result, combine the passes: the inverse-variance weighted mean
+   of `ln R`, with combined bar `max(sqrt(1 / (w_1 + w_2)), |x_1 - x_2| / 2)`.
+4. If the passes **disagree** - `|x_1 - x_2| > 2 * sqrt(sigma_1^2 + sigma_2^2)`
+   - run that comparison a third time and combine all three the same way,
+   with the bar including the spread between passes.
+5. If the combined bar still misses the goal, **refuse**. Report that the
+   machine could not reproduce this number to the goal, and how far the
+   passes were apart.
+
+**Why passes, and why whole-suite.** Replayed with a second trial started
+`g` rounds after the first ended, at about 79 rounds a second:
+
+| | gap | first-run blowups the second run disagrees with | blowups, both averaged | blowups, budget split in two |
+| --- | --- | --- | --- | --- |
+| quiet, memory pairs | none | 60% | 55 of 159 | 124 |
+| | ~1 min | 72% | 33 | 64 |
+| | ~10 min | 85% | 14 | 41 |
+| noisy, clock/clock | none | 71% | 2 of 14 | 13 |
+| | ~1 min | 100% | 2 | 2 |
+
+The gap is what gives a second pass its power. An immediate rerun shares
+the episode that fooled the first. Running the whole suite, and then
+running it again, provides the gap at no cost, because every other
+benchmark runs in between.
+
+**Why every comparison, not just the close calls.** A blowup does not look
+borderline. It has a tight bar and sits several bars from the truth, so it
+looks like a confident result. A rule that reruns only comparisons that are
+borderline significant would skip exactly the wrong answers.
+
+**Why a √2 looser goal.** Two passes at `sqrt(2) * ln(1 + goal)` average to
+about `ln(1 + goal)`. They cost 1.2-1.3x the rounds of one pass, not 2x,
+because of the floor and the 1.3x stepping. With a 10-minute gap, that cut
+the quiet machine's memory-pair blowups from 159 to 41.
+
+**Why refuse.** A number whose two measurements disagree beyond their error
+bars is not known to the precision asked for, whatever either bar says.
+Printing it with a caveat invites someone to act on it. The progression is
+natural:
+- a refusal is a failed measurement;
+- a retry is a refusal with a loop around it;
+- more passes are retries whose results are kept.
+
+The user can ask for a looser goal, or for "run until the time limit" with
+no goal at all. A result that merely ran out of budget before meeting its
+goal is a different case: it is printed, and marked `(limit)`.
+
+**Not yet validated:**
+- The third-pass and refusal rules have not been replayed. The two-pass
+  numbers above have.
+- The replay emulates a second pass within one recording, not across
+  separate processes.
+- A lone `bench()` call outside a suite has no gap to borrow. It can only
+  do its two passes back to back, which catches fewer drift blowups (60-71%
+  rather than 72-100%) but all of the statistical ones.
+
+## 8. Reporting
+
+Logs stay internal. People think in percentages for small changes and in
+factors for large ones: "twice as fast", not "50% less time".
+
+- **A ratio within a factor of 1.25** prints as a percentage: `3.2% slower
+  (±0.4%)`.
+- **A larger ratio** prints as a factor: `2.31x faster (±0.6%)`. The `±`
+  is how well the factor is known, so ±0.6% on 2.31x means 2.30x to 2.32x.
+- **A bar wider than about 20%** prints as a factor too: `×/÷ 1.3`.
+  Percentages stop being symmetric at that size.
+- **Absolute times** always print alongside, in nanoseconds, and in cycles
+  when the machine is not quiesced.
+- **Flags.** `(limit)` means the budget ran out before the goal. A refused
+  result prints the refusal, never the number.
+
+## Constants, and where each came from
+
+| constant | value | from |
+| --- | --- | --- |
+| batch ceiling | 20 us | tick contamination swept against a known answer |
+| batch floor | 100 ns | ~370 ns harness cost per measurement |
+| second rung for slow calls | if `2 t(1) <= 1 s` | a cost decision, not measured |
+| trim | 25% each end | swept 0/10/25/40%; any trim removes tick bias, 25% matches the reference |
+| rounds per block | >= 15 | each block needs both rungs of both functions |
+| blocks | 8 to 20 | 8 removes lucky-small stops; smaller blocks cost more |
+| first check | 120 rounds | 8 blocks x 15 |
+| check growth | 1.3x | at most 30% overshoot |
+| canary | 4 cycles a link | measured at two clocks on this machine; verify per architecture |
+| passes | 2, at a √2 looser goal | replayed, 1.2-1.3x the cost |
+| disagreement | > 2 combined bars | replayed: 3-7% of good clock-pair results trigger it |
+| default goal | 1% | the crate's existing default |
+
+## Limits it does not overcome
+
+- **Memory-bound functions reproduce only to about 1% over minutes, even on
+  a quiet machine.** A 0.5% goal for `btree_miss` is below what the machine
+  reproduces at that scale. Two passes catch most of these, but catching is
+  all they can do.
+- **Mixed ratios on an unquiet machine have no fixed value.** The two-pass
+  check will refuse them, which is correct, and the refusal should say why.
+- **Functions slower than about 1 ms per call** are barely represented in
+  the lab's data. Above that every batch is hit by ticks, the trimmed mean
+  has no clean population to find, and the result includes a roughly
+  constant interrupt tax of about 0.5%.
+- **Quieting moves the operating point.** A pinned core at base clock drives
+  memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
+  number measured quiet does not describe the machine people run on.
+
+## Tests a clean implementation should carry
+
+The lab's `replay.rs` has the first two as unit tests.
+
+1. **Symmetry.** A/B and B/A give reciprocal estimates, identical bars and
+   identical stopping points.
+2. **Recovery.** A synthetic pair with a wandering clock (±1% a round,
+   clamped to 0.6-1.6x), a fixed cost per batch, and ±0.5% noise recovers a
+   known ratio of slopes to within 0.2%.
+3. **The stopping rule on iid noise.** Gaussian rounds with no machine at
+   all, sized so an honest stop needs about 240 rounds, should give at most
+   about 0.1% blowups and 68-75% coverage. With 4 blocks they give about
+   1%, so this test fails if the floor regresses.
+4. **Rung balance.** Over any block, both rungs of every function appear.
+   A block missing one returns no estimate rather than a smaller bar.
+5. **Replay.** The lab's `lab pairs` scoring, pointed at the
+   implementation's estimator, on the six pair recordings. Today's figures,
+   for the paired estimator: every quiet clock/clock cell passes (54 of
+   54), the noisy ones 51 of 54, with 1 and 14 blowups respectively.
+
+## Decisions still open
+
+1. **Cycles or bogo-nanoseconds.** Cycles are a real unit. Nanoseconds at a
+   nominal clock are friendlier and fake.
+2. **The primary quantity for a single function**, if the proposed rule in
+   section 4 proves too blunt.
+3. **The refusal policy.** Whether a refusal fails the process (a non-zero
+   exit) by default, and what flag allows it through.
+4. **The third-pass rule.** It needs replaying with three trials per
+   comparison before it is trusted.
+5. **Lone `bench()` calls.** Whether a single call outside a suite does two
+   back-to-back passes, or one, by default.
+
+---
+
+# Part 2: draft user documentation
+
+*Everything below is written as it would appear in the crate's docs. Names
+such as `ComparisonSet` follow the `comparison` branch, and the numbers in
+the examples are illustrative.*
+
+---
+
+## How `scaling` measures
+
+`scaling` keeps measuring until it knows each answer to the accuracy you
+asked for, 1% by default. It tells you how accurate the answer is, and
+refuses to give an answer it cannot stand behind.
+
+```none
+parse_v1:        412.3ns ± 0.9ns   (1650 cycles)
+parse_v2:        178.4ns ± 0.4ns   (714 cycles)
+parse_v2 vs v1:  2.31x faster (±0.4%)
+```
+
+### Comparisons are the precise measurement
+
+To know which of two implementations is faster, and by how much, measure
+them together:
+
+```rust
+let mut set = ComparisonSet::new("parse");
+set.baseline("v1", || parse_v1(INPUT));
+set.candidate("v2", || parse_v2(INPUT));
+println!("{}", set.run());
+```
+
+They are timed in alternation, in the same rounds, so whatever the machine
+does while they run - the clock changing speed, the package warming up -
+happens to both. It cancels out of the comparison. Comparing two separate
+`bench` results cannot do that, because each one measured a different
+moment.
+
+A small change is shown as a percentage, `3.2% slower (±0.4%)`. A large
+one is shown as a factor, `2.31x faster (±0.4%)`. The `±` is how well that
+number is known: ±0.4% on 2.31x means somewhere between 2.30x and 2.32x.
+
+To compare a function against an earlier version of itself, link both
+versions of the crate into one benchmark and put them in the same set.
+Before-and-after then becomes a comparison within one run, and no stored
+number from another day is needed.
+
+### Absolute times
+
+Every result also comes with its absolute time, because "does this even
+matter?" is a question about nanoseconds. A function that takes 40 ns
+inside a request that waits 2 ms on the network is fast enough, whatever
+the comparison says.
+
+On a machine that has not been quiesced (see `quiet-bench`), the clock
+changes speed under load, and nanoseconds measured at one moment do not
+describe another. `scaling` also reports the time in **cycles** of the
+CPU's clock, measured against a reference loop that runs alongside your
+code. For code limited by the CPU, cycles hold still when the clock does
+not. For code limited by memory, neither number holds still. The honest
+answer then is to quiesce the machine.
+
+### What happens while it measures
+
+1. **Batch sizes.** For each function it finds two batch sizes, `N` and
+   `2N` calls, both short enough (at most 20 us) to dodge the operating
+   system's timer interrupts. Subtracting the two cancels the fixed cost of
+   timing anything at all, so a 2 ns function reads 2 ns, not 2 ns plus the
+   cost of reading the clock.
+2. **Rounds.** It runs everything in rounds: each function once, in a fresh
+   random order, together with a small reference loop that tracks the clock.
+3. **Error bars.** It estimates error bars from how much the answer varies
+   between stretches of the run, not from a formula that assumes every
+   measurement is independent. They are not, and a formula would claim
+   more precision than the data has.
+4. **Stopping.** It stops when every answer you asked about has reached its
+   goal.
+5. **A second pass.** It does all of that twice, as two passes over
+   everything, and compares the passes. Some of a machine's variation is
+   slower than one measurement: a minute in which memory is slower, a
+   background job that comes and goes. Only a second look at a different
+   moment can see it. The two passes together cost little more than one,
+   because each is run to a looser goal.
+
+### When it cannot reach the goal
+
+There are two different failures, and they are reported differently:
+
+- **Out of time.** The time limit ran out before the goal was met. The
+  answer is printed with the accuracy it did reach, and marked `(limit)`.
+- **Not reproducible.** The passes disagreed by more than their error bars
+  allow, even after a third look. The answer is not printed, because it is
+  not known to the accuracy you asked for:
+
+  ```none
+  btree_lookup vs hash_lookup: not reproducible to 0.5%
+      passes measured 1.83x, 1.79x and 1.86x faster
+      the CPU clock moved by up to 12% during the run
+      ask for a looser goal, or quiesce the machine
+  ```
+
+You can ask for a looser goal (`Config::relative(0.05)`), or for no goal at
+all - measure until the time limit and report whatever accuracy that buys.
+
+### Caveats
+
+- **Read the `±` as a typical error, not a bound.** About a third of
+  results land more than one `±` from the truth, and about 1 in 20 more
+  than two.
+- **Compare like with like.** A comparison between a function limited by
+  the CPU and one limited by memory has no fixed answer on a machine whose
+  clock moves, because the clock changes one and not the other. Expect
+  those to be refused unless the machine is quiesced.
+- **Memory-bound code reproduces to about 1%.** Even on a quiet machine, the
+  memory system has slow moods lasting minutes. Goals much tighter than 1%
+  for such code will often be refused, correctly.
+- **Slow functions are measured one call at a time.** Above about a
+  millisecond per call every measurement absorbs some timer interrupts, so
+  the result includes a small, roughly constant overhead (about 0.5%) that
+  no amount of measuring removes.
+- **A quiesced machine is a different machine.** Pinning the clock makes
+  results reproducible, but at base clock the memory system runs slower
+  too, so the absolute numbers describe the quiet machine, not the one you
+  deploy on. Comparisons travel better than absolute times.
