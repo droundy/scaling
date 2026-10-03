@@ -1,0 +1,1064 @@
+
+=== btree_miss ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                  btree_miss     28.0382     28.0839     28.0871         NaN         NaN         -86        3   0.00%
+                        btree_miss+copy_64mb     28.5703     28.2111     28.2170         NaN         NaN         673        3   0.03%
+                       btree_miss+cpu_canary     28.0401     28.0853     28.0876     11.8653     11.8821         -85        3   0.01%
+                      btree_miss+instant_now     28.0432     28.0822     28.0851         NaN         NaN         -73        3   0.00%
+                       btree_miss+mem_canary     28.0656     28.0980     28.1024         NaN         NaN         -61        3   0.01%
+                        btree_miss+mpsc_send     28.0739     28.1308     28.1350         NaN         NaN        -107        3   0.02%
+                          btree_miss+nothing     28.0391     28.0845     28.0882         NaN         NaN         -85        3   0.00%
+                       btree_miss+slice_sort     28.2195     28.1445     28.1423         NaN         NaN         141        3   0.09%
+             btree_miss+copy_64mb+cpu_canary     28.5594     28.1829     28.1913     12.0201     11.8810         706        3   0.05%
+            btree_miss+copy_64mb+instant_now     28.5468     28.1759     28.1758         NaN         NaN         695        3   0.07%
+             btree_miss+copy_64mb+mem_canary     28.5728     28.2190     28.2249         NaN         NaN         663        3   0.04%
+              btree_miss+copy_64mb+mpsc_send     28.5791     28.2018     28.2062         NaN         NaN         707        3   0.10%
+                btree_miss+copy_64mb+nothing     28.5723     28.1947     28.2000         NaN         NaN         708        3   0.04%
+             btree_miss+copy_64mb+slice_sort     28.6606     28.1676     28.1667         NaN         NaN         924        3   0.14%
+           btree_miss+cpu_canary+instant_now     28.0464     28.0940     28.0965     11.8613     11.8789         -89        3   0.00%
+            btree_miss+cpu_canary+mem_canary     28.0646     28.0907     28.0935     11.8718     11.8788         -49        3   0.00%
+             btree_miss+cpu_canary+mpsc_send     28.0833     28.1314     28.1352     11.8625     11.8756         -90        3   0.02%
+               btree_miss+cpu_canary+nothing     28.0418     28.0865     28.0888     11.8611     11.8744         -84        3   0.00%
+            btree_miss+cpu_canary+slice_sort     28.2448     28.1310     28.1335     11.8757     11.8316         213        3   0.16%
+           btree_miss+instant_now+mem_canary     28.0701     28.0950     28.0987         NaN         NaN         -47        3   0.01%
+            btree_miss+instant_now+mpsc_send     28.0869     28.1130     28.1152         NaN         NaN         -49        3   0.04%
+              btree_miss+instant_now+nothing     28.0459     28.0808     28.0831         NaN         NaN         -66        3   0.01%
+           btree_miss+instant_now+slice_sort     28.2761     28.1499     28.1528         NaN         NaN         237        3   0.22%
+             btree_miss+mem_canary+mpsc_send     28.0913     28.1273     28.1319         NaN         NaN         -67        3   0.02%
+               btree_miss+mem_canary+nothing     28.0648     28.0941     28.0972         NaN         NaN         -55        3   0.00%
+            btree_miss+mem_canary+slice_sort     28.2385     28.1520     28.1523         NaN         NaN         162        3   0.22%
+                btree_miss+mpsc_send+nothing     28.0834     28.1209     28.1245         NaN         NaN         -70        3   0.02%
+             btree_miss+mpsc_send+slice_sort     28.2620     28.2048     28.2045         NaN         NaN         107        3   0.21%
+               btree_miss+nothing+slice_sort     28.2272     28.1363     28.1370         NaN         NaN         170        3   0.04%
+ btree_miss+copy_64mb+cpu_canary+instant_now     28.5396     28.1781     28.1837     12.0232     11.8868         678        3   0.01%
+  btree_miss+copy_64mb+cpu_canary+mem_canary     28.5569     28.1881     28.1940     12.0306     11.8882         691        3   0.06%
+   btree_miss+copy_64mb+cpu_canary+mpsc_send     28.5301     28.1859     28.1910     12.0158     11.8891         645        3   0.06%
+     btree_miss+copy_64mb+cpu_canary+nothing     28.5372     28.1634     28.1706     12.0158     11.8727         701        3   0.04%
+  btree_miss+copy_64mb+cpu_canary+slice_sort     28.6584     28.1743     28.1744     12.0228     11.8489         908        3   0.21%
+ btree_miss+copy_64mb+instant_now+mem_canary     28.5561     28.1970     28.2034         NaN         NaN         673        3   0.03%
+  btree_miss+copy_64mb+instant_now+mpsc_send     28.5438     28.1809     28.1877         NaN         NaN         680        3   0.02%
+    btree_miss+copy_64mb+instant_now+nothing     28.5344     28.1819     28.1890         NaN         NaN         661        3   0.07%
+ btree_miss+copy_64mb+instant_now+slice_sort     28.6196     28.1747     28.1735         NaN         NaN         834        3   0.08%
+   btree_miss+copy_64mb+mem_canary+mpsc_send     28.5549     28.1779     28.1837         NaN         NaN         707        3   0.02%
+     btree_miss+copy_64mb+mem_canary+nothing     28.5535     28.1942     28.2013         NaN         NaN         674        3   0.04%
+  btree_miss+copy_64mb+mem_canary+slice_sort     28.6533     28.1726     28.1705         NaN         NaN         901        3   0.09%
+      btree_miss+copy_64mb+mpsc_send+nothing     28.5365     28.1691     28.1777         NaN         NaN         689        3   0.03%
+   btree_miss+copy_64mb+mpsc_send+slice_sort     28.6117     28.1871     28.1854         NaN         NaN         796        3   0.08%
+     btree_miss+copy_64mb+nothing+slice_sort     28.6004     28.1661     28.1658         NaN         NaN         814        3   0.08%
+btree_miss+cpu_canary+instant_now+mem_canary     28.0723     28.0942     28.0965     11.8684     11.8788         -41        3   0.00%
+ btree_miss+cpu_canary+instant_now+mpsc_send     28.0973     28.1147     28.1185     11.8652     11.8762         -33        3   0.04%
+   btree_miss+cpu_canary+instant_now+nothing     28.0482     28.0841     28.0869     11.8592     11.8717         -67        3   0.00%
+btree_miss+cpu_canary+instant_now+slice_sort     28.2816     28.1430     28.1427     11.9122     11.8607         260        3   0.18%
+  btree_miss+cpu_canary+mem_canary+mpsc_send     28.1068     28.1240     28.1271     11.8666     11.8811         -32        3   0.01%
+    btree_miss+cpu_canary+mem_canary+nothing     28.0663     28.0967     28.0998     11.8704     11.8839         -57        3   0.00%
+ btree_miss+cpu_canary+mem_canary+slice_sort     28.2517     28.1426     28.1440     11.8998     11.8627         205        3   0.15%
+     btree_miss+cpu_canary+mpsc_send+nothing     28.0896     28.1121     28.1160     11.8627     11.8736         -42        3   0.02%
+  btree_miss+cpu_canary+mpsc_send+slice_sort     28.1928     28.1596     28.1547     11.8703     11.8621          62        3   0.07%
+    btree_miss+cpu_canary+nothing+slice_sort     28.2240     28.1275     28.1284     11.8676     11.8345         181        3   0.12%
+ btree_miss+instant_now+mem_canary+mpsc_send     28.1067     28.1135     28.1177         NaN         NaN         -13        3   0.01%
+   btree_miss+instant_now+mem_canary+nothing     28.0679     28.0937     28.0974         NaN         NaN         -48        3   0.01%
+btree_miss+instant_now+mem_canary+slice_sort     28.2683     28.1422     28.1437         NaN         NaN         236        3   0.11%
+    btree_miss+instant_now+mpsc_send+nothing     28.0866     28.1150     28.1179         NaN         NaN         -53        3   0.02%
+ btree_miss+instant_now+mpsc_send+slice_sort     28.2500     28.1262     28.1268         NaN         NaN         232        3   0.07%
+   btree_miss+instant_now+nothing+slice_sort     28.2387     28.1351     28.1348         NaN         NaN         194        3   0.09%
+     btree_miss+mem_canary+mpsc_send+nothing     28.1081     28.1228     28.1254         NaN         NaN         -27        3   0.02%
+  btree_miss+mem_canary+mpsc_send+slice_sort     28.4505     28.1911     28.1937         NaN         NaN         486        3   0.31%
+    btree_miss+mem_canary+nothing+slice_sort     28.3247     28.1521     28.1481         NaN         NaN         324        3   0.32%
+     btree_miss+mpsc_send+nothing+slice_sort     28.2640     28.1143     28.1157         NaN         NaN         281        3   0.22%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary     28.6121     28.1479     28.1581     12.0520     11.8684         870        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send     28.5755     28.1647     28.1719     12.0267     11.8764         770        3   0.06%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing     28.5580     28.1611     28.1687     12.0213     11.8750         744        3   0.03%
+btree_miss+copy_64mb+cpu_canary+instant_now+slice_sort     28.7168     28.1736     28.1789     12.0667     11.8659        1018        3   0.19%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send     28.5988     28.1714     28.1796     12.0433     11.8814         801        3   0.03%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing     28.6047     28.1854     28.1941     12.0422     11.8858         786        3   0.03%
+btree_miss+copy_64mb+cpu_canary+mem_canary+slice_sort     28.7219     28.1658     28.1735     12.0711     11.8628        1043        3   0.32%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing     28.5853     28.1576     28.1672     12.0391     11.8724         802        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+slice_sort     28.6651     28.1607     28.1656     12.0407     11.8567         946        3   0.15%
+btree_miss+copy_64mb+cpu_canary+nothing+slice_sort     28.6554     28.1662     28.1661     12.0293     11.8416         917        3   0.23%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send     28.6013     28.1774     28.1808         NaN         NaN         795        3   0.02%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing     28.6006     28.1678     28.1767         NaN         NaN         812        3   0.08%
+btree_miss+copy_64mb+instant_now+mem_canary+slice_sort     28.6863     28.1627     28.1619         NaN         NaN         982        3   0.14%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing     28.6032     28.1602     28.1684         NaN         NaN         831        3   0.04%
+btree_miss+copy_64mb+instant_now+mpsc_send+slice_sort     28.6517     28.1598     28.1588         NaN         NaN         922        3   0.11%
+btree_miss+copy_64mb+instant_now+nothing+slice_sort     28.6910     28.1488     28.1496         NaN         NaN        1017        3   0.10%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing     28.6114     28.1668     28.1761         NaN         NaN         833        3   0.04%
+btree_miss+copy_64mb+mem_canary+mpsc_send+slice_sort     28.6852     28.1772     28.1836         NaN         NaN         952        3   0.28%
+btree_miss+copy_64mb+mem_canary+nothing+slice_sort     28.6962     28.1746     28.1815         NaN         NaN         978        3   0.19%
+btree_miss+copy_64mb+mpsc_send+nothing+slice_sort     28.6691     28.1564     28.1594         NaN         NaN         961        3   0.08%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send     28.1130     28.1244     28.1263     11.8707     11.8717         -21        3   0.03%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing     28.0725     28.0881     28.0914     11.8652     11.8724         -29        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+slice_sort     28.2421     28.1224     28.1233     11.9070     11.8624         224        3   0.25%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing     28.0971     28.1029     28.1066     11.8649     11.8660         -11        3   0.01%
+btree_miss+cpu_canary+instant_now+mpsc_send+slice_sort     28.1816     28.1310     28.1324     11.8755     11.8601          95        3   0.14%
+btree_miss+cpu_canary+instant_now+nothing+slice_sort     28.2639     28.1309     28.1287     11.9060     11.8541         249        3   0.09%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing     28.1121     28.1099     28.1127     11.8733     11.8704           4        3   0.02%
+btree_miss+cpu_canary+mem_canary+mpsc_send+slice_sort     28.2028     28.1357     28.1342     11.8876     11.8633         126        3   0.04%
+btree_miss+cpu_canary+mem_canary+nothing+slice_sort     28.2440     28.1210     28.1194     11.9044     11.8521         231        3   0.09%
+btree_miss+cpu_canary+mpsc_send+nothing+slice_sort     28.2185     28.1231     28.1234     11.8879     11.8469         179        3   0.03%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing     28.1125     28.1010     28.1048         NaN         NaN          22        3   0.01%
+btree_miss+instant_now+mem_canary+mpsc_send+slice_sort     28.2102     28.1687     28.1665         NaN         NaN          78        3   0.16%
+btree_miss+instant_now+mem_canary+nothing+slice_sort     28.2201     28.1347     28.1335         NaN         NaN         160        3   0.05%
+btree_miss+instant_now+mpsc_send+nothing+slice_sort     28.2084     28.1409     28.1422         NaN         NaN         127        3   0.07%
+btree_miss+mem_canary+mpsc_send+nothing+slice_sort     28.2360     28.1355     28.1372         NaN         NaN         188        3   0.11%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send     28.5567     28.1774     28.1797     12.0235     11.8861         711        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing     28.5529     28.1433     28.1456     12.0249     11.8742         768        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort     28.6470     28.1729     28.1721     12.0505     11.8665         889        3   0.17%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing     28.5278     28.1560     28.1600     12.0151     11.8738         697        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort     28.7035     28.1534     28.1486     12.0680     11.8588        1031        3   0.18%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort     28.5965     28.1607     28.1579     12.0213     11.8626         817        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing     28.5568     28.1610     28.1642     12.0236     11.8798         742        3   0.04%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort     28.6956     28.1552     28.1538     12.0666     11.8565        1013        3   0.19%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort     28.5939     28.1763     28.1765     12.0236     11.8611         783        3   0.09%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort     28.6506     28.1597     28.1582     12.0400     11.8566         921        3   0.12%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing     28.5651     28.1529     28.1536         NaN         NaN         773        3   0.02%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort     28.7066     28.1523     28.1506         NaN         NaN        1039        3   0.21%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort     28.6146     28.1681     28.1666         NaN         NaN         837        3   0.06%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort     28.5993     28.1586     28.1571         NaN         NaN         826        3   0.09%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort     28.6364     28.1727     28.1709         NaN         NaN         870        3   0.15%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     28.1119     28.1173     28.1196     11.8658     11.8730         -10        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     28.3060     28.1151     28.1164     11.9270     11.8538         358        3   0.08%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort     28.2312     28.1280     28.1287     11.8987     11.8622         194        3   0.04%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     28.2734     28.1373     28.1408     11.9110     11.8595         255        3   0.19%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     28.2061     28.1360     28.1340     11.8845     11.8573         131        3   0.06%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort     28.2730     28.1158     28.1174         NaN         NaN         295        3   0.03%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     28.5653     28.1730     28.1788     12.0269     11.8814         736        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     28.6890     28.1539     28.1549     12.0648     11.8606        1003        3   0.09%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort     28.6615     28.1636     28.1632     12.0540     11.8643         934        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     28.6280     28.1587     28.1636     12.0281     11.8536         880        3   0.17%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     28.6203     28.1704     28.1701     12.0291     11.8636         843        3   0.12%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort     28.6547     28.1710     28.1737         NaN         NaN         907        3   0.27%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     28.2280     28.1233     28.1219     11.8981     11.8535         196        3   0.11%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     28.6154     28.1760     28.1721     12.0402     11.8671         824        3   0.09%
+              spread across 64 compositions:       0.84%       0.10%       0.11%       0.67%       0.11%
+             pass-to-pass spread (the null):       0.11%       0.04%       0.04%       0.10%       0.05%
+
+=== copy_64mb ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                   copy_64mb6205162.04816207464.59486207815.9049         NaN         NaN       -2303        3   0.72%
+                        btree_miss+copy_64mb6148313.96866141726.70766142089.9791         NaN         NaN        6587        3   0.18%
+                        copy_64mb+cpu_canary6135523.40846132151.37006131772.33122587646.42862584283.3970        3372        3   0.17%
+                       copy_64mb+instant_now6129480.14606130412.10436130712.2925         NaN         NaN        -932        3   0.10%
+                        copy_64mb+mem_canary6127720.88866125587.57966125576.9888         NaN         NaN        2133        3   0.05%
+                         copy_64mb+mpsc_send6142098.69646145406.48466145732.1857         NaN         NaN       -3308        3   0.19%
+                           copy_64mb+nothing6130659.47286127900.71366128378.4556         NaN         NaN        2759        3   0.08%
+                        copy_64mb+slice_sort6133826.14446131468.91176131267.7623         NaN         NaN        2357        3   0.04%
+             btree_miss+copy_64mb+cpu_canary6130222.20286128160.37636128309.10862583884.88812582419.7414        2062        3   0.06%
+            btree_miss+copy_64mb+instant_now6130957.07546127491.14876127202.9841         NaN         NaN        3466        3   0.04%
+             btree_miss+copy_64mb+mem_canary6163688.84836162426.14506163069.2365         NaN         NaN        1263        3   0.62%
+              btree_miss+copy_64mb+mpsc_send6162271.74136163205.94716163875.7158         NaN         NaN        -934        3   0.70%
+                btree_miss+copy_64mb+nothing6142604.12816138346.30816137559.8254         NaN         NaN        4258        3   0.24%
+             btree_miss+copy_64mb+slice_sort6153309.64726156024.10076155451.3706         NaN         NaN       -2714        3   0.55%
+            copy_64mb+cpu_canary+instant_now6164727.47046158322.23536158216.70832598434.43912595134.7280        6405        3   0.47%
+             copy_64mb+cpu_canary+mem_canary6128786.70296130195.19816129788.90362585920.49912585355.0660       -1408        3   0.05%
+              copy_64mb+cpu_canary+mpsc_send6136492.95766139650.97606139586.43402588206.79162586464.9289       -3158        3   0.12%
+                copy_64mb+cpu_canary+nothing6128509.72866129201.48266129047.60302584169.66532583054.8756        -692        3   0.05%
+             copy_64mb+cpu_canary+slice_sort6147370.53236144216.33786144900.91732580529.14832581238.9012        3154        3   0.44%
+            copy_64mb+instant_now+mem_canary6139517.77286138857.79266138972.8063         NaN         NaN         660        3   0.14%
+             copy_64mb+instant_now+mpsc_send6128101.75776128469.73816128383.3424         NaN         NaN        -368        3   0.04%
+               copy_64mb+instant_now+nothing6132479.18046132813.09966132957.9824         NaN         NaN        -334        3   0.09%
+            copy_64mb+instant_now+slice_sort6137178.63136136653.21166135861.3821         NaN         NaN         525        3   0.19%
+              copy_64mb+mem_canary+mpsc_send6145414.77906147165.41986147765.2585         NaN         NaN       -1751        3   0.28%
+                copy_64mb+mem_canary+nothing6128460.41476128896.14926128947.2015         NaN         NaN        -436        3   0.04%
+             copy_64mb+mem_canary+slice_sort6132095.03986128534.91466129072.5740         NaN         NaN        3560        3   0.07%
+                 copy_64mb+mpsc_send+nothing6147295.54556147914.93256148623.6038         NaN         NaN        -619        3   0.32%
+              copy_64mb+mpsc_send+slice_sort6174189.63486173329.51546173139.1645         NaN         NaN         860        3   0.92%
+                copy_64mb+nothing+slice_sort6133651.38376132617.84006132781.5096         NaN         NaN        1034        3   0.08%
+ btree_miss+copy_64mb+cpu_canary+instant_now6131190.76486128917.99096129085.92912587241.31922583462.3319        2273        3   0.05%
+  btree_miss+copy_64mb+cpu_canary+mem_canary6140473.88066140299.66746140753.50902589847.09502588236.6400         174        3   0.15%
+   btree_miss+copy_64mb+cpu_canary+mpsc_send6136607.73926136516.63446136624.01192589006.98882587497.7907          91        3   0.05%
+     btree_miss+copy_64mb+cpu_canary+nothing6128743.79846128965.70956129430.11632585068.92312582646.6074        -222        3   0.06%
+  btree_miss+copy_64mb+cpu_canary+slice_sort6130699.50496130645.20116130449.07122575362.92682577031.2989          54        3   0.03%
+ btree_miss+copy_64mb+instant_now+mem_canary6149272.19896150812.18656150619.8674         NaN         NaN       -1540        3   0.37%
+  btree_miss+copy_64mb+instant_now+mpsc_send6128901.70206130645.86956130756.8444         NaN         NaN       -1744        3   0.03%
+    btree_miss+copy_64mb+instant_now+nothing6128303.06106128506.07786128584.7074         NaN         NaN        -203        3   0.02%
+ btree_miss+copy_64mb+instant_now+slice_sort6153726.10796146025.34836147299.8941         NaN         NaN        7701        3   0.40%
+   btree_miss+copy_64mb+mem_canary+mpsc_send6145748.98326144202.68016144584.9203         NaN         NaN        1546        3   0.07%
+     btree_miss+copy_64mb+mem_canary+nothing6130595.45986128921.91946128793.4862         NaN         NaN        1674        3   0.06%
+  btree_miss+copy_64mb+mem_canary+slice_sort6147539.65346145334.92886145088.1967         NaN         NaN        2205        3   0.14%
+      btree_miss+copy_64mb+mpsc_send+nothing6140059.69856140057.81896140189.2808         NaN         NaN           2        3   0.09%
+   btree_miss+copy_64mb+mpsc_send+slice_sort6133486.63316130649.55516130843.2631         NaN         NaN        2837        3   0.01%
+     btree_miss+copy_64mb+nothing+slice_sort6133739.75956133268.55696132917.9342         NaN         NaN         471        3   0.04%
+ copy_64mb+cpu_canary+instant_now+mem_canary6136916.84826135052.32026135096.72672587948.74492587149.6878        1865        3   0.12%
+  copy_64mb+cpu_canary+instant_now+mpsc_send6152028.21126154564.06326154892.89912592628.86072594351.4389       -2536        3   0.27%
+    copy_64mb+cpu_canary+instant_now+nothing6164836.00176161742.21146161909.50122598996.94972597006.0352        3094        3   0.81%
+ copy_64mb+cpu_canary+instant_now+slice_sort6152787.86686147902.97876146926.29312587071.91452587771.5058        4885        3   0.30%
+   copy_64mb+cpu_canary+mem_canary+mpsc_send6133448.26126132915.29286132916.24862585305.13102583644.6321         533        3   0.02%
+     copy_64mb+cpu_canary+mem_canary+nothing6130180.39196129998.97336129875.10042586237.58312587094.3785         181        3   0.04%
+  copy_64mb+cpu_canary+mem_canary+slice_sort6131570.07636127696.54766127899.92712579788.79912580569.1986        3874        3   0.08%
+      copy_64mb+cpu_canary+mpsc_send+nothing6148460.69896145951.98326145976.72982592210.00822590311.8912        2509        3   0.11%
+   copy_64mb+cpu_canary+mpsc_send+slice_sort6136723.57686135170.44706134824.74462581095.87142581862.3833        1553        3   0.10%
+     copy_64mb+cpu_canary+nothing+slice_sort6132326.56406131673.05226131654.43492575923.58812579756.2897         654        3   0.04%
+  copy_64mb+instant_now+mem_canary+mpsc_send6132683.63786133471.37486133645.1135         NaN         NaN        -788        3   0.09%
+    copy_64mb+instant_now+mem_canary+nothing6131370.24006131398.14426131451.8967         NaN         NaN         -28        3   0.07%
+ copy_64mb+instant_now+mem_canary+slice_sort6139730.32746140122.66896140276.2368         NaN         NaN        -392        3   0.10%
+     copy_64mb+instant_now+mpsc_send+nothing6132907.75496130431.79196130530.9362         NaN         NaN        2476        3   0.02%
+  copy_64mb+instant_now+mpsc_send+slice_sort6140496.94576139120.31186139329.1832         NaN         NaN        1377        3   0.13%
+    copy_64mb+instant_now+nothing+slice_sort6168083.78716163354.76846162687.5602         NaN         NaN        4729        3   0.70%
+      copy_64mb+mem_canary+mpsc_send+nothing6131509.62436129775.03746129818.3213         NaN         NaN        1735        3   0.04%
+   copy_64mb+mem_canary+mpsc_send+slice_sort6136116.74896133404.26246133812.5693         NaN         NaN        2712        3   0.10%
+     copy_64mb+mem_canary+nothing+slice_sort6134100.23756135674.02286135743.8587         NaN         NaN       -1574        3   0.09%
+      copy_64mb+mpsc_send+nothing+slice_sort6135670.63196138289.97536137746.8845         NaN         NaN       -2619        3   0.12%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary6135391.90076134595.74496134697.87212588605.04872586107.6044         796        3   0.08%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send6149925.28706151526.51256151404.82362592989.15652592178.2870       -1601        3   0.43%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing6134764.72476137121.43766137175.22222587822.66442585754.0394       -2357        3   0.16%
+btree_miss+copy_64mb+cpu_canary+instant_now+slice_sort6129834.84516127045.83476127211.99292579576.16992578455.7501        2789        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send6144010.97986147101.19676146678.83392589738.83252592206.3308       -3090        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing6150277.65996147952.31446148874.52102594017.52482592565.4130        2325        3   0.54%
+btree_miss+copy_64mb+cpu_canary+mem_canary+slice_sort6157597.76436154429.14826154886.68762591585.10042590469.8090        3169        3   0.58%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing6134061.09936139022.85306139324.99722587418.90562587870.9256       -4962        3   0.05%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+slice_sort6159206.62296164071.87376163805.73132590524.54462594006.0209       -4865        3   0.33%
+btree_miss+copy_64mb+cpu_canary+nothing+slice_sort6134548.19286132172.79376131906.10132578649.51122577783.5492        2375        3   0.05%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send6182051.04296182781.97626182871.4800         NaN         NaN        -731        3   1.20%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing6144258.84096143150.50866142819.4826         NaN         NaN        1108        3   0.34%
+btree_miss+copy_64mb+instant_now+mem_canary+slice_sort6152548.23826151635.30526152340.6377         NaN         NaN         913        3   0.30%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing6162557.78206165056.07166164561.5027         NaN         NaN       -2498        3   0.30%
+btree_miss+copy_64mb+instant_now+mpsc_send+slice_sort6150590.34856150299.04316149626.9974         NaN         NaN         291        3   0.32%
+btree_miss+copy_64mb+instant_now+nothing+slice_sort6133547.88896129740.12366129891.5938         NaN         NaN        3808        3   0.01%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing6149123.00516149923.20636149303.1837         NaN         NaN        -800        3   0.22%
+btree_miss+copy_64mb+mem_canary+mpsc_send+slice_sort6170451.83926171088.53706171795.3591         NaN         NaN        -637        3   0.66%
+btree_miss+copy_64mb+mem_canary+nothing+slice_sort6148140.32326144301.87196144447.0007         NaN         NaN        3838        3   0.32%
+btree_miss+copy_64mb+mpsc_send+nothing+slice_sort6145908.53706143373.30976143665.2648         NaN         NaN        2535        3   0.16%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send6134444.96426135220.20756134864.13072586026.51122588124.0795        -775        3   0.11%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing6138742.13756137040.10386137269.67092589433.91962587861.1008        1702        3   0.12%
+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort6132287.65676129042.72976129226.77182582956.20742580861.9032        3245        3   0.06%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing6145767.75836146446.74726146338.05732590797.13862591467.6793        -679        3   0.23%
+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort6142167.32006142256.58426141991.21082585987.35212586216.7838         -89        3   0.25%
+copy_64mb+cpu_canary+instant_now+nothing+slice_sort6205270.43756213704.71096212995.88132610464.70312610894.2501       -8434        3   1.00%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing6159180.14506161227.83236161524.19112596466.82792597664.9943       -2048        3   0.70%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort6136381.10506135185.35696135174.31862583220.84262583192.3362        1196        3   0.15%
+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort6138339.00176134365.43346134247.23912583474.87762580895.1958        3974        3   0.22%
+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort6133353.80426134937.64596134839.69152580489.07702582169.7375       -1584        3   0.05%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing6146351.51926144757.59896146086.9295         NaN         NaN        1594        3   0.25%
+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort6135032.36756133363.55086133495.6039         NaN         NaN        1669        3   0.07%
+copy_64mb+instant_now+mem_canary+nothing+slice_sort6133688.23586129017.41706129089.3467         NaN         NaN        4671        3   0.03%
+copy_64mb+instant_now+mpsc_send+nothing+slice_sort6146810.56256145220.08706145563.3769         NaN         NaN        1590        3   0.07%
+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort6157476.15926158236.80046158852.9119         NaN         NaN        -761        3   0.24%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send6151209.54726153140.92796152334.41462593163.02142592702.2709       -1931        3   0.44%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing6157095.55936157144.02126157122.19062596928.13242595956.1796         -48        3   0.55%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort6133075.27886129548.16876129667.81742582906.47612579361.2892        3527        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing6134275.33776135176.96136135844.93882587435.13642587815.5300        -902        3   0.16%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort6193553.53686186710.04126187239.47892605134.17632602590.9398        6843        3   0.85%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort6134432.40616133006.44536133003.31602581267.31492581903.1964        1426        3   0.10%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing6134065.69786134961.61956134920.25892586529.82382586389.6301        -896        3   0.07%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort6153577.39056153346.44136153598.17772590265.40462589406.6929         231        3   0.08%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort6131041.01906128875.02916128843.41012579862.28422580544.8461        2166        3   0.03%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort6139794.69006140382.48326140979.13382582663.06772583099.5066        -588        3   0.08%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing6161210.01996163385.17516162166.7365         NaN         NaN       -2175        3   0.42%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort6133419.06586131904.01546131847.7436         NaN         NaN        1515        3   0.07%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort6145397.54986140932.76286141480.5145         NaN         NaN        4465        3   0.20%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort6146055.90046144446.51896144034.3170         NaN         NaN        1609        3   0.21%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort6155480.62346152133.69356151953.9778         NaN         NaN        3347        3   0.28%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing6133052.56276133112.45586132897.88412586958.00812586741.1544         -60        3   0.11%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort6144956.40686141831.82696141078.02162586916.55942586385.7728        3125        3   0.13%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort6158825.96456153026.23216152737.22702592494.24842590891.1283        5800        3   0.50%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort6158888.36066161311.08566161826.35302592334.30952593112.8820       -2423        3   0.13%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort6132705.44066131663.20406131333.12132582092.16592581518.6012        1042        3   0.03%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort6176785.05206177470.99076177292.0059         NaN         NaN        -686        3   0.74%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing6160619.62136164469.06626164265.82862596391.34642597242.4656       -3849        3   0.35%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort6132377.14276131588.24486130942.76032581857.13772583370.7356         789        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort6191477.69026195103.54586195541.35372605536.66682606476.8154       -3626        3   1.33%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort6176614.86316176130.71456175435.27512599037.53822597758.0618         484        3   0.76%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort6149153.16966152300.20416151203.92362588110.04982589806.0471       -3147        3   0.22%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort6190435.21666196648.62246196464.3763         NaN         NaN       -6213        3   1.17%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort6168954.38246165606.60986164621.70212595974.18632594719.6107        3348        3   0.22%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort6148080.04616150772.60576150508.87112589432.62222588876.2259       -2693        3   0.30%
+              spread across 64 compositions:       0.27%       0.28%       0.28%       0.27%       0.26%
+             pass-to-pass spread (the null):       0.36%       0.37%       0.37%       0.33%       0.34%
+
+=== cpu_canary ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                  cpu_canary      2.3611      2.3647      2.3650      1.0000      1.0000         -76        3   0.01%
+                       btree_miss+cpu_canary      2.3648      2.3648      2.3651      1.0000      1.0000           1        3   0.01%
+                        copy_64mb+cpu_canary      2.3763      2.3739      2.3746      1.0000      1.0000          51        3   0.01%
+                      cpu_canary+instant_now      2.3649      2.3644      2.3647      1.0000      1.0000          12        3   0.01%
+                       cpu_canary+mem_canary      2.3627      2.3657      2.3659      1.0000      1.0000         -65        3   0.00%
+                        cpu_canary+mpsc_send      2.3710      2.3675      2.3678      1.0000      1.0000          72        3   0.02%
+                          cpu_canary+nothing      2.3636      2.3644      2.3647      1.0000      1.0000         -17        3   0.01%
+                       cpu_canary+slice_sort      2.3976      2.3655      2.3659      1.0000      1.0000         674        3   0.03%
+             btree_miss+copy_64mb+cpu_canary      2.3780      2.3725      2.3732      1.0000      1.0000         115        3   0.01%
+           btree_miss+cpu_canary+instant_now      2.3689      2.3643      2.3646      1.0000      1.0000          97        3   0.01%
+            btree_miss+cpu_canary+mem_canary      2.3663      2.3653      2.3657      1.0000      1.0000          20        3   0.01%
+             btree_miss+cpu_canary+mpsc_send      2.3725      2.3673      2.3676      1.0000      1.0000         110        3   0.01%
+               btree_miss+cpu_canary+nothing      2.3670      2.3646      2.3649      1.0000      1.0000          50        3   0.03%
+            btree_miss+cpu_canary+slice_sort      2.3992      2.3657      2.3661      1.0000      1.0000         702        3   0.04%
+            copy_64mb+cpu_canary+instant_now      2.3760      2.3735      2.3743      1.0000      1.0000          52        3   0.01%
+             copy_64mb+cpu_canary+mem_canary      2.3747      2.3743      2.3750      1.0000      1.0000          10        3   0.02%
+              copy_64mb+cpu_canary+mpsc_send      2.3765      2.3727      2.3731      1.0000      1.0000          81        3   0.02%
+                copy_64mb+cpu_canary+nothing      2.3773      2.3740      2.3747      1.0000      1.0000          69        3   0.01%
+             copy_64mb+cpu_canary+slice_sort      2.3986      2.3691      2.3695      1.0000      1.0000         619        3   0.04%
+           cpu_canary+instant_now+mem_canary      2.3665      2.3658      2.3661      1.0000      1.0000          16        3   0.03%
+            cpu_canary+instant_now+mpsc_send      2.3729      2.3673      2.3677      1.0000      1.0000         116        3   0.01%
+              cpu_canary+instant_now+nothing      2.3666      2.3647      2.3649      1.0000      1.0000          41        3   0.01%
+           cpu_canary+instant_now+slice_sort      2.3882      2.3654      2.3656      1.0000      1.0000         477        3   0.02%
+             cpu_canary+mem_canary+mpsc_send      2.3721      2.3672      2.3676      1.0000      1.0000         103        3   0.02%
+               cpu_canary+mem_canary+nothing      2.3655      2.3650      2.3652      1.0000      1.0000          12        3   0.01%
+            cpu_canary+mem_canary+slice_sort      2.3864      2.3654      2.3656      1.0000      1.0000         441        3   0.02%
+                cpu_canary+mpsc_send+nothing      2.3724      2.3675      2.3679      1.0000      1.0000         102        3   0.01%
+             cpu_canary+mpsc_send+slice_sort      2.3901      2.3671      2.3675      1.0000      1.0000         482        3   0.01%
+               cpu_canary+nothing+slice_sort      2.3977      2.3652      2.3655      1.0000      1.0000         682        3   0.03%
+ btree_miss+copy_64mb+cpu_canary+instant_now      2.3770      2.3722      2.3728      1.0000      1.0000         102        3   0.02%
+  btree_miss+copy_64mb+cpu_canary+mem_canary      2.3765      2.3725      2.3733      1.0000      1.0000          83        3   0.00%
+   btree_miss+copy_64mb+cpu_canary+mpsc_send      2.3758      2.3722      2.3729      1.0000      1.0000          76        3   0.00%
+     btree_miss+copy_64mb+cpu_canary+nothing      2.3784      2.3716      2.3722      1.0000      1.0000         143        3   0.03%
+  btree_miss+copy_64mb+cpu_canary+slice_sort      2.3989      2.3697      2.3704      1.0000      1.0000         611        3   0.02%
+btree_miss+cpu_canary+instant_now+mem_canary      2.3692      2.3651      2.3655      1.0000      1.0000          86        3   0.01%
+ btree_miss+cpu_canary+instant_now+mpsc_send      2.3740      2.3658      2.3661      1.0000      1.0000         172        3   0.00%
+   btree_miss+cpu_canary+instant_now+nothing      2.3697      2.3646      2.3648      1.0000      1.0000         107        3   0.02%
+btree_miss+cpu_canary+instant_now+slice_sort      2.3896      2.3657      2.3660      1.0000      1.0000         500        3   0.04%
+  btree_miss+cpu_canary+mem_canary+mpsc_send      2.3738      2.3663      2.3666      1.0000      1.0000         158        3   0.00%
+    btree_miss+cpu_canary+mem_canary+nothing      2.3674      2.3659      2.3662      1.0000      1.0000          30        3   0.03%
+ btree_miss+cpu_canary+mem_canary+slice_sort      2.3883      2.3664      2.3666      1.0000      1.0000         460        3   0.02%
+     btree_miss+cpu_canary+mpsc_send+nothing      2.3737      2.3665      2.3669      1.0000      1.0000         151        3   0.01%
+  btree_miss+cpu_canary+mpsc_send+slice_sort      2.3893      2.3677      2.3680      1.0000      1.0000         453        3   0.02%
+    btree_miss+cpu_canary+nothing+slice_sort      2.3994      2.3653      2.3657      1.0000      1.0000         716        3   0.04%
+ copy_64mb+cpu_canary+instant_now+mem_canary      2.3762      2.3721      2.3728      1.0000      1.0000          85        3   0.02%
+  copy_64mb+cpu_canary+instant_now+mpsc_send      2.3766      2.3717      2.3721      1.0000      1.0000         103        3   0.02%
+    copy_64mb+cpu_canary+instant_now+nothing      2.3773      2.3724      2.3731      1.0000      1.0000         101        3   0.04%
+ copy_64mb+cpu_canary+instant_now+slice_sort      2.3902      2.3701      2.3705      1.0000      1.0000         422        3   0.05%
+   copy_64mb+cpu_canary+mem_canary+mpsc_send      2.3765      2.3731      2.3737      1.0000      1.0000          72        3   0.00%
+     copy_64mb+cpu_canary+mem_canary+nothing      2.3751      2.3728      2.3734      1.0000      1.0000          47        3   0.01%
+  copy_64mb+cpu_canary+mem_canary+slice_sort      2.3887      2.3711      2.3715      1.0000      1.0000         369        3   0.02%
+      copy_64mb+cpu_canary+mpsc_send+nothing      2.3769      2.3721      2.3728      1.0000      1.0000         101        3   0.03%
+   copy_64mb+cpu_canary+mpsc_send+slice_sort      2.3899      2.3699      2.3703      1.0000      1.0000         419        3   0.01%
+     copy_64mb+cpu_canary+nothing+slice_sort      2.3988      2.3689      2.3693      1.0000      1.0000         627        3   0.01%
+ cpu_canary+instant_now+mem_canary+mpsc_send      2.3741      2.3669      2.3674      1.0000      1.0000         151        3   0.01%
+   cpu_canary+instant_now+mem_canary+nothing      2.3678      2.3656      2.3659      1.0000      1.0000          46        3   0.00%
+cpu_canary+instant_now+mem_canary+slice_sort      2.3848      2.3654      2.3657      1.0000      1.0000         407        3   0.02%
+    cpu_canary+instant_now+mpsc_send+nothing      2.3739      2.3667      2.3671      1.0000      1.0000         150        3   0.01%
+ cpu_canary+instant_now+mpsc_send+slice_sort      2.3862      2.3666      2.3670      1.0000      1.0000         411        3   0.02%
+   cpu_canary+instant_now+nothing+slice_sort      2.3913      2.3651      2.3654      1.0000      1.0000         550        3   0.02%
+     cpu_canary+mem_canary+mpsc_send+nothing      2.3736      2.3663      2.3667      1.0000      1.0000         153        3   0.01%
+  cpu_canary+mem_canary+mpsc_send+slice_sort      2.3865      2.3672      2.3677      1.0000      1.0000         405        3   0.04%
+    cpu_canary+mem_canary+nothing+slice_sort      2.3891      2.3658      2.3663      1.0000      1.0000         489        3   0.03%
+     cpu_canary+mpsc_send+nothing+slice_sort      2.3914      2.3673      2.3676      1.0000      1.0000         506        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary      2.3765      2.3712      2.3719      1.0000      1.0000         111        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send      2.3770      2.3720      2.3726      1.0000      1.0000         104        3   0.03%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing      2.3782      2.3710      2.3716      1.0000      1.0000         152        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+slice_sort      2.3906      2.3698      2.3702      1.0000      1.0000         437        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send      2.3765      2.3706      2.3711      1.0000      1.0000         124        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing      2.3770      2.3718      2.3725      1.0000      1.0000         108        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mem_canary+slice_sort      2.3896      2.3691      2.3694      1.0000      1.0000         430        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing      2.3765      2.3712      2.3718      1.0000      1.0000         112        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+slice_sort      2.3896      2.3705      2.3707      1.0000      1.0000         402        3   0.02%
+btree_miss+copy_64mb+cpu_canary+nothing+slice_sort      2.3983      2.3686      2.3689      1.0000      1.0000         625        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send      2.3751      2.3662      2.3666      1.0000      1.0000         185        3   0.02%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing      2.3705      2.3651      2.3655      1.0000      1.0000         113        3   0.03%
+btree_miss+cpu_canary+instant_now+mem_canary+slice_sort      2.3844      2.3658      2.3659      1.0000      1.0000         392        3   0.02%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing      2.3751      2.3664      2.3668      1.0000      1.0000         183        3   0.01%
+btree_miss+cpu_canary+instant_now+mpsc_send+slice_sort      2.3859      2.3669      2.3673      1.0000      1.0000         397        3   0.00%
+btree_miss+cpu_canary+instant_now+nothing+slice_sort      2.3894      2.3666      2.3667      1.0000      1.0000         478        3   0.03%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing      2.3748      2.3666      2.3670      1.0000      1.0000         172        3   0.01%
+btree_miss+cpu_canary+mem_canary+mpsc_send+slice_sort      2.3838      2.3673      2.3675      1.0000      1.0000         347        3   0.02%
+btree_miss+cpu_canary+mem_canary+nothing+slice_sort      2.3876      2.3662      2.3664      1.0000      1.0000         448        3   0.02%
+btree_miss+cpu_canary+mpsc_send+nothing+slice_sort      2.3884      2.3670      2.3672      1.0000      1.0000         449        3   0.01%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send      2.3766      2.3709      2.3715      1.0000      1.0000         119        3   0.02%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing      2.3762      2.3711      2.3716      1.0000      1.0000         107        3   0.03%
+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort      2.3852      2.3692      2.3695      1.0000      1.0000         334        3   0.04%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing      2.3767      2.3710      2.3716      1.0000      1.0000         122        3   0.01%
+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort      2.3858      2.3694      2.3698      1.0000      1.0000         344        3   0.02%
+copy_64mb+cpu_canary+instant_now+nothing+slice_sort      2.3902      2.3686      2.3690      1.0000      1.0000         453        3   0.02%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing      2.3762      2.3714      2.3718      1.0000      1.0000         101        3   0.01%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort      2.3849      2.3703      2.3707      1.0000      1.0000         307        3   0.02%
+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort      2.3890      2.3690      2.3693      1.0000      1.0000         420        3   0.02%
+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort      2.3888      2.3702      2.3707      1.0000      1.0000         390        3   0.03%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      2.3748      2.3663      2.3667      1.0000      1.0000         179        3   0.02%
+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort      2.3841      2.3668      2.3671      1.0000      1.0000         364        3   0.02%
+cpu_canary+instant_now+mem_canary+nothing+slice_sort      2.3851      2.3648      2.3651      1.0000      1.0000         425        3   0.01%
+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      2.3867      2.3662      2.3665      1.0000      1.0000         430        3   0.02%
+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      2.3860      2.3675      2.3679      1.0000      1.0000         389        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send      2.3765      2.3712      2.3716      1.0000      1.0000         111        3   0.00%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing      2.3773      2.3698      2.3704      1.0000      1.0000         156        3   0.03%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort      2.3873      2.3688      2.3692      1.0000      1.0000         389        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing      2.3769      2.3697      2.3703      1.0000      1.0000         150        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort      2.3878      2.3694      2.3699      1.0000      1.0000         385        3   0.02%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort      2.3910      2.3682      2.3686      1.0000      1.0000         477        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing      2.3766      2.3709      2.3713      1.0000      1.0000         119        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort      2.3868      2.3689      2.3692      1.0000      1.0000         376        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort      2.3904      2.3689      2.3693      1.0000      1.0000         451        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort      2.3903      2.3698      2.3700      1.0000      1.0000         430        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      2.3760      2.3663      2.3667      1.0000      1.0000         203        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort      2.3851      2.3665      2.3668      1.0000      1.0000         391        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort      2.3865      2.3654      2.3657      1.0000      1.0000         443        3   0.00%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      2.3876      2.3664      2.3667      1.0000      1.0000         443        3   0.00%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      2.3869      2.3669      2.3673      1.0000      1.0000         420        3   0.03%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      2.3765      2.3705      2.3711      1.0000      1.0000         126        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort      2.3852      2.3689      2.3692      1.0000      1.0000         343        3   0.02%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort      2.3879      2.3683      2.3687      1.0000      1.0000         412        3   0.02%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      2.3882      2.3687      2.3691      1.0000      1.0000         409        3   0.01%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      2.3873      2.3703      2.3707      1.0000      1.0000         357        3   0.00%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      2.3836      2.3665      2.3668      1.0000      1.0000         359        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      2.3768      2.3701      2.3707      1.0000      1.0000         142        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort      2.3851      2.3699      2.3702      1.0000      1.0000         319        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort      2.3872      2.3682      2.3686      1.0000      1.0000         399        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      2.3870      2.3685      2.3688      1.0000      1.0000         388        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      2.3872      2.3690      2.3694      1.0000      1.0000         382        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      2.3847      2.3663      2.3667      1.0000      1.0000         385        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      2.3854      2.3692      2.3698      1.0000      1.0000         340        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      2.3840      2.3685      2.3689      1.0000      1.0000         325        3   0.02%
+             spread across 128 compositions:       0.37%       0.11%       0.11%       0.00%       0.00%
+             pass-to-pass spread (the null):       0.02%       0.03%       0.03%       0.00%       0.00%
+
+=== instant_now ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                 instant_now     32.4257     32.3503     32.3519         NaN         NaN         141        3   0.12%
+                      btree_miss+instant_now     32.3306     32.3007     32.3015         NaN         NaN          56        3   0.10%
+                       copy_64mb+instant_now     32.4304     32.5828     32.5885         NaN         NaN        -286        3   0.01%
+                      cpu_canary+instant_now     32.3217     32.3484     32.3508     13.6656     13.6779         -50        3   0.02%
+                      instant_now+mem_canary     32.4219     32.3841     32.3807         NaN         NaN          71        3   0.06%
+                       instant_now+mpsc_send     32.3237     32.3795     32.3814         NaN         NaN        -105        3   0.04%
+                         instant_now+nothing     32.3613     32.3714     32.3706         NaN         NaN         -19        3   0.14%
+                      instant_now+slice_sort     32.4486     32.4533     32.4538         NaN         NaN          -9        3   0.04%
+            btree_miss+copy_64mb+instant_now     32.3171     32.5019     32.5052         NaN         NaN        -347        3   0.10%
+           btree_miss+cpu_canary+instant_now     32.3220     32.2715     32.2695     13.6580     13.6382          95        3   0.13%
+           btree_miss+instant_now+mem_canary     32.3007     32.2427     32.2411         NaN         NaN         109        3   0.03%
+            btree_miss+instant_now+mpsc_send     32.3386     32.3815     32.3836         NaN         NaN         -81        3   0.03%
+              btree_miss+instant_now+nothing     32.3481     32.2556     32.2544         NaN         NaN         173        3   0.11%
+           btree_miss+instant_now+slice_sort     32.4504     32.4043     32.4019         NaN         NaN          86        3   0.08%
+            copy_64mb+cpu_canary+instant_now     32.3738     32.5203     32.5217     13.6388     13.6946        -275        3   0.12%
+            copy_64mb+instant_now+mem_canary     32.4081     32.5136     32.5172         NaN         NaN        -198        3   0.05%
+             copy_64mb+instant_now+mpsc_send     32.4218     32.5575     32.5595         NaN         NaN        -254        3   0.07%
+               copy_64mb+instant_now+nothing     32.3557     32.5086     32.5072         NaN         NaN        -287        3   0.06%
+            copy_64mb+instant_now+slice_sort     32.5204     32.5502     32.5503         NaN         NaN         -56        3   0.02%
+           cpu_canary+instant_now+mem_canary     32.2790     32.3292     32.3265     13.6428     13.6612         -94        3   0.05%
+            cpu_canary+instant_now+mpsc_send     32.3750     32.4235     32.4285     13.6605     13.6829         -91        3   0.06%
+              cpu_canary+instant_now+nothing     32.3728     32.3278     32.3302     13.6852     13.6593          84        3   0.04%
+           cpu_canary+instant_now+slice_sort     32.4557     32.4813     32.4815     13.6638     13.6731         -48        3   0.04%
+            instant_now+mem_canary+mpsc_send     32.3486     32.4214     32.4178         NaN         NaN        -137        3   0.04%
+              instant_now+mem_canary+nothing     32.3100     32.3298     32.3235         NaN         NaN         -37        3   0.08%
+           instant_now+mem_canary+slice_sort     32.4611     32.4523     32.4524         NaN         NaN          16        3   0.07%
+               instant_now+mpsc_send+nothing     32.3874     32.3839     32.3834         NaN         NaN           7        3   0.13%
+            instant_now+mpsc_send+slice_sort     32.4269     32.4741     32.4733         NaN         NaN         -88        3   0.01%
+              instant_now+nothing+slice_sort     32.4682     32.4570     32.4556         NaN         NaN          21        3   0.04%
+ btree_miss+copy_64mb+cpu_canary+instant_now     32.2999     32.4657     32.4549     13.5991     13.6818        -311        3   0.08%
+ btree_miss+copy_64mb+instant_now+mem_canary     32.2915     32.4808     32.4837         NaN         NaN        -355        3   0.04%
+  btree_miss+copy_64mb+instant_now+mpsc_send     32.3213     32.4800     32.4806         NaN         NaN        -298        3   0.16%
+    btree_miss+copy_64mb+instant_now+nothing     32.3189     32.4816     32.4886         NaN         NaN        -305        3   0.05%
+ btree_miss+copy_64mb+instant_now+slice_sort     32.4205     32.5244     32.5272         NaN         NaN        -195        3   0.13%
+btree_miss+cpu_canary+instant_now+mem_canary     32.2590     32.3082     32.3064     13.6322     13.6477         -92        3   0.05%
+ btree_miss+cpu_canary+instant_now+mpsc_send     32.3020     32.3550     32.3526     13.6338     13.6507         -99        3   0.19%
+   btree_miss+cpu_canary+instant_now+nothing     32.3439     32.2914     32.2881     13.6602     13.6392          98        3   0.09%
+btree_miss+cpu_canary+instant_now+slice_sort     32.3971     32.4115     32.4108     13.6424     13.6389         -27        3   0.14%
+ btree_miss+instant_now+mem_canary+mpsc_send     32.3311     32.3503     32.3522         NaN         NaN         -36        3   0.03%
+   btree_miss+instant_now+mem_canary+nothing     32.3224     32.3318     32.3298         NaN         NaN         -18        3   0.10%
+btree_miss+instant_now+mem_canary+slice_sort     32.3595     32.4134     32.4116         NaN         NaN        -101        3   0.06%
+    btree_miss+instant_now+mpsc_send+nothing     32.3569     32.3953     32.3959         NaN         NaN         -72        3   0.09%
+ btree_miss+instant_now+mpsc_send+slice_sort     32.4158     32.4442     32.4445         NaN         NaN         -53        3   0.05%
+   btree_miss+instant_now+nothing+slice_sort     32.4064     32.3853     32.3846         NaN         NaN          40        3   0.07%
+ copy_64mb+cpu_canary+instant_now+mem_canary     32.3633     32.4816     32.4829     13.6364     13.6791        -222        3   0.06%
+  copy_64mb+cpu_canary+instant_now+mpsc_send     32.3804     32.4995     32.5009     13.6387     13.6836        -223        3   0.10%
+    copy_64mb+cpu_canary+instant_now+nothing     32.3427     32.4657     32.4664     13.6243     13.6707        -231        3   0.06%
+ copy_64mb+cpu_canary+instant_now+slice_sort     32.4630     32.5335     32.5354     13.6497     13.6689        -132        3   0.12%
+  copy_64mb+instant_now+mem_canary+mpsc_send     32.3798     32.5273     32.5316         NaN         NaN        -277        3   0.11%
+    copy_64mb+instant_now+mem_canary+nothing     32.3410     32.4847     32.4861         NaN         NaN        -269        3   0.07%
+ copy_64mb+instant_now+mem_canary+slice_sort     32.4409     32.5493     32.5505         NaN         NaN        -203        3   0.09%
+     copy_64mb+instant_now+mpsc_send+nothing     32.3510     32.5066     32.5041         NaN         NaN        -292        3   0.09%
+  copy_64mb+instant_now+mpsc_send+slice_sort     32.4668     32.5343     32.5348         NaN         NaN        -127        3   0.07%
+    copy_64mb+instant_now+nothing+slice_sort     32.4430     32.5417     32.5428         NaN         NaN        -185        3   0.05%
+ cpu_canary+instant_now+mem_canary+mpsc_send     32.3709     32.4202     32.4200     13.6513     13.6799         -93        3   0.12%
+   cpu_canary+instant_now+mem_canary+nothing     32.3572     32.2908     32.2906     13.6725     13.6443         125        3   0.12%
+cpu_canary+instant_now+mem_canary+slice_sort     32.4138     32.4451     32.4458     13.6424     13.6744         -59        3   0.06%
+    cpu_canary+instant_now+mpsc_send+nothing     32.3425     32.3942     32.3939     13.6448     13.6672         -97        3   0.06%
+ cpu_canary+instant_now+mpsc_send+slice_sort     32.4262     32.4730     32.4688     13.6386     13.6727         -88        3   0.02%
+   cpu_canary+instant_now+nothing+slice_sort     32.3910     32.4339     32.4317     13.6234     13.6494         -81        3   0.06%
+    instant_now+mem_canary+mpsc_send+nothing     32.3480     32.4014     32.3999         NaN         NaN        -100        3   0.04%
+ instant_now+mem_canary+mpsc_send+slice_sort     32.4348     32.4445     32.4445         NaN         NaN         -18        3   0.12%
+   instant_now+mem_canary+nothing+slice_sort     32.4172     32.4209     32.4251         NaN         NaN          -7        3   0.09%
+    instant_now+mpsc_send+nothing+slice_sort     32.4114     32.4706     32.4747         NaN         NaN        -111        3   0.11%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary     32.2850     32.4280     32.4261     13.6036     13.6654        -268        3   0.07%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send     32.3398     32.4419     32.4400     13.6262     13.6633        -192        3   0.07%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing     32.3054     32.4260     32.4279     13.6125     13.6598        -226        3   0.09%
+btree_miss+copy_64mb+cpu_canary+instant_now+slice_sort     32.4026     32.4760     32.4786     13.6284     13.6473        -138        3   0.07%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send     32.3581     32.4855     32.4871         NaN         NaN        -239        3   0.12%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing     32.2957     32.4504     32.4494         NaN         NaN        -290        3   0.03%
+btree_miss+copy_64mb+instant_now+mem_canary+slice_sort     32.4061     32.5007     32.5010         NaN         NaN        -177        3   0.04%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing     32.3249     32.4824     32.4824         NaN         NaN        -295        3   0.16%
+btree_miss+copy_64mb+instant_now+mpsc_send+slice_sort     32.4275     32.4744     32.4718         NaN         NaN         -88        3   0.04%
+btree_miss+copy_64mb+instant_now+nothing+slice_sort     32.4209     32.4981     32.4946         NaN         NaN        -145        3   0.07%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send     32.3347     32.3668     32.3673     13.6417     13.6487         -60        3   0.12%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing     32.3359     32.3025     32.3086     13.6605     13.6440          63        3   0.08%
+btree_miss+cpu_canary+instant_now+mem_canary+slice_sort     32.3704     32.3935     32.3916     13.6356     13.6453         -43        3   0.07%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing     32.3170     32.3572     32.3566     13.6342     13.6489         -75        3   0.05%
+btree_miss+cpu_canary+instant_now+mpsc_send+slice_sort     32.3837     32.4237     32.4245     13.6348     13.6504         -75        3   0.12%
+btree_miss+cpu_canary+instant_now+nothing+slice_sort     32.3937     32.3966     32.3990     13.6317     13.6315          -5        3   0.07%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing     32.3379     32.3434     32.3416         NaN         NaN         -10        3   0.21%
+btree_miss+instant_now+mem_canary+mpsc_send+slice_sort     32.3943     32.4447     32.4481         NaN         NaN         -95        3   0.07%
+btree_miss+instant_now+mem_canary+nothing+slice_sort     32.3678     32.3692     32.3650         NaN         NaN          -3        3   0.13%
+btree_miss+instant_now+mpsc_send+nothing+slice_sort     32.3753     32.4311     32.4302         NaN         NaN        -105        3   0.06%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send     32.3302     32.5117     32.5100     13.6141     13.7005        -340        3   0.06%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing     32.3348     32.4696     32.4738     13.6296     13.6809        -253        3   0.11%
+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort     32.4287     32.5107     32.5152     13.6481     13.6774        -154        3   0.12%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing     32.3344     32.4918     32.4870     13.6213     13.6862        -295        3   0.09%
+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort     32.4064     32.5315     32.5296     13.6328     13.6809        -235        3   0.06%
+copy_64mb+cpu_canary+instant_now+nothing+slice_sort     32.4220     32.4785     32.4769     13.6297     13.6514        -106        3   0.04%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing     32.3550     32.5065     32.5078         NaN         NaN        -284        3   0.02%
+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort     32.4081     32.5223     32.5233         NaN         NaN        -214        3   0.03%
+copy_64mb+instant_now+mem_canary+nothing+slice_sort     32.3998     32.5080     32.5084         NaN         NaN        -203        3   0.01%
+copy_64mb+instant_now+mpsc_send+nothing+slice_sort     32.4163     32.5035     32.4994         NaN         NaN        -164        3   0.04%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     32.3210     32.3891     32.3905     13.6338     13.6632        -128        3   0.11%
+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     32.3894     32.4674     32.4692     13.6398     13.6679        -146        3   0.03%
+cpu_canary+instant_now+mem_canary+nothing+slice_sort     32.4200     32.4478     32.4479     13.6566     13.6653         -52        3   0.07%
+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     32.3885     32.4695     32.4667     13.6382     13.6668        -152        3   0.05%
+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.3998     32.4603     32.4625         NaN         NaN        -113        3   0.07%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send     32.3244     32.4807     32.4801     13.6121     13.6862        -293        3   0.09%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing     32.3043     32.4430     32.4382     13.6151     13.6699        -260        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort     32.3650     32.4653     32.4687     13.6240     13.6552        -188        3   0.09%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing     32.3260     32.4642     32.4681     13.6240     13.6775        -259        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort     32.4130     32.4667     32.4684     13.6353     13.6488        -101        3   0.09%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort     32.3804     32.4652     32.4701     13.6172     13.6545        -159        3   0.07%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing     32.3127     32.4616     32.4587         NaN         NaN        -279        3   0.06%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort     32.4306     32.4759     32.4749         NaN         NaN         -85        3   0.07%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort     32.4124     32.4850     32.4900         NaN         NaN        -136        3   0.03%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort     32.4012     32.4883     32.4877         NaN         NaN        -163        3   0.09%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     32.3048     32.3244     32.3212     13.6231     13.6376         -37        3   0.11%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     32.3574     32.4205     32.4202     13.6228     13.6482        -118        3   0.16%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort     32.3639     32.3902     32.3933     13.6264     13.6403         -49        3   0.07%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     32.3630     32.4091     32.4078     13.6168     13.6358         -86        3   0.05%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.3736     32.4262     32.4264         NaN         NaN         -99        3   0.08%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     32.3432     32.4831     32.4790     13.6285     13.6844        -262        3   0.03%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     32.4347     32.4895     32.4888     13.6412     13.6578        -103        3   0.08%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort     32.3609     32.4791     32.4751     13.6101     13.6540        -222        3   0.08%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     32.4090     32.5134     32.5138     13.6254     13.6679        -196        3   0.02%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.4288     32.4733     32.4725         NaN         NaN         -83        3   0.17%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.3762     32.4428     32.4413     13.6406     13.6556        -125        3   0.14%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     32.3394     32.4282     32.4318     13.6181     13.6609        -166        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     32.3867     32.4877     32.4892     13.6220     13.6683        -189        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort     32.4007     32.4536     32.4550     13.6350     13.6546         -99        3   0.06%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     32.3782     32.4890     32.4864     13.6108     13.6639        -208        3   0.05%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.4050     32.4845     32.4877         NaN         NaN        -149        3   0.03%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.3669     32.4174     32.4157     13.6296     13.6539         -95        3   0.04%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.4370     32.4948     32.4971     13.6482     13.6677        -108        3   0.10%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     32.4007     32.4762     32.4744     13.6334     13.6682        -142        3   0.01%
+              spread across 64 compositions:       0.14%       0.20%       0.20%       0.12%       0.11%
+             pass-to-pass spread (the null):       0.08%       0.07%       0.08%       0.09%       0.07%
+
+=== mem_canary ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                  mem_canary    134.2655    132.9106    132.8322         NaN         NaN         392        3   6.20%
+                       btree_miss+mem_canary    143.5806    144.3630    144.3339         NaN         NaN        -226        3   8.08%
+                        copy_64mb+mem_canary    222.6310    170.9397    170.1903         NaN         NaN       14939        3   0.23%
+                       cpu_canary+mem_canary    128.9984    128.3147    128.2789     54.4777     54.2141         198        3   0.30%
+                      instant_now+mem_canary    128.8974    128.2563    128.2354         NaN         NaN         185        3   0.57%
+                        mem_canary+mpsc_send    176.7582    176.1698    176.1193         NaN         NaN         170        3  17.17%
+                          mem_canary+nothing    128.7570    127.9900    127.9768         NaN         NaN         222        3   0.46%
+                       mem_canary+slice_sort    133.4460    130.5243    130.5179         NaN         NaN         844        3   0.77%
+             btree_miss+copy_64mb+mem_canary    222.4734    169.1367    168.1260         NaN         NaN       15414        3   0.30%
+            btree_miss+cpu_canary+mem_canary    129.8791    129.1449    129.1599     54.8518     54.5105         212        3   0.77%
+           btree_miss+instant_now+mem_canary    130.0025    128.8583    128.8926         NaN         NaN         331        3   0.74%
+             btree_miss+mem_canary+mpsc_send    182.4980    181.2904    181.3937         NaN         NaN         349        3  13.54%
+               btree_miss+mem_canary+nothing    130.5732    129.6302    129.5848         NaN         NaN         273        3   0.50%
+            btree_miss+mem_canary+slice_sort    135.0799    132.0095    131.9376         NaN         NaN         887        3   0.29%
+             copy_64mb+cpu_canary+mem_canary    222.2172    170.7318    169.8019     93.3041     71.7361       14879        3   0.16%
+            copy_64mb+instant_now+mem_canary    221.8810    170.6650    169.7162         NaN         NaN       14801        3   0.13%
+              copy_64mb+mem_canary+mpsc_send    224.0744    171.8621    170.6415         NaN         NaN       15089        3   1.61%
+                copy_64mb+mem_canary+nothing    221.0797    171.2511    170.0817         NaN         NaN       14400        3   0.13%
+             copy_64mb+mem_canary+slice_sort    223.8942    172.1533    170.9344         NaN         NaN       14953        3   0.15%
+           cpu_canary+instant_now+mem_canary    129.3793    128.5895    128.6035     54.6095     54.3296         228        3   1.10%
+             cpu_canary+mem_canary+mpsc_send    176.3084    175.4817    175.6214     74.2918     73.9354         239        3  18.36%
+               cpu_canary+mem_canary+nothing    130.6624    129.9047    129.8629     55.1737     54.8486         219        3   0.41%
+            cpu_canary+mem_canary+slice_sort    134.5269    131.9893    131.9515     56.5585     55.5682         733        3   0.36%
+            instant_now+mem_canary+mpsc_send    158.3328    159.2900    159.1587         NaN         NaN        -277        3  16.71%
+              instant_now+mem_canary+nothing    135.8706    136.1544    136.0514         NaN         NaN         -82        3   5.16%
+           instant_now+mem_canary+slice_sort    139.9253    136.9554    136.8712         NaN         NaN         858        3   5.42%
+                mem_canary+mpsc_send+nothing    135.9491    134.5473    134.3571         NaN         NaN         405        3   4.70%
+             mem_canary+mpsc_send+slice_sort    165.2339    159.8869    159.8832         NaN         NaN        1545        3  15.55%
+               mem_canary+nothing+slice_sort    135.1626    131.8127    131.7871         NaN         NaN         968        3   0.79%
+  btree_miss+copy_64mb+cpu_canary+mem_canary    221.3829    172.0785    170.8470     92.9167     72.2071       14249        3   0.81%
+ btree_miss+copy_64mb+instant_now+mem_canary    220.4309    171.4715    170.2190         NaN         NaN       14149        3   0.42%
+   btree_miss+copy_64mb+mem_canary+mpsc_send    223.2631    171.4274    170.3836         NaN         NaN       14981        3   0.35%
+     btree_miss+copy_64mb+mem_canary+nothing    220.8881    171.0963    170.0909         NaN         NaN       14390        3   0.16%
+  btree_miss+copy_64mb+mem_canary+slice_sort    224.8301    173.2639    172.1668         NaN         NaN       14903        3   0.34%
+btree_miss+cpu_canary+instant_now+mem_canary    130.7568    129.4996    129.4970     55.1688     54.7000         363        3   0.16%
+  btree_miss+cpu_canary+mem_canary+mpsc_send    166.9718    166.8927    166.6563     70.2735     70.3157          23        3   7.28%
+    btree_miss+cpu_canary+mem_canary+nothing    130.4518    129.4025    129.4022     55.0909     54.6426         303        3   1.95%
+ btree_miss+cpu_canary+mem_canary+slice_sort    134.5912    132.2419    132.2120     56.6230     55.6124         679        3   0.58%
+ btree_miss+instant_now+mem_canary+mpsc_send    161.0465    160.1834    160.1528         NaN         NaN         249        3  15.30%
+   btree_miss+instant_now+mem_canary+nothing    130.9750    129.8425    129.8371         NaN         NaN         327        3   0.30%
+btree_miss+instant_now+mem_canary+slice_sort    141.5944    139.1440    139.0836         NaN         NaN         708        3   6.05%
+     btree_miss+mem_canary+mpsc_send+nothing    161.5218    161.3162    161.2061         NaN         NaN          59        3  10.92%
+  btree_miss+mem_canary+mpsc_send+slice_sort    175.4429    170.7505    170.7789         NaN         NaN        1356        3  15.12%
+    btree_miss+mem_canary+nothing+slice_sort    137.1111    134.3730    134.3340         NaN         NaN         791        3   1.99%
+ copy_64mb+cpu_canary+instant_now+mem_canary    222.8722    170.8045    169.7510     93.6219     71.7563       15048        3   0.14%
+   copy_64mb+cpu_canary+mem_canary+mpsc_send    220.3744    170.2716    169.0702     91.9277     71.3223       14480        3   0.16%
+     copy_64mb+cpu_canary+mem_canary+nothing    220.5787    171.1379    170.0150     92.6388     71.9095       14288        3   0.18%
+  copy_64mb+cpu_canary+mem_canary+slice_sort    222.5103    171.8067    170.5958     93.3391     72.0245       14653        3   0.07%
+  copy_64mb+instant_now+mem_canary+mpsc_send    221.6131    170.6615    169.4508         NaN         NaN       14725        3   0.59%
+    copy_64mb+instant_now+mem_canary+nothing    220.3924    171.2530    170.1412         NaN         NaN       14201        3   0.10%
+ copy_64mb+instant_now+mem_canary+slice_sort    222.2832    171.6759    170.5086         NaN         NaN       14626        3   0.13%
+      copy_64mb+mem_canary+mpsc_send+nothing    221.9001    170.1448    168.9892         NaN         NaN       14957        3   0.45%
+   copy_64mb+mem_canary+mpsc_send+slice_sort    223.6056    170.9219    169.7383         NaN         NaN       15226        3   0.34%
+     copy_64mb+mem_canary+nothing+slice_sort    224.4435    172.6052    171.4563         NaN         NaN       14981        3   0.28%
+ cpu_canary+instant_now+mem_canary+mpsc_send    192.2012    192.7671    192.9449     80.8850     81.2041        -164        3   3.39%
+   cpu_canary+instant_now+mem_canary+nothing    133.7100    132.4345    132.3526     56.4345     55.9127         369        3   2.63%
+cpu_canary+instant_now+mem_canary+slice_sort    134.8252    132.5490    132.5461     56.7355     55.7734         658        3   0.18%
+     cpu_canary+mem_canary+mpsc_send+nothing    151.9328    149.5449    149.4881     64.0015     63.0577         690        3   8.55%
+  cpu_canary+mem_canary+mpsc_send+slice_sort    165.0478    164.8060    164.7362     69.1376     69.2214          70        3  14.65%
+    cpu_canary+mem_canary+nothing+slice_sort    135.1706    132.7547    132.7410     56.7850     55.8672         698        3   0.42%
+    instant_now+mem_canary+mpsc_send+nothing    150.7476    151.1232    150.8757         NaN         NaN        -109        3   5.24%
+ instant_now+mem_canary+mpsc_send+slice_sort    158.3531    155.6754    155.6407         NaN         NaN         774        3   9.05%
+   instant_now+mem_canary+nothing+slice_sort    135.3911    132.9009    132.8497         NaN         NaN         720        3   0.49%
+     mem_canary+mpsc_send+nothing+slice_sort    157.7755    154.1143    153.8905         NaN         NaN        1058        3   5.16%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary    225.1922    171.4216    170.6224     94.5484     71.9952       15540        3   0.43%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send    222.9098    171.3879    170.0790     93.3402     71.8806       14890        3   0.16%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing    221.7389    171.4408    170.2781     93.0954     71.9917       14536        3   0.63%
+btree_miss+copy_64mb+cpu_canary+mem_canary+slice_sort    224.7837    172.5918    171.3643     94.3339     72.3712       15083        3   1.59%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send    220.0915    169.3120    168.0432         NaN         NaN       14675        3   0.55%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing    223.2304    172.5146    171.3372         NaN         NaN       14657        3   1.40%
+btree_miss+copy_64mb+instant_now+mem_canary+slice_sort    224.6882    173.0826    171.8637         NaN         NaN       14914        3   0.87%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing    224.4128    172.0133    171.1286         NaN         NaN       15143        3   0.88%
+btree_miss+copy_64mb+mem_canary+mpsc_send+slice_sort    223.6275    171.3432    170.4275         NaN         NaN       15110        3   0.31%
+btree_miss+copy_64mb+mem_canary+nothing+slice_sort    225.4870    173.3535    172.4416         NaN         NaN       15067        3   1.17%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send    142.9643    140.0115    139.8867     60.1642     59.0211         853        3   6.66%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing    145.0654    142.9115    142.6557     61.2340     60.2836         622        3   6.44%
+btree_miss+cpu_canary+instant_now+mem_canary+slice_sort    147.2955    144.7910    144.6628     61.9458     60.9259         724        3   9.99%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing    166.2305    167.2007    166.9778     70.0282     70.3854        -280        3  12.11%
+btree_miss+cpu_canary+mem_canary+mpsc_send+slice_sort    162.7213    158.9674    158.9723     68.3970     66.8500        1085        3  10.63%
+btree_miss+cpu_canary+mem_canary+nothing+slice_sort    136.4277    134.2234    134.2338     57.3833     56.4704         637        3   1.07%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing    158.3282    156.7394    156.7214         NaN         NaN         459        3  19.34%
+btree_miss+instant_now+mem_canary+mpsc_send+slice_sort    170.5261    169.0329    169.0032         NaN         NaN         432        3  12.36%
+btree_miss+instant_now+mem_canary+nothing+slice_sort    136.4520    133.9374    133.9172         NaN         NaN         727        3   0.58%
+btree_miss+mem_canary+mpsc_send+nothing+slice_sort    174.0583    170.2236    170.2133         NaN         NaN        1108        3  14.54%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send    222.3868    169.4344    168.4272     93.1540     71.0251       15303        3   0.11%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing    222.2279    170.3724    169.4249     93.3281     71.5364       14986        3   0.16%
+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort    223.5664    171.2305    170.1929     93.7041     71.8136       15125        3   0.23%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing    222.4921    168.9817    167.9614     93.2499     70.9836       15465        3   0.53%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort    224.2420    170.2905    169.1895     93.7895     71.4329       15592        3   0.44%
+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort    225.6352    171.4294    170.3595     94.6134     71.9375       15665        3   0.47%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing    223.0670    170.0972    169.0190         NaN         NaN       15308        3   0.26%
+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort    223.9813    170.3269    169.1988         NaN         NaN       15506        3   0.12%
+copy_64mb+instant_now+mem_canary+nothing+slice_sort    224.1074    170.8198    169.7612         NaN         NaN       15400        3   0.07%
+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort    223.2991    170.0087    168.7034         NaN         NaN       15401        3   0.58%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing    151.7199    147.7012    147.7304     63.9119     62.2131        1161        3  10.14%
+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort    172.4492    170.6136    170.6723     72.4799     71.7500         530        3   4.20%
+cpu_canary+instant_now+mem_canary+nothing+slice_sort    139.9959    139.8739    139.6664     58.8793     58.8532          35        3   2.61%
+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort    161.0929    158.3902    158.4874     67.6954     66.5747         781        3   6.06%
+instant_now+mem_canary+mpsc_send+nothing+slice_sort    152.7655    150.1997    150.0675         NaN         NaN         742        3   6.37%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send    224.4848    170.4003    169.4193     94.0261     71.4604       15630        3   0.21%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing    222.9246    171.0641    170.1346     93.7027     71.8727       14988        3   0.32%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort    225.3267    171.9997    170.9667     94.5736     72.0708       15412        3   0.08%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing    222.4782    170.6993    169.6586     93.0181     71.7187       14964        3   0.26%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort    227.1488    173.1130    172.0826     95.2553     72.5852       15616        3   0.42%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort    224.3182    172.0144    171.0142     94.0863     72.1043       15116        3   0.06%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing    224.7258    172.3163    171.2459         NaN         NaN       15146        3   1.96%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort    223.7794    170.7288    169.6740         NaN         NaN       15332        3   0.09%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort    225.1203    172.9677    171.9683         NaN         NaN       15072        3   0.40%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort    228.8364    172.4618    171.3968         NaN         NaN       16292        3   1.07%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing    177.8922    172.4780    172.3201     74.8435     72.6944        1565        3   8.73%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort    157.0698    153.5066    153.1951     65.9128     64.4989        1030        3  10.00%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort    138.6010    135.7718    135.6460     58.2906     57.1550         818        3   1.61%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort    165.6409    162.7394    162.7968     69.5944     68.4331         839        3  10.86%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort    144.3102    142.1534    142.1117         NaN         NaN         623        3   1.55%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing    222.9166    168.6052    167.4733     93.4160     70.8927       15696        3   0.15%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort    225.5751    170.6162    169.4996     94.3252     71.5313       15883        3   0.66%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort    227.0946    172.5043    171.3821     95.2709     72.3526       15777        3   1.84%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort    223.3578    171.2567    170.1805     93.5276     71.6757       15057        3   0.09%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort    227.8599    173.9591    172.8086         NaN         NaN       15577        3   1.54%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort    171.1922    166.0645    166.0638     71.8879     69.9163        1482        3   7.97%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing    225.6577    172.9663    171.8481     94.3493     72.4738       15228        3   1.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort    221.6966    170.3987    169.1646     92.8827     71.5021       14825        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort    222.5868    171.8269    170.6300     93.2682     72.1772       14670        3   0.10%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort    226.5604    172.6934    171.4605     94.8021     72.4509       15568        3   1.17%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort    226.4870    173.6359    172.4151         NaN         NaN       15274        3   1.40%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort    171.4021    169.1060    169.2629     72.0440     71.0448         664        3   3.58%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort    229.1702    173.3429    172.1180     95.9318     72.7528       16134        3   0.91%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort    224.0789    172.5751    171.1867     93.9338     72.4116       14885        3   1.50%
+              spread across 64 compositions:      20.74%      10.60%      10.42%      20.54%      10.45%
+             pass-to-pass spread (the null):       5.15%       5.10%       5.10%       5.12%       5.07%
+
+=== mpsc_send ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                   mpsc_send     46.3074     46.6339     46.6408         NaN         NaN        -576        3   2.62%
+                        btree_miss+mpsc_send     45.0474     45.1919     45.2457         NaN         NaN        -255        3   1.72%
+                         copy_64mb+mpsc_send     37.6387     40.8780     41.0845         NaN         NaN       -5711        3   0.37%
+                        cpu_canary+mpsc_send     42.1861     43.4643     43.5336     17.7700     18.3074       -2254        3   5.79%
+                       instant_now+mpsc_send     44.3707     44.9908     45.0565         NaN         NaN       -1093        3   2.62%
+                        mem_canary+mpsc_send     41.5893     43.2798     43.3531         NaN         NaN       -2980        3   1.41%
+                           mpsc_send+nothing     42.2286     43.0864     43.1365         NaN         NaN       -1512        3   0.76%
+                        mpsc_send+slice_sort     35.5195     43.2555     43.5310         NaN         NaN      -13639        3   0.61%
+              btree_miss+copy_64mb+mpsc_send     37.4882     41.1733     41.4553         NaN         NaN       -6497        3   0.26%
+             btree_miss+cpu_canary+mpsc_send     42.0257     43.0296     43.1283     17.6987     18.1262       -1770        3   9.14%
+            btree_miss+instant_now+mpsc_send     41.2730     45.5001     45.6568         NaN         NaN       -7452        3   6.05%
+             btree_miss+mem_canary+mpsc_send     40.2715     43.8311     43.9619         NaN         NaN       -6276        3   1.14%
+                btree_miss+mpsc_send+nothing     40.2311     44.9833     45.2146         NaN         NaN       -8378        3   5.95%
+             btree_miss+mpsc_send+slice_sort     35.0219     42.9070     43.3005         NaN         NaN      -13901        3   0.66%
+              copy_64mb+cpu_canary+mpsc_send     37.6215     40.9433     41.2037     15.7747     17.2195       -5856        3   0.10%
+             copy_64mb+instant_now+mpsc_send     37.3482     41.6196     41.9201         NaN         NaN       -7530        3   0.19%
+              copy_64mb+mem_canary+mpsc_send     37.6034     41.4443     41.7321         NaN         NaN       -6771        3   0.20%
+                 copy_64mb+mpsc_send+nothing     37.4772     41.1908     41.4611         NaN         NaN       -6547        3   0.12%
+              copy_64mb+mpsc_send+slice_sort     36.8965     42.0493     42.4017         NaN         NaN       -9084        3   0.16%
+            cpu_canary+instant_now+mpsc_send     40.6582     43.0132     43.1414     17.1280     18.1236       -4152        3   1.86%
+             cpu_canary+mem_canary+mpsc_send     40.8126     44.0987     44.2352     17.2029     18.5914       -5793        3   3.24%
+                cpu_canary+mpsc_send+nothing     41.0705     43.7147     43.8680     17.3048     18.4227       -4662        3   4.23%
+             cpu_canary+mpsc_send+slice_sort     35.4749     45.3495     45.8113     14.9215     19.0467      -17409        3   1.14%
+            instant_now+mem_canary+mpsc_send     40.0037     43.6598     43.7794         NaN         NaN       -6446        3   2.45%
+               instant_now+mpsc_send+nothing     37.4782     43.2627     43.5443         NaN         NaN      -10198        3   4.91%
+            instant_now+mpsc_send+slice_sort     35.3613     45.0784     45.5545         NaN         NaN      -17131        3   1.02%
+                mem_canary+mpsc_send+nothing     40.1107     42.4607     42.5603         NaN         NaN       -4143        3   2.49%
+             mem_canary+mpsc_send+slice_sort     35.0316     43.3929     43.8193         NaN         NaN      -14741        3   0.67%
+                mpsc_send+nothing+slice_sort     34.9518     43.4943     43.8966         NaN         NaN      -15060        3   0.44%
+   btree_miss+copy_64mb+cpu_canary+mpsc_send     37.3847     41.3629     41.6863     15.7079     17.4218       -7014        3   0.30%
+  btree_miss+copy_64mb+instant_now+mpsc_send     37.2861     41.6124     41.9419         NaN         NaN       -7627        3   0.08%
+   btree_miss+copy_64mb+mem_canary+mpsc_send     37.4743     41.8728     42.2120         NaN         NaN       -7755        3   0.32%
+      btree_miss+copy_64mb+mpsc_send+nothing     37.2254     41.6945     42.0138         NaN         NaN       -7879        3   0.16%
+   btree_miss+copy_64mb+mpsc_send+slice_sort     37.0041     42.4368     42.7798         NaN         NaN       -9578        3   0.14%
+ btree_miss+cpu_canary+instant_now+mpsc_send     35.2745     43.6101     44.0003     14.8775     18.3809      -14696        3   0.45%
+  btree_miss+cpu_canary+mem_canary+mpsc_send     36.2412     44.8269     45.2162     15.2774     18.8927      -15137        3   1.91%
+     btree_miss+cpu_canary+mpsc_send+nothing     35.2765     44.3009     44.6916     14.8826     18.6637      -15910        3   0.42%
+  btree_miss+cpu_canary+mpsc_send+slice_sort     34.8697     44.8111     45.3061     14.6724     18.8155      -17527        3   0.21%
+ btree_miss+instant_now+mem_canary+mpsc_send     35.7580     43.0502     43.3944         NaN         NaN      -12856        3   2.61%
+    btree_miss+instant_now+mpsc_send+nothing     35.3854     44.6647     45.0748         NaN         NaN      -16359        3   0.34%
+ btree_miss+instant_now+mpsc_send+slice_sort     34.7098     43.9428     44.3923         NaN         NaN      -16278        3   0.68%
+     btree_miss+mem_canary+mpsc_send+nothing     35.5637     43.4926     43.8489         NaN         NaN      -13979        3   1.58%
+  btree_miss+mem_canary+mpsc_send+slice_sort     34.6604     42.4327     42.8376         NaN         NaN      -13702        3   0.37%
+     btree_miss+mpsc_send+nothing+slice_sort     34.7556     44.5723     45.0478         NaN         NaN      -17307        3   0.51%
+  copy_64mb+cpu_canary+instant_now+mpsc_send     37.2245     42.0295     42.3868     15.6189     17.6907       -8471        3   0.05%
+   copy_64mb+cpu_canary+mem_canary+mpsc_send     37.2999     42.0560     42.4135     15.6448     17.7037       -8385        3   0.10%
+      copy_64mb+cpu_canary+mpsc_send+nothing     37.3559     41.9026     42.2276     15.6625     17.5964       -8016        3   0.86%
+   copy_64mb+cpu_canary+mpsc_send+slice_sort     36.9627     43.0203     43.3755     15.5067     18.0492      -10680        3   0.35%
+  copy_64mb+instant_now+mem_canary+mpsc_send     37.3305     41.6625     42.0075         NaN         NaN       -7637        3   0.06%
+     copy_64mb+instant_now+mpsc_send+nothing     37.0414     41.6801     42.0028         NaN         NaN       -8178        3   0.21%
+  copy_64mb+instant_now+mpsc_send+slice_sort     36.8815     42.4814     42.8130         NaN         NaN       -9873        3   0.02%
+      copy_64mb+mem_canary+mpsc_send+nothing     37.1927     42.2936     42.6347         NaN         NaN       -8993        3   0.02%
+   copy_64mb+mem_canary+mpsc_send+slice_sort     36.9773     42.9192     43.2927         NaN         NaN      -10476        3   0.16%
+      copy_64mb+mpsc_send+nothing+slice_sort     36.8648     42.2756     42.6246         NaN         NaN       -9539        3   0.40%
+ cpu_canary+instant_now+mem_canary+mpsc_send     35.1307     42.5160     42.8940     14.8158     17.9161      -13020        3   0.74%
+    cpu_canary+instant_now+mpsc_send+nothing     35.5193     44.8690     45.2626     14.9819     18.9103      -16483        3   0.23%
+ cpu_canary+instant_now+mpsc_send+slice_sort     34.9621     44.7127     45.1701     14.7101     18.8007      -17190        3   0.49%
+     cpu_canary+mem_canary+mpsc_send+nothing     35.5712     43.8270     44.1866     14.9973     18.4599      -14555        3   1.72%
+  cpu_canary+mem_canary+mpsc_send+slice_sort     34.7626     43.8061     44.2290     14.6267     18.4112      -15944        3   0.23%
+     cpu_canary+mpsc_send+nothing+slice_sort     34.5224     42.4954     42.8968     14.5075     17.8481      -14056        3   0.35%
+    instant_now+mem_canary+mpsc_send+nothing     35.4293     43.9504     44.3193         NaN         NaN      -15023        3   1.04%
+ instant_now+mem_canary+mpsc_send+slice_sort     34.7868     44.5195     44.9847         NaN         NaN      -17159        3   0.40%
+    instant_now+mpsc_send+nothing+slice_sort     34.7645     44.0519     44.5172         NaN         NaN      -16374        3   0.22%
+     mem_canary+mpsc_send+nothing+slice_sort     34.5720     43.3819     43.8240         NaN         NaN      -15532        3   0.38%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send     36.9710     41.8973     42.2539     15.5183     17.6201       -8685        3   0.18%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send     37.0881     42.4502     42.8004     15.5783     17.8680       -9453        3   0.31%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing     36.7496     42.6676     43.0076     15.4491     17.9482      -10433        3   0.13%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+slice_sort     36.6380     41.8517     42.1695     15.3855     17.5698       -9192        3   0.11%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send     37.0143     42.1807     42.5299         NaN         NaN       -9108        3   0.13%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing     36.8318     41.8174     42.1396         NaN         NaN       -8790        3   0.17%
+btree_miss+copy_64mb+instant_now+mpsc_send+slice_sort     36.7416     42.0576     42.3611         NaN         NaN       -9372        3   0.22%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing     36.8414     42.2614     42.5819         NaN         NaN       -9555        3   0.28%
+btree_miss+copy_64mb+mem_canary+mpsc_send+slice_sort     36.6909     42.2932     42.6048         NaN         NaN       -9877        3   0.21%
+btree_miss+copy_64mb+mpsc_send+nothing+slice_sort     36.8481     42.4936     42.8445         NaN         NaN       -9953        3   0.19%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send     34.6902     44.3083     44.7539     14.6295     18.6530      -16957        3   0.69%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing     34.8996     44.1455     44.5970     14.7174     18.5936      -16300        3   0.14%
+btree_miss+cpu_canary+instant_now+mpsc_send+slice_sort     34.6947     44.4412     44.9138     14.5953     18.6668      -17183        3   0.35%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing     34.9160     43.8575     44.2808     14.7250     18.4765      -15764        3   0.65%
+btree_miss+cpu_canary+mem_canary+mpsc_send+slice_sort     34.8220     45.2400     45.7515     14.6518     19.0156      -18367        3   0.14%
+btree_miss+cpu_canary+mpsc_send+nothing+slice_sort     34.4974     43.3610     43.7871     14.5169     18.2184      -15627        3   0.27%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing     34.7922     43.9393     44.3390         NaN         NaN      -16126        3   0.92%
+btree_miss+instant_now+mem_canary+mpsc_send+slice_sort     34.5439     43.5056     43.9758         NaN         NaN      -15799        3   0.29%
+btree_miss+instant_now+mpsc_send+nothing+slice_sort     34.8003     45.1264     45.6408         NaN         NaN      -18205        3   0.32%
+btree_miss+mem_canary+mpsc_send+nothing+slice_sort     34.3936     43.5556     43.9753         NaN         NaN      -16153        3   0.72%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send     37.0057     42.6780     43.0325     15.5379     17.9544      -10000        3   0.10%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing     36.8314     42.2882     42.6351     15.4755     17.7778       -9620        3   0.25%
+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort     36.8134     42.1698     42.5064     15.4431     17.7198       -9443        3   0.11%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing     36.9550     42.0254     42.3778     15.5250     17.6694       -8939        3   0.31%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort     36.9448     42.8430     43.2113     15.4933     17.9923      -10398        3   0.15%
+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort     36.7986     42.9337     43.2985     15.4479     18.0118      -10816        3   0.14%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing     36.8931     42.1669     42.5165         NaN         NaN       -9298        3   0.09%
+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort     36.9132     42.1590     42.5127         NaN         NaN       -9248        3   0.24%
+copy_64mb+instant_now+mpsc_send+nothing+slice_sort     36.8650     42.6051     42.9604         NaN         NaN      -10120        3   0.31%
+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort     36.8946     42.4419     42.7844         NaN         NaN       -9780        3   0.14%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     34.9632     44.7967     45.2309     14.7450     18.8666      -17336        3   0.28%
+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     34.5618     43.2616     43.7094     14.5451     18.1896      -15338        3   0.07%
+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     34.7314     45.2045     45.7202     14.6092     19.0043      -18464        3   0.16%
+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     34.6707     45.1847     45.6970     14.5820     18.9990      -18536        3   0.11%
+instant_now+mem_canary+mpsc_send+nothing+slice_sort     34.5200     44.1559     44.6020         NaN         NaN      -16988        3   0.73%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send     36.8331     41.9288     42.2320     15.4566     17.6472       -8984        3   0.26%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing     36.7226     42.3703     42.7242     15.4263     17.8359       -9957        3   0.32%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort     36.9062     41.5568     41.8969     15.4854     17.4598       -8199        3   0.66%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing     36.8947     42.6871     43.0334     15.4877     17.9516      -10212        3   0.35%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort     36.7858     42.3486     42.6904     15.4437     17.7973       -9807        3   0.17%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort     36.6959     42.3005     42.6453     15.3906     17.7573       -9881        3   0.14%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing     36.7995     42.0585     42.3807         NaN         NaN       -9272        3   0.23%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort     36.6939     42.5423     42.8967         NaN         NaN      -10311        3   0.03%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort     36.6022     41.9230     42.2556         NaN         NaN       -9381        3   0.11%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort     36.7452     42.1307     42.4403         NaN         NaN       -9494        3   0.06%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     34.6066     44.5387     44.9747     14.5976     18.7627      -17510        3   0.09%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     34.3728     43.0632     43.4768     14.4681     18.1029      -15321        3   0.55%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     34.6571     44.4277     44.9232     14.5811     18.6813      -17226        3   0.78%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     34.5125     44.2489     44.7357     14.5165     18.6044      -17165        3   0.31%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort     34.6358     45.3933     45.9205         NaN         NaN      -18965        3   0.05%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     36.7295     42.7402     43.0796     15.4363     17.9812      -10597        3   0.11%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     36.7015     42.4323     42.7843     15.4049     17.8155      -10103        3   0.22%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     36.8164     42.4595     42.8059     15.4317     17.8417       -9949        3   0.47%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     36.8049     42.3300     42.6581     15.4314     17.7887       -9741        3   0.24%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort     36.8150     42.0990     42.4319         NaN         NaN       -9316        3   0.24%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     34.5504     43.8572     44.3009     14.5453     18.4421      -16408        3   0.38%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing     36.6811     41.9767     42.2941     15.4044     17.6649       -9336        3   0.12%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort     36.4469     42.0263     42.3474     15.2948     17.6546       -9837        3   0.12%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort     36.6465     41.7438     42.0826     15.3531     17.5313       -8986        3   0.23%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort     36.6219     41.9739     42.2923     15.3602     17.6453       -9436        3   0.18%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort     36.6774     42.3208     42.6742         NaN         NaN       -9949        3   0.09%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     34.5054     45.0944     45.6182     14.5243     18.9495      -18668        3   0.28%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     36.6861     42.2309     42.5639     15.4089     17.7479       -9775        3   0.14%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort     36.4693     42.1407     42.4750     15.3095     17.7205       -9999        3   0.17%
+              spread across 64 compositions:       4.85%       2.67%       2.76%       4.83%       2.70%
+             pass-to-pass spread (the null):       1.60%       2.10%       2.14%       1.60%       2.10%
+
+=== nothing ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                     nothing      0.5901      0.5912      0.5913         NaN         NaN        -104        3   0.00%
+                          btree_miss+nothing      0.5901      0.5912      0.5913         NaN         NaN        -105        3   0.00%
+                           copy_64mb+nothing      0.5909      0.5938      0.5939         NaN         NaN        -275        3   0.01%
+                          cpu_canary+nothing      0.5901      0.5912      0.5913      0.2498      0.2502        -102        3   0.00%
+                         instant_now+nothing      0.5901      0.5912      0.5913         NaN         NaN        -104        3   0.00%
+                          mem_canary+nothing      0.5901      0.5914      0.5915         NaN         NaN        -125        3   0.00%
+                           mpsc_send+nothing      0.5902      0.5917      0.5918         NaN         NaN        -140        3   0.00%
+                          nothing+slice_sort      0.5902      0.5915      0.5916         NaN         NaN        -127        3   0.00%
+                btree_miss+copy_64mb+nothing      0.5909      0.5933      0.5934         NaN         NaN        -223        3   0.01%
+               btree_miss+cpu_canary+nothing      0.5901      0.5913      0.5914      0.2496      0.2500        -104        3   0.00%
+              btree_miss+instant_now+nothing      0.5901      0.5912      0.5913         NaN         NaN        -100        3   0.00%
+               btree_miss+mem_canary+nothing      0.5901      0.5914      0.5914         NaN         NaN        -113        3   0.00%
+                btree_miss+mpsc_send+nothing      0.5902      0.5919      0.5920         NaN         NaN        -153        3   0.00%
+               btree_miss+nothing+slice_sort      0.5902      0.5917      0.5918         NaN         NaN        -138        3   0.00%
+                copy_64mb+cpu_canary+nothing      0.5909      0.5930      0.5931      0.2492      0.2500        -201        3   0.00%
+               copy_64mb+instant_now+nothing      0.5909      0.5932      0.5933         NaN         NaN        -217        3   0.01%
+                copy_64mb+mem_canary+nothing      0.5909      0.5932      0.5933         NaN         NaN        -215        3   0.00%
+                 copy_64mb+mpsc_send+nothing      0.5909      0.5930      0.5931         NaN         NaN        -202        3   0.01%
+                copy_64mb+nothing+slice_sort      0.5909      0.5924      0.5925         NaN         NaN        -145        3   0.00%
+              cpu_canary+instant_now+nothing      0.5901      0.5912      0.5913      0.2497      0.2500        -101        3   0.00%
+               cpu_canary+mem_canary+nothing      0.5901      0.5914      0.5915      0.2497      0.2502        -124        3   0.00%
+                cpu_canary+mpsc_send+nothing      0.5902      0.5918      0.5919      0.2493      0.2499        -151        3   0.00%
+               cpu_canary+nothing+slice_sort      0.5902      0.5915      0.5916      0.2483      0.2488        -123        3   0.00%
+              instant_now+mem_canary+nothing      0.5901      0.5913      0.5914         NaN         NaN        -114        3   0.00%
+               instant_now+mpsc_send+nothing      0.5902      0.5916      0.5917         NaN         NaN        -137        3   0.00%
+              instant_now+nothing+slice_sort      0.5902      0.5913      0.5914         NaN         NaN        -108        3   0.00%
+                mem_canary+mpsc_send+nothing      0.5902      0.5920      0.5921         NaN         NaN        -166        3   0.00%
+               mem_canary+nothing+slice_sort      0.5902      0.5915      0.5916         NaN         NaN        -126        3   0.00%
+                mpsc_send+nothing+slice_sort      0.5902      0.5917      0.5918         NaN         NaN        -142        3   0.00%
+     btree_miss+copy_64mb+cpu_canary+nothing      0.5909      0.5928      0.5929      0.2491      0.2501        -178        3   0.01%
+    btree_miss+copy_64mb+instant_now+nothing      0.5908      0.5929      0.5931         NaN         NaN        -193        3   0.00%
+     btree_miss+copy_64mb+mem_canary+nothing      0.5909      0.5932      0.5934         NaN         NaN        -219        3   0.00%
+      btree_miss+copy_64mb+mpsc_send+nothing      0.5908      0.5930      0.5931         NaN         NaN        -204        3   0.01%
+     btree_miss+copy_64mb+nothing+slice_sort      0.5909      0.5924      0.5925         NaN         NaN        -142        3   0.01%
+   btree_miss+cpu_canary+instant_now+nothing      0.5902      0.5912      0.5912      0.2495      0.2498         -97        3   0.00%
+    btree_miss+cpu_canary+mem_canary+nothing      0.5901      0.5913      0.5914      0.2496      0.2500        -109        3   0.00%
+     btree_miss+cpu_canary+mpsc_send+nothing      0.5902      0.5917      0.5918      0.2493      0.2499        -143        3   0.00%
+    btree_miss+cpu_canary+nothing+slice_sort      0.5902      0.5915      0.5916      0.2483      0.2485        -122        3   0.00%
+   btree_miss+instant_now+mem_canary+nothing      0.5901      0.5914      0.5914         NaN         NaN        -114        3   0.00%
+    btree_miss+instant_now+mpsc_send+nothing      0.5902      0.5915      0.5916         NaN         NaN        -125        3   0.00%
+   btree_miss+instant_now+nothing+slice_sort      0.5902      0.5914      0.5915         NaN         NaN        -116        3   0.00%
+     btree_miss+mem_canary+mpsc_send+nothing      0.5902      0.5919      0.5920         NaN         NaN        -159        3   0.00%
+    btree_miss+mem_canary+nothing+slice_sort      0.5902      0.5916      0.5917         NaN         NaN        -132        3   0.00%
+     btree_miss+mpsc_send+nothing+slice_sort      0.5902      0.5918      0.5919         NaN         NaN        -150        3   0.00%
+    copy_64mb+cpu_canary+instant_now+nothing      0.5909      0.5929      0.5931      0.2492      0.2501        -193        3   0.01%
+     copy_64mb+cpu_canary+mem_canary+nothing      0.5909      0.5934      0.5935      0.2493      0.2503        -232        3   0.01%
+      copy_64mb+cpu_canary+mpsc_send+nothing      0.5909      0.5930      0.5932      0.2492      0.2500        -197        3   0.00%
+     copy_64mb+cpu_canary+nothing+slice_sort      0.5908      0.5923      0.5924      0.2485      0.2487        -137        3   0.01%
+    copy_64mb+instant_now+mem_canary+nothing      0.5909      0.5933      0.5935         NaN         NaN        -230        3   0.00%
+     copy_64mb+instant_now+mpsc_send+nothing      0.5909      0.5929      0.5931         NaN         NaN        -195        3   0.00%
+    copy_64mb+instant_now+nothing+slice_sort      0.5909      0.5925      0.5926         NaN         NaN        -149        3   0.01%
+      copy_64mb+mem_canary+mpsc_send+nothing      0.5909      0.5934      0.5935         NaN         NaN        -231        3   0.01%
+     copy_64mb+mem_canary+nothing+slice_sort      0.5909      0.5926      0.5927         NaN         NaN        -164        3   0.01%
+      copy_64mb+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5925         NaN         NaN        -139        3   0.00%
+   cpu_canary+instant_now+mem_canary+nothing      0.5901      0.5914      0.5914      0.2495      0.2501        -118        3   0.00%
+    cpu_canary+instant_now+mpsc_send+nothing      0.5902      0.5915      0.5916      0.2492      0.2498        -125        3   0.00%
+   cpu_canary+instant_now+nothing+slice_sort      0.5902      0.5914      0.5915      0.2487      0.2490        -117        3   0.00%
+     cpu_canary+mem_canary+mpsc_send+nothing      0.5902      0.5916      0.5917      0.2493      0.2498        -133        3   0.00%
+    cpu_canary+mem_canary+nothing+slice_sort      0.5902      0.5914      0.5914      0.2487      0.2490        -111        3   0.00%
+     cpu_canary+mpsc_send+nothing+slice_sort      0.5902      0.5915      0.5916      0.2485      0.2489        -127        3   0.00%
+    instant_now+mem_canary+mpsc_send+nothing      0.5902      0.5917      0.5918         NaN         NaN        -144        3   0.00%
+   instant_now+mem_canary+nothing+slice_sort      0.5902      0.5915      0.5916         NaN         NaN        -124        3   0.00%
+    instant_now+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917         NaN         NaN        -137        3   0.00%
+     mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5918      0.5918         NaN         NaN        -148        3   0.00%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing      0.5909      0.5927      0.5929      0.2491      0.2499        -170        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing      0.5909      0.5928      0.5930      0.2493      0.2501        -177        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing      0.5909      0.5930      0.5932      0.2492      0.2502        -199        3   0.01%
+btree_miss+copy_64mb+cpu_canary+nothing+slice_sort      0.5909      0.5924      0.5925      0.2483      0.2489        -144        3   0.00%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing      0.5909      0.5930      0.5931         NaN         NaN        -197        3   0.01%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing      0.5909      0.5927      0.5928         NaN         NaN        -166        3   0.01%
+btree_miss+copy_64mb+instant_now+nothing+slice_sort      0.5909      0.5922      0.5923         NaN         NaN        -124        3   0.00%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing      0.5909      0.5929      0.5931         NaN         NaN        -188        3   0.01%
+btree_miss+copy_64mb+mem_canary+nothing+slice_sort      0.5909      0.5924      0.5926         NaN         NaN        -145        3   0.00%
+btree_miss+copy_64mb+mpsc_send+nothing+slice_sort      0.5909      0.5924      0.5926         NaN         NaN        -145        3   0.00%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing      0.5902      0.5914      0.5915      0.2495      0.2500        -117        3   0.00%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing      0.5902      0.5915      0.5916      0.2492      0.2498        -125        3   0.00%
+btree_miss+cpu_canary+instant_now+nothing+slice_sort      0.5902      0.5914      0.5915      0.2486      0.2490        -117        3   0.00%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing      0.5902      0.5915      0.5916      0.2492      0.2498        -125        3   0.00%
+btree_miss+cpu_canary+mem_canary+nothing+slice_sort      0.5902      0.5914      0.5915      0.2486      0.2492        -117        3   0.00%
+btree_miss+cpu_canary+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917      0.2485      0.2491        -133        3   0.00%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing      0.5902      0.5915      0.5916         NaN         NaN        -123        3   0.00%
+btree_miss+instant_now+mem_canary+nothing+slice_sort      0.5902      0.5914      0.5915         NaN         NaN        -112        3   0.00%
+btree_miss+instant_now+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917         NaN         NaN        -129        3   0.00%
+btree_miss+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5918      0.5919         NaN         NaN        -148        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing      0.5909      0.5929      0.5930      0.2494      0.2501        -187        3   0.01%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing      0.5908      0.5930      0.5931      0.2492      0.2500        -201        3   0.01%
+copy_64mb+cpu_canary+instant_now+nothing+slice_sort      0.5909      0.5923      0.5924      0.2486      0.2492        -130        3   0.00%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing      0.5909      0.5930      0.5931      0.2492      0.2502        -192        3   0.00%
+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort      0.5909      0.5924      0.5925      0.2486      0.2493        -138        3   0.00%
+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5924      0.2486      0.2492        -133        3   0.00%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing      0.5909      0.5928      0.5929         NaN         NaN        -180        3   0.00%
+copy_64mb+instant_now+mem_canary+nothing+slice_sort      0.5909      0.5924      0.5925         NaN         NaN        -137        3   0.00%
+copy_64mb+instant_now+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5924         NaN         NaN        -137        3   0.01%
+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5924      0.5925         NaN         NaN        -143        3   0.00%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      0.5902      0.5915      0.5916      0.2492      0.2497        -127        3   0.00%
+cpu_canary+instant_now+mem_canary+nothing+slice_sort      0.5902      0.5915      0.5916      0.2488      0.2493        -122        3   0.00%
+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      0.5902      0.5917      0.5918      0.2486      0.2493        -141        3   0.00%
+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5917      0.5918      0.2487      0.2493        -139        3   0.00%
+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5919      0.5920         NaN         NaN        -163        3   0.00%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing      0.5909      0.5923      0.5924      0.2492      0.2498        -138        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing      0.5909      0.5923      0.5925      0.2493      0.2498        -130        3   0.00%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort      0.5909      0.5922      0.5923      0.2488      0.2493        -118        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing      0.5908      0.5928      0.5929      0.2492      0.2499        -181        3   0.01%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort      0.5909      0.5923      0.5924      0.2488      0.2492        -132        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort      0.5909      0.5924      0.5924      0.2487      0.2491        -141        3   0.01%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing      0.5909      0.5927      0.5929         NaN         NaN        -175        3   0.01%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort      0.5909      0.5924      0.5925         NaN         NaN        -139        3   0.01%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort      0.5909      0.5922      0.5923         NaN         NaN        -117        3   0.00%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5924         NaN         NaN        -129        3   0.01%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      0.5902      0.5917      0.5918      0.2492      0.2498        -141        3   0.00%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort      0.5902      0.5915      0.5915      0.2488      0.2493        -118        3   0.00%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      0.5902      0.5918      0.5919      0.2486      0.2493        -147        3   0.00%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5917      0.5918      0.2486      0.2492        -141        3   0.00%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917         NaN         NaN        -130        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      0.5909      0.5926      0.5928      0.2493      0.2500        -161        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort      0.5909      0.5921      0.5922      0.2489      0.2492        -112        3   0.00%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5925      0.2487      0.2494        -136        3   0.01%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5924      0.5925      0.2488      0.2494        -134        3   0.00%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5924         NaN         NaN        -130        3   0.01%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917      0.2488      0.2493        -133        3   0.00%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing      0.5909      0.5923      0.5924      0.2492      0.2496        -128        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort      0.5909      0.5922      0.5923      0.2488      0.2492        -123        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5924      0.2488      0.2491        -129        3   0.00%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5923      0.5923      0.2488      0.2492        -126        3   0.00%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5922      0.5923         NaN         NaN        -122        3   0.00%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5902      0.5916      0.5917      0.2487      0.2493        -135        3   0.00%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5921      0.5923      0.2489      0.2493        -116        3   0.01%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort      0.5909      0.5921      0.5922      0.2490      0.2494        -111        3   0.00%
+              spread across 64 compositions:       0.06%       0.10%       0.10%       0.15%       0.18%
+             pass-to-pass spread (the null):       0.00%       0.02%       0.03%       0.03%       0.04%
+
+=== slice_sort ===
+                                       round    naive/it     wide/it      lsq/it   naive/cpu    wide/cpu  fixed/meas   passes pass sd
+                                  slice_sort 228949.6355 229028.6133 229036.6069         NaN         NaN         -79        3   0.07%
+                       btree_miss+slice_sort 229253.1221 229013.2165 228994.8910         NaN         NaN         240        3   0.05%
+                        copy_64mb+slice_sort 230326.2341 229605.3608 229609.4537         NaN         NaN         721        3   0.07%
+                       cpu_canary+slice_sort 229214.9941 229086.7309 229092.5587  96289.6055  96306.3146         128        3   0.02%
+                      instant_now+slice_sort 229205.1679 228979.3805 228976.6435         NaN         NaN         226        3   0.00%
+                       mem_canary+slice_sort 229186.3859 229038.2303 229017.9450         NaN         NaN         148        3   0.05%
+                        mpsc_send+slice_sort 229799.6056 229210.4122 229223.2326         NaN         NaN         589        3   0.04%
+                          nothing+slice_sort 229166.6709 229091.6474 229090.5680         NaN         NaN          75        3   0.07%
+             btree_miss+copy_64mb+slice_sort 230484.1145 229446.3361 229442.1795         NaN         NaN        1038        3   0.10%
+            btree_miss+cpu_canary+slice_sort 229249.3493 228996.0513 229000.9146  96317.8263  96287.9821         253        3   0.03%
+           btree_miss+instant_now+slice_sort 229292.0631 229042.4672 229049.4421         NaN         NaN         250        3   0.02%
+            btree_miss+mem_canary+slice_sort 229286.6364 229140.0450 229125.2475         NaN         NaN         147        3   0.04%
+             btree_miss+mpsc_send+slice_sort 229661.1726 229248.0913 229256.1781         NaN         NaN         413        3   0.04%
+               btree_miss+nothing+slice_sort 229321.0455 229076.0648 229076.6724         NaN         NaN         245        3   0.01%
+             copy_64mb+cpu_canary+slice_sort 230433.5547 229470.8004 229445.5048  96701.1719  96372.4296         963        3   0.07%
+            copy_64mb+instant_now+slice_sort 230517.7113 229598.5168 229620.5906         NaN         NaN         919        3   0.07%
+             copy_64mb+mem_canary+slice_sort 230379.0724 229582.7479 229575.5510         NaN         NaN         796        3   0.06%
+              copy_64mb+mpsc_send+slice_sort 230707.7559 229581.9176 229604.6504         NaN         NaN        1126        3   0.02%
+                copy_64mb+nothing+slice_sort 230337.6801 229507.2114 229551.4986         NaN         NaN         830        3   0.01%
+           cpu_canary+instant_now+slice_sort 229540.0513 229042.1818 229029.3792  96626.7159  96498.3470         498        3   0.01%
+            cpu_canary+mem_canary+slice_sort 229433.9369 229182.8311 229169.6607  96619.4456  96533.1942         251        3   0.03%
+             cpu_canary+mpsc_send+slice_sort 229698.8830 229128.1433 229126.4066  96621.8373  96479.7550         571        3   0.05%
+               cpu_canary+nothing+slice_sort 229340.9806 229069.9297 229059.4043  96370.6728  96314.1242         271        3   0.04%
+           instant_now+mem_canary+slice_sort 229402.8822 229046.4685 229060.1003         NaN         NaN         356        3   0.01%
+            instant_now+mpsc_send+slice_sort 229657.4461 229065.5588 229088.7858         NaN         NaN         592        3   0.05%
+              instant_now+nothing+slice_sort 229419.2997 229076.3600 229090.3836         NaN         NaN         343        3   0.05%
+             mem_canary+mpsc_send+slice_sort 229688.8847 229201.3576 229163.4372         NaN         NaN         488        3   0.02%
+               mem_canary+nothing+slice_sort 229311.6136 229138.3222 229132.0809         NaN         NaN         173        3   0.06%
+                mpsc_send+nothing+slice_sort 229644.3460 229167.3291 229145.8196         NaN         NaN         477        3   0.03%
+  btree_miss+copy_64mb+cpu_canary+slice_sort 230352.4164 229464.3474 229459.3559  96667.9833  96449.5389         888        3   0.08%
+ btree_miss+copy_64mb+instant_now+slice_sort 230321.7719 229471.8216 229467.3734         NaN         NaN         850        3   0.05%
+  btree_miss+copy_64mb+mem_canary+slice_sort 230145.5738 229479.1434 229498.4122         NaN         NaN         666        3   0.05%
+   btree_miss+copy_64mb+mpsc_send+slice_sort 230515.7719 229533.9092 229540.9976         NaN         NaN         982        3   0.05%
+     btree_miss+copy_64mb+nothing+slice_sort 230116.9850 229518.4707 229508.4008         NaN         NaN         599        3   0.04%
+btree_miss+cpu_canary+instant_now+slice_sort 229369.3616 229137.0796 229132.2091  96489.4602  96539.6949         232        3   0.03%
+ btree_miss+cpu_canary+mem_canary+slice_sort 229459.4120 229071.4906 229066.3771  96569.6278  96483.9813         388        3   0.03%
+  btree_miss+cpu_canary+mpsc_send+slice_sort 229693.9584 229158.4845 229173.4090  96604.4804  96483.5614         535        3   0.04%
+    btree_miss+cpu_canary+nothing+slice_sort 229354.6844 229127.1494 229129.0864  96292.0229  96406.8207         228        3   0.03%
+btree_miss+instant_now+mem_canary+slice_sort 229381.9664 229088.7745 229077.7142         NaN         NaN         293        3   0.03%
+ btree_miss+instant_now+mpsc_send+slice_sort 229738.8983 229083.9643 229075.7446         NaN         NaN         655        3   0.06%
+   btree_miss+instant_now+nothing+slice_sort 229230.8568 229058.1245 229078.4438         NaN         NaN         173        3   0.07%
+  btree_miss+mem_canary+mpsc_send+slice_sort 229498.0318 229341.7762 229339.7826         NaN         NaN         156        3   0.05%
+    btree_miss+mem_canary+nothing+slice_sort 229298.9293 229132.3880 229140.3278         NaN         NaN         167        3   0.03%
+     btree_miss+mpsc_send+nothing+slice_sort 229715.8974 229194.8374 229185.0661         NaN         NaN         521        3   0.05%
+ copy_64mb+cpu_canary+instant_now+slice_sort 230315.0256 229552.0728 229544.1250  96753.6029  96655.5486         763        3   0.09%
+  copy_64mb+cpu_canary+mem_canary+slice_sort 230311.4085 229476.0970 229481.1135  96819.0059  96613.2602         835        3   0.07%
+   copy_64mb+cpu_canary+mpsc_send+slice_sort 230540.4642 229588.0800 229552.8987  96860.4094  96626.2252         952        3   0.05%
+     copy_64mb+cpu_canary+nothing+slice_sort 230506.2759 229400.6037 229376.1967  96741.7985  96439.2512        1106        3   0.10%
+ copy_64mb+instant_now+mem_canary+slice_sort 230407.7577 229534.7949 229573.5875         NaN         NaN         873        3   0.04%
+  copy_64mb+instant_now+mpsc_send+slice_sort 230526.8568 229461.6156 229464.2293         NaN         NaN        1065        3   0.03%
+    copy_64mb+instant_now+nothing+slice_sort 230335.4845 229405.6174 229425.8724         NaN         NaN         930        3   0.08%
+   copy_64mb+mem_canary+mpsc_send+slice_sort 230542.7507 229520.3851 229513.5471         NaN         NaN        1022        3   0.03%
+     copy_64mb+mem_canary+nothing+slice_sort 230425.9160 229463.0269 229427.4606         NaN         NaN         963        3   0.09%
+      copy_64mb+mpsc_send+nothing+slice_sort 230625.7224 229521.8105 229518.6964         NaN         NaN        1104        3   0.06%
+cpu_canary+instant_now+mem_canary+slice_sort 229272.1963 229185.0588 229180.3410  96548.3212  96593.7432          87        3   0.02%
+ cpu_canary+instant_now+mpsc_send+slice_sort 229714.5190 229256.9714 229243.6387  96656.0210  96570.5526         458        3   0.04%
+   cpu_canary+instant_now+nothing+slice_sort 229366.6817 228976.0365 228972.0073  96488.1463  96444.1785         391        3   0.01%
+  cpu_canary+mem_canary+mpsc_send+slice_sort 229711.4085 229306.4677 229316.3993  96656.3869  96605.1959         405        3   0.04%
+    cpu_canary+mem_canary+nothing+slice_sort 229551.4244 229090.8370 229093.8070  96563.1480  96508.3346         461        3   0.01%
+     cpu_canary+mpsc_send+nothing+slice_sort 229606.2962 229234.2401 229216.5395  96490.2367  96493.6931         372        3   0.06%
+ instant_now+mem_canary+mpsc_send+slice_sort 229714.6702 229197.3204 229223.7814         NaN         NaN         517        3   0.02%
+   instant_now+mem_canary+nothing+slice_sort 229377.0124 229087.9148 229082.1671         NaN         NaN         289        3   0.04%
+    instant_now+mpsc_send+nothing+slice_sort 229672.0531 229217.7991 229218.2499         NaN         NaN         454        3   0.02%
+     mem_canary+mpsc_send+nothing+slice_sort 229751.2617 229194.3523 229174.1152         NaN         NaN         557        3   0.04%
+btree_miss+copy_64mb+cpu_canary+instant_now+slice_sort 230311.4901 229576.4068 229570.0174  96794.6514  96597.7779         735        3   0.08%
+btree_miss+copy_64mb+cpu_canary+mem_canary+slice_sort 230463.7763 229390.0976 229392.7383  96885.2847  96528.0027        1074        3   0.09%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+slice_sort 230467.7438 229452.0370 229472.0045  96869.7764  96492.2897        1016        3   0.02%
+btree_miss+copy_64mb+cpu_canary+nothing+slice_sort 230278.1594 229443.2555 229436.8099  96647.5646  96423.8963         835        3   0.02%
+btree_miss+copy_64mb+instant_now+mem_canary+slice_sort 230428.6153 229414.6588 229434.6942         NaN         NaN        1014        3   0.06%
+btree_miss+copy_64mb+instant_now+mpsc_send+slice_sort 230568.5673 229406.2366 229448.6508         NaN         NaN        1162        3   0.06%
+btree_miss+copy_64mb+instant_now+nothing+slice_sort 230494.8595 229470.0650 229453.8037         NaN         NaN        1025        3   0.10%
+btree_miss+copy_64mb+mem_canary+mpsc_send+slice_sort 230551.7695 229523.2265 229518.3614         NaN         NaN        1029        3   0.09%
+btree_miss+copy_64mb+mem_canary+nothing+slice_sort 230392.2134 229422.2554 229397.1083         NaN         NaN         970        3   0.03%
+btree_miss+copy_64mb+mpsc_send+nothing+slice_sort 230407.4293 229637.4847 229641.0551         NaN         NaN         770        3   0.05%
+btree_miss+cpu_canary+instant_now+mem_canary+slice_sort 229459.0814 229056.6803 229057.3275  96607.7204  96571.7140         402        3   0.01%
+btree_miss+cpu_canary+instant_now+mpsc_send+slice_sort 229579.2785 229185.1870 229179.7553  96593.5758  96562.0340         394        3   0.04%
+btree_miss+cpu_canary+instant_now+nothing+slice_sort 229392.5775 229099.3345 229122.6449  96502.3987  96504.6975         293        3   0.11%
+btree_miss+cpu_canary+mem_canary+mpsc_send+slice_sort 229649.1517 229275.3971 229254.6296  96646.6090  96602.0827         374        3   0.05%
+btree_miss+cpu_canary+mem_canary+nothing+slice_sort 229359.4499 229098.4550 229083.3837  96498.0752  96528.5283         261        3   0.07%
+btree_miss+cpu_canary+mpsc_send+nothing+slice_sort 229772.2039 229163.5783 229150.6513  96627.4945  96512.0139         609        3   0.04%
+btree_miss+instant_now+mem_canary+mpsc_send+slice_sort 229665.2314 229302.4673 229318.6746         NaN         NaN         363        3   0.06%
+btree_miss+instant_now+mem_canary+nothing+slice_sort 229517.5004 229010.6743 229005.9712         NaN         NaN         507        3   0.02%
+btree_miss+instant_now+mpsc_send+nothing+slice_sort 229565.5793 229211.7110 229199.3740         NaN         NaN         354        3   0.05%
+btree_miss+mem_canary+mpsc_send+nothing+slice_sort 229660.3522 229212.6897 229208.8322         NaN         NaN         448        3   0.07%
+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort 230465.7601 229342.5339 229342.6098  96932.0015  96589.0211        1123        3   0.03%
+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort 230588.1028 229455.3985 229486.9574  96958.7521  96649.8317        1133        3   0.06%
+copy_64mb+cpu_canary+instant_now+nothing+slice_sort 230214.0831 229528.0274 229536.2829  96735.6367  96614.9363         686        3   0.02%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort 230591.0231 229398.6992 229415.3791  96950.0278  96587.8991        1192        3   0.06%
+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort 230328.7798 229457.0522 229440.0366  96831.0057  96570.0538         872        3   0.04%
+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort 230611.8329 229465.0500 229497.5909  96915.9912  96530.6790        1147        3   0.06%
+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort 230565.5416 229513.4340 229507.3084         NaN         NaN        1052        3   0.05%
+copy_64mb+instant_now+mem_canary+nothing+slice_sort 230409.0814 229404.6121 229404.6920         NaN         NaN        1004        3   0.06%
+copy_64mb+instant_now+mpsc_send+nothing+slice_sort 230567.7069 229452.8141 229458.9218         NaN         NaN        1115        3   0.04%
+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort 230624.4867 229476.7785 229469.0643         NaN         NaN        1148        3   0.10%
+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort 229668.5604 229220.2946 229207.9572  96706.2657  96503.5134         448        3   0.01%
+cpu_canary+instant_now+mem_canary+nothing+slice_sort 229575.3402 229052.8456 229057.4397  96701.7066  96477.8243         522        3   0.05%
+cpu_canary+instant_now+mpsc_send+nothing+slice_sort 229638.5390 229147.6584 229135.5431  96665.7480  96481.6429         491        3   0.02%
+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort 229712.3813 229177.9373 229186.1021  96712.3224  96462.1217         534        3   0.03%
+instant_now+mem_canary+mpsc_send+nothing+slice_sort 229706.8543 229140.0241 229141.7229         NaN         NaN         567        3   0.07%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+slice_sort 230237.8769 229469.6353 229475.8771  96832.1540  96635.2632         768        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+slice_sort 230694.2747 229486.6359 229487.1826  96988.6838  96601.8530        1208        3   0.12%
+btree_miss+copy_64mb+cpu_canary+instant_now+nothing+slice_sort 230278.3227 229456.1918 229434.6330  96819.3912  96564.4783         822        3   0.05%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+slice_sort 230496.2274 229474.6531 229481.4514  96944.6622  96582.5265        1022        3   0.03%
+btree_miss+copy_64mb+cpu_canary+mem_canary+nothing+slice_sort 230252.0717 229386.7367 229344.9782  96797.0636  96523.5962         865        3   0.02%
+btree_miss+copy_64mb+cpu_canary+mpsc_send+nothing+slice_sort 230466.7604 229475.8206 229465.1420  96838.6430  96515.1603         991        3   0.02%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+slice_sort 230564.2192 229547.8025 229541.0134         NaN         NaN        1016        3   0.03%
+btree_miss+copy_64mb+instant_now+mem_canary+nothing+slice_sort 230264.7001 229471.8515 229451.4595         NaN         NaN         793        3   0.08%
+btree_miss+copy_64mb+instant_now+mpsc_send+nothing+slice_sort 230560.3798 229499.0453 229477.7611         NaN         NaN        1061        3   0.06%
+btree_miss+copy_64mb+mem_canary+mpsc_send+nothing+slice_sort 230536.3627 229427.0427 229428.1540         NaN         NaN        1109        3   0.04%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort 229730.0864 229120.7570 229152.1347  96708.5471  96527.0675         609        3   0.03%
+btree_miss+cpu_canary+instant_now+mem_canary+nothing+slice_sort 229616.0090 229076.8176 229076.4988  96678.1390  96509.4406         539        3   0.04%
+btree_miss+cpu_canary+instant_now+mpsc_send+nothing+slice_sort 229532.3268 229145.3728 229167.4576  96587.9377  96504.5717         387        3   0.05%
+btree_miss+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort 229719.3219 229131.1647 229134.9745  96692.7175  96462.2251         588        3   0.05%
+btree_miss+instant_now+mem_canary+mpsc_send+nothing+slice_sort 229626.6308 229232.9625 229228.2448         NaN         NaN         394        3   0.04%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort 230433.8786 229452.1872 229453.5132  96894.6241  96578.8397         982        3   0.05%
+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort 230320.5558 229401.7854 229414.6852  96860.5589  96569.0086         919        3   0.02%
+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort 230462.8134 229351.3792 229368.3062  96921.4416  96531.3111        1111        3   0.06%
+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort 230521.2657 229440.3968 229452.0364  96915.3867  96587.6605        1081        3   0.06%
+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort 230668.3187 229357.4833 229368.4106         NaN         NaN        1311        3   0.04%
+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort 229714.7148 229168.3809 229158.9806  96733.3542  96579.2906         546        3   0.03%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+slice_sort 230487.7042 229463.4912 229456.7700  96963.3731  96595.9180        1024        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+nothing+slice_sort 230434.0891 229277.4213 229291.7239  96962.6867  96439.3093        1157        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mpsc_send+nothing+slice_sort 230429.3660 229443.9805 229483.5462  96884.5649  96548.3023         985        3   0.03%
+btree_miss+copy_64mb+cpu_canary+mem_canary+mpsc_send+nothing+slice_sort 230546.2426 229374.9575 229391.1236  96987.1474  96483.2560        1171        3   0.02%
+btree_miss+copy_64mb+instant_now+mem_canary+mpsc_send+nothing+slice_sort 230531.7819 229408.0899 229450.4818         NaN         NaN        1124        3   0.03%
+btree_miss+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort 229797.4085 229114.8796 229139.9066  96725.0905  96531.9240         683        3   0.05%
+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort 230603.2459 229398.8536 229422.5509  96985.4580  96550.9689        1204        3   0.05%
+btree_miss+copy_64mb+cpu_canary+instant_now+mem_canary+mpsc_send+nothing+slice_sort 230499.6395 229374.8340 229387.3707  96966.1333  96598.8055        1125        3   0.06%
+              spread across 64 compositions:       0.20%       0.07%       0.07%       0.18%       0.08%
+             pass-to-pass spread (the null):       0.05%       0.04%       0.04%       0.06%       0.05%
