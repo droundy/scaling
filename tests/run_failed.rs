@@ -1,4 +1,4 @@
-//! Registrations that contradict each other: `Config::run` says what is wrong
+//! Registrations that cannot be run: `Config::run` says what is wrong
 //! and `Config::run_and_print` fails the same way instead of measuring
 //! anything.
 //!

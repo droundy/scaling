@@ -5,11 +5,12 @@ use crate::assemble::Diagnostic;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
 
-/// Why [`Config::run`] measured nothing: the registered benchmarks contradict
-/// each other.
+/// Why [`Config::run`] measured nothing: what is registered cannot be run as
+/// written. Two benchmarks may share a name, a group may have two baselines, or
+/// a metrics function may count allocations in a program that has not installed
+/// [`Allocator`](crate::Allocator).
 ///
-/// Printing it, with `{}` or `{:?}`, lists every contradiction found, one to a
-/// line, so `.expect("..")` on a failed run says what to fix, and so does a
+/// Printing it, with `{}` or `{:?}`, lists every problem found, one to a line, so `.expect("..")` on a failed run says what to fix, and so does a
 /// `main` that returns it, which prints `Error: ` and the list and exits with
 /// status 1. What to fix is in your own `#[scaling::bench]`,
 /// `#[scaling::input]` and `#[scaling::metrics]` attributes, which is why this
@@ -21,7 +22,7 @@ pub struct RegistrationError {
 
 impl Display for RegistrationError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "registered benchmarks do not make sense together:")?;
+        write!(f, "the registered benchmarks cannot be run:")?;
         for problem in &self.problems {
             write!(f, "\n  - {problem}")?;
         }
@@ -82,7 +83,7 @@ impl Config {
     /// # Errors
     ///
     /// [`RegistrationError`] if the run never started because the registered
-    /// benchmarks cannot be put together, and nothing is measured. It is the
+    /// benchmarks cannot be run as written, and nothing is measured. It is the
     /// same error [`Config::run`] returns, and it is not printed here: a `main`
     /// that returns it prints it to stderr and exits with a nonzero status, and
     /// a test that calls `.expect("..")` on it fails with it.
@@ -119,9 +120,9 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`RegistrationError`] says every way the registrations contradict each
-    /// other - two benchmarks of one name, say - and nothing is measured. It is
-    /// the text [`run_and_print`] would have printed.
+    /// [`RegistrationError`] says every way the registrations cannot be run as
+    /// written - two benchmarks of one name, say - and nothing is measured.
+    /// [`run_and_print`] returns the same error.
     ///
     /// Registrations that are merely unused, such as an input no candidate takes,
     /// are not errors. A warning for each goes to stderr, as in

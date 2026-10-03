@@ -108,7 +108,7 @@ fn a_script_can_read_the_numbers_it_measured() {
 /// panic, so a script can say what is wrong in its own words.
 #[test]
 fn run_hands_back_what_it_could_not_assemble() {
-    // Nothing here contradicts anything, so this is the `Ok` half; the `Err`
+    // Nothing here is wrong, so this is the `Ok` half; the `Err`
     // half is covered against deliberately broken registrations in
     // `suite::bad_registrations` (src/suite.rs), which cannot share a
     // binary with these.
