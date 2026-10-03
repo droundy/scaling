@@ -552,6 +552,11 @@ factors for large ones: "twice as fast", not "50% less time".
   the lab's data. Above that every batch is hit by ticks, the trimmed mean
   has no clean population to find, and the result includes a roughly
   constant interrupt tax of about 0.5%.
+- **Offsets fixed for the life of a process are not caught.** Both passes
+  run in one process, by decision. On battery, one of four processes
+  measured `str_find` 0.6-2.3% high throughout, against its own bar of
+  about 0.2%. Running the benchmark again, as a new process, is the only
+  way to see one.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.
@@ -576,22 +581,26 @@ The lab's `replay.rs` has the first two as unit tests.
    for the paired estimator: every quiet clock/clock cell passes (54 of
    54), the noisy ones 51 of 54, with 1 and 14 blowups respectively.
 
+## Decided
+
+- **The default goal stays 1%, quiesced or not.** On an unquiesced laptop
+  that means most comparisons tighter than 1-2% are refused, and the
+  refusal says why. A user who wants a number anyway asks for a looser
+  goal.
+- **The crate does not restart itself.** Both passes run in one process,
+  so offsets fixed for the life of a process are not caught. That is a
+  stated limit (see "Limits it does not overcome"), not a hidden one.
+
 ## Decisions still open
 
 1. **Cycles or bogo-nanoseconds.** Cycles are a real unit, and on battery
-   they reproduced 10-60x better than nanoseconds for clock-bound code. Nanoseconds at a
-   nominal clock are friendlier and fake.
+   they reproduced 10-60x better than nanoseconds for clock-bound code.
+   Nanoseconds at a nominal clock are friendlier and fake.
 2. **The primary quantity for a single function**, if the proposed rule in
    section 4 proves too blunt.
 3. **The refusal policy.** Whether a refusal fails the process (a non-zero
    exit) by default, and what flag allows it through.
-4. **What a laptop can promise.** Unquiesced, clock-bound ratios reproduce
-   to 1-2% across processes, and tighter goals are mostly refused. Should
-   the default goal differ when no `quiet-bench` reservation is found?
-5. **Separate processes.** Whether to recommend running a benchmark
-   binary twice, or have the crate re-exec itself for its second pass, so
-   that process-level shifts are caught too.
-6. **Lone `bench()` calls.** Whether a single call outside a suite does two
+4. **Lone `bench()` calls.** Whether a single call outside a suite does two
    back-to-back passes, or one, by default.
 
 ---
