@@ -890,6 +890,8 @@ impl Config {
     /// [`Difference::min_detectable_difference`], which is what that floor came to
     /// on a result that reported no change.
     ///
+    /// The default is `0.01`, 1%.
+    ///
     /// `0.0` disables the relative goal, leaving the absolute one
     /// ([`with_absolute_error`](Config::with_absolute_error)) alone in charge.
     /// These take `self` by value and hand it back, so they chain:
@@ -909,8 +911,9 @@ impl Config {
     /// the whole budget failing to reach it. An absolute floor puts a bound on
     /// how much precision is worth chasing.
     ///
-    /// `Duration::ZERO` disables it, leaving the relative goal
-    /// ([`with_relative_error`](Config::with_relative_error)) alone in charge.
+    /// The default is `Duration::ZERO`, which disables it, leaving the relative
+    /// goal ([`with_relative_error`](Config::with_relative_error)) alone in
+    /// charge.
     ///
     /// As with the relative goal, a comparison reads this as the smallest
     /// difference worth detecting rather than as a precision.
@@ -943,6 +946,8 @@ impl Config {
     /// function costs to run, raise `max_time` to match. The deadline is
     /// checked between samples, so a run can overshoot it by one sample's worth
     /// of input building and calls.
+    ///
+    /// The default is 10 seconds.
     pub fn with_max_time(mut self, max_time: Duration) -> Self {
         self.max_time = max_time;
         self
