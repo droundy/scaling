@@ -1,50 +1,265 @@
+#![doc = include_str!("../README.md")]
 /*!
-A lightweight micro-benchmarking library which:
 
-* measures until it reaches an accuracy you ask for, and tells you the
-  accuracy it achieved;
-* handles benchmarks which mutate state;
-* can measure how a benchmark scales, as a power of `N`
-* is very easy to use!
+## Attribute inputs and setup
 
-`scaling` is designed to work with either slow or fast functions.
-It's forked from [easybench], which is itself inspired by [criterion],
-but doesn't do as much sophisticated
-analysis (no outlier detection, no HTML output).
+A flat benchmark may take no argument or one input. Use `input = value` when
+each iteration should receive a clone of the same initial value, or
+`make_input = || value` when each iteration needs a newly built value. The
+function may take `&I`, `&mut I`, or `I` by value; by-value inputs are useful
+when the benchmark consumes its input:
 
-[easybench]: https://crates.io/crates/easybench
-[criterion]: https://crates.io/crates/criterion
+```rust
+#[scaling::bench(input = vec![0_u8; 1024])]
+fn count(bytes: &[u8]) -> usize { bytes.len() }
+
+#[scaling::bench(make_input = || vec![0_u8; 1024])]
+fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
+```
+
+For comparisons, candidates use the group's shared `#[scaling::input]`
+instead of `input =` or `make_input =` on the candidate. Every timed iteration
+is given an input of its own. The shared input is generated for each
+iteration, a batch of them to a round, and cloned for each candidate, so every
+candidate in a round is measured on the same values. That is why the input
+type must be `Clone` when a group has more than one candidate, and the
+generating and cloning are paid for out of [`Config::max_time`], though they
+are not timed. A setup-once candidate uses the shared input only
+when its returned closure is first built; later inputs are still generated,
+but that cached closure is called without them. Comparison candidates must
+take `&I` or `&mut I`; owned inputs are currently supported only by
+standalone benchmarks.
+
+A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
+setup-once benchmark: the function runs once, then the returned closure is
+called for every timed iteration. This is useful when mutable state must
+persist between calls, such as an advancing random-number generator. With
+`input = value`, the value is passed to setup once, not cloned for every
+call to the returned closure. This form cannot be combined with
+`make_input =`, and a returned closure that itself takes an argument is not
+supported.
+
+For a scaling benchmark, `nmin` is required and `input =` is unavailable
+because the input must vary with `n`. Use `make_input = |n| ...` to build
+size-dependent input; it runs before timing, once per sample. A scaling
+benchmark can also return `impl Fn() -> O` or `impl FnMut() -> O`: setup is
+then cached separately for each size, and the returned closure is timed at
+that size. It cannot be combined with `make_input =`.
+
+An input registration can be expanded across types with `types(A, B, ...)`
+or across sizes with `sizes(1, 2, ...)`. A type-expanded input is generic
+and produces one registration per listed type. A size-expanded input takes
+the size as its argument and produces one input per listed size. These
+options are alternatives, not combinable. Candidates can likewise use
+`types(A, B, ...)` to register a generic candidate once per listed input
+type. For example, this registers two inputs for the same comparison:
+
+```rust
+#[scaling::input(group = "sorting", sizes(8, 32))]
+fn values(size: usize) -> Vec<u8> { (0..size as u8).collect() }
+
+#[scaling::bench(group = "sorting")]
+fn sort(values: &mut Vec<u8>) { values.sort_unstable() }
+```
+
+
+## Reading the output
+
+A flat benchmark prints as `name  value ± error`. The `±` is the standard
+error of the value, in the same unit, and the value is printed to the
+precision that error justifies. Two marks may follow:
+
+* `(limit)`: the time budget ran out before the accuracy target was met, so
+  the `±` is wider than you asked for ([`Timing::hit_limit`]).
+* `(untrusted)`: too few samples were taken for the `±` itself to mean
+  anything ([`Timing::untrustworthy`]).
+
+Both can appear together as `(limit, untrusted)`.
+
+A scaling benchmark prints `(constant ± error)ns/N (R²=…)`. `R²=0.000` with
+`(limit)` means no power of `N` described the cost. A longer `max_time` will
+not change that, since it is the model, not the sampling, that failed.
+
+In a comparison, the baseline's row is an absolute time and every other
+candidate's is its difference from the baseline: `-7.0% ± 0.4%` is seven
+percent faster, give or take the error. `(< 1.0%)` means no difference was
+found, and the figure is the smallest change this run could have detected at
+its accuracy goal.
+
+A group with several inputs prints as a grid, candidates down and inputs
+across, with the baseline named in its title. The layout is chosen for you: a
+group that would be wider than 100 columns is turned on its side, and if that
+is still too wide it is printed with a line to each cell. A group whose inputs
+differ in type is split into a table to each type when one table will not hold
+it. Because `(limit)` and `(untrusted)` marks widen cells, two groups of the
+same shape can lay out differently. Nothing about it is configurable yet; a
+[`Group`] prints itself, so a caller can choose which groups to print and in
+what order (see [`Report::groups`]).
+
+A run prints nothing but how many benchmarks it is about to measure (on
+stderr) until all of them have finished. The suite is measured interleaved, so
+there are no partial results, and there is no way to filter a run: leave out
+benchmarks you do not want measured by not registering them, which is what a
+feature gate is for (see below). Results are not saved: [`Report`], [`Timing`]
+and [`Difference`] deliberately have no serialization, because two runs a day
+apart were not measured on the same machine. To compare with the past, measure
+the past in the same run, as below.
+
+## Keeping a `src/`-resident benchmark out of ordinary builds
+
+Nothing here wraps the function in a `#[cfg]` for you: a `#[cfg]` written
+above the attribute strips the whole item, macro included, before it ever
+expands. A benchmark placed in `benches/` is already fine as it is -
+`cargo` only builds that directory for `cargo bench` - but one placed in
+`src/`, to sit next to the code it measures, compiles into *every* build by
+default: an ordinary `cargo build`, and every crate depending on yours.
+Gate it yourself, one of two ways.
+
+**A feature of your own**, if you are also going to publish this crate and
+want `cargo bench --features my-benchmarks` to keep working the ordinary
+way. Make `scaling` an *optional* dependency tied to that feature, and add
+it a second time, plainly, as a dev-dependency - so `benches/bench.rs`
+itself always has it, feature or not:
+
+```toml
+[dependencies]
+scaling = { version = "...", optional = true }
+[dev-dependencies]
+scaling = "..."
+[features]
+my-benchmarks = ["dep:scaling"]
+```
+
+then write every `src/`-resident benchmark under that same `#[cfg]`:
 
 ```
-use scaling::{bench,bench_env,bench_scaling};
-
 # fn fib(_: usize) -> usize { 0 }
-#
-// Simple benchmarks are performed with `bench` or `bench_scaling`.
-println!("fib 200: {}", bench(|| fib(200) ));
-println!("fib 500: {}", bench(|| fib(500) ));
-println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
-
-// If a function needs to mutate some state, use `bench_env`.
-println!("reverse: {}", bench_env(vec![0;100], |xs| xs.reverse() ));
-println!("sort:    {}", bench_env(vec![0;100], |xs| xs.sort()    ));
+#[cfg(feature = "my-benchmarks")]
+#[scaling::bench]
+fn fib_200() -> usize { fib(200) }
 ```
 
-Running the above yields the following results:
+and run with `cargo bench --features my-benchmarks`. `scaling` ships no
+feature of its own for this: a fixed name baked into the macro, say
+`#[cfg(feature = "scaling-bench")]`, would be a convention nobody asked
+for, and would compile silently to nothing for a crate that had never
+defined that exact feature - worse than an explicit gate you chose
+yourself. The cost of this route is a `#[cfg]` to remember on every
+benchmark you write this way.
 
-```none
-fib 200:    71.716ns ± 0.057ns
-fib 500:    262.75ns ± 0.14ns
-fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
-reverse:     51.80ns ± 0.62ns
-sort:        111.3ns ± 1.1ns
+This route also buys something the other one cannot: benchmarks that
+cross crate boundaries. `#[scaling::bench]` in `src/` becomes part of the
+crate's own compiled output, the same as any other item behind a feature -
+and registration is collected from *everything linked into one binary*,
+regardless of which crate contributed it. So a family of related crates -
+`rand_core`, `rand_chacha`, `rand_pcg`, and the like - can each register
+their own benchmarks behind their own feature, and a single downstream
+binary that depends on several of them with those features enabled gets
+one combined, interleaved run spanning the whole family, with no crate
+having to know about any of the others' benchmarks in advance. This is
+exactly why every registration carries `crate_name`/`crate_version`: two
+crates - or two versions of one - registering into the same binary is an
+intended scenario, not an edge case, and a name they happen to share is
+resolved by keeping every version, told apart by where it came from.
+`#[cfg(test)]` code never leaves the crate that defines it, so the
+dev-only route below cannot do this at all.
+
+**Dev-only, no feature at all**, if you would rather not annotate every
+benchmark individually. Put `scaling` in `[dev-dependencies]` only -
+nothing under `[dependencies]` - and wrap the whole module in
+`#[cfg(test)]` instead of one attribute per function:
+
+```no_run
+#[cfg(test)]
+mod benches {
+    #[scaling::bench]
+    fn fib_200() -> usize { super::fib(200) }
+
+    #[test]
+    #[ignore] // a real run needs --release; plain `cargo test` should not pay for it
+    fn run() {
+        scaling::runner::run(Default::default());
+    }
+}
 ```
 
-Easy! However, please read the [caveats](#caveats) below before using.
+and run with `cargo test --release -- --ignored run`. An ordinary `cargo
+build` never sees `#[cfg(test)]` code at all, so it never touches
+`scaling`, `inventory`, or anything either depends on - the same zero cost
+to a normal build the feature route buys, bought instead by `#[cfg(test)]`,
+something every Rust crate already uses, at the cost of [`main!`] and the
+ordinary `cargo bench` CLI: `#[test]` functions are not run by `cargo
+bench` on stable Rust, so this route goes through `cargo test` instead
+(hence `--release`, since `cargo test`'s own default profile is
+unoptimised) and calls [`crate::runner::run`] by hand rather than through
+[`main!`].
 
-# Benchmarking algorithm
+## Comparing against your own history
 
-## Flat benchmarks: `bench`, `bench_env`, `bench_gen_env`
+The same `group`/`baseline` machinery any other comparison in this crate
+uses also answers "did this get slower since the last release" - and more
+accurately than storing a number from a past run and diffing today's
+against it later, because two runs a day apart do not share a machine
+state: a warmer package, a different mix of interrupts, a CPU that has
+since settled into a lower clock step, all shift a *stored* number without
+shifting today's result to match. Comparing against your own history this
+way never stores a number at all - it measures the *old* code itself,
+fresh, in the very same interleaved round as the new code, so whatever the
+machine happens to be doing shifts both equally and cancels out of the
+difference, exactly as it does for any other pairing here.
+
+Pin the old release as a dev-dependency, under a name of your own that is
+not the crate's own:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", version = "=1.2.0" }
+```
+
+or, to compare against the tip of your default branch rather than a
+tagged release, a git dependency naming no `branch`/`tag`/`rev` tracks
+`origin`'s `HEAD`:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", git = "https://github.com/you/my-crate" }
+```
+
+or a particular commit, by `rev`:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", git = "https://github.com/you/my-crate", rev = "a1b2c3d" }
+```
+
+The `package = ".."` rename is what lets a crate depend on an older copy of
+itself: the old copy gets a name that the crate's own code does not already
+use.
+
+Either way, what you get is the *actual function definitions* of that
+version, not a cached timing - so write the comparison the ordinary way,
+the released crate's public API on one side and your own on the other:
+
+```ignore
+#[scaling::bench(group = "sort", baseline)]
+fn released(v: &mut Vec<u64>) { my_crate_previous::sort(v) }
+
+#[scaling::bench(group = "sort")]
+fn current(v: &mut Vec<u64>) { my_crate::sort(v) }
+```
+
+`baseline` names the released version, so the report reads the way a
+regression check should: the code being written is measured *against* what
+already shipped, not the other way around. See [`crate::runner`]'s module
+docs for the one sharp edge this has: it stops working if two different
+versions of `scaling` itself ever end up anywhere in the dependency graph,
+since registration is keyed on the literal monomorphized type `inventory`
+collects, and two `scaling` versions split the registry silently rather
+than erroring.
+
+## Benchmarking algorithm
+
+### Flat benchmarks: `#[bench]`
 
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
@@ -68,17 +283,17 @@ standard errors *away* from the true value about 5% of the time, and about a
 third of the time you should expect the discrepancy to be more than one
 standard error.  So do *not* take this `±` value as a bound on the error!
 
-[`Stats::std_error`] and [`Stats::rel_std_error`] give the error absolutely
-and relatively, [`Stats::iterations`] and [`Stats::samples`] say how much
-work it took, [`Stats::hit_limit`] tells you if the budget ran out before
-the target accuracy was met, and [`Stats::untrustworthy`] tells you if too
+[`Timing::std_error`] and [`Timing::rel_std_error`] give the error absolutely
+and relatively, [`Timing::iterations`] and [`Timing::samples`] say how much
+work it took, [`Timing::hit_limit`] tells you if the budget ran out before
+the target accuracy was met, and [`Timing::untrustworthy`] tells you if too
 few samples were collected for the error bar itself to mean anything.
 Those are marked `(limit)` and `(untrusted)` in the output.
 
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
 
-## Scaling benchmarks: `bench_scaling`, `bench_scaling_gen`
+### Scaling benchmarks: `#[bench_scaling]`
 
 These work in two stages, and the split is the point of the design.
 
@@ -128,7 +343,7 @@ separately because they fail independently:
   and it is what the `±` in the output shows. Measuring continues until it
   meets the same accuracy target the flat benchmarks use, so
   `(43.1 ± 1.2)ns/N` means the same kind of thing as `43.1ns ± 1.2ns` does
-  for [`bench`].
+  for a flat one.
 
 The two are deliberately not merged into one number, and measured error bars
 are what keeps them apart. Where errors are only assumed, the usual move is
@@ -151,11 +366,14 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 range measured, with `goodness_of_fit` zeroed and the `(limit)` mark to say
 that nothing described it exactly. Naming those shapes needs a different
 kind of fit and would be a different feature; measuring a power well is the
-thing this does.
+thing this does. For the same reason, a longer `max_time` does not rescue a
+benchmark reported with `(limit)` and `R²=0.000`: the sampling was not what
+failed.
 
-# Caveats
 
-## Caveat 1: Harness overhead
+## Caveats
+
+### Caveat 1: Harness overhead
 
 **TL;DR: Compile with `--release`; the overhead is likely to be within the
 **noise of your
@@ -167,18 +385,18 @@ benchmarks size each batch so that a sample takes far longer than the two
 sizes large enough that a single call dwarfs them. However, work which is
 done once-per-iteration *will* be counted in the final times.
 
-* In the case of [`bench()`] this amounts to incrementing the loop counter and
-  passing the return value through `std::hint::black_box`.
-* In the case of [`bench_env`] and [`bench_gen_env`], we also do a lookup into a big vector in
-  order to get the environment for that iteration.
+* For a benchmark taking no input this amounts to incrementing the loop
+  counter and passing the return value through `std::hint::black_box`.
+* For one taking an input, we also do a lookup into a big vector in order to
+  get the input for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
 
 The cost of the above operations depend on the details of your benchmark;
 namely: (1) how large is the return value? and (2) does the benchmark evict
-the environment vector from the CPU cache? In practice, these criteria are only
+the input vector from the CPU cache? In practice, these criteria are only
 satisfied by longer-running benchmarks, making these effects hard to measure.
 
-## Caveat 2: Pure functions
+### Caveat 2: Pure functions
 
 **TL;DR: Return enough information to prevent the optimiser from eliminating
 code from your benchmark.**
@@ -187,14 +405,15 @@ Benchmarking pure functions involves a nasty gotcha which users should be
 aware of. Consider the following benchmarks:
 
 ```
-# use scaling::{bench,bench_env};
-#
 # fn fib(_: usize) -> usize { 0 }
-#
-let fib_1 = bench(|| fib(500) );                     // fine
-let fib_2 = bench(|| { fib(500); } );                // spoiler: NOT fine
-let fib_3 = bench_env(0, |x| { *x = fib(500); } );   // also fine, but ugly
-# let _ = (fib_1, fib_2, fib_3);
+#[scaling::bench]
+fn fib_1() -> usize { fib(500) }                      // fine
+
+#[scaling::bench]
+fn fib_2() { fib(500); }                              // spoiler: NOT fine
+
+#[scaling::bench(make_input = || 0usize)]
+fn fib_3(x: &mut usize) { *x = fib(500); }            // also fine, but ugly
 ```
 
 The results are a little surprising:
@@ -219,9 +438,20 @@ accidentally eliminated.
 
 In the case of `fib_3`, we actually *do* use the return value: each
 iteration we take the result of `fib(500)` and store it in the iteration's
-environment. This has the desired effect, but looks a bit weird.
+own input. This has the desired effect, but looks a bit weird.
 
-## Caveat 3: A busy machine
+This applies equally to [`bench_scaling`] and to a comparison's
+alternatives, not just to a plain `#[bench]`: every timed call, whichever
+of the three it is, is protected by [`std::hint::black_box`] the same way -
+a comparison's own timing loop is shared with [`bench`] rather than having
+its own, so there is one place this is done rather than three. A scaling
+benchmark has one further wrinkle: the size `N` itself is also passed
+through `black_box` before the call, not just the result afterward -
+without that, the optimiser can see `N` as a literal within one round and
+hoist the call out on that basis alone, the same elimination this caveat
+is about, one step earlier.
+
+### Caveat 3: A busy machine
 
 **TL;DR: on Linux, ``sudo `which quiet-bench` reserve 2`` then
 `quiet-bench run <your benchmark>`.**
@@ -237,54 +467,170 @@ them, and pins the clock frequency. Benchmarks then pin themselves to the
 reserved CPUs automatically, with no code change. See the [`quiet`] module
 for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
+
+#### CI
+
+`quiet-bench reserve` wants root and exclusive cores, which an ordinary CI
+runner - shared, often virtualized, rarely handing out either - usually
+cannot give it. [`quiet::status`] still tells you outright rather than
+letting a run silently assume it is quiesced: check it in CI the same way
+you would locally, and expect [`quiet::Status::NotQuiesced`] there.
+
+Be honest with yourself about what a tight error bar is worth on a busy
+machine: the statistics can catch too *few* samples, a fact about the
+budget they can see. They cannot catch a busy machine, which is exactly
+the failure this caveat opened with - the whole run shifted together, so
+the error bar stays tight and looks fully earned. There is no flag that
+turns that into a caught case; the only fix is a quieter machine, or
+judging results from CI with that firmly in mind rather than trusting
+them the way a quiesced run's would be trusted.
 */
 
-pub mod quiet;
+/// Assembling registered benchmarks into a suite.
+#[doc(hidden)]
+pub mod assemble;
 mod bench;
+mod difference;
+mod formatting;
+mod input_group;
+pub mod quiet;
+/// Benchmarks registered from anywhere in a crate.
+///
+/// Public but hidden: the types here are named by generated registration
+/// code rather than written by hand, and their shapes are not yet stable.
+#[doc(hidden)]
+pub mod registry;
+pub mod runner;
 mod scaling;
+mod suite;
+pub(crate) use bench::time_loop;
+pub(crate) use suite::{block_on, Clock, Machine};
+pub(crate) mod significant;
 
-// `self::` because the crate is called `scaling` too, and rustdoc builds
-// doctests with `--extern scaling` pointing at this very crate - which
-// leaves a bare `scaling::` ambiguous between the module below and the
-// whole crate. Rust 1.66 calls that ambiguity an error; later compilers
-// quietly pick one, so this only ever failed on the oldest supported
-// toolchain, and only when building doctests rather than the library.
-pub use self::bench::{bench, bench_env, bench_gen_env, Stats};
-pub use self::scaling::{bench_scaling, bench_scaling_gen, Scaling, ScalingStats};
+// Use `self::` because `scaling` is also the crate name; without it, doctests
+// can end up with an ambiguous `scaling::` path when built against the crate
+// itself.
+pub use self::bench::Timing;
 
-use std::f64;
+pub use self::difference::Difference;
+pub use self::input_group::Timings;
+pub use self::scaling::{Scaling, ScalingStats};
+pub use self::suite::{Group, Report};
+pub(crate) use self::suite::{Measurement, TypedInput};
+
+pub(crate) use self::input_group::InputGroup;
+pub(crate) use self::suite::{Assembled, Suite};
+
+/// Re-exported so that registration code written by a macro has a single
+/// path to name, and callers need not depend on `inventory` themselves.
+#[doc(hidden)]
+pub use inventory;
+
+/// Attribute macros that register a benchmark where it is written, rather
+/// than requiring it be added to a suite by hand.
+pub use scaling_macros::{bench, bench_scaling, input};
+
+/// A whole benchmark binary, in one line.
+///
+/// ```no_run
+/// // benches/bench.rs, in its entirety
+/// scaling::main!();
+/// ```
+///
+/// This expands to a `main` that discovers all registered benchmarks in the
+/// binary, measures them with the default [`Config`], and prints the table.
+/// For custom budgets or settings, build a [`Config`] manually and call
+/// [`runner::run`] or [`runner::measure`] from your own `main`.
+///
+/// "This binary" means it literally: everything `#[scaling::bench]` and its
+/// siblings mark, anywhere in your crate's own `src/` - which the compiler
+/// links into every target regardless - is discovered automatically. A second
+/// *file* under `benches/` is not automatically part of it; Cargo treats each
+/// top-level file there as its own separate binary with its own `main`.
+///
+/// # Its exit status means something
+///
+/// Zero unless the run never started because registrations contradict each
+/// other, which exits `2` instead.
+#[macro_export]
+macro_rules! main {
+    () => {
+        fn main() -> ::std::process::ExitCode {
+            $crate::runner::main()
+        }
+    };
+}
+
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::*;
+
+/// Spend at least this long *running the benchmark* before believing any
+/// accuracy target.
+///
+/// Measured time, not wall-clock time: an input that is slow to build would
+/// otherwise satisfy the floor by being built, and construction is not
+/// evidence about the function. [`Config::max_time`] is the opposite - a
+/// wall-clock cap, because that is a promise about how long the caller waits -
+/// so the two clocks are deliberately different.
+///
+/// A comparison gets twice this, since a round there buys evidence about two
+/// functions and is only as good as its weaker half. A time floor is scale-free
+/// where a sample-count floor is not: it costs a slow function nothing while
+/// a fast one still gets enough time to reduce variance before the target is
+/// treated as met.
+///
+/// ```none
+///   time floor   spread   worst error bar   cost
+///   none         0.316%        1.01x        1.3ms
+///   1ms          0.244%        0.93x        1.4ms
+///   3ms          0.143%        1.45x        3.4ms
+///   10ms         0.144%        3.10x       10.4ms
+/// ```
+///
+/// "worst error bar" is how far the reported `±` understates the spread
+/// actually seen, for whichever workload it understated most. Ten
+/// milliseconds buys no further reproducibility and costs a great deal of
+/// honesty: past a few milliseconds the `±` shrinks faster than the answer
+/// settles, so sampling harder yields a tighter number that is less true.
+/// Reproducibility beyond this is the caller's to ask for, with
+/// [`Config::target_rel_error`].
+const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
 
 /// Roughly the longest a single benchmark should take.
 ///
 /// A backstop rather than a target: both kinds of benchmark stop as soon as
 /// they have the accuracy asked for, and neither sizes any of its work
 /// against the time available.
-const BENCH_TIME_MAX: Duration = Duration::from_secs(10);
+const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// How hard a benchmark works to pin down `ns_per_iter`, and when it gives
 /// up.
 ///
-/// [`bench`], [`bench_env`] and [`bench_gen_env`] use [`Config::default`];
-/// call the same-named methods on a `Config` to choose your own.
+/// A benchmark uses [`Config::default`] unless a caller supplies a different
+/// `Config`; the methods below build one by hand.
 ///
 /// ```
 /// use scaling::Config;
 /// use std::time::Duration;
 ///
-/// # fn fib(_: usize) -> usize { 0 }
 /// // "to within a tenth of a percent"
 /// let tight = Config::relative(0.001);
 /// // "to within 50 nanoseconds, and do not spend more than a second"
-/// let quick = Config {
-///     max_time: Duration::from_secs(1),
-///     ..Config::absolute(Duration::from_nanos(50))
-/// };
+/// let quick = Config::absolute(Duration::from_nanos(50))
+///     .with_max_time(Duration::from_secs(1));
 /// # let _ = (tight.target_rel_error, quick.target_abs_error);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Stop once the standard error falls below this fraction of the
     /// measurement (`0.01` = 1%).
+    ///
+    /// A comparison reads this as a *sensitivity* rather than a precision:
+    /// the smallest difference worth detecting, as a fraction of the
+    /// baseline. See [`Timing::min_detectable_difference`], which is what
+    /// that floor came to on a result that reported no change.
     pub target_rel_error: f64,
     /// Stop once the standard error falls below this duration.
     ///
@@ -297,9 +643,34 @@ pub struct Config {
     ///
     /// `Duration::ZERO` disables it, leaving `target_rel_error` alone in
     /// charge.
+    ///
+    /// As with [`Config::target_rel_error`], the `compare_*` functions read
+    /// this as the smallest difference worth detecting rather than as a
+    /// precision.
     pub target_abs_error: Duration,
     /// Give up after roughly this much wall-clock time even if neither goal
-    /// was reached, setting [`Stats::hit_limit`].
+    /// was reached, setting [`Timing::hit_limit`].
+    ///
+    /// Wall clock rather than measured time, because this is a promise about
+    /// how long the caller waits - a benchmark whose input is slow to build
+    /// has still taken that long. A comparison allows this much per
+    /// alternative, since each produces its own [`Timing`] and would otherwise
+    /// get a fraction of the budget one benchmark gets for the same target.
+    ///
+    /// So building inputs counts against it. That means every call of
+    /// `make_input` or of an `#[input]` function, every clone handed to a
+    /// comparison's candidates, and dropping them afterwards, though none of
+    /// it counts towards the measurement. Two things do not count. One is
+    /// work done once before the benchmark starts, such as evaluating
+    /// `input = <value>` (each clone of that value still does). The other,
+    /// in a suite, is the time other benchmarks spend on their turns.
+    ///
+    /// The consequence is that an expensive input eats into the budget. The
+    /// run still ends on time, but with fewer samples, so a wider `±` and
+    /// likely [`Timing::hit_limit`]. When an input costs much more to build
+    /// than the function costs to run, raise `max_time` to match. The
+    /// deadline is checked between samples, so a run can overshoot it by
+    /// one sample's worth of input building and calls.
     pub max_time: Duration,
 }
 
@@ -308,7 +679,7 @@ impl Default for Config {
         Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
-            max_time: BENCH_TIME_MAX,
+            max_time: MAX_BENCH_TIME,
         }
     }
 }
@@ -317,10 +688,7 @@ impl Config {
     /// Ask for a standard error below `fraction` of the measurement
     /// (`0.001` = 0.1%).
     pub fn relative(fraction: f64) -> Self {
-        Config {
-            target_rel_error: fraction,
-            ..Config::default()
-        }
+        Config::default().with_relative_error(fraction)
     }
 
     /// Ask for a standard error below `error` in absolute terms.
@@ -328,10 +696,104 @@ impl Config {
     /// This sets only the absolute goal, leaving the relative one at its
     /// default, so sampling stops at whichever of the two is reached first.
     pub fn absolute(error: Duration) -> Self {
-        Config {
-            target_abs_error: error,
-            ..Config::default()
+        Config::default().with_absolute_error(error)
+    }
+
+    /// Set [`Config::target_rel_error`], keeping every other setting.
+    ///
+    /// `0.0` disables the relative goal, leaving `target_abs_error` alone in
+    /// charge. These take `self` by value and hand it back, so they chain:
+    /// `Config::default().with_relative_error(0.0).with_absolute_error(e)`.
+    pub fn with_relative_error(mut self, fraction: f64) -> Self {
+        self.target_rel_error = fraction;
+        self
+    }
+
+    /// Set [`Config::target_abs_error`], keeping every other setting.
+    ///
+    /// `Duration::ZERO` disables the absolute goal.
+    pub fn with_absolute_error(mut self, error: Duration) -> Self {
+        self.target_abs_error = error;
+        self
+    }
+
+    /// Set [`Config::max_time`], keeping every other setting.
+    pub fn with_max_time(mut self, max_time: Duration) -> Self {
+        self.max_time = max_time;
+        self
+    }
+
+    /// The smallest difference worth detecting, in nanoseconds, for a
+    /// baseline of `baseline_ns`.
+    ///
+    /// The coarser of the two goals wins, matching how [`Config::accuracy_met`]
+    /// stops at whichever is reached first.
+    fn comparison_goal_ns(&self, baseline_ns: f64) -> f64 {
+        (self.target_rel_error * baseline_ns).max(self.target_abs_error.as_secs_f64() * 1e9)
+    }
+
+    /// Is `std_error` small enough that a difference the size of the goal
+    /// would be *detected*?
+    ///
+    /// This is the same predicate [`Timing::is_changed`] applies, asked
+    /// of a hypothetical difference rather than the observed one, so a
+    /// comparison stops exactly when the test it is about to run would fire
+    /// at the goal. Deliberately independent of the difference actually
+    /// measured: stopping as soon as a result *became* significant would be
+    /// optional stopping, and would put back the false positives the
+    /// Bonferroni correction exists to remove.
+    /// `z_alpha` is passed in rather than read from a field: it belongs to
+    /// the *family* of comparisons being run, which is a property of the call
+    /// that started them and not of the `Config`. See [`Config::z_alpha_for`].
+    fn comparison_accuracy_met(&self, baseline_ns: f64, std_error: f64, z_alpha: f64) -> bool {
+        // Every sample agreed to the limit of the timer's resolution; no
+        // further sampling can improve on that. Also keeps the zero-mean
+        // case out of the `0 / 0` that would follow.
+        if std_error == 0.0 {
+            return true;
         }
+        significant::is_significant(self.comparison_goal_ns(baseline_ns), std_error, z_alpha)
+    }
+
+    /// The Bonferroni limit for a family of `comparisons` comparisons.
+    ///
+    /// Each entry point works this out for the family it can see:
+    /// [`InputGroup::run`] for its own `k - 1`, and a [`Suite`] for its
+    /// total, which it knows once its last entry is added and before it runs
+    /// anything. Nothing is promised in advance, so there is nothing to
+    /// verify afterwards.
+    ///
+    /// # Only a suite sees a whole family
+    ///
+    /// A caller who runs several standalone comparisons and reads them
+    /// together has a family larger than any one call knows about, and none
+    /// of them corrects for it - so the chance of some false positive among
+    /// them grows with how many were run. `Config` used to carry a promised
+    /// count and a `Drop` that checked it, which made the caller declare that
+    /// total; removing that machinery removed the guarantee with it. A
+    /// [`Suite`] is the path that still has it, by collecting everything
+    /// before measuring anything.
+    pub(crate) fn z_alpha_for(comparisons: u64) -> f64 {
+        significant::bonferroni_z_limit(comparisons, significant::FWER)
+    }
+
+    /// A seed distinguishing one standalone comparison's random stream from
+    /// the next one's.
+    ///
+    /// Only the *order* alternatives are timed in depends on this, never a
+    /// reported number, so this is entropy rather than state: it exists so
+    /// that two comparisons run back to back do not draw the same sequence of
+    /// orders and correlate with each other.
+    ///
+    /// A process-global counter rather than a field, because it replaced one
+    /// on `Config` that existed for the plan and had to go with it.
+    /// Consecutive comparisons differing matters more here than a
+    /// comparison's order being reproducible across runs - a [`Suite`] seeds
+    /// its entries from their position instead, and so stays reproducible.
+    #[cfg(test)]
+    pub(crate) fn next_comparison_seed() -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.fetch_add(1, Relaxed)
     }
 
     /// Is a measurement of `ns_per_iter` with standard error `std_error`
@@ -343,18 +805,12 @@ impl Config {
         if std_error == 0.0 {
             return true;
         }
-        std_error < self.target_rel_error * ns_per_iter
-            || std_error < self.target_abs_error.as_secs_f64() * 1e9
+        std_error < self.comparison_goal_ns(ns_per_iter)
     }
 }
 
 /// Pick a human-readable unit from a magnitude in nanoseconds, returning
 /// the divisor and its suffix.
-///
-/// We choose units ourselves rather than deferring to `Duration`'s `Debug`,
-/// which cannot help here: `Duration` has nanosecond resolution, so the
-/// error bar on a fast benchmark - 0.12 ns on a 71 ns function is entirely
-/// typical - would round to a useless `0ns`.
 fn unit_for(ns: f64) -> (f64, &'static str) {
     let magnitude = ns.abs();
     if magnitude < 1e3 {
@@ -368,35 +824,19 @@ fn unit_for(ns: f64) -> (f64, &'static str) {
     }
 }
 
-/// How many decimal places `x` needs to show two significant digits, which
-/// is all the precision an error bar ever deserves.
-fn error_decimals(x: f64) -> usize {
-    // The `is_finite` test comes first so that the comparison below never
-    // has to reason about NaN.
-    if !x.is_finite() || x <= 0.0 {
+/// How many decimal places `error` needs to show one significant digit.
+fn error_decimals(error: f64) -> usize {
+    if !error.is_finite() || error <= 0.0 {
         return 4;
     }
-    // The floor is zero, not one: an error of 25 in its own unit wants no
-    // decimals at all, and forcing one on it prints `25.0`, which is three
-    // significant digits claiming to be two.
-    (1 - x.log10().floor() as i64).clamp(0, 9) as usize
+    // The 0.5 below causes us to print `1.1` or `0.6` instead of `1`.
+    (-(0.5 * error).log10().floor() as i64).clamp(0, 9) as usize
 }
 
-/// A value and its error, formatted to the precision the error justifies:
-/// digits of the value beyond where the uncertainty starts are noise
-/// dressed up as signal, so `71.9858 ± 0.17` is really only known to
-/// `71.99 ± 0.17`, and printing the extra two digits would invite a reader
-/// to believe them.
-///
-/// The error switches to scientific notation below `1e-4` rather than
-/// spelling out a run of leading zeroes - an optimised-away benchmark can
-/// reach `0.000000021` - but the value keeps plain digits at the same
-/// decimal count, which is what the scientific notation stands in for.
-///
-/// Callers own the unit: this only picks how many digits to show, in
-/// whatever unit `value` and `error` already share.
-fn value_and_error(value: f64, error: f64) -> (String, String) {
-    let decimals = error_decimals(error);
+/// A value and its error, formatted to the precision the error justifies, with extra digits as
+/// requested by the formatter.
+fn value_and_error(value: f64, error: f64, precision: Option<usize>) -> (String, String) {
+    let decimals = error_decimals(error) + precision.unwrap_or(0);
     let error_str = if error > 0.0 && error < 1e-4 {
         format!("{error:.1e}")
     } else {
@@ -405,16 +845,7 @@ fn value_and_error(value: f64, error: f64) -> (String, String) {
     (format!("{value:.decimals$}"), error_str)
 }
 
-
-/// Running mean and variance of the per-iteration times, updated in O(1)
-/// per sample.
-///
-/// The sampling loop asks whether it can stop after *every* sample, so
-/// recomputing from a stored vector would make the loop O(k²) in the number
-/// of samples - fine at the default `sample_time`, but `sample_time` is a
-/// public knob and shrinking it puts the loop in a regime where it spends
-/// more of the budget on arithmetic than on measuring. Keeping the running
-/// figures also means the samples themselves never need storing.
+/// Running mean and variance of the per-iteration times.
 ///
 /// This is Welford's algorithm rather than accumulating `sum` and
 /// `sum_of_squares`, because the variance we want is a minute difference
@@ -437,12 +868,12 @@ impl Running {
     }
 
     /// Mean, and the standard error *of that mean*, in nanoseconds. See
-    /// [`Config::bench_gen_env`] for why batching does not bias this.
+    /// [`Config::bench_make_input`] for why batching does not bias this.
     ///
     /// The error is absolute rather than relative because that is the
     /// primitive quantity: it needs nothing but the samples, whereas
     /// dividing by the mean is undefined when the mean is zero.
-    /// [`Stats::rel_std_error`] is derived from it for reporting.
+    /// [`Timing::rel_std_error`] is derived from it for reporting.
     fn mean_and_stderr(&self) -> (f64, f64) {
         if self.count < 2 {
             // A standard error needs at least two points to exist at all.
@@ -460,8 +891,6 @@ impl Running {
         (self.mean, (var / self.count as f64).sqrt())
     }
 }
-
-
 
 /// Helpers shared by both modules' tests.
 #[cfg(test)]
@@ -493,7 +922,13 @@ pub(crate) mod testutil {
     }
 
     /// Is the machine quiet enough for a timing assertion to mean anything?
+    ///
+    /// Pins first. Every benchmark pins its own thread, but this gate is
+    /// consulted *before* the first benchmark runs, so without pinning here
+    /// the answer would be "not pinned" every time and these tests would
+    /// skip themselves even under `quiet-bench run`.
     pub fn quiesced() -> bool {
+        crate::quiet::pin_if_reserved();
         matches!(crate::quiet::status(), crate::quiet::Status::Pinned { .. })
     }
 
@@ -504,58 +939,3 @@ pub(crate) mod testutil {
         (mean, sd / mean)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fib(n: usize) -> usize {
-        let mut i = 0;
-        let mut sum = 0;
-        let mut last = 0;
-        let mut curr = 1usize;
-        while i < n - 1 {
-            sum = curr.wrapping_add(last);
-            last = curr;
-            curr = sum;
-            i += 1;
-        }
-        sum
-    }
-
-    // This is only here because doctests don't work with `--nocapture`.
-    #[test]
-    #[ignore]
-    fn doctests_again() {
-        println!();
-        println!("fib 200: {}", bench(|| fib(200)));
-        println!("fib 500: {}", bench(|| fib(500)));
-        println!("fib scaling: {}", bench_scaling(|n| fib(n), 0));
-        println!("reverse: {}", bench_env(vec![0; 100], |xs| xs.reverse()));
-        println!("sort:    {}", bench_env(vec![0; 100], |xs| xs.sort()));
-
-        // This is fine:
-        println!("fib 1:   {}", bench(|| fib(500)));
-        // This is NOT fine:
-        println!(
-            "fib 2:   {}",
-            bench(|| {
-                fib(500);
-            })
-        );
-        // This is also fine, but a bit weird:
-        println!(
-            "fib 3:   {}",
-            bench_env(0, |x| {
-                *x = fib(500);
-            })
-        );
-    }
-
-
-}
-
-
-
-
-
