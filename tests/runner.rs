@@ -103,6 +103,31 @@ fn a_script_can_read_the_numbers_it_measured() {
     assert!(report.stats("flat").is_some());
 }
 
+/// A standalone benchmark is compared with nothing, so it prints as its
+/// name and its timing: the name once, no "(baseline)", and no header line
+/// of its own the way a group gets one.
+#[test]
+fn a_standalone_benchmark_prints_its_name_once_and_no_baseline() {
+    let report = measure(&quick()).expect("these registrations compose");
+    let shown = report.to_string();
+
+    let lines: Vec<&str> = shown
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "flat" || w == "flat:"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one line for one benchmark:\n{shown}");
+    let line = lines[0];
+    assert!(line.starts_with("flat "), "{shown}");
+    assert_eq!(line.matches("flat").count(), 1, "the name once: {line:?}");
+    assert!(
+        !line.contains("baseline"),
+        "nothing to compare with: {line:?}"
+    );
+
+    // Groups keep naming their baseline.
+    assert!(shown.contains("(baseline)"), "{shown}");
+}
+
 /// Registrations that do not compose come back as a list rather than a
 /// panic, so a script can say what is wrong in its own words.
 #[test]
