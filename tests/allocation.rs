@@ -125,6 +125,37 @@ fn counted(out: Vec<u8>) -> Metrics {
         .retained_bytes()
 }
 
+// ---- a function that builds a metric of its own from the counts ----
+
+#[scaling::bench(group = "kept", baseline)]
+fn exact() -> Vec<u8> {
+    vec![0u8; 8_000]
+}
+
+#[scaling::bench(group = "kept")]
+fn padded() -> Vec<u8> {
+    let mut v = Vec::with_capacity(32_000);
+    v.extend_from_slice(&[0u8; 8_000]);
+    v
+}
+
+#[scaling::metrics(group = "kept", allocation)]
+fn waste(out: Vec<u8>) -> Metrics {
+    let held = alloc::counts().expect("the run was counted").retained_bytes;
+    Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
+}
+
+// Not marked `allocation`, so its run is not counted and there are no counts.
+#[scaling::bench(group = "uncounted")]
+fn lone() -> Vec<u8> {
+    vec![0u8; 10]
+}
+
+#[scaling::metrics(group = "uncounted")]
+fn peeks(_out: Vec<u8>) -> Metrics {
+    Metrics::new().count("had counts", alloc::counts().is_some() as u8)
+}
+
 fn report() -> scaling::Report {
     let cfg = Config::relative(0.1).with_max_time(Duration::from_millis(50));
     scaling::runner::measure(&cfg).expect("the registrations compose")
@@ -158,4 +189,27 @@ fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
     assert!(value(4, 1).unwrap() >= 10_000.0, "{:?}", value(4, 1));
     // Not the million bytes the metrics function itself allocated.
     assert!(value(1, 1).unwrap() < 100_000.0);
+}
+
+#[test]
+fn a_metrics_function_can_read_the_counts_to_build_its_own_metric() {
+    let report = report();
+    let (_, group) = report
+        .groups()
+        .find(|(name, _)| *name == "kept")
+        .expect("the kept group");
+    assert_eq!(group.candidates, ["exact", "padded"]);
+    assert_eq!(group.metrics[0].name, "held per byte");
+    // 8000 bytes held for 8000 bytes returned, and 32000 held for 8000.
+    assert_eq!(group.metrics[0].values, [[Some(1.0)], [Some(4.0)]]);
+}
+
+#[test]
+fn a_function_not_marked_allocation_has_no_counts() {
+    let report = report();
+    let (_, group) = report
+        .groups()
+        .find(|(name, _)| *name == "uncounted")
+        .expect("the uncounted group");
+    assert_eq!(group.metrics[0].values, [[Some(0.0)]]);
 }

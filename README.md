@@ -289,6 +289,20 @@ fn sizes(out: Vec<u8>) -> scaling::Metrics {
 }
 ```
 
+A function can also read the counts itself, to build a metric of its own from
+them, with `scaling::alloc::counts()`:
+
+```rust,ignore
+#[scaling::metrics(group = "encode", allocation)]
+fn overhead(out: Vec<u8>) -> scaling::Metrics {
+    let held = scaling::alloc::counts().map_or(0, |c| c.retained_bytes);
+    scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
+}
+```
+
+It returns `None` in a function that is not marked `allocation`, since its run
+was not counted.
+
 Only the candidate's own call is counted: not its input, which it was
 handed, and not what `sizes` does with the output. A program that asks for
 counts without installing the allocator is refused before anything runs,

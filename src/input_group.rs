@@ -118,7 +118,10 @@ where
         } else {
             ((self.f)(input), None)
         };
+        // For the function to read, if it wants to build a metric from them.
+        let provided = crate::alloc::provide(counted);
         let mut metrics = (self.metrics)(pristine, output);
+        drop(provided);
         metrics.resolve_allocation(counted);
         metrics
     }

@@ -75,6 +75,13 @@ thread_local! {
     };
 }
 
+thread_local! {
+    /// The counts of the run whose metrics function is being called, for
+    /// [`counts`]. Apart from the counters above because it is only touched
+    /// outside the allocator, where nothing stops it from being richer.
+    static CURRENT: Cell<Option<AllocStats>> = const { Cell::new(None) };
+}
+
 /// Set by the first allocation through [`CountingAlloc`], which is how the
 /// rest of the crate can tell that it is the global allocator.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -85,6 +92,41 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// reached `main` has.
 pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
+}
+
+/// The counts of the run a metrics function is being called for, so that it
+/// can build a metric of its own from them.
+///
+/// ```ignore
+/// #[scaling::metrics(group = "encode", allocation)]
+/// fn overhead(out: Vec<u8>) -> scaling::Metrics {
+///     let held = scaling::alloc::counts().map_or(0, |c| c.retained_bytes);
+///     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
+/// }
+/// ```
+///
+/// `None` anywhere else, and in a metrics function that is not marked
+/// `allocation`, since its run was not counted. The counts are those of the
+/// candidate's own call, fixed before the function started, so whatever the
+/// function allocates does not change them.
+pub fn counts() -> Option<AllocStats> {
+    CURRENT.with(Cell::get)
+}
+
+/// Makes [`counts`] return `stats` until it is dropped, and then what it
+/// returned before.
+pub(crate) struct Provided(Option<AllocStats>);
+
+pub(crate) fn provide(stats: Option<AllocStats>) -> Provided {
+    Provided(CURRENT.with(|current| current.replace(stats)))
+}
+
+impl Drop for Provided {
+    fn drop(&mut self) {
+        // Also on a panic, so that a metrics function that fails does not
+        // leave its counts to be read by the next.
+        CURRENT.with(|current| current.set(self.0));
+    }
 }
 
 /// A global allocator that counts, and otherwise leaves everything to the
@@ -191,4 +233,41 @@ pub fn measure<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
         retained_bytes: c.live.get() - start,
     });
     (result, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(retained: i64) -> AllocStats {
+        AllocStats {
+            retained_bytes: retained,
+            ..AllocStats::default()
+        }
+    }
+
+    #[test]
+    fn counts_are_there_only_while_provided() {
+        assert_eq!(counts(), None);
+        {
+            let _outer = provide(Some(stats(5)));
+            assert_eq!(counts(), Some(stats(5)));
+            {
+                let _inner = provide(None);
+                assert_eq!(counts(), None);
+            }
+            assert_eq!(counts(), Some(stats(5)));
+        }
+        assert_eq!(counts(), None);
+    }
+
+    #[test]
+    fn a_panic_does_not_leave_counts_behind() {
+        let caught = std::panic::catch_unwind(|| {
+            let _provided = provide(Some(stats(9)));
+            panic!("a metrics function failing");
+        });
+        assert!(caught.is_err());
+        assert_eq!(counts(), None);
+    }
 }
