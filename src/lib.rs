@@ -562,6 +562,7 @@ mod bench;
 mod difference;
 mod formatting;
 mod input_group;
+mod metrics;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///
@@ -585,6 +586,7 @@ pub use self::bench::Timing;
 
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
+pub use self::metrics::{IntoMetric, Metric, MetricColumn, Metrics, Unit};
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::{Group, Measurement, Report, TypedInput};
 

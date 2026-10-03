@@ -24,14 +24,15 @@ What carries over:
 
 - the extra data is a function of what the benchmark produced, computed once
   and not timed;
-- a table of one input with the time and the metrics across;
-- a percent-of-best view.
+- a table of one input with the time and the metrics across.
+
+Not carried over: its percent-of-best view, which needs to know which way
+is better for every metric.
 
 ## Concepts
 
 A **metric** is a named number computed once per cell, after sampling, so it
-cannot disturb the timing. It has a unit, and optionally a direction that
-says which way is better.
+cannot disturb the timing. It has a unit, which decides how it is printed.
 
 Two kinds:
 
@@ -71,9 +72,9 @@ fn per_vertex(mesh: &Mesh, out: Vec<u8>) -> scaling::Metrics { ... }
 - Signatures: `fn(O) -> Metrics` or `fn(&I, O) -> Metrics`, where `O` is the
   candidate's return type and `I` its input. The argument count selects the
   form.
-- `Metrics` is a builder: `.bytes`, `.count`, `.ratio`, `.seconds`, or
-  `.value(name, v).unit(..).better(..)`. Names are given where the number
-  is, so the unit and direction sit beside it.
+- `Metrics` is a builder: `.bytes`, `.count`, `.ratio`, `.percent`,
+  `.seconds`, or `.value(name, v).unit(..)`. Names are given where the number
+  is, so the unit sits beside it.
 - A metric function pairs with candidates on `(group, output type)`, and on
   input type for the two-argument form: the way inputs already pair. A
   candidate with another output type shows `-`.
@@ -121,7 +122,6 @@ pub struct Group { ..., pub metrics: Vec<MetricColumn> }
 pub struct MetricColumn {
     pub name: String,
     pub unit: Unit,
-    pub better: Better,
     /// Same shape as `Group::measurements`: values[candidate][input].
     pub values: Vec<Vec<Option<f64>>>,
 }
@@ -134,23 +134,40 @@ scripts reach results by name.
 
 ## Tables
 
-A group with metrics prints one sub-table per input, with the time and each
-metric across. A group without metrics keeps today's grid.
+Two layouts, chosen by shape.
+
+**Stacked**, for a group with several inputs and one or two metrics: the
+candidates-down, inputs-across grid a group without metrics has, with each
+candidate's metrics on the lines beneath its time, named in the margin.
 
 ```
 serialize (Mesh)  baseline: json
-candidate         time                size            zstd
-json         812µs ± 3µs        1.90MiB         612KiB
-postcard     -61.2% ± 0.4%      0.72MiB (-62%)  391KiB (-36%)
+candidate              mesh              log
+json         81.2ns ± 0.8ns   40.0ns ± 0.4ns
+  size              1.90MiB          2.00KiB
+postcard    -61.08% ± 0.15%    -25.0% ± 0.3%
+  size        737KiB (-62%)      512B (-75%)
+```
+
+**A table to an input**, for one input or more than two metrics: candidates
+down, the time and then each metric across.
+
+```
+serialize@mesh (Mesh)  baseline: json
+candidate              time           size         ratio  ...
+json         81.2ns ± 0.8ns        1.90MiB         0.310
+postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
 ```
 
 - Metrics are exact, so their delta needs no significance test: baseline row
   absolute, other rows `value (Δ%)`. Time keeps its convention.
-- The best value in a column is marked, using `better`.
 - Values format by unit: `bytes` picks KiB or MiB, `ratio` three significant
   digits, `custom` a given suffix.
-- The transpose and long-form fallbacks stay and gain the metric columns.
-- Later: a percent-of-best view, as in the prior art.
+- A stack that is too wide for the page becomes tables to an input. A table
+  to an input that is too wide is turned on its side, and if it is too wide
+  either way it becomes one line per cell, with the metrics as more columns.
+- There is no notion of which direction is better, so nothing marks a best
+  value.
 
 ## Phases
 
@@ -161,7 +178,7 @@ postcard     -61.2% ± 0.4%      0.72MiB (-62%)  391KiB (-36%)
 3. Registry and macros: `#[metrics]`, the candidate shim, assembly pairing
    and diagnostics.
 4. Observers: `CountingAlloc`, `peak_bytes`, `allocations`.
-5. Options: percent-of-best, a `Config` switch to skip metrics, a runner flag
+5. Options: a `Config` switch to skip metrics, a runner flag
    to select them.
 
 ## Open questions

@@ -351,6 +351,7 @@ impl<I: 'static> InputGroup<I> {
         Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
             timings,
+            metrics: Vec::new(),
         }
     }
 }
@@ -444,6 +445,10 @@ async fn calibrate<I>(
 pub struct Timings {
     names: Vec<String>,
     timings: Vec<Timing>,
+    /// What each alternative produced besides a time, in the same order as
+    /// `timings`. Empty when nothing was computed, so a plain run carries
+    /// nothing extra.
+    metrics: Vec<Metrics>,
 }
 
 impl Timings {
@@ -452,6 +457,7 @@ impl Timings {
         Timings {
             names: vec!["nothing".to_string()],
             timings: vec![timing],
+            metrics: Vec::new(),
         }
     }
 
@@ -460,7 +466,27 @@ impl Timings {
         Timings {
             names: names.iter().map(|name| (*name).to_string()).collect(),
             timings: timings.to_vec(),
+            metrics: Vec::new(),
         }
+    }
+
+    /// Attaches what each alternative produced besides a time, one record per
+    /// alternative in the order they were added.
+    #[allow(dead_code)] // until a run computes any
+    pub(crate) fn with_metrics(mut self, metrics: Vec<Metrics>) -> Self {
+        assert_eq!(
+            metrics.len(),
+            self.timings.len(),
+            "one record of metrics per alternative"
+        );
+        self.metrics = metrics;
+        self
+    }
+
+    /// What each alternative produced besides a time, in the order they were
+    /// added. Empty when nothing was computed.
+    pub fn metrics(&self) -> &[Metrics] {
+        &self.metrics
     }
 
     /// The name of the baseline - the first alternative that was added.
@@ -485,10 +511,16 @@ impl Timings {
     }
 
     /// Every alternative's name and measurement, baseline first.
-    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement)> {
+    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement, Metrics)> {
         self.names()
-            .map(str::to_string)
-            .zip(self.timings.iter().map(|t| crate::Measurement::Timing(*t)))
+            .enumerate()
+            .map(|(i, name)| {
+                (
+                    name.to_string(),
+                    crate::Measurement::Timing(self.timings[i]),
+                    self.metrics.get(i).cloned().unwrap_or_default(),
+                )
+            })
             .collect()
     }
 

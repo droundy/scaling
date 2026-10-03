@@ -477,6 +477,12 @@ pub struct Group {
     /// group can span several input types, and each type is its own
     /// comparison with its own baseline.
     pub baselines: Vec<Option<usize>>,
+    /// What else was computed for each cell, one column per metric name,
+    /// laid out like [`Group::measurements`]. Empty when nothing was
+    /// computed. A metric's columns are the union of the names across the
+    /// group, in the order first met going down the rows and across the
+    /// inputs.
+    pub metrics: Vec<MetricColumn>,
 }
 
 /// Everything a suite measured, keyed by logical group name.
@@ -489,7 +495,7 @@ pub struct Report {
 #[derive(Default)]
 struct Column {
     baseline: Option<String>,
-    cells: BTreeMap<String, Measurement>,
+    cells: BTreeMap<String, (Measurement, Metrics)>,
 }
 
 /// A [`Group`] before its rows and columns are laid out.
@@ -504,7 +510,12 @@ struct GroupBuilder {
 }
 
 impl GroupBuilder {
-    fn add(&mut self, input: TypedInput, results: Vec<(String, Measurement)>, compared: bool) {
+    fn add(
+        &mut self,
+        input: TypedInput,
+        results: Vec<(String, Measurement, Metrics)>,
+        compared: bool,
+    ) {
         let at = match self.columns.iter().position(|(seen, _)| *seen == input) {
             Some(at) => at,
             None => {
@@ -514,14 +525,52 @@ impl GroupBuilder {
         };
         let column = &mut self.columns[at].1;
         column.baseline = compared
-            .then(|| results.first().map(|(name, _)| name.clone()))
+            .then(|| results.first().map(|(name, _, _)| name.clone()))
             .flatten();
-        for (candidate, measurement) in results {
+        for (candidate, measurement, metrics) in results {
             if !self.candidates.contains(&candidate) {
                 self.candidates.push(candidate.clone());
             }
-            column.cells.insert(candidate, measurement);
+            column.cells.insert(candidate, (measurement, metrics));
         }
+    }
+
+    /// One column per metric name met in any cell, taking its unit
+    /// from the first cell that has it.
+    fn metric_columns(&self) -> Vec<MetricColumn> {
+        let mut columns: Vec<MetricColumn> = Vec::new();
+        for candidate in &self.candidates {
+            for (_, column) in &self.columns {
+                let Some((_, metrics)) = column.cells.get(candidate) else {
+                    continue;
+                };
+                for metric in metrics.iter() {
+                    if !columns.iter().any(|c| c.name == metric.name) {
+                        columns.push(MetricColumn {
+                            name: metric.name.clone(),
+                            unit: metric.unit,
+                            values: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+        for column in &mut columns {
+            column.values = self
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    self.columns
+                        .iter()
+                        .map(|(_, cells)| {
+                            let (_, metrics) = cells.cells.get(candidate)?;
+                            Some(metrics.get(&column.name)?.value)
+                        })
+                        .collect()
+                })
+                .collect();
+        }
+        columns
     }
 
     fn build(mut self) -> Group {
@@ -553,17 +602,33 @@ impl GroupBuilder {
             .map(|candidate| {
                 self.columns
                     .iter()
-                    .map(|(_, column)| column.cells.get(candidate).copied())
+                    .map(|(_, column)| column.cells.get(candidate).map(|(m, _)| *m))
                     .collect()
             })
             .collect();
+        let metrics = self.metric_columns();
         Group {
             candidates: self.candidates,
             inputs,
             measurements,
             baselines,
+            metrics,
         }
     }
+}
+
+/// The first alternative of `timings` as the only cell, under `name`.
+///
+/// For an entry that is not a comparison: its one result is the whole
+/// cell, whatever the group it ran in called the alternative.
+fn only_cell(name: &str, timings: &Timings) -> Vec<(String, Measurement, Metrics)> {
+    timings
+        .measurements()
+        .into_iter()
+        .next()
+        .map(|(_, measurement, metrics)| (name.to_string(), measurement, metrics))
+        .into_iter()
+        .collect()
 }
 
 impl Report {
@@ -591,23 +656,15 @@ impl Report {
                 // left unclaimed, and so still shown below under its own name
                 // rather than dropped.
                 let results = match found {
-                    Found::Timing(timings) if single => timings
-                        .timings()
-                        .first()
-                        .map(|timing| {
-                            vec![(
-                                lane.candidates[0].name.clone(),
-                                Measurement::Timing(*timing),
-                            )]
-                        })
-                        .unwrap_or_default(),
-                    Found::Timing(timings) => timings.measurements(),
-                    Found::Scaling(scaling) if single => {
-                        vec![(
-                            lane.candidates[0].name.clone(),
-                            Measurement::Scaling(*scaling),
-                        )]
+                    Found::Timing(timings) if single => {
+                        only_cell(&lane.candidates[0].name, timings)
                     }
+                    Found::Timing(timings) => timings.measurements(),
+                    Found::Scaling(scaling) if single => vec![(
+                        lane.candidates[0].name.clone(),
+                        Measurement::Scaling(*scaling),
+                        Metrics::new(),
+                    )],
                     Found::Scaling(_) => continue,
                 };
                 grouped.entry(lane.group.to_string()).or_default().add(
@@ -633,17 +690,11 @@ impl Report {
                 Found::Timing(timings) if timings.timings().len() > 1 => {
                     (timings.measurements(), true)
                 }
-                Found::Timing(timings) => (
-                    timings
-                        .timings()
-                        .first()
-                        .map(|timing| vec![(name.clone(), Measurement::Timing(*timing))])
-                        .unwrap_or_default(),
+                Found::Timing(timings) => (only_cell(name, timings), false),
+                Found::Scaling(scaling) => (
+                    vec![(name.clone(), Measurement::Scaling(*scaling), Metrics::new())],
                     false,
                 ),
-                Found::Scaling(scaling) => {
-                    (vec![(name.clone(), Measurement::Scaling(*scaling))], false)
-                }
             };
             grouped
                 .entry(name.clone())
