@@ -14,7 +14,7 @@
 //! measuring nothing. That makes every diagnostic below testable without a
 //! benchmark, a machine claim, or a linker.
 
-use crate::registry::{Candidate, ErasedInput, Input, Registered};
+use crate::registry::{Candidate, ErasedInput, Input, MetricsFn, Registered};
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
@@ -278,6 +278,20 @@ pub enum Diagnostic {
         candidate: String,
         type_name: &'static str,
     },
+    /// More than one metrics function applies to one candidate, so there is
+    /// no telling which should compute its metrics.
+    AmbiguousMetrics {
+        group: String,
+        candidate: String,
+        functions: Vec<String>,
+    },
+    /// A metrics function that no candidate returns the type of, in any of
+    /// its groups, so it computed nothing.
+    OrphanMetrics {
+        name: String,
+        groups: Vec<String>,
+        type_name: &'static str,
+    },
 }
 
 impl Diagnostic {
@@ -293,7 +307,9 @@ impl Diagnostic {
     pub fn is_fatal(&self) -> bool {
         !matches!(
             self,
-            Diagnostic::OrphanCandidate { .. } | Diagnostic::OrphanInput { .. }
+            Diagnostic::OrphanCandidate { .. }
+                | Diagnostic::OrphanInput { .. }
+                | Diagnostic::OrphanMetrics { .. }
         )
     }
 }
@@ -346,6 +362,37 @@ impl Display for Diagnostic {
                 f,
                 "in group `{group}`, `{candidate}` takes a different `{type_name}` from \
                  the one the inputs produce - two types of the same name are still two types",
+            ),
+            Diagnostic::AmbiguousMetrics {
+                group,
+                candidate,
+                functions,
+            } => write!(
+                f,
+                "in group `{group}`, more than one metrics function takes what `{candidate}` \
+                 returns, so none can be chosen: {}",
+                list(functions),
+            ),
+            Diagnostic::OrphanMetrics {
+                name,
+                groups,
+                type_name,
+            } => write!(
+                f,
+                "the metrics function `{name}` takes `{type_name}`, but no candidate in {} \
+                 returns that, so it computed nothing",
+                if groups.len() == 1 {
+                    format!("group `{}`", groups[0])
+                } else {
+                    format!(
+                        "groups {}",
+                        groups
+                            .iter()
+                            .map(|g| format!("`{g}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
             ),
         }
     }
@@ -421,6 +468,11 @@ pub struct Lane {
     /// collide across crates or versions. Set once, after every lane of a
     /// group is known, by comparing input names across them.
     pub needs_type_suffix: bool,
+    /// For each of `candidates`, the metrics function that applies to it, if
+    /// any. Empty when no metrics function was registered, and otherwise as
+    /// long as `candidates`. Set in [`plan_with_metrics`], for the same
+    /// reason `needs_type_suffix` is: it takes every registration to know.
+    pub metrics: Vec<Option<&'static MetricsFn>>,
 }
 
 impl Lane {
@@ -758,6 +810,7 @@ fn lanes_for_group(
             // lane cannot tell by itself whether another lane of its group
             // shares one of its input names.
             needs_type_suffix: false,
+            metrics: Vec::new(),
         });
     }
 
@@ -830,6 +883,23 @@ pub fn plan(
     regs: &[&'static Registered],
     candidates: &[&'static Candidate],
     inputs: &[&'static Input],
+) -> (Plan, Vec<Diagnostic>) {
+    plan_with_metrics(regs, candidates, inputs, &[])
+}
+
+/// [`plan`], and each candidate is also paired with the metrics function
+/// that applies to it.
+///
+/// A metrics function applies to a candidate when it names one of the
+/// candidate's groups and takes the type the candidate returns - and, if it
+/// also reads the input, when the candidate is measured on that type. More
+/// than one that applies is a contradiction, except that the same function
+/// registered at several versions of its crate is one function, the newest.
+pub fn plan_with_metrics(
+    regs: &[&'static Registered],
+    candidates: &[&'static Candidate],
+    inputs: &[&'static Input],
+    metrics: &[&'static MetricsFn],
 ) -> (Plan, Vec<Diagnostic>) {
     let mut problems = Vec::new();
 
@@ -925,7 +995,91 @@ pub fn plan(
         lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
     }
 
+    if !metrics.is_empty() {
+        pair_metrics(&mut lanes, metrics, &mut problems);
+    }
+
     (Plan { flat, lanes }, problems)
+}
+
+/// Give each lane's candidates the metrics function that applies to them.
+fn pair_metrics(
+    lanes: &mut [Lane],
+    metrics: &[&'static MetricsFn],
+    problems: &mut Vec<Diagnostic>,
+) {
+    let mut used = vec![false; metrics.len()];
+    for lane in lanes.iter_mut() {
+        let input_type = (lane.inputs[0].reg.type_id)();
+        let mut paired = Vec::with_capacity(lane.candidates.len());
+        for candidate in &lane.candidates {
+            let Some(returns) = &candidate.reg.metrics else {
+                paired.push(None);
+                continue;
+            };
+            let output_type = (returns.output_type)();
+            let applies: Vec<usize> = (0..metrics.len())
+                .filter(|&i| {
+                    let m = metrics[i];
+                    m.groups.contains(&lane.group)
+                        && (m.output_type)() == output_type
+                        && match m.input_type {
+                            None => true,
+                            Some(t) => t() == input_type,
+                        }
+                })
+                .collect();
+            let chosen = match applies.as_slice() {
+                [] => None,
+                [only] => Some(*only),
+                several => {
+                    // One function registered by every version of a crate
+                    // is still one function: take the newest, as for inputs.
+                    let first = metrics[several[0]];
+                    let same_function = several.iter().all(|&i| {
+                        metrics[i].crate_name == first.crate_name && metrics[i].name == first.name
+                    });
+                    if same_function {
+                        several
+                            .iter()
+                            .copied()
+                            .max_by_key(|&i| Version::parse(metrics[i].crate_version))
+                    } else {
+                        problems.push(Diagnostic::AmbiguousMetrics {
+                            group: lane.group.to_string(),
+                            candidate: candidate.name.clone(),
+                            functions: several
+                                .iter()
+                                .map(|&i| {
+                                    format!(
+                                        "{}@{} ({})",
+                                        metrics[i].crate_name,
+                                        metrics[i].crate_version,
+                                        metrics[i].name,
+                                    )
+                                })
+                                .collect(),
+                        });
+                        None
+                    }
+                }
+            };
+            for &i in &applies {
+                used[i] = true;
+            }
+            paired.push(chosen.map(|i| metrics[i]));
+        }
+        lane.metrics = paired;
+    }
+    for (m, used) in metrics.iter().zip(used) {
+        if !used {
+            problems.push(Diagnostic::OrphanMetrics {
+                name: m.name.to_string(),
+                groups: m.groups.iter().map(|g| g.to_string()).collect(),
+                type_name: m.output_type_name,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1416,7 +1570,55 @@ pub(crate) mod lane_tests {
             crate_name,
             crate_version,
             add_alt: noop_alt,
+            metrics: None,
         }
+    }
+
+    /// `candidate`, saying that it returns an `O` that a metrics function
+    /// can take.
+    pub(crate) fn returning<O: 'static>(mut candidate: Candidate, ty: &'static str) -> Candidate {
+        fn no_metrics(
+            set: crate::registry::InputGroup<ErasedInput>,
+            _: &str,
+            _: &'static MetricsFn,
+        ) -> crate::registry::InputGroup<ErasedInput> {
+            set
+        }
+        candidate.metrics = Some(crate::registry::CandidateMetrics {
+            output_type: TypeId::of::<O>,
+            output_type_name: ty,
+            add_alt: no_metrics,
+        });
+        candidate
+    }
+
+    /// The type of input a metrics function reads: its id, and its name.
+    pub(crate) type InputOf = (fn() -> TypeId, &'static str);
+
+    /// A metrics function for `group` that takes an `O`, and reads an input
+    /// of type `I` when that is given.
+    pub(crate) fn metrics_fn<O: 'static>(
+        group: &'static str,
+        name: &'static str,
+        ty: &'static str,
+        input: Option<InputOf>,
+        crate_version: &'static str,
+    ) -> MetricsFn {
+        MetricsFn {
+            groups: one_group(group),
+            name,
+            output_type: TypeId::of::<O>,
+            output_type_name: ty,
+            input_type: input.map(|(id, _)| id),
+            input_type_name: input.map_or("", |(_, name)| name),
+            crate_name: "testcrate",
+            crate_version,
+            eval: |_, _| crate::Metrics::new(),
+        }
+    }
+
+    pub(crate) fn leak_m(v: Vec<MetricsFn>) -> Vec<&'static MetricsFn> {
+        v.into_iter().map(|m| &*Box::leak(Box::new(m))).collect()
     }
 
     pub(crate) fn cand<I: 'static>(
@@ -2170,5 +2372,163 @@ mod review_regressions {
                 .any(|p| matches!(p, Diagnostic::ManyBaselines { .. })),
             "{problems:?}",
         );
+    }
+}
+
+/// Pairing candidates with the metrics functions that apply to them.
+#[cfg(test)]
+mod metrics_pairing {
+    use super::lane_tests::*;
+    use super::*;
+    use std::any::TypeId;
+
+    /// A group of two candidates returning `Vec<u8>`, and one returning a
+    /// `u32`, all on the unit input.
+    fn candidates() -> Vec<&'static Candidate> {
+        leak_c(vec![
+            returning::<Vec<u8>>(cand::<()>("g", "a", "()", true), "Vec<u8>"),
+            returning::<Vec<u8>>(cand::<()>("g", "b", "()", false), "Vec<u8>"),
+            returning::<u32>(cand::<()>("g", "c", "()", false), "u32"),
+        ])
+    }
+
+    fn paired(metrics: Vec<MetricsFn>) -> (Vec<Option<&'static str>>, Vec<Diagnostic>) {
+        let (plan, problems) = plan_with_metrics(&[], &candidates(), &[], &leak_m(metrics));
+        let lane = &plan.lanes[0];
+        (
+            lane.metrics.iter().map(|m| m.map(|m| m.name)).collect(),
+            problems,
+        )
+    }
+
+    #[test]
+    fn a_function_applies_to_the_candidates_that_return_its_type() {
+        let (names, problems) = paired(vec![metrics_fn::<Vec<u8>>(
+            "g", "sizes", "Vec<u8>", None, "1.0.0",
+        )]);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names, [Some("sizes"), Some("sizes"), None]);
+    }
+
+    #[test]
+    fn different_types_get_different_functions() {
+        let (names, problems) = paired(vec![
+            metrics_fn::<Vec<u8>>("g", "sizes", "Vec<u8>", None, "1.0.0"),
+            metrics_fn::<u32>("g", "values", "u32", None, "1.0.0"),
+        ]);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names, [Some("sizes"), Some("sizes"), Some("values")]);
+    }
+
+    #[test]
+    fn a_function_for_another_group_does_not_apply() {
+        let (names, problems) = paired(vec![metrics_fn::<Vec<u8>>(
+            "elsewhere",
+            "sizes",
+            "Vec<u8>",
+            None,
+            "1.0.0",
+        )]);
+        assert_eq!(names, [None, None, None]);
+        assert!(
+            matches!(problems.as_slice(), [Diagnostic::OrphanMetrics { name, .. }] if name == "sizes"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_function_nothing_returns_the_type_of_is_a_warning() {
+        let (names, problems) = paired(vec![metrics_fn::<String>(
+            "g", "text", "String", None, "1.0.0",
+        )]);
+        assert_eq!(names, [None, None, None]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(!problems[0].is_fatal());
+        assert!(problems[0].to_string().contains("computed nothing"));
+    }
+
+    #[test]
+    fn two_functions_for_one_type_are_a_contradiction() {
+        let (names, problems) = paired(vec![
+            metrics_fn::<Vec<u8>>("g", "sizes", "Vec<u8>", None, "1.0.0"),
+            metrics_fn::<Vec<u8>>("g", "lengths", "Vec<u8>", None, "1.0.0"),
+        ]);
+        assert_eq!(names, [None, None, None]);
+        assert!(problems.iter().all(Diagnostic::is_fatal), "{problems:?}");
+        let said = problems[0].to_string();
+        assert!(said.contains("sizes") && said.contains("lengths"), "{said}");
+    }
+
+    #[test]
+    fn one_function_at_several_versions_is_the_newest() {
+        let (plan, problems) = plan_with_metrics(
+            &[],
+            &candidates(),
+            &[],
+            &leak_m(vec![
+                metrics_fn::<Vec<u8>>("g", "sizes", "Vec<u8>", None, "1.2.0"),
+                metrics_fn::<Vec<u8>>("g", "sizes", "Vec<u8>", None, "1.10.0"),
+                metrics_fn::<Vec<u8>>("g", "sizes", "Vec<u8>", None, "1.9.0"),
+            ]),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let versions: Vec<_> = plan.lanes[0]
+            .metrics
+            .iter()
+            .map(|m| m.map(|m| m.crate_version))
+            .collect();
+        assert_eq!(versions, [Some("1.10.0"), Some("1.10.0"), None]);
+    }
+
+    #[test]
+    fn a_function_that_reads_the_input_applies_only_to_that_input_type() {
+        let reads_unit = metrics_fn::<Vec<u8>>(
+            "g",
+            "ratio",
+            "Vec<u8>",
+            Some((TypeId::of::<()>, "()")),
+            "1.0.0",
+        );
+        let reads_string = metrics_fn::<Vec<u8>>(
+            "g",
+            "other",
+            "Vec<u8>",
+            Some((TypeId::of::<String>, "String")),
+            "1.0.0",
+        );
+        let (names, problems) = paired(vec![reads_unit, reads_string]);
+        assert_eq!(names, [Some("ratio"), Some("ratio"), None]);
+        // The one for `String` matched nothing in this group.
+        assert!(
+            matches!(problems.as_slice(), [Diagnostic::OrphanMetrics { name, .. }] if name == "other"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_candidate_that_cannot_hand_on_its_output_has_no_function() {
+        let cs = leak_c(vec![
+            cand::<()>("g", "plain", "()", true),
+            returning::<u32>(cand::<()>("g", "typed", "()", false), "u32"),
+        ]);
+        let (plan, _) = plan_with_metrics(
+            &[],
+            &cs,
+            &[],
+            &leak_m(vec![metrics_fn::<u32>("g", "values", "u32", None, "1.0.0")]),
+        );
+        let names: Vec<_> = plan.lanes[0]
+            .metrics
+            .iter()
+            .map(|m| m.map(|m| m.name))
+            .collect();
+        assert_eq!(names, [None, Some("values")]);
+    }
+
+    #[test]
+    fn with_no_metrics_functions_a_lane_carries_none() {
+        let (plan, problems) = plan_with_metrics(&[], &candidates(), &[], &[]);
+        assert!(problems.is_empty());
+        assert!(plan.lanes[0].metrics.is_empty());
     }
 }

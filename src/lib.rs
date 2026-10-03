@@ -600,7 +600,7 @@ pub use inventory;
 
 /// Attribute macros that register a benchmark where it is written, rather
 /// than requiring it be added to a suite by hand.
-pub use scaling_macros::{bench, bench_scaling, input};
+pub use scaling_macros::{bench, bench_scaling, input, metrics};
 
 /// A whole benchmark binary, in one line.
 ///

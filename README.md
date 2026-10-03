@@ -222,6 +222,62 @@ A group with just one input - the common case, and the only shape a plain
 `group = "..."` with no `#[input]` at all ever has - prints as an ordinary
 comparison instead, with no grid to read.
 
+## Metrics
+
+A timing is not always the whole story about a candidate. A serializer is also
+judged by how many bytes it wrote, and a compressor by what it saved.
+`#[scaling::metrics]` computes extra numbers from what the candidates of a
+group returned, and they are printed beside the time:
+
+```rust
+use scaling::Metrics;
+
+#[scaling::input(group = "encode")]
+fn text() -> String { "abcd".repeat(100) }
+
+#[scaling::bench(group = "encode", baseline)]
+fn plain(s: &mut String) -> Vec<u8> { s.clone().into_bytes() }
+
+#[scaling::bench(group = "encode")]
+fn doubled(s: &mut String) -> Vec<u8> {
+    let mut bytes = s.clone().into_bytes();
+    bytes.extend_from_slice(s.as_bytes());
+    bytes
+}
+
+#[scaling::metrics(group = "encode")]
+fn sizes(out: Vec<u8>) -> Metrics {
+    Metrics::new().bytes("size", out.len())
+}
+```
+
+`sizes` names a group and takes a `Vec<u8>`, so it applies to every candidate
+of `encode` that returns one - and to candidates added later, without editing
+it. It takes the output by value, so it needs no `Clone` and may reuse the
+buffer. A metrics function that also wants the input, as it was before the
+candidate ran, takes it first as `&I`: `fn ratio(input: &String, out:
+Vec<u8>) -> Metrics`.
+
+Each candidate is run once more after the timing is done, outside it, and
+its output is handed over, so a metric is the number from one run: suited to
+things that do not vary from run to run, such as a size. A group has one
+metrics function for each type its candidates return; a second for the same
+type is reported as a contradiction. A candidate that returns another type,
+or one that cannot be named in a registration (`impl Trait`, a borrow, or a
+generic parameter), is measured as usual and has no metrics. Build the numbers with
+`Metrics::bytes`, `count`, `ratio`, `percent` and `seconds`, or `value`
+followed by `unit` for anything else.
+
+A group with metrics prints them beside the time, and under it when there
+are several inputs and one or two metrics:
+
+```none
+encode@text (String)  baseline: plain
+candidate               time          size
+plain       51.50ns ± 0.03ns          400B
+doubled       +205.6% ± 0.4%  800B (+100%)
+```
+
 ## Why measuring them together matters
 
 Benchmarks run one after another are measured in different machines: the

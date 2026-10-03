@@ -44,7 +44,7 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
-use crate::registry::{Candidate, Input, Registered};
+use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Display, Formatter};
@@ -384,7 +384,8 @@ impl Suite {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let cands: Vec<&'static Candidate> = inventory::iter::<Candidate>().collect();
         let inputs: Vec<&'static Input> = inventory::iter::<Input>().collect();
-        self.assemble_registered(&regs, &cands, &inputs)
+        let metrics: Vec<&'static MetricsFn> = inventory::iter::<MetricsFn>().collect();
+        self.assemble_with_metrics(&regs, &cands, &inputs, &metrics)
     }
 
     /// [`Suite::try_add_registered`], taking the registrations as explicit
@@ -392,13 +393,26 @@ impl Suite {
     /// really are outside a test, but reading them there would mean a set
     /// built to test one contradiction shares a process-wide registry with
     /// every other test's registrations.
+    #[cfg(test)]
     fn assemble_registered(
         &mut self,
         regs: &[&'static Registered],
         cands: &[&'static Candidate],
         inputs: &[&'static Input],
     ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
-        let (plan, problems) = crate::assemble::plan(regs, cands, inputs);
+        self.assemble_with_metrics(regs, cands, inputs, &[])
+    }
+
+    /// [`Suite::assemble_registered`], and candidates are given the metrics
+    /// functions that apply to them.
+    fn assemble_with_metrics(
+        &mut self,
+        regs: &[&'static Registered],
+        cands: &[&'static Candidate],
+        inputs: &[&'static Input],
+        metrics: &[&'static MetricsFn],
+    ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
+        let (plan, problems) = crate::assemble::plan_with_metrics(regs, cands, inputs, metrics);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
         // other error, not a field on the returned value that a caller
@@ -422,8 +436,13 @@ impl Suite {
                 // values; a singleton uses them directly.
                 let make = input.reg.make;
                 let mut group = cfg.input_group_make_input(make);
-                for c in &lane.candidates {
-                    group = (c.reg.add_alt)(group, &c.name);
+                for (n, c) in lane.candidates.iter().enumerate() {
+                    // A candidate with a metrics function is added in the
+                    // form that is run once more for it.
+                    group = match (lane.metrics.get(n).copied().flatten(), &c.reg.metrics) {
+                        (Some(m), Some(returns)) => (returns.add_alt)(group, &c.name, m),
+                        _ => (c.reg.add_alt)(group, &c.name),
+                    };
                 }
                 let name = if lane.candidates.len() == 1 {
                     let c = lane
@@ -1708,6 +1727,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_baseline,
+            metrics: None,
         }
     }
 
@@ -1721,6 +1741,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_unstable,
+            metrics: None,
         }
     }
 
@@ -1734,6 +1755,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_slow,
+            metrics: None,
         }
     }
 
@@ -1931,6 +1953,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        metrics: None,
     };
     static TWO_BASELINES_B: Candidate = Candidate {
         groups: &["two-baselines"],
@@ -1941,6 +1964,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        metrics: None,
     };
 
     /// Both problems are reported together, and nothing is added.
@@ -2052,6 +2076,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.9.0",
             add_alt: add_alt_new,
+            metrics: None,
         }
     }
 
@@ -2065,6 +2090,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.8.0",
             add_alt: add_alt_old,
+            metrics: None,
         }
     }
 
@@ -2079,6 +2105,7 @@ mod versions_and_rivals {
             crate_name: "theircrate",
             crate_version: "0.1.0",
             add_alt: add_alt_new,
+            metrics: None,
         }
     }
 

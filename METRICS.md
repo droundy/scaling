@@ -179,8 +179,15 @@ postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
    the timing, and the records travel with the `Timings` into the `Report`.
    (There is no public hand-built API to extend, since groups are built by
    the registry, so this is what phase 3's macros call.)
-3. Registry and macros: `#[metrics]`, the candidate shim, assembly pairing
-   and diagnostics.
+3. Registry and macros: `#[scaling::metrics(group = ...)]`, a `MetricsFn`
+   registration, and for each candidate the type it returns and a way to
+   add itself that hands the output on. `assemble::plan_with_metrics` pairs
+   them, with diagnostics for a contradiction (fatal) and for a function
+   nothing returns the type of (a warning). A function registered by several
+   versions of one crate is one function, the newest. A candidate whose
+   output cannot be named (a borrow, `impl Trait`, a generic parameter) is
+   measured and has no metrics. The inline form on a standalone `#[bench]`
+   is not done.
 4. Observers: `CountingAlloc`, `peak_bytes`, `allocations`.
 5. Options: a `Config` switch to skip metrics, a runner flag
    to select them.

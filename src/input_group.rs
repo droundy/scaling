@@ -214,8 +214,7 @@ impl<I: 'static> InputGroup<I> {
     /// `metrics` takes the output by value, so it needs no `Clone`, and may
     /// reuse or check it. The run is outside the timing and happens once, so
     /// it suits quantities that do not vary from run to run.
-    #[allow(dead_code)] // until a registered benchmark can ask for metrics
-    pub(crate) fn add_input_metrics<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
+    pub fn add_input_metrics<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
     where
         F: FnMut(&mut I) -> O + 'static,
         O: 'static,
@@ -240,13 +239,7 @@ impl<I: 'static> InputGroup<I> {
     ///
     /// If the group has no way to clone its input, since the pristine copy
     /// has to come from somewhere.
-    #[allow(dead_code)] // until a registered benchmark can ask for metrics
-    pub(crate) fn add_input_metrics_with_input<F, O, M>(
-        mut self,
-        name: &str,
-        f: F,
-        mut metrics: M,
-    ) -> Self
+    pub fn add_input_metrics_with_input<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
     where
         F: FnMut(&mut I) -> O + 'static,
         O: 'static,
