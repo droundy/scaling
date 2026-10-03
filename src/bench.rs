@@ -77,6 +77,7 @@ const MAX_SAMPLES: usize = 1_000_000;
 
 /// A benchmark's measured timing.
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[non_exhaustive]
 pub struct Timing {
     /// The time, in nanoseconds, per iteration.
     pub ns_per_iter: f64,
@@ -124,7 +125,8 @@ pub struct Timing {
     /// simply needed longer sets only `hit_limit`, and its error bar is
     /// perfectly believable - just wider than requested.
     pub untrustworthy: bool,
-    pub difference: Option<Difference>,
+    /// Read through [`Timing::difference`].
+    pub(crate) difference: Option<Difference>,
 }
 
 impl Timing {

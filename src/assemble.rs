@@ -235,6 +235,7 @@ pub(crate) fn resolve_versions<T: 'static>(
 /// about, because the whole point of collecting registrations from anywhere
 /// is that the reader does not know where they all are.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Diagnostic {
     /// Two registrations claim the same name, so a report could not tell
     /// their rows apart.

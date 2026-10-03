@@ -87,6 +87,7 @@ impl Config {
 
 /// Statistics for a benchmark run determining the scaling of a function.
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[non_exhaustive]
 pub struct ScalingStats {
     /// The scaling law, if one was found.
     ///
@@ -163,6 +164,7 @@ impl ScalingStats {
 }
 /// The timing and scaling results (without statistics) for a benchmark.
 #[derive(Debug, PartialEq, Clone, Copy)]
+#[non_exhaustive]
 pub struct Scaling {
     /// The scaling power.
     ///

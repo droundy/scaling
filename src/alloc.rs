@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// not, since it was handed that, and neither is what a metrics function does
 /// afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Allocations {
     /// How many times it asked for memory: allocating, and growing or
     /// shrinking an allocation, each count once.

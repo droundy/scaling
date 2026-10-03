@@ -15,6 +15,7 @@
 /// [`Metrics::bytes`], [`Metrics::count`] and the others each pick one; this is
 /// what [`Metrics::unit`] takes, to change the unit of the number just added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Unit {
     /// Bytes, printed in the largest binary unit that keeps it above one:
     /// `812B`, `1.90MiB`.
