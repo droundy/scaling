@@ -24,8 +24,8 @@
 use super::{Kind, Workload};
 use std::cell::Cell;
 
-/// Multiply-adds per call. About 1.7 GHz and roughly one per cycle, so the
-/// default is a bit over 2 ms - comfortably into the regime where a sample
+/// Multiply-adds per call. Each is a canary link, four cycles, so at 1.7 GHz
+/// the default is about 8 ms - comfortably into the regime where a sample
 /// takes several ticks and cannot be made shorter.
 fn interior() -> u64 {
     std::env::var("LAB_SLOW_ITERS")
@@ -40,15 +40,24 @@ impl Workload {
         // Carried across calls like the canaries do, so the chain cannot be
         // constant-folded and each call genuinely depends on the last.
         let x = Cell::new(0x243F6A8885A308D3u64);
+        // Each link goes through `black_box`, exactly as the canary's batch
+        // loop does. Without it the compiler unrolls the chain and folds
+        // eight links into one multiply-add with precomputed constants: a
+        // call of 250,000 links took 28us where the canary's chain predicts
+        // 228us. With it the loop is the canary's own, link for link, so
+        // this workload's true ratio to the canary is exactly
+        // `LAB_SLOW_ITERS` - a known answer for the slow regime, whatever
+        // the clock is doing.
         Workload::simple("slow_cpu", Kind::Payload, move || {
-            let mut v = x.get();
             for _ in 0..n {
-                v = v
+                let v = x
+                    .get()
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
+                x.set(v);
+                std::hint::black_box(v);
             }
-            x.set(v);
-            v
+            x.get()
         })
     }
 }
