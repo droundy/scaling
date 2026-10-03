@@ -134,29 +134,25 @@ for a script that wants to look at the numbers rather than show them - reached
 by name, since nobody wrote those names down: they come from the module and
 function each benchmark was declared in.
 
-For custom output, `Report::groups()` exposes each logical group's candidate
-rows, typed input columns, and dense measurements. Each column's
-`baselines` entry says which row the rest were compared against. A caller
-can choose which fields to print or join its own candidate metadata before
-formatting:
+For custom output, `Report::groups()` gives each logical group as a `Group`,
+in name order. A `Group` prints itself as a table, and `println!("{report}")`
+prints every group, so choosing the order, or printing only some, is ordinary
+code:
 
 ```rust,no_run
-use scaling::{runner, Config, Measurement};
+use scaling::{runner, Config};
 
 let report = runner::measure(&Config::default()).expect("registrations compose");
-for (group_name, group) in report.groups() {
-    for (candidate, measurements) in group.candidates.iter().zip(&group.measurements) {
-        for (input, value) in group.inputs.iter().zip(measurements) {
-            if let Some(Measurement::Timing(timing)) = value {
-                println!(
-                    "{group_name} {candidate} {}<{}> {} ns",
-                    input.name, input.type_name, timing.ns_per_iter
-                );
-            }
-        }
-    }
+let mut groups: Vec<_> = report.groups().collect();
+// Put the group called "summing" first, then the rest as they come.
+groups.sort_by_key(|(name, _)| *name != "summing");
+for (_, group) in groups {
+    println!("{group}");
 }
 ```
+
+What a `Group` holds is not exposed, so how it is laid out can change; the
+numbers themselves are reachable by name, as above.
 
 ## Comparisons
 

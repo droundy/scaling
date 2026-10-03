@@ -4,7 +4,7 @@ A benchmark's timing is one number about a cell (one candidate on one input).
 Often the interesting question is about something else the candidate
 produced: how many bytes a serializer wrote, how well its output compresses,
 how much memory it peaked at. This plans a way to attach any such number to a
-cell and show it in the tables from `Report::groups()`.
+cell and show it in the tables a `Group` prints.
 
 It builds on `Group` and `formatting` from the `flexible-tables` branch
 (#17), and is stacked on it.
@@ -120,20 +120,24 @@ the builder says what to show.
 
 ## Data model
 
+Inside a `Group` (which is opaque: its fields are private, and it prints
+itself), a dense layer parallel to `measurements`:
+
 ```rust
-pub struct Group { ..., pub metrics: Vec<MetricColumn> }
-pub struct MetricColumn {
-    pub name: String,
-    pub unit: Unit,
+struct Group { /* .. */ metrics: Vec<MetricColumn> }
+struct MetricColumn {
+    name: String,
+    unit: Unit,
     /// Same shape as `Group::measurements`: values[candidate][input].
-    pub values: Vec<Vec<Option<f64>>>,
+    values: Vec<Vec<Option<f64>>>,
 }
 ```
 
-A dense layer parallel to `measurements`. The column set is the union of the
-names across candidates, in first-seen order, so a candidate that produces
-no such metric gets `None`. Also `Report::metric(group, candidate, name)`, since
-scripts reach results by name.
+The column set is the union of the names across candidates, in first-seen
+order, so a candidate that produces no such metric gets `None`. None of that
+is exposed. A script reads the numbers by name, as it reads the timings: the
+`Metrics` of each alternative come with `Timings::metrics()`, in the order of
+`Timings::names()`, and a value is `metrics.get("alloc net")`.
 
 ## Tables
 

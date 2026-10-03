@@ -1,21 +1,9 @@
-use crate::{Group, Measurement, Report, TypedInput};
+use crate::{Group, Measurement, TypedInput};
 use std::collections::BTreeSet;
 
 const MAX_TABLE_WIDTH: usize = 100;
 
-pub(crate) fn table(report: &Report) -> String {
-    let mut out = String::new();
-    for (name, group) in report.groups() {
-        let shown = render_group(name, group);
-        if !shown.is_empty() {
-            out.push_str(&shown);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn render_group(name: &str, group: &Group) -> String {
+pub(crate) fn render_group(name: &str, group: &Group) -> String {
     if !group.metrics.is_empty() {
         if stacks(group) {
             if let Some(shown) = render_stacked(name, group) {
@@ -561,6 +549,7 @@ mod tests {
     #[test]
     fn compact_groups_render_as_grids() {
         let group = Group {
+            name: String::new(),
             candidates: vec!["stable".into(), "unstable".into(), "crazy".into()],
             inputs: vec![
                 TypedInput {
@@ -594,6 +583,7 @@ mod tests {
     #[test]
     fn narrow_layout_transposes_when_that_fits() {
         let group = Group {
+            name: String::new(),
             candidates: vec!["sort".into()],
             inputs: (0..8)
                 .map(|i| TypedInput {
@@ -643,6 +633,7 @@ mod tests {
         let shown = render_group(
             "wide",
             &Group {
+                name: String::new(),
                 candidates,
                 inputs,
                 measurements,
@@ -675,6 +666,7 @@ mod tests {
     #[test]
     fn a_comparison_names_its_baseline() {
         let group = Group {
+            name: String::new(),
             candidates: vec!["stable".into(), "unstable".into()],
             inputs: vec![TypedInput {
                 name: String::new(),
@@ -697,6 +689,7 @@ mod tests {
             type_name: type_name.into(),
         };
         let group = Group {
+            name: String::new(),
             candidates: vec!["fast".into(), "small".into()],
             inputs: vec![typed("random", "i32"), typed("random", "u32")],
             measurements: vec![
@@ -713,6 +706,7 @@ mod tests {
     #[test]
     fn a_lone_benchmark_prints_on_one_line() {
         let group = Group {
+            name: String::new(),
             candidates: vec!["lonely".into()],
             inputs: vec![TypedInput::default()],
             measurements: vec![vec![Some(timing(22.0))]],
@@ -732,6 +726,7 @@ mod tests {
 
     fn serializers() -> Group {
         Group {
+            name: String::new(),
             candidates: vec!["json".into(), "postcard".into(), "bincode".into()],
             inputs: vec![TypedInput {
                 name: "mesh".into(),
@@ -940,6 +935,7 @@ mod tests {
     #[test]
     fn a_lone_benchmark_can_have_metrics() {
         let group = Group {
+            name: String::new(),
             candidates: vec!["lonely".into()],
             inputs: vec![TypedInput::default()],
             measurements: vec![vec![Some(timing(22.0))]],

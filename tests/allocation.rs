@@ -166,12 +166,11 @@ fn report() -> scaling::Report {
 #[test]
 fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
     let report = report();
-    let (_, group) = report
-        .groups()
-        .find(|(name, _)| *name == "build")
-        .expect("the build group");
-    assert_eq!(group.candidates, ["at_once", "in_pieces"]);
-    let names: Vec<&str> = group.metrics.iter().map(|m| m.name.as_str()).collect();
+    let results = report.comparison("build").expect("the build comparison");
+    let candidates: Vec<&str> = results.names().collect();
+    assert_eq!(candidates, ["at_once", "in_pieces"]);
+    let metrics = results.metrics();
+    let names: Vec<&str> = metrics[0].iter().map(|(name, _, _)| name).collect();
     assert_eq!(
         names,
         [
@@ -182,45 +181,43 @@ fn a_metrics_function_shows_the_counts_of_its_candidates_run() {
             "alloc net"
         ]
     );
-    let value = |metric: usize, candidate: usize| group.metrics[metric].values[candidate][0];
+    let value = |candidate: usize, metric: &str| metrics[candidate].get(metric).unwrap();
 
     // One allocation of exactly the size asked for.
-    assert_eq!(value(1, 0), Some(10_000.0));
-    assert_eq!(value(2, 0), Some(1.0));
-    assert_eq!(value(3, 0), Some(10_000.0));
+    assert_eq!(value(0, "alloc peak"), 10_000.0);
+    assert_eq!(value(0, "alloc count"), 1.0);
+    assert_eq!(value(0, "alloc total"), 10_000.0);
     // And all of it is still held, as the output.
-    assert_eq!(value(4, 0), Some(10_000.0));
+    assert_eq!(value(0, "alloc net"), 10_000.0);
 
     // Grown a piece at a time: several requests, the peak at least the
     // final size, and more asked for in all than ever held at once.
-    assert!(value(2, 1).unwrap() > 1.0, "{:?}", value(2, 1));
-    assert!(value(1, 1).unwrap() >= 10_000.0, "{:?}", value(1, 1));
-    assert!(value(3, 1).unwrap() >= value(1, 1).unwrap());
+    assert!(value(1, "alloc count") > 1.0);
+    assert!(value(1, "alloc peak") >= 10_000.0);
+    assert!(value(1, "alloc total") >= value(1, "alloc peak"));
     // What is kept is the output, with whatever room it grew to.
-    assert!(value(4, 1).unwrap() >= 10_000.0, "{:?}", value(4, 1));
+    assert!(value(1, "alloc net") >= 10_000.0);
     // Not the million bytes the metrics function itself allocated.
-    assert!(value(1, 1).unwrap() < 100_000.0);
+    assert!(value(1, "alloc peak") < 100_000.0);
 }
 
 #[test]
 fn a_metrics_function_can_read_the_counts_to_build_its_own_metric() {
     let report = report();
-    let (_, group) = report
-        .groups()
-        .find(|(name, _)| *name == "kept")
-        .expect("the kept group");
-    assert_eq!(group.candidates, ["exact", "padded"]);
-    assert_eq!(group.metrics[0].name, "held per byte");
+    let results = report.comparison("kept").expect("the kept comparison");
+    let candidates: Vec<&str> = results.names().collect();
+    assert_eq!(candidates, ["exact", "padded"]);
+    let held = |candidate: usize| results.metrics()[candidate].get("held per byte");
     // 8000 bytes held for 8000 bytes returned, and 32000 held for 8000.
-    assert_eq!(group.metrics[0].values, [[Some(1.0)], [Some(4.0)]]);
+    assert_eq!(held(0), Some(1.0));
+    assert_eq!(held(1), Some(4.0));
 }
 
 #[test]
 fn a_function_not_marked_allocation_has_no_counts() {
     let report = report();
-    let (_, group) = report
-        .groups()
-        .find(|(name, _)| *name == "uncounted")
-        .expect("the uncounted group");
-    assert_eq!(group.metrics[0].values, [[Some(0.0)]]);
+    let results = report
+        .get_timings("uncounted::lone")
+        .expect("the lone candidate");
+    assert_eq!(results.metrics()[0].get("had counts"), Some(0.0));
 }

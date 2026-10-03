@@ -148,7 +148,7 @@ pub fn run(options: Config) -> Outcome {
 
     let report = suite.run();
 
-    print!("{}", crate::formatting::table(&report));
+    print!("{report}");
 
     Outcome::Measured
 }

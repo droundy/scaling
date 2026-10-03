@@ -345,14 +345,14 @@ impl Metrics {
 /// One metric across a whole [`Group`](crate::Group), shaped like its
 /// measurements.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MetricColumn {
+pub(crate) struct MetricColumn {
     /// What the metric is called.
-    pub name: String,
+    pub(crate) name: String,
     /// What it is counted in.
-    pub unit: Unit,
+    pub(crate) unit: Unit,
     /// `values[candidate][input]`, aligned with the group's measurements.
     /// `None` where that cell produced no such metric.
-    pub values: Vec<Vec<Option<f64>>>,
+    pub(crate) values: Vec<Vec<Option<f64>>>,
 }
 
 #[cfg(test)]
