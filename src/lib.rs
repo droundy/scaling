@@ -1028,7 +1028,6 @@ impl Config {
 
     /// Is a measurement of `ns_per_iter` with standard error `std_error`
     /// (both in nanoseconds) precise enough to stop?
-    #[cfg(test)]
     fn accuracy_met(&self, ns_per_iter: f64, std_error: f64) -> bool {
         // A standard error of exactly zero means every sample agreed to the
         // limit of the timer's resolution, and no further sampling can
