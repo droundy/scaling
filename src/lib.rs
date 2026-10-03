@@ -521,17 +521,17 @@ pub(crate) mod significant;
 pub use self::bench::Timing;
 
 pub use self::alloc::{Allocations, Allocator};
-pub use self::assemble::Diagnostic;
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
 pub(crate) use self::metrics::MetricColumn;
 pub use self::metrics::{MetricValue, Metrics};
+pub use self::run::RegistrationError;
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::{Group, Report};
 pub(crate) use self::suite::{Measurement, TypedInput};
 
 pub(crate) use self::input_group::InputGroup;
-pub(crate) use self::suite::{Assembled, Suite};
+pub(crate) use self::suite::Suite;
 
 /// Re-exported so that registration code written by a macro has a single
 /// path to name, and callers need not depend on `inventory` themselves.

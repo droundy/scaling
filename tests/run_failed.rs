@@ -19,12 +19,13 @@ fn second() -> u64 {
 
 #[test]
 fn run_says_what_does_not_compose() {
-    let problems = match Config::default().run() {
+    let said = match Config::default().run() {
         Ok(_) => panic!("two benchmarks called `same` should not compose"),
-        Err(problems) => problems,
+        Err(error) => error.to_string(),
     };
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(problems[0].to_string().contains("same"), "{problems:?}");
+    let problems = said.lines().filter(|l| l.starts_with("  - ")).count();
+    assert_eq!(problems, 1, "{said}");
+    assert!(said.contains("same"), "{said}");
 }
 
 #[test]

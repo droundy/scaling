@@ -1,9 +1,41 @@
 //! Running the registered benchmarks: [`Config::run_and_print`] and
 //! [`Config::run`].
 
-use crate::assemble::Diagnostic;
-use crate::{Assembled, Config, Report, Suite};
+use crate::{Config, Report, Suite};
+use std::fmt::{self, Display, Formatter};
 use std::process::ExitCode;
+
+/// Why [`Config::run`] measured nothing: the registered benchmarks contradict
+/// each other.
+///
+/// Printing it, with `{}` or `{:?}`, lists every contradiction found, one to a
+/// line, so `.expect("..")` on a failed run says what to fix. What to fix is
+/// in your own `#[scaling::bench]`, `#[scaling::input]` and
+/// `#[scaling::metrics]` attributes, which is why this carries only the text.
+#[derive(Clone)]
+pub struct RegistrationError {
+    problems: Vec<String>,
+}
+
+impl Display for RegistrationError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "registered benchmarks do not make sense together:")?;
+        for problem in &self.problems {
+            write!(f, "\n  - {problem}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The same text as [`Display`], so that `unwrap` and `expect` show it as it
+/// reads rather than as a list of escaped strings.
+impl fmt::Debug for RegistrationError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for RegistrationError {}
 
 impl Config {
     /// Discover every benchmark registered in this binary, measure them
@@ -50,22 +82,16 @@ impl Config {
     /// # Its exit status means something
     ///
     /// Zero, unless the run never started because registrations contradict each
-    /// other, which gives `2`. [`Config::run`] says which registrations.
+    /// other, which gives `2` and prints what is wrong to stderr. [`Config::run`]
+    /// hands the same text back as a [`RegistrationError`].
     pub fn run_and_print(&self) -> ExitCode {
-        let (suite, tokens) = match self.assemble() {
-            Ok(assembled) => assembled,
-            Err(problems) => {
-                eprintln!("registered benchmarks do not make sense together:");
-                for p in &problems {
-                    eprintln!("  - {p}");
-                }
+        let suite = match self.assemble() {
+            Ok(suite) => suite,
+            Err(error) => {
+                eprintln!("{error}");
                 return ExitCode::from(2);
             }
         };
-
-        for w in &tokens.warnings {
-            eprintln!("warning: {w}");
-        }
 
         if suite.is_empty() {
             eprintln!("There are no benchmarks to run!");
@@ -95,8 +121,15 @@ impl Config {
     /// [`Report::scaling`] - which is what makes this usable without knowing
     /// in advance what a run will hold.
     ///
-    /// `Err` carries every reason the registrations do not compose, the same
-    /// list [`run_and_print`] would have printed.
+    /// # Errors
+    ///
+    /// [`RegistrationError`] says every way the registrations contradict each
+    /// other - two benchmarks of one name, say - and nothing is measured. It is
+    /// the text [`run_and_print`] would have printed.
+    ///
+    /// Registrations that are merely unused, such as an input no candidate takes,
+    /// are not errors. A warning for each goes to stderr, as in
+    /// [`run_and_print`], and the run goes ahead.
     ///
     /// ```no_run
     /// use scaling::Config;
@@ -117,20 +150,27 @@ impl Config {
     /// ```
     ///
     /// [`run_and_print`]: Config::run_and_print
-    pub fn run(&self) -> Result<Report, Vec<Diagnostic>> {
-        let (suite, _tokens) = self.assemble()?;
-        Ok(suite.run())
+    pub fn run(&self) -> Result<Report, RegistrationError> {
+        Ok(self.assemble()?.run())
     }
 
     /// Discover everything registered and assemble it into a suite, ready to
-    /// run.
+    /// run, saying on stderr what went unused.
     ///
     /// Shared by [`Config::run_and_print`] and [`Config::run`] so that the two
     /// cannot drift: what `run` hands back is what `run_and_print` would have
-    /// printed, assembled by the same code under the same options.
-    fn assemble(&self) -> Result<(Suite, Assembled), Vec<Diagnostic>> {
+    /// printed, assembled by the same code under the same options, and the two
+    /// warn alike.
+    fn assemble(&self) -> Result<Suite, RegistrationError> {
         let mut suite = self.suite();
-        let tokens = suite.try_add_registered()?;
-        Ok((suite, tokens))
+        let assembled = suite
+            .try_add_registered()
+            .map_err(|problems| RegistrationError {
+                problems: problems.iter().map(ToString::to_string).collect(),
+            })?;
+        for warning in &assembled.warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(suite)
     }
 }
