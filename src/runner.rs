@@ -1,5 +1,5 @@
-//! Discover every benchmark registered in this binary, measure them, and
-//! print the results.
+//! The whole of a benchmark binary: discover every benchmark registered in
+//! this binary, measure them, and print the results.
 //!
 //! [`crate::main!`] runs every registered benchmark with the default
 //! [`Config`] and prints a table:
