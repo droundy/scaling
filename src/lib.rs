@@ -996,7 +996,7 @@ impl Config {
     /// The Bonferroni limit for a family of `comparisons` comparisons.
     ///
     /// Each entry point works this out for the family it can see:
-    /// [`InputGroup::run`] for its own `k - 1`, and a [`Suite`] for its
+    /// `InputGroup::run` for its own `k - 1`, and a [`Suite`] for its
     /// total, which it knows once its last entry is added and before it runs
     /// anything. Nothing is promised in advance, so there is nothing to
     /// verify afterwards.

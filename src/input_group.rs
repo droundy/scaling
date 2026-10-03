@@ -218,7 +218,7 @@ impl Config {
     /// Neither the generating nor the cloning is timed, but both are paid
     /// out of [`max_time`](crate::Config::with_max_time).
     ///
-    /// Like [`Config::input_group`]: this assembles a registered input group
+    /// Like `Config::input_group`: this assembles a registered input group
     /// or matrix lane.
     pub(crate) fn input_group_make_input<G, I: Clone + 'static>(
         &self,
@@ -269,9 +269,7 @@ impl<I: 'static> InputGroup<I> {
     ///
     /// The alternatives must agree on the input type, but not on what they
     /// return: each is timed by its own instantiation of the timing loop,
-    /// and only that loop, not its `O`, is visible to [`run`].
-    ///
-    /// [`run`]: InputGroup::run
+    /// and only that loop, not its `O`, is visible to the group's `run`.
     pub fn add_input<F, O>(mut self, name: &str, f: F) -> Self
     where
         F: FnMut(&mut I) -> O + 'static,

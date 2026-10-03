@@ -260,7 +260,7 @@ impl Suite {
         self.add_input_group(name, group);
     }
 
-    /// Add a scaling benchmark, as [`bench_scaling`](fn@bench_scaling) would run it.
+    /// Add a scaling benchmark.
     pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize)
     where
         F: FnMut(usize) -> O + 'static,
@@ -271,8 +271,7 @@ impl Suite {
         })
     }
 
-    /// Add a scaling benchmark over generated inputs, as
-    /// [`bench_scaling_gen`] would run it.
+    /// Add a scaling benchmark over inputs generated for each size.
     pub fn add_scaling_gen<G, F, I, O>(&mut self, name: &str, make_input: G, f: F, nmin: usize)
     where
         G: FnMut(usize) -> I + 'static,
@@ -290,7 +289,7 @@ impl Suite {
         })
     }
 
-    /// Add an input group, built with [`Config::input_group`].
+    /// Add an input group.
     ///
     /// # Panics
     ///
@@ -411,7 +410,7 @@ impl Suite {
         self.assemble_with_metrics(regs, cands, inputs, &[])
     }
 
-    /// [`Suite::assemble_registered`], and candidates are given the metrics
+    /// `Suite::assemble_registered`, and candidates are given the metrics
     /// functions that apply to them.
     fn assemble_with_metrics(
         &mut self,

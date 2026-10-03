@@ -58,7 +58,7 @@ impl Config {
     }
 
     /// The generated-input scaling sweep, which yields between rounds. See
-    /// [`Config::bench_scaling_gen`].
+    /// `Config::bench_scaling_gen`.
     pub(crate) async fn bench_scaling_gen_async<G, F, I, O>(
         &self,
         clock: &Clock,

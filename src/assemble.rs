@@ -8,7 +8,7 @@
 //! could not have been said immediately - the same reasoning a comparison set
 //! already applies when it checks its alternative count before claiming.
 //!
-//! [`plan`](crate::assemble::plan) is therefore a pure function over slices:
+//! [`plan_with_metrics`] is therefore a pure function over slices:
 //! it takes registrations
 //! and returns either a plan or a list of complaints, touching nothing and
 //! measuring nothing. That makes every diagnostic below testable without a
@@ -556,9 +556,9 @@ fn unit_input() -> Named<Input> {
 
 /// Partition one group's candidates and inputs into lanes and pair them up.
 ///
-/// Pure, like [`plan`], and for the same reason: everything that can be
-/// wrong is decided before the machine is claimed. `group` is fixed for the
-/// whole call - [`plan`] calls this once per group name, having already
+/// Pure, like [`plan_with_metrics`], and for the same reason: everything that
+/// can be wrong is decided before the machine is claimed. `group` is fixed for
+/// the whole call - [`plan_with_metrics`] calls this once per group name, having already
 /// exploded every candidate and input across the (possibly several) groups
 /// it belongs to.
 ///
@@ -909,7 +909,7 @@ pub fn plan(
     plan_with_metrics(regs, candidates, inputs, &[])
 }
 
-/// [`plan`], and each candidate is also paired with the metrics function
+/// `plan`, and each candidate is also paired with the metrics function
 /// that applies to it.
 ///
 /// A metrics function applies to a candidate when it names one of the

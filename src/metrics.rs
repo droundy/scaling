@@ -173,7 +173,7 @@ impl fmt::Display for MetricValue {
 }
 
 /// `text` with the width, fill and alignment `f` asks for. Not
-/// [`Formatter::pad`], which would read a precision as a length to cut the
+/// [`Formatter::pad`](std::fmt::Formatter::pad), which would read a precision as a length to cut the
 /// text to.
 fn pad(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     let Some(width) = f.width() else {
@@ -315,7 +315,7 @@ enum Entry {
     Counted(Counted),
 }
 
-/// Which of an alternative's [`Allocations`] a metric shows.
+/// Which of an alternative's [`Allocations`](crate::Allocations) a metric shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Counted {
     AllocationCount,

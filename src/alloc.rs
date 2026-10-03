@@ -76,7 +76,7 @@ pub(crate) fn installed() -> bool {
 
 /// The counts of the run a metrics function is being called for, if it is
 /// being called for one that was counted. See
-/// [`Metrics::counts`](crate::Metrics::counts).
+/// [`Metrics::allocations`](crate::Metrics::allocations).
 pub(crate) fn current() -> Option<Allocations> {
     CURRENT.with(Cell::get)
 }
