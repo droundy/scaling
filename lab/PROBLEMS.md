@@ -684,12 +684,39 @@ measured 17-18% below its exact ratio to the canary, in every run:
   in the noisy pair recordings, where 4-6 ms `copy_64mb` calls - which are
   memory-bound - shared every round with a canary reading 0.91 ns.
 
-So on a machine whose clock is free to move, "everything in one round
-runs under the same clock" fails between a long CPU-bound call and the
-short batches around it. A slow function's bogo-nanoseconds measured
-against the 20 us canary would be about 20% low. Whether this is the
-clock or the cycles is untested. It needs the same run on a pinned,
-fixed-clock core: if the offset vanishes there, it is frequency.
+**It is cycles, not the clock: the same happens pinned at a fixed clock.**
+On reserved CPU 2, with the performance governor, no turbo and 1.7 GHz:
+
+| `slow_cpu` call | canary, ns a link | `f64_sin`, ns | `slow_cpu`, ns a link |
+| --- | --- | --- | --- |
+| 0.6 ms | 2.400 | 33.85 | 2.366 |
+| 9.5 ms | 2.896 | 41.19 | 2.371 |
+
+`slow_cpu` stays at exactly 4.0 cycles a link. The short batches move
+together, by about 22%. That is a step between discrete states, not a
+widening:
+- **0.6 ms calls:** almost every canary batch ran at 2.359 or 2.400 ns a
+  link, 4.0 or 4.07 cycles.
+- **9.5 ms calls:** almost every one ran at 2.89 ns, 4.9 cycles.
+
+The two-rung subtraction keeps the shift: the per-link slope is 2.864 ns
+against 2.359 ns. So this is problem 3 - the number moves with the company
+it keeps - in a large new form. **A long CPU-bound neighbour makes short
+CPU-bound work cost about 20% more cycles**, on a quiet machine too, and
+subtraction does not remove it. Long memory-bound neighbours do not:
+`copy_64mb` at 4-6 ms shared every round of the pair recordings, with the
+canary at 2.359 ns quiet. The mechanism is not identified.
+
+What it breaks:
+- **Absolute times** of short functions measured in a suite that also
+  holds long CPU-bound ones read about 20% high, quiet or not.
+- **Ratios** between a long CPU-bound function and a short one are off by
+  the same.
+- **Bogo-nanoseconds** of a slow function measured against the 20 us
+  canary are about 20% low.
+
+Ratios between alternatives of similar length are unaffected, since both
+sides are in the same state.
 
 ---
 
