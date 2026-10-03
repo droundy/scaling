@@ -487,11 +487,15 @@ pub(crate) struct TypedInput {
 
 /// The results of one logical group: its candidates measured on its inputs.
 ///
-/// It prints itself as a table, laid out to fit: `println!("{group}")`. Reach
-/// the groups of a [`Report`] through [`Report::groups`], which gives them in
-/// name order; a caller that wants another order, or only some of them, can
-/// collect and sort. What is inside is not exposed, so how a group is laid out
-/// is free to change.
+/// It prints itself as a table, laid out to fit: `println!("{group}")`. A
+/// precision sets how many significant figures its metrics are shown to, as in
+/// `{group:.4}`, and is three by default; timings always show the digits their
+/// error justifies.
+///
+/// Reach the groups of a [`Report`] through [`Report::groups`], which gives
+/// them in name order; a caller that wants another order, or only some of
+/// them, can collect and sort. What is inside is not exposed, so how a group is
+/// laid out is free to change.
 #[derive(Debug, Clone)]
 pub struct Group {
     /// What the group is called: the group name for a registered comparison,
@@ -525,7 +529,11 @@ pub struct Group {
 
 impl Display for Group {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.write_str(&crate::formatting::render_group(&self.name, self))
+        f.write_str(&crate::formatting::render_group(
+            &self.name,
+            self,
+            f.precision(),
+        ))
     }
 }
 
@@ -1128,9 +1136,16 @@ impl Report {
 impl Display for Report {
     /// Every group as its table, in name order, each followed by a blank line:
     /// what a benchmark binary prints at the end of a run.
+    ///
+    /// A precision is a number of significant figures for the metrics, as in
+    /// `{report:.4}`, and is three by default. Timings always show the digits
+    /// their error justifies.
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         for (_, group) in self.groups() {
-            let shown = group.to_string();
+            let shown = match f.precision() {
+                Some(figures) => format!("{group:.figures$}"),
+                None => group.to_string(),
+            };
             // A group with nothing measured says nothing, not a blank line.
             if !shown.is_empty() {
                 writeln!(f, "{shown}")?;

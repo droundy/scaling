@@ -3,14 +3,17 @@ use std::collections::BTreeSet;
 
 const MAX_TABLE_WIDTH: usize = 100;
 
-pub(crate) fn render_group(name: &str, group: &Group) -> String {
+/// A group as its table. `figures` is how many significant figures to show
+/// the metrics to, and the default if there is none; timings always show the
+/// digits their error justifies.
+pub(crate) fn render_group(name: &str, group: &Group, figures: Option<usize>) -> String {
     if !group.metrics.is_empty() {
         if stacks(group) {
-            if let Some(shown) = render_stacked(name, group) {
+            if let Some(shown) = render_stacked(name, group, figures) {
                 return shown;
             }
         }
-        return render_with_metrics(name, group);
+        return render_with_metrics(name, group, figures);
     }
     if group.candidates.len() == 1 && group.inputs.len() == 1 {
         let input = &group.inputs[0];
@@ -97,7 +100,7 @@ pub(crate) fn render_group(name: &str, group: &Group) -> String {
     }
 
     let all_columns: Vec<usize> = (0..group.inputs.len()).collect();
-    render_long(name, group, &all_columns)
+    render_long(name, group, &all_columns, figures)
 }
 
 /// The title of a grid: the group, and the type of its inputs when they all
@@ -277,14 +280,14 @@ fn format_matrix(
 /// The form that always fits, since it grows downwards: used when neither
 /// orientation of a table does. Any metrics follow the measurement as
 /// further columns.
-fn render_long(name: &str, group: &Group, columns: &[usize]) -> String {
+fn render_long(name: &str, group: &Group, columns: &[usize], figures: Option<usize>) -> String {
     let mut rows = Vec::new();
     for (candidate, candidate_name) in group.candidates.iter().enumerate() {
         for &input in columns {
             let details = &group.inputs[input];
             let shown = group.measurements[candidate][input];
             let metrics: Vec<String> = (0..group.metrics.len())
-                .map(|metric| metric_cell(group, metric, candidate, input))
+                .map(|metric| metric_cell(group, metric, candidate, input, figures))
                 .collect();
             if shown.is_none() && metrics.iter().all(|m| m == "-") {
                 continue;
@@ -372,7 +375,7 @@ fn stacks(group: &Group) -> bool {
 /// `None` when it is too wide for the page. Unlike a plain grid it is not
 /// turned on its side, because then the metrics would be the columns and the
 /// lines under each time would no longer line up.
-fn render_stacked(name: &str, group: &Group) -> Option<String> {
+fn render_stacked(name: &str, group: &Group, figures: Option<usize>) -> Option<String> {
     let types: BTreeSet<&str> = group
         .inputs
         .iter()
@@ -399,7 +402,7 @@ fn render_stacked(name: &str, group: &Group) -> Option<String> {
             values.push(
                 columns
                     .iter()
-                    .map(|&column| metric_cell(group, metric, row, column))
+                    .map(|&column| metric_cell(group, metric, row, column, figures))
                     .collect(),
             );
         }
@@ -417,7 +420,7 @@ fn render_stacked(name: &str, group: &Group) -> Option<String> {
 /// A table to an input rather than one grid because the metrics are what
 /// there is to read across, and a cell that held a time and several metrics
 /// for each input would not be readable.
-fn render_with_metrics(name: &str, group: &Group) -> String {
+fn render_with_metrics(name: &str, group: &Group, figures: Option<usize>) -> String {
     let mut out = String::new();
     for column in 0..group.inputs.len() {
         let rows: Vec<usize> = (0..group.candidates.len())
@@ -446,7 +449,7 @@ fn render_with_metrics(name: &str, group: &Group) -> String {
                 std::iter::once(Format(group.measurements[row][column]).to_string())
                     .chain(
                         (0..group.metrics.len())
-                            .map(|metric| metric_cell(group, metric, row, column)),
+                            .map(|metric| metric_cell(group, metric, row, column, figures)),
                     )
                     .collect()
             })
@@ -459,7 +462,7 @@ fn render_with_metrics(name: &str, group: &Group) -> String {
             &headings,
             &values,
         )
-        .unwrap_or_else(|| render_long(name, group, &[column]));
+        .unwrap_or_else(|| render_long(name, group, &[column], figures));
         if !out.is_empty() {
             out.push('\n');
         }
@@ -486,12 +489,21 @@ fn input_title(name: &str, input: &TypedInput) -> String {
 ///
 /// The difference needs no significance test, since a metric is computed
 /// rather than sampled, so it is always shown.
-fn metric_cell(group: &Group, metric: usize, row: usize, column: usize) -> String {
+fn metric_cell(
+    group: &Group,
+    metric: usize,
+    row: usize,
+    column: usize,
+    figures: Option<usize>,
+) -> String {
     let metric = &group.metrics[metric];
     let Some(value) = metric.values[row][column] else {
         return "-".to_string();
     };
-    let mut shown = value.to_string();
+    let mut shown = match figures {
+        Some(figures) => format!("{value:.figures$}"),
+        None => value.to_string(),
+    };
     if let Some(baseline) = group.baselines[column].filter(|&baseline| baseline != row) {
         // A difference needs both to be counted in the same unit.
         if let Some(base) = metric.values[baseline][column]
@@ -526,6 +538,11 @@ mod tests {
 
     use super::*;
     use expect_test::expect;
+
+    /// A group as its table, with the default figures for its metrics.
+    fn render_group(name: &str, group: &Group) -> String {
+        super::render_group(name, group, None)
+    }
 
     fn timing(ns_per_iter: f64) -> Measurement {
         Measurement::Timing(crate::Timing {

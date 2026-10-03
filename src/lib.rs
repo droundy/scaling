@@ -775,6 +775,12 @@ pub use scaling_macros::input;
 /// input gets a table. See "Reading the output" in the crate docs for how a
 /// group that is too wide is laid out.
 ///
+/// A timing's error says how many of its digits mean anything; nothing says so
+/// for a metric, so each is shown to three significant figures. A precision on
+/// the thing being printed changes that for all of them: `println!("{report:.5}")`
+/// shows every metric to five, and so does `{group:.5}` for one [`Group`].
+/// Timings are not affected.
+///
 /// # Reading them back
 ///
 /// A script that measured with [`Config::run`] asks the [`Report`] for a
