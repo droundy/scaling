@@ -68,7 +68,7 @@ pub struct Registered {
     /// # Why this adds rather than runs
     ///
     /// The obvious shape - `fn(&Config) -> Stats`, run it and hand back the
-    /// answer - would be wrong. [`Config::bench`] and friends drive their
+    /// answer - would be wrong. `Config::bench` and friends drive their
     /// sampling loop to completion with `block_on`, so a registry of those
     /// would run every benchmark start to finish, one after another. That is
     /// precisely what a suite exists not to do: its scheduler interleaves
@@ -86,7 +86,6 @@ pub struct Registered {
     /// types at the point it writes it, so `F`, `I` and `O` are resolved
     /// there and the shim that comes out has a fixed signature.
     ///
-    /// [`Config::bench`]: crate::Config::bench
     pub add: fn(&mut Suite, &str),
 }
 
@@ -251,9 +250,10 @@ pub struct Input {
     pub type_id: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
     pub type_name: &'static str,
-    /// Called once per round. With multiple candidates the value is cloned
-    /// for each, so that all of them meet the same input; a singleton uses it
-    /// directly. See [`ErasedInput`].
+    /// Called once for each timed iteration - a round makes a batch of them.
+    /// With multiple candidates each value is cloned for each, so that all of
+    /// them meet the same input; a singleton uses it directly. See
+    /// [`ErasedInput`].
     pub make: fn() -> ErasedInput,
 }
 

@@ -13,7 +13,7 @@ A lightweight benchmarking library which:
 Put an attribute on a function and it is a benchmark. These can live
 anywhere in your crate, next to the code they measure:
 
-```rust
+```rust,ignore
 #[scaling::bench]
 fn fib_200() -> usize { fib(200) }
 
@@ -68,7 +68,7 @@ everything is in the same unit.
 `#[scaling::bench_scaling]` measures how the cost grows with `N` and reports
 the constant in front of the law it found, with the same kind of error bar:
 
-```rust
+```rust,ignore
 #[scaling::bench_scaling(nmin = 0)]
 fn fib_scaling(n: usize) -> usize { fib(n) }
 ```
@@ -116,8 +116,9 @@ together with the default accuracy and budget, and printed as a table -
 that is what `scaling::main!()` above gives you. The default run needs no
 configuration to build, no list to add to and no printing to write.
 
-Choosing a tighter accuracy target or time budget means building a
-[`Config`] and passing it to the runner in your own `main`:
+`scaling::main!()` takes no arguments, so choosing a tighter accuracy target or
+time budget means building a [`Config`] and passing it to the runner in your
+own `main`:
 
 ```rust,no_run
 use scaling::{runner, Config};
@@ -133,6 +134,26 @@ fn main() -> std::process::ExitCode {
 for a script that wants to look at the numbers rather than show them - reached
 by name, since nobody wrote those names down: they come from the module and
 function each benchmark was declared in.
+
+For custom output, `Report::groups()` gives each logical group as a `Group`,
+in name order. A `Group` prints itself as a table, and `println!("{report}")`
+prints every group, so choosing the order, or printing only some, is ordinary
+code:
+
+```rust,no_run
+use scaling::{runner, Config};
+
+let report = runner::measure(&Config::default()).expect("registrations compose");
+let mut groups: Vec<_> = report.groups().collect();
+// Put the group called "summing" first, then the rest as they come.
+groups.sort_by_key(|(name, _)| *name != "summing");
+for (_, group) in groups {
+    println!("{group}");
+}
+```
+
+What a `Group` holds is not exposed, so how it is laid out can change; the
+numbers themselves are reachable by name, as above.
 
 ## Comparisons
 
@@ -156,6 +177,9 @@ fn unstable(v: &mut Vec<u64>) { v.sort_unstable() }
 All the candidates are measured in one interleaved round on the *same*
 generated input, which is what lets the difference between them be reported
 with its own error bar rather than by subtracting two independent numbers.
+To give every candidate the same values the input is generated for each
+iteration and cloned for each candidate, so its type must be `Clone`; the
+generating and cloning are not timed, but they are paid for out of `max_time`.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
@@ -211,9 +235,9 @@ average the same drift.
 It is also what makes the multiple-comparison correction right. Run five
 comparisons and you have five chances at a false positive; the threshold
 each one is judged at comes from how many the run actually holds, which is
-knowable only once they have all been collected. (So a run filtered down to
-one comparison judges it more leniently — correctly, but it does mean a
-filtered run and a full one are not quite asking the same question.)
+knowable only once they have all been collected. (So a run holding a single
+comparison judges it more leniently — correctly, but it does mean a small run
+and a full one are not quite asking the same question.)
 
 What this buys is a **bound**, not an improvement. Reversing the declaration
 order of eight identical workloads moves an interleaved benchmark by
@@ -288,10 +312,10 @@ when no reservation is active, benchmarks simply run normally.
 
 Licensed under either of
 
- * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   http://opensource.org/licenses/MIT)
+ * Apache License, Version 2.0, ([LICENSE-APACHE](https://github.com/droundy/scaling/blob/main/LICENSE-APACHE) or
+   <http://www.apache.org/licenses/LICENSE-2.0>)
+ * MIT license ([LICENSE-MIT](https://github.com/droundy/scaling/blob/main/LICENSE-MIT) or
+   <http://opensource.org/licenses/MIT>)
 
 at your option.
 

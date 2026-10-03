@@ -455,6 +455,14 @@ impl Timings {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_named(names: &[&str], timings: &[Timing]) -> Self {
+        Timings {
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+            timings: timings.to_vec(),
+        }
+    }
+
     /// The name of the baseline - the first alternative that was added.
     pub fn baseline_name(&self) -> &str {
         &self.names[0]
@@ -474,6 +482,14 @@ impl Timings {
     /// What each alternative measured, in the order they were added.
     pub fn stats(&self) -> &[Timing] {
         self.timings()
+    }
+
+    /// Every alternative's name and measurement, baseline first.
+    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement)> {
+        self.names()
+            .map(str::to_string)
+            .zip(self.timings.iter().map(|t| crate::Measurement::Timing(*t)))
+            .collect()
     }
 
     /// Each alternative beyond the baseline, paired with its name, as a

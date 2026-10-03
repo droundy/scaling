@@ -20,6 +20,9 @@ libc = "0.2"
 inventory = "0.3.21"
 scaling-macros = { version = "0.9.0", path = "macros" }
 
+[dev-dependencies]
+expect-test = "1.5.1"
+
 [workspace]
 members = [".", "macros"]
 

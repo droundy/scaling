@@ -86,7 +86,7 @@ impl Config {
 }
 
 /// Statistics for a benchmark run determining the scaling of a function.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct ScalingStats {
     /// The scaling law, if one was found.
     ///
@@ -208,9 +208,9 @@ impl Display for ScalingStats {
                 self.goodness_of_fit
             )
         } else {
-            let (value, error) = value_and_error(value, self.std_error() / div);
+            let (value, error) = value_and_error(value, self.std_error() / div, f.precision());
             let shown = format!("({value} ± {error}){unit}{suffix}");
-            write!(f, "{shown:>22}{limit} (R²={:.3})", self.goodness_of_fit)
+            write!(f, "{shown}{limit} (R²={:.3})", self.goodness_of_fit)
         }
     }
 }

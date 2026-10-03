@@ -1,36 +1,109 @@
+#![doc = include_str!("../README.md")]
 /*!
-A lightweight micro-benchmarking library which:
 
-* measures until it reaches an accuracy you ask for, and tells you the
-  accuracy it achieved;
-* handles benchmarks which mutate state;
-* can measure how a benchmark scales, as a power of `N`
-* is very easy to use!
+## Attribute inputs and setup
 
-`scaling` is designed to work with either slow or fast functions.
-It's forked from [easybench], which is itself inspired by [criterion],
-but doesn't do as much sophisticated
-analysis (no outlier detection, no HTML output).
+A flat benchmark may take no argument or one input. Use `input = value` when
+each iteration should receive a clone of the same initial value, or
+`make_input = || value` when each iteration needs a newly built value. The
+function may take `&I`, `&mut I`, or `I` by value; by-value inputs are useful
+when the benchmark consumes its input:
 
-[easybench]: https://crates.io/crates/easybench
-[criterion]: https://crates.io/crates/criterion
+```rust
+#[scaling::bench(input = vec![0_u8; 1024])]
+fn count(bytes: &[u8]) -> usize { bytes.len() }
 
-Put an attribute on a function and it is a benchmark. They can live anywhere
-in your crate, next to the code they measure:
-
+#[scaling::bench(make_input = || vec![0_u8; 1024])]
+fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
 ```
-# fn fib(_: usize) -> usize { 0 }
-#[scaling::bench]
-fn fib_200() -> usize { fib(200) }
 
-// A benchmark that mutates state says where the state comes from.
-#[scaling::bench(make_input = || vec![0i32; 100])]
-fn reverse(xs: &mut Vec<i32>) { xs.reverse() }
+For comparisons, candidates use the group's shared `#[scaling::input]`
+instead of `input =` or `make_input =` on the candidate. Every timed iteration
+is given an input of its own. The shared input is generated for each
+iteration, a batch of them to a round, and cloned for each candidate, so every
+candidate in a round is measured on the same values. That is why the input
+type must be `Clone` when a group has more than one candidate, and the
+generating and cloning are paid for out of [`Config::max_time`], though they
+are not timed. A setup-once candidate uses the shared input only
+when its returned closure is first built; later inputs are still generated,
+but that cached closure is called without them. Comparison candidates must
+take `&I` or `&mut I`; owned inputs are currently supported only by
+standalone benchmarks.
 
-// And one can measure how the cost grows with `N`.
-#[scaling::bench_scaling(nmin = 0)]
-fn fib_scaling(n: usize) -> usize { fib(n) }
+A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
+setup-once benchmark: the function runs once, then the returned closure is
+called for every timed iteration. This is useful when mutable state must
+persist between calls, such as an advancing random-number generator. With
+`input = value`, the value is passed to setup once, not cloned for every
+call to the returned closure. This form cannot be combined with
+`make_input =`, and a returned closure that itself takes an argument is not
+supported.
+
+For a scaling benchmark, `nmin` is required and `input =` is unavailable
+because the input must vary with `n`. Use `make_input = |n| ...` to build
+size-dependent input; it runs before timing, once per sample. A scaling
+benchmark can also return `impl Fn() -> O` or `impl FnMut() -> O`: setup is
+then cached separately for each size, and the returned closure is timed at
+that size. It cannot be combined with `make_input =`.
+
+An input registration can be expanded across types with `types(A, B, ...)`
+or across sizes with `sizes(1, 2, ...)`. A type-expanded input is generic
+and produces one registration per listed type. A size-expanded input takes
+the size as its argument and produces one input per listed size. These
+options are alternatives, not combinable. Candidates can likewise use
+`types(A, B, ...)` to register a generic candidate once per listed input
+type. For example, this registers two inputs for the same comparison:
+
+```rust
+#[scaling::input(group = "sorting", sizes(8, 32))]
+fn values(size: usize) -> Vec<u8> { (0..size as u8).collect() }
+
+#[scaling::bench(group = "sorting")]
+fn sort(values: &mut Vec<u8>) { values.sort_unstable() }
 ```
+
+
+## Reading the output
+
+A flat benchmark prints as `name  value ± error`. The `±` is the standard
+error of the value, in the same unit, and the value is printed to the
+precision that error justifies. Two marks may follow:
+
+* `(limit)`: the time budget ran out before the accuracy target was met, so
+  the `±` is wider than you asked for ([`Timing::hit_limit`]).
+* `(untrusted)`: too few samples were taken for the `±` itself to mean
+  anything ([`Timing::untrustworthy`]).
+
+Both can appear together as `(limit, untrusted)`.
+
+A scaling benchmark prints `(constant ± error)ns/N (R²=…)`. `R²=0.000` with
+`(limit)` means no power of `N` described the cost. A longer `max_time` will
+not change that, since it is the model, not the sampling, that failed.
+
+In a comparison, the baseline's row is an absolute time and every other
+candidate's is its difference from the baseline: `-7.0% ± 0.4%` is seven
+percent faster, give or take the error. `(< 1.0%)` means no difference was
+found, and the figure is the smallest change this run could have detected at
+its accuracy goal.
+
+A group with several inputs prints as a grid, candidates down and inputs
+across, with the baseline named in its title. The layout is chosen for you: a
+group that would be wider than 100 columns is turned on its side, and if that
+is still too wide it is printed with a line to each cell. A group whose inputs
+differ in type is split into a table to each type when one table will not hold
+it. Because `(limit)` and `(untrusted)` marks widen cells, two groups of the
+same shape can lay out differently. Nothing about it is configurable yet; a
+[`Group`] prints itself, so a caller can choose which groups to print and in
+what order (see [`Report::groups`]).
+
+A run prints nothing but how many benchmarks it is about to measure (on
+stderr) until all of them have finished. The suite is measured interleaved, so
+there are no partial results, and there is no way to filter a run: leave out
+benchmarks you do not want measured by not registering them, which is what a
+feature gate is for (see below). Results are not saved: [`Report`], [`Timing`]
+and [`Difference`] deliberately have no serialization, because two runs a day
+apart were not measured on the same machine. To compare with the past, measure
+the past in the same run, as below.
 
 ## Keeping a `src/`-resident benchmark out of ordinary builds
 
@@ -121,7 +194,7 @@ bench` on stable Rust, so this route goes through `cargo test` instead
 unoptimised) and calls [`crate::runner::run`] by hand rather than through
 [`main!`].
 
-### Comparing against your own history
+## Comparing against your own history
 
 The same `group`/`baseline` machinery any other comparison in this crate
 uses also answers "did this get slower since the last release" - and more
@@ -152,6 +225,17 @@ tagged release, a git dependency naming no `branch`/`tag`/`rev` tracks
 my_crate_previous = { package = "my-crate", git = "https://github.com/you/my-crate" }
 ```
 
+or a particular commit, by `rev`:
+
+```toml
+[dev-dependencies]
+my_crate_previous = { package = "my-crate", git = "https://github.com/you/my-crate", rev = "a1b2c3d" }
+```
+
+The `package = ".."` rename is what lets a crate depend on an older copy of
+itself: the old copy gets a name that the crate's own code does not already
+use.
+
 Either way, what you get is the *actual function definitions* of that
 version, not a cached timing - so write the comparison the ordinary way,
 the released crate's public API on one side and your own on the other:
@@ -173,28 +257,9 @@ since registration is keyed on the literal monomorphized type `inventory`
 collects, and two `scaling` versions split the registry silently rather
 than erroring.
 
-The binary that runs them is one line, and [`main!`] is the whole of it:
+## Benchmarking algorithm
 
-```no_run
-// benches/bench.rs
-scaling::main!();
-```
-
-`cargo bench` then yields - module-qualified, `bench::` here because that is
-what `[[bench]] name = "bench"` makes `module_path!()` at the top of that
-file:
-
-```none
-bench::fib_200:      71.716ns ± 0.057ns
-bench::reverse:       51.80ns ± 0.62ns
-bench::fib_scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
-```
-
-Easy! However, please read the [caveats](#caveats) below before using.
-
-# Benchmarking algorithm
-
-## Flat benchmarks: `#[bench]`
+### Flat benchmarks: `#[bench]`
 
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
@@ -228,7 +293,7 @@ Those are marked `(limit)` and `(untrusted)` in the output.
 If a benchmark requires some state to run, one copy of the initial state is
 prepared per iteration.
 
-## Scaling benchmarks: `#[bench_scaling]`
+### Scaling benchmarks: `#[bench_scaling]`
 
 These work in two stages, and the split is the point of the design.
 
@@ -301,148 +366,14 @@ Only power laws are fitted. A cost that is not one - `O(N log N)`, or
 range measured, with `goodness_of_fit` zeroed and the `(limit)` mark to say
 that nothing described it exactly. Naming those shapes needs a different
 kind of fit and would be a different feature; measuring a power well is the
-thing this does.
+thing this does. For the same reason, a longer `max_time` does not rescue a
+benchmark reported with `(limit)` and `R²=0.000`: the sampling was not what
+failed.
 
-# A benchmark suite: declare, don't assemble
 
-Everything above measures one thing, where you called it. A *suite* is the
-other half of this crate: many benchmarks measured together, declared
-wherever they belong rather than gathered into a list.
+## Caveats
 
-Put an attribute on a function and it is part of the suite:
-
-```
-# fn fib(_: usize) -> usize { 0 }
-#[scaling::bench]
-fn fib_200() -> usize { fib(200) }
-
-#[scaling::bench(make_input = || vec![5i32, 3, 1, 4, 2])]
-fn sorting(v: &mut Vec<i32>) { v.sort() }
-```
-
-They can live anywhere in the crate, next to what they measure. The whole of
-the binary that runs them is:
-
-```no_run
-// benches/bench.rs
-scaling::main!();
-```
-
-which discovers every registered benchmark, measures them together, and
-prints them with the default accuracy and budget. To change the accuracy or
-time budget, build a [`Config`] and pass it to [`runner::run`] from your own
-`main`, instead of using this macro.
-
-See [`main!`] for the whole of it, [`Config`] for the available settings,
-and [`runner::measure`] for reading the numbers in a script rather than
-printing them.
-
-Comparisons are declared the same way. `group = "..."` (or `group("a",
-"b")`, to belong to several at once) makes a function one candidate of a
-comparison, and [`scaling::input`](macro@input) declares a shared input -
-candidates and inputs are registered independently and paired by type, with
-no list of the pairings anywhere, so adding one new input is picked up by
-every candidate that shares its group and type.
-
-## Attribute inputs and setup
-
-A flat benchmark may take no argument or one input. Use `input = value` when
-each iteration should receive a clone of the same initial value, or
-`make_input = || value` when each iteration needs a newly built value. The
-function may take `&I`, `&mut I`, or `I` by value; by-value inputs are useful
-when the benchmark consumes its input:
-
-```rust
-#[scaling::bench(input = vec![0_u8; 1024])]
-fn count(bytes: &[u8]) -> usize { bytes.len() }
-
-#[scaling::bench(make_input = || vec![0_u8; 1024])]
-fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
-```
-
-For comparisons, candidates use the group's shared `#[scaling::input]`
-instead of `input =` or `make_input =` on the candidate. The shared input
-is generated once per iteration and cloned so ordinary candidates in that
-round see the same value. A setup-once candidate uses the shared input only
-when its returned closure is first built; later inputs are still generated,
-but that cached closure is called without them. Comparison candidates must
-take `&I` or `&mut I`; owned inputs are currently supported only by
-standalone benchmarks.
-
-A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
-setup-once benchmark: the function runs once, then the returned closure is
-called for every timed iteration. This is useful when mutable state must
-persist between calls, such as an advancing random-number generator. With
-`input = value`, the value is passed to setup once, not cloned for every
-call to the returned closure. This form cannot be combined with
-`make_input =`, and a returned closure that itself takes an argument is not
-supported.
-
-For a scaling benchmark, `nmin` is required and `input =` is unavailable
-because the input must vary with `n`. Use `make_input = |n| ...` to build
-size-dependent input; it runs before timing, once per sample. A scaling
-benchmark can also return `impl Fn() -> O` or `impl FnMut() -> O`: setup is
-then cached separately for each size, and the returned closure is timed at
-that size. It cannot be combined with `make_input =`.
-
-An input registration can be expanded across types with `types(A, B, ...)`
-or across sizes with `sizes(1, 2, ...)`. A type-expanded input is generic
-and produces one registration per listed type. A size-expanded input takes
-the size as its argument and produces one input per listed size. These
-options are alternatives, not combinable. Candidates can likewise use
-`types(A, B, ...)` to register a generic candidate once per listed input
-type. For example, this registers two inputs for the same comparison:
-
-```rust
-#[scaling::input(group = "sorting", sizes(8, 32))]
-fn values(size: usize) -> Vec<u8> { (0..size as u8).collect() }
-
-#[scaling::bench(group = "sorting")]
-fn sort(values: &mut Vec<u8>) { values.sort_unstable() }
-```
-
-## Why they are measured together
-
-Benchmarks run one after another are measured in different machines. The
-first runs on a cold package and the fiftieth on a warm one, so their
-numbers are not comparable with each other, and neither is either of them
-with the same suite run tomorrow.
-
-A suite measures them interleaved instead, one sample each in rotation, so
-every benchmark's samples spread across the whole session and all of them
-average the same drift. A comparison counts as *one* participant in that
-rotation, because its round must stay whole for the paired error bar to mean
-anything - which is also fair, since one of its turns runs `k` batches and
-produces `k` [`Stats`].
-
-Measuring them together is also what lets the multiple-comparison correction
-be right: the threshold each comparison is judged at comes from how many
-comparisons the run actually holds, which is knowable only once they have
-all been collected. A run containing one comparison is judged according to
-that one comparison.
-
-What this buys is a *bound*, not an improvement. Reversing the declaration
-order of eight identical workloads moves an interleaved benchmark by
-0.15-0.45%, whatever the session; measured one after another the same
-workloads move by anywhere from 0.10% to 1.19%, depending on nothing but how
-much the machine happened to be drifting. The medians are near enough equal
-(0.28% against 0.26%); the worst case is four times better. Interleaving
-pays a floor it never gets back - every sample starts on a cache the rest of
-the suite has been using - in exchange for a ceiling on drift.
-
-So it does *not* make any single benchmark more precise - it averages drift
-in rather than out - and it does not make a suite's numbers comparable with
-the same benchmark measured on its own. What it gives you is that the
-numbers within one suite, and across runs of it, were measured in the same
-machine.
-
-Each benchmark still gets [`Config::max_time`] of its own running time, so a
-suite of `n` may take `n` times as long as one, and a comparison of `k`
-alternatives costs `k` times a single benchmark.
-
-# Caveats
-
-## Caveat 1: Harness overhead
+### Caveat 1: Harness overhead
 
 **TL;DR: Compile with `--release`; the overhead is likely to be within the
 **noise of your
@@ -465,7 +396,7 @@ namely: (1) how large is the return value? and (2) does the benchmark evict
 the input vector from the CPU cache? In practice, these criteria are only
 satisfied by longer-running benchmarks, making these effects hard to measure.
 
-## Caveat 2: Pure functions
+### Caveat 2: Pure functions
 
 **TL;DR: Return enough information to prevent the optimiser from eliminating
 code from your benchmark.**
@@ -520,7 +451,7 @@ without that, the optimiser can see `N` as a literal within one round and
 hoist the call out on that basis alone, the same elimination this caveat
 is about, one step earlier.
 
-## Caveat 3: A busy machine
+### Caveat 3: A busy machine
 
 **TL;DR: on Linux, ``sudo `which quiet-bench` reserve 2`` then
 `quiet-bench run <your benchmark>`.**
@@ -537,7 +468,7 @@ reserved CPUs automatically, with no code change. See the [`quiet`] module
 for the details, and [`quiet::status`] to check at runtime whether it took
 effect.
 
-### CI
+#### CI
 
 `quiet-bench reserve` wants root and exclusive cores, which an ordinary CI
 runner - shared, often virtualized, rarely handing out either - usually
@@ -560,6 +491,7 @@ them the way a quiesced run's would be trusted.
 pub mod assemble;
 mod bench;
 mod difference;
+mod formatting;
 mod input_group;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
@@ -568,8 +500,6 @@ pub mod quiet;
 /// code rather than written by hand, and their shapes are not yet stable.
 #[doc(hidden)]
 pub mod registry;
-/// The whole of a benchmark binary: discover, measure, print. See
-/// [`main!`](crate::main).
 pub mod runner;
 mod scaling;
 mod suite;
@@ -585,7 +515,8 @@ pub use self::bench::Timing;
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
 pub use self::scaling::{Scaling, ScalingStats};
-pub use self::suite::Report;
+pub use self::suite::{Group, Report};
+pub(crate) use self::suite::{Measurement, TypedInput};
 
 pub(crate) use self::input_group::InputGroup;
 pub(crate) use self::suite::{Assembled, Suite};
@@ -723,7 +654,7 @@ pub struct Config {
     /// Wall clock rather than measured time, because this is a promise about
     /// how long the caller waits - a benchmark whose input is slow to build
     /// has still taken that long. A comparison allows this much per
-    /// alternative, since each produces its own [`Stats`] and would otherwise
+    /// alternative, since each produces its own [`Timing`] and would otherwise
     /// get a fraction of the budget one benchmark gets for the same target.
     ///
     /// So building inputs counts against it. That means every call of
@@ -880,11 +811,6 @@ impl Config {
 
 /// Pick a human-readable unit from a magnitude in nanoseconds, returning
 /// the divisor and its suffix.
-///
-/// We choose units ourselves rather than deferring to `Duration`'s `Debug`,
-/// which cannot help here: `Duration` has nanosecond resolution, so the
-/// error bar on a fast benchmark - 0.12 ns on a 71 ns function is entirely
-/// typical - would round to a useless `0ns`.
 fn unit_for(ns: f64) -> (f64, &'static str) {
     let magnitude = ns.abs();
     if magnitude < 1e3 {
@@ -898,35 +824,19 @@ fn unit_for(ns: f64) -> (f64, &'static str) {
     }
 }
 
-/// How many decimal places `x` needs to show two significant digits, which
-/// is all the precision an error bar ever deserves.
-fn error_decimals(x: f64) -> usize {
-    // The `is_finite` test comes first so that the comparison below never
-    // has to reason about NaN.
-    if !x.is_finite() || x <= 0.0 {
+/// How many decimal places `error` needs to show one significant digit.
+fn error_decimals(error: f64) -> usize {
+    if !error.is_finite() || error <= 0.0 {
         return 4;
     }
-    // The floor is zero, not one: an error of 25 in its own unit wants no
-    // decimals at all, and forcing one on it prints `25.0`, which is three
-    // significant digits claiming to be two.
-    (1 - x.log10().floor() as i64).clamp(0, 9) as usize
+    // The 0.5 below causes us to print `1.1` or `0.6` instead of `1`.
+    (-(0.5 * error).log10().floor() as i64).clamp(0, 9) as usize
 }
 
-/// A value and its error, formatted to the precision the error justifies:
-/// digits of the value beyond where the uncertainty starts are noise
-/// dressed up as signal, so `71.9858 ± 0.17` is really only known to
-/// `71.99 ± 0.17`, and printing the extra two digits would invite a reader
-/// to believe them.
-///
-/// The error switches to scientific notation below `1e-4` rather than
-/// spelling out a run of leading zeroes - an optimised-away benchmark can
-/// reach `0.000000021` - but the value keeps plain digits at the same
-/// decimal count, which is what the scientific notation stands in for.
-///
-/// Callers own the unit: this only picks how many digits to show, in
-/// whatever unit `value` and `error` already share.
-fn value_and_error(value: f64, error: f64) -> (String, String) {
-    let decimals = error_decimals(error);
+/// A value and its error, formatted to the precision the error justifies, with extra digits as
+/// requested by the formatter.
+fn value_and_error(value: f64, error: f64, precision: Option<usize>) -> (String, String) {
+    let decimals = error_decimals(error) + precision.unwrap_or(0);
     let error_str = if error > 0.0 && error < 1e-4 {
         format!("{error:.1e}")
     } else {
@@ -935,15 +845,7 @@ fn value_and_error(value: f64, error: f64) -> (String, String) {
     (format!("{value:.decimals$}"), error_str)
 }
 
-/// Running mean and variance of the per-iteration times, updated in O(1)
-/// per sample.
-///
-/// The sampling loop asks whether it can stop after *every* sample, so
-/// recomputing from a stored vector would make the loop O(k²) in the number
-/// of samples - fine at the default `sample_time`, but `sample_time` is a
-/// public knob and shrinking it puts the loop in a regime where it spends
-/// more of the budget on arithmetic than on measuring. Keeping the running
-/// figures also means the samples themselves never need storing.
+/// Running mean and variance of the per-iteration times.
 ///
 /// This is Welford's algorithm rather than accumulating `sum` and
 /// `sum_of_squares`, because the variance we want is a minute difference
