@@ -5,3 +5,4 @@ runs
 day/
 night/
 *.log
+__pycache__/

@@ -158,6 +158,20 @@ to get. Under additive noise that made the claimed bar 80-200x too large.
 which is problem 3. A member that stops changes the composition for
 everyone still measuring, by percent-scale amounts unquiesced.
 
+**Two rules for the harness between batches.** Both come from one effect.
+On this machine, the first floating-point or vector instruction after a
+millisecond or so without one costs 80-150 us at a fifth less clock
+(section "Limits", and PROBLEMS.md, "Slow functions"):
+
+- **No floating point between batches.** Timings are integer nanoseconds,
+  and so is all the bookkeeping in the round loop. A harness that converts
+  each time to `f64` puts the penalty on whichever short batch runs next.
+- **After any batch longer than 0.5 ms, wake the vector unit and wait.**
+  Execute one untimed `f64` operation, and wait 150 us before timing the
+  next batch. Otherwise a benchmarked function that uses floating point,
+  following a long integer-only one, takes the penalty itself and passes
+  it on to the batches after it.
+
 **Why the canary.** It is a dependent multiply-add chain held in registers.
 On the quiet machine it reads to 0.02%. On this machine it costs 4 core
 cycles a link, a multiply and an add: against the logged clock frequency
@@ -630,24 +644,21 @@ factors for large ones: "twice as fast", not "50% less time".
   measured `str_find` 0.6-2.3% high throughout, against its own bar of
   about 0.2%. Running the benchmark again, as a new process, is the only
   way to see one.
-- **Long CPU-bound calls do not share the clock of the short batches
-  around them.** With 4-10 ms CPU-bound calls in the rounds, the short
-  batches - canary and `f64_sin` alike - ran at a clock about 23% lower
-  than the long calls. That was confirmed with the reference-cycle
-  counter, on a reserved core with turbo off. Below 2 ms the difference
-  was at most 3%. A call's clock ramps over its first millisecond or so.
-  Long memory-bound calls do not cause the dip.
+- **The vector unit's wake-up penalty, now removed by the harness.** On
+  this i5-1240P, the first floating-point or vector instruction after a
+  millisecond or more without one costs about 80-150 us at a fifth less
+  clock. The harness's own `f64` conversion after a long integer-only call
+  used to put that penalty on the next short batch, which looked like long
+  CPU-bound neighbours slowing short work by 20% (PROBLEMS.md, "Slow
+  functions"). Two rules remove it:
+  - the harness does no floating point between batches - integer
+    nanoseconds throughout;
+  - after any batch longer than 0.5 ms, it wakes the vector unit with one
+    untimed `f64` operation and waits 150 us before timing the next batch.
 
-  What it biases:
-  - ratios between a long CPU-bound function and a short one;
-  - a slow function's bogo-nanoseconds measured against the 20 us canary;
-  - short functions' nanoseconds in a suite that also holds long ones.
-
-  **Remedy, tested in part:** a canary matched in duration. For a function
-  whose sample runs longer than about 0.2 ms, run the canary's chain - as
-  `slow_cpu` does - for about the same time. A 2.4-4.8 ms chain matched a
-  9.5 ms call to 0.1-0.6% (PROBLEMS.md, "Slow functions"). Ratios between
-  alternatives of similar length need no remedy.
+  With both, short functions beside 9.5 ms calls read within 1.3% of their
+  values beside short ones. No two-phase split or duration-matched canary
+  is needed for this effect.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.

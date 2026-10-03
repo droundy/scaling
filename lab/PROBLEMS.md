@@ -718,9 +718,9 @@ than the long calls beside them. The "fixed" 1.7 GHz of a reserved core
 with the performance governor and no turbo is fixed only on average. On
 this i5-1240P, power management moves it by a fifth over milliseconds.
 
-**A call's clock ramps over its first millisecond or so.** A second chain,
-`slow_cpu2`, of its own length, was run in rounds alongside a 9.5 ms
-`slow_cpu`. Its cost per link relative to `slow_cpu`:
+**A call's clock seemed to ramp over its first millisecond or so.** A
+second chain, `slow_cpu2`, of its own length, was run in rounds alongside a
+9.5 ms `slow_cpu`. Its cost per link relative to `slow_cpu`:
 
 | `slow_cpu2` call | `slow_cpu2` | canary, 20 us |
 | --- | --- | --- |
@@ -729,23 +729,79 @@ this i5-1240P, power management moves it by a fifth over milliseconds.
 | 2.4 ms | +0.6% | +22.5% |
 | 4.8 ms | +0.1% | +22.5% |
 
-So a canary matched in duration works: a chain run for a few
-milliseconds sees the clock of a long call to within half a percent,
-where the 20 us canary is off by a fifth. Long memory-bound neighbours did
-not cause the dip. `copy_64mb` at 4-6 ms shared every round of the pair
-recordings, with the canary at 2.359 ns quiet.
+That is the signature of a fixed penalty at the start of each call, not a
+ramp, and the mechanism below explains it.
 
-What it breaks:
-- **Absolute times** of short functions measured in a suite that also
-  holds long CPU-bound ones read about 20% high, quiet or not.
-- **Ratios** between a long CPU-bound function and a short one are off by
-  the same.
-- **Bogo-nanoseconds** of a slow function measured against the 20 us
-  canary are about 20% low.
+**The mechanism: the first vector instruction after a long integer-only
+stretch.** None of these was the cause:
+- **Thermal throttling:** CPU 2's throttle counters did not move during
+  either setup.
+- **Idle states:** idle residency was the same in both setups, and tiny.
+- **Turbo licences:** glibc's AVX was switched off with
+  `GLIBC_TUNABLES=glibc.cpu.hwcaps=-AVX2,-AVX,-AVX_Fast_Unaligned_Load`,
+  and the dip was unchanged.
 
-Ratios between alternatives of similar length are unaffected, since both
-sides are in the same state.
+A standalone program settled it: `analysis/vector_wake.rs` runs
+`chain(long)`, then a timed `chain(short)`, and nothing else. Build it with
+`rustc -O vector_wake.rs`, and run it as `quiet-bench run ./vector_wake
+LONG SHORT REPS MODE`. With nothing in
+between, a short chain after a 9.5 ms chain ran at 2.360 ns a link, with no
+dip. With **one** instruction that uses the vector unit in between,
+untimed, it ran at 2.851-2.867 ns, a 21% dip, whichever instruction it was:
 
+- `vpaddq ymm0` - one 256-bit integer add;
+- `paddq xmm0` and `subpd xmm0` - 128-bit SSE;
+- a scalar `f64` multiply (`mulsd`), or `Duration::as_secs_f64()`;
+- a 64 KB memset, glibc's AVX switched off or not.
+
+A 1 MB `malloc` with nothing written does nothing; nor does a system call or
+a small write. After a 0.6 ms chain, the same instructions do nothing.
+
+So on this i5-1240P, the first vector or floating-point instruction after a
+millisecond or more without one costs about 80-150 us at a clock a fifth
+lower, presumably while the vector unit powers back up. Whatever runs in
+that window pays.
+
+**In the lab the trigger was the harness itself.** Every batch ended with
+`start.elapsed().as_secs_f64() * 1e9`, and the round loop added an `f64`
+per sample. After a long integer-only call, that floating point woke the
+unit, and the next short batch - usually the canary - ran inside the
+penalty. That one cause accounts for everything above:
+- the dip appears pinned with turbo off;
+- untimed integer-only input preparation causes it too, since a batch's
+  preparation is followed by the same conversion;
+- 4-6 ms `copy_64mb` calls, whose vector copies keep the unit awake, never
+  caused it;
+- the canary always read slow, since it ran next.
+
+**Fixed in the harness, two ways.**
+
+1. **Integer nanoseconds throughout.** `time_batch` now returns `u64`
+   nanoseconds, and `Timing::time` and the round loop's bookkeeping are
+   integer too. With that alone, the canary beside 9.5 ms calls read 2.383
+   ns a link, against 2.364 beside 0.6 ms calls: 0.8% where it was 22%.
+
+2. **A warm-up after long batches.** A benchmarked function that itself
+   uses floating point wakes the unit anyway: with `f64_sin` in the round,
+   the dip came back for everyone (canary 2.862 ns). So after any batch
+   longer than 0.5 ms, the harness now executes one untimed `f64` multiply
+   and waits before timing the next batch (`LAB_VWARM=us`):
+
+   | wait | canary | `f64_sin` | `parse_u64` |
+   | --- | --- | --- | --- |
+   | none | 2.867 | 41.04 | 55.6 |
+   | 30 us | 2.864 | 40.90 | 51.8 |
+   | 80 us | 2.803 | 40.73 | 50.7 |
+   | 150 us | 2.359 | 34.08 | 45.8 |
+   | beside 0.6 ms calls | 2.359 | 33.64 | 45.9 |
+
+   150 us restores every short function to within 1.3% of its value beside
+   short calls. It costs 150 us per long batch, which is about 1.5% at
+   10 ms, and nothing at all for a set of fast functions.
+
+**What this does not cover.** A function that uses floating point only
+after long integer work *inside its own call* pays the wake-up in its own
+time. That is its real cost on this machine, and no harness can change it.
 ---
 
 ## How they interact

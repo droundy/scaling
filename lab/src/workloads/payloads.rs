@@ -241,6 +241,44 @@ impl Workload {
     }
 }
 
+impl Workload {
+    /// Trivial to time, slow to prepare: each batch's preparation spins the
+    /// canary's chain for `LAB_GEN_ITERS` links (about 2.4 ms per million at
+    /// 1.7 GHz), outside the timer, once per batch.
+    ///
+    /// For one question: does untimed CPU-heavy input generation dip its
+    /// neighbours' clock the way a long timed call does? If the dip is power
+    /// management reacting to sustained load, whether the timer is running
+    /// should not matter.
+    pub fn heavy_gen() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static FRESH: AtomicBool = AtomicBool::new(true);
+        fn gen_heavy() -> u64 {
+            if FRESH.swap(false, Ordering::Relaxed) {
+                let n: u64 = std::env::var("LAB_GEN_ITERS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(2_000_000);
+                let mut v = 0x243F6A8885A308D3u64;
+                for _ in 0..n {
+                    v = v
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    std::hint::black_box(v);
+                }
+                v
+            } else {
+                1
+            }
+        }
+        fn run_heavy(x: &mut u64) -> u64 {
+            FRESH.store(true, Ordering::Relaxed);
+            *x ^ 1
+        }
+        Workload::new("heavy_gen", Kind::Payload, gen_heavy, run_heavy)
+    }
+}
+
 /// Every payload, keyed by name, so a run can take any subset of them.
 ///
 /// Nothing here depends on the order - the caller sorts - so adding a payload

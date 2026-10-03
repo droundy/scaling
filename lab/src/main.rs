@@ -418,6 +418,13 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
 }
 
+/// Microseconds to wait after waking the vector unit, before timing a batch
+/// that follows a long one (`LAB_VWARM`, default 0: off).
+fn vector_warmup_us() -> u64 {
+    static W: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| std::env::var("LAB_VWARM").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
 /// What one round of a composition costs, in ns.
 ///
 /// One sample per workload, at the average of its rungs, plus the harness
@@ -837,8 +844,17 @@ fn run(
     let mut last_machine = Instant::now() - MACHINE_EVERY;
     // Wall time spent at each rung, so a subset can stop once every rung
     // holds more than any replay will read.
-    let mut held: Vec<Vec<f64>> = rungs.iter().map(|r| vec![0.0; r.len()]).collect();
-    let cap_ns = CAP_PER_RUNG.as_nanos() as f64;
+    //
+    // In integer nanoseconds, like the timings: any floating-point
+    // instruction between batches wakes the vector unit after a long
+    // integer-only batch, and the next short batch pays for it.
+    let mut held: Vec<Vec<u64>> = rungs.iter().map(|r| vec![0; r.len()]).collect();
+    let cost_ns: Vec<Vec<u64>> = rungs
+        .iter()
+        .map(|r| r.iter().map(|x| x.2.round().max(0.0) as u64).collect())
+        .collect();
+    let cap_ns = CAP_PER_RUNG.as_nanos() as u64;
+    let mut last_ns: u64 = 0;
     for r in 0..rounds {
         // The budget running out - *not* a convergence test. Nothing here
         // looks at the numbers it is collecting, and no workload ever
@@ -902,8 +918,18 @@ fn run(
                 ws[i].time_batch(warmup)();
             }
             let time_me = ws[i].time_batch(*count);
-            t.time(ridx, time_me);
-            held[i][pick[i]] += rungs[i][pick[i]].2;
+            if vector_warmup_us() > 0 && last_ns > 500_000 {
+                // The batch before this one ran long enough for the vector
+                // unit to power down if it used none. Wake it here, untimed,
+                // and wait out the ~50us it runs slow afterwards, so the
+                // penalty lands on nobody's timer (`LAB_VWARM=us`).
+                std::hint::black_box(std::hint::black_box(1.5f64) * std::hint::black_box(2.5f64));
+                let w = Instant::now();
+                let wait = Duration::from_micros(vector_warmup_us());
+                while w.elapsed() < wait {}
+            }
+            last_ns = t.time(ridx, time_me);
+            held[i][pick[i]] += cost_ns[i][pick[i]];
         }
         done += 1;
         // Checked once a round, and only against the cheapest thing to
@@ -946,7 +972,7 @@ fn overhead_of(w: &Workload, n: usize) -> f64 {
         .map(|_| {
             let start = Instant::now();
             let job = w.time_batch(n);
-            let timed = job();
+            let timed = job() as f64;
             (start.elapsed().as_secs_f64() * 1e9 - timed).max(0.0)
         })
         .collect();
@@ -988,7 +1014,7 @@ fn calibrate(w: &Workload, seed: &mut u64) -> (usize, f64) {
         let job = w.time_batch(n);
         let prepared = p.elapsed();
 
-        let ns = job();
+        let ns = job() as f64;
 
         if ns >= target * 0.9 || prepared > prepare_ceiling || n >= 1 << 32 {
             if ns < target * 0.9 {
@@ -1005,7 +1031,7 @@ fn calibrate(w: &Workload, seed: &mut u64) -> (usize, f64) {
             let mut again: Vec<f64> = (0..3)
                 .map(|_| {
                     *seed = step(*seed);
-                    w.time_batch(n)()
+                    w.time_batch(n)() as f64
                 })
                 .collect();
             again.sort_by(|a, b| a.partial_cmp(b).unwrap());

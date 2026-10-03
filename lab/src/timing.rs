@@ -108,11 +108,18 @@ impl Timing {
     ///
     /// The index rather than the name, so the measuring loop neither hashes
     /// nor allocates per sample.
-    pub fn time(&mut self, idx: u8, f: impl FnOnce() -> f64) -> f64 {
+    ///
+    /// Integer nanoseconds throughout, with no floating point between one
+    /// batch and the next. The first floating-point or vector instruction
+    /// after a millisecond or so of pure integer work costs this core about
+    /// 50us at a fifth less clock - the vector unit waking up - and when the
+    /// harness converted each time to `f64`, that penalty landed on whichever
+    /// short batch ran next (PROBLEMS.md, "Slow functions").
+    pub fn time(&mut self, idx: u8, f: impl FnOnce() -> u64) -> u64 {
         let ns = f();
         self.buf.clear();
         self.buf.push(idx);
-        put_leb128(&mut self.buf, ns.round().max(0.0) as u64);
+        put_leb128(&mut self.buf, ns);
         if let Some(w) = self.out.as_mut() {
             use std::io::Write as _;
             if let Err(e) = w.write_all(&self.buf) {

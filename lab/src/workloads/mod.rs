@@ -63,7 +63,7 @@ pub struct Workload {
     pub name: &'static str,
     pub kind: Kind,
     /// Prepare to time a batch of the workload with batch size `usize`.
-    f: Box<dyn Fn(usize) -> Box<dyn FnOnce() -> f64>>,
+    f: Box<dyn Fn(usize) -> Box<dyn FnOnce() -> u64>>,
 }
 
 impl Workload {
@@ -90,7 +90,7 @@ impl Workload {
                     for x in data.iter_mut() {
                         black_box(f(x));
                     }
-                    start.elapsed().as_secs_f64() * 1e9
+                    start.elapsed().as_nanos() as u64
                 })
             }),
         }
@@ -126,13 +126,13 @@ impl Workload {
                     for _ in 0..count {
                         black_box(f());
                     }
-                    start.elapsed().as_secs_f64() * 1e9
+                    start.elapsed().as_nanos() as u64
                 })
             }),
         }
     }
 
-    pub fn time_batch(&self, count: usize) -> Box<dyn FnOnce() -> f64> {
+    pub fn time_batch(&self, count: usize) -> Box<dyn FnOnce() -> u64> {
         (self.f)(count)
     }
 }
@@ -167,6 +167,7 @@ pub fn named(name: &str) -> Workload {
         "mem_canary" => Workload::mem_canary(),
         "slow_cpu" => Workload::slow_cpu(),
         "slow_cpu2" => Workload::slow_cpu2(),
+        "heavy_gen" => Workload::heavy_gen(),
         _ => {
             let mut pool = payloads::all();
             pool.remove(name).unwrap_or_else(|| {

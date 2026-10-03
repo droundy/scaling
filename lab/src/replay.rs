@@ -809,6 +809,19 @@ fn typical(v: &[f64]) -> f64 {
 /// Accuracy targets to report against, as relative standard error.
 const TARGETS: [f64; 3] = [0.02, 0.01, 0.005];
 
+/// The goals `lab pairs` replays: [`TARGETS`], or `LAB_TARGETS=a,b,...`.
+///
+/// A comparison judged with a Bonferroni-corrected `z` stops when
+/// `z * sigma <= ln(1 + goal)`, so its one-sigma target is the goal over
+/// `z`: 1% at ten comparisons is about 0.35%. Listing that here replays it.
+fn pair_targets() -> Vec<f64> {
+    std::env::var("LAB_TARGETS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect::<Vec<f64>>())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| TARGETS.to_vec())
+}
+
 const CAL_TRIALS: usize = 200;
 
 /// An honest 1-sigma bar contains the truth about this often.
@@ -1334,7 +1347,7 @@ pub fn selftest(dir: &str) {
             let Some(&i) = idx.get(&rung_name(&tapes[w].workload, k)) else {
                 continue;
             };
-            t.time(i, || ns);
+            t.time(i, || ns.round().max(0.0) as u64);
         }
     }
     if short > 0 {
@@ -1893,7 +1906,7 @@ pub fn pairs(paths: &[String]) {
                     "estimator", "goal", "within", "cover", "blow", "capped", "rounds"
                 );
                 for &(label, est) in &estimators {
-                    for &target in &TARGETS {
+                    for &target in &pair_targets() {
                         let mut outs: Vec<PairOutcome> = Vec::new();
                         let mut starts: Vec<usize> = Vec::new();
                         let mut s = 0;
