@@ -28,8 +28,8 @@ const MAX_SAMPLES: usize = 1_000_000;
 /// one.
 type GenInput<I> = dyn FnMut() -> I + 'static;
 
-/// One alternative's timing loop, type-erased so that alternatives may
-/// differ in what they return.
+/// One alternative, type-erased so that alternatives may differ in what they
+/// return.
 ///
 /// The erasure is at the level of a whole batch rather than a single call:
 /// what is behind the pointer is [`time_loop`] with its `F` already chosen,
@@ -37,13 +37,71 @@ type GenInput<I> = dyn FnMut() -> I + 'static;
 /// per batch rather than once per iteration. On a 9 ns function the
 /// per-iteration form costs 14%; this costs nothing measurable.
 ///
-/// It takes a batch of inputs already prepared rather than making its own,
-/// so that every alternative in a round is handed the *same* inputs. That is
-/// what makes the per-round differences genuinely paired: if each drew its
-/// own inputs and the cost varied with the input, the difference between two
-/// alternatives would carry the difference between two draws as well, and no
-/// amount of averaging distinguishes the two.
-type Batch<I> = Box<dyn FnMut(&mut [I]) -> f64 + 'static>;
+/// [`Alternative::batch`] takes a batch of inputs already prepared rather
+/// than making its own, so that every alternative in a round is handed the
+/// *same* inputs. That is what makes the per-round differences genuinely
+/// paired: if each drew its own inputs and the cost varied with the input,
+/// the difference between two alternatives would carry the difference between
+/// two draws as well, and no amount of averaging distinguishes the two.
+trait Alternative<I> {
+    /// Time a batch of iterations over `xs`, returning the total in
+    /// nanoseconds.
+    fn batch(&mut self, xs: &mut [I]) -> f64;
+
+    /// Whether [`Alternative::measure`] has anything to compute.
+    fn has_metrics(&self) -> bool {
+        false
+    }
+
+    /// Run once on `input`, outside the timing, and compute the metrics from
+    /// what it returned. `pristine` is the input as it was before the run,
+    /// when there is one to give.
+    fn measure(&mut self, _input: &mut I, _pristine: Option<&I>) -> Metrics {
+        Metrics::new()
+    }
+}
+
+/// An alternative that is only timed.
+struct Timed<F>(F);
+
+impl<I, F, O> Alternative<I> for Timed<F>
+where
+    F: FnMut(&mut I) -> O,
+{
+    fn batch(&mut self, xs: &mut [I]) -> f64 {
+        time_loop(&mut self.0, xs)
+    }
+}
+
+/// An alternative that is timed, and then run once more for its metrics.
+///
+/// The function and the metrics live together because the function is
+/// needed twice and cannot be shared between two closures: sharing it
+/// through a cell would put a borrow check inside the timing loop.
+struct Measured<F, M, O> {
+    f: F,
+    metrics: M,
+    _output: std::marker::PhantomData<fn() -> O>,
+}
+
+impl<I, F, M, O> Alternative<I> for Measured<F, M, O>
+where
+    F: FnMut(&mut I) -> O,
+    M: FnMut(Option<&I>, O) -> Metrics,
+{
+    fn batch(&mut self, xs: &mut [I]) -> f64 {
+        time_loop(&mut self.f, xs)
+    }
+
+    fn has_metrics(&self) -> bool {
+        true
+    }
+
+    fn measure(&mut self, input: &mut I, pristine: Option<&I>) -> Metrics {
+        let output = (self.f)(input);
+        (self.metrics)(pristine, output)
+    }
+}
 
 /// Benchmarks sharing an input, gathered before any of them runs.
 #[expect(clippy::type_complexity)]
@@ -56,7 +114,7 @@ pub struct InputGroup<I> {
 
 struct Entry<I> {
     name: String,
-    batch: Batch<I>,
+    alt: Box<dyn Alternative<I>>,
 }
 
 impl Config {
@@ -138,13 +196,75 @@ impl<I: 'static> InputGroup<I> {
     /// and only that loop, not its `O`, is visible to [`run`].
     ///
     /// [`run`]: InputGroup::run
-    pub fn add_input<F, O>(mut self, name: &str, mut f: F) -> Self
+    pub fn add_input<F, O>(mut self, name: &str, f: F) -> Self
     where
         F: FnMut(&mut I) -> O + 'static,
     {
         self.entries.push(Entry {
             name: name.to_string(),
-            batch: Box::new(move |xs: &mut [I]| time_loop(&mut f, xs)),
+            alt: Box::new(Timed(f)),
+        });
+        self
+    }
+
+    /// Like [`InputGroup::add_input`], and once the timing is done the
+    /// alternative is run one more time and `metrics` computes extra numbers
+    /// from what it returned.
+    ///
+    /// `metrics` takes the output by value, so it needs no `Clone`, and may
+    /// reuse or check it. The run is outside the timing and happens once, so
+    /// it suits quantities that do not vary from run to run.
+    #[allow(dead_code)] // until a registered benchmark can ask for metrics
+    pub(crate) fn add_input_metrics<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
+    where
+        F: FnMut(&mut I) -> O + 'static,
+        O: 'static,
+        M: FnMut(O) -> Metrics + 'static,
+    {
+        self.entries.push(Entry {
+            name: name.to_string(),
+            alt: Box::new(Measured {
+                f,
+                metrics: move |_: Option<&I>, output| metrics(output),
+                _output: std::marker::PhantomData,
+            }),
+        });
+        self
+    }
+
+    /// Like [`InputGroup::add_input_metrics`], and `metrics` is also given
+    /// the input as it was before the run, which the alternative is free to
+    /// have changed.
+    ///
+    /// # Panics
+    ///
+    /// If the group has no way to clone its input, since the pristine copy
+    /// has to come from somewhere.
+    #[allow(dead_code)] // until a registered benchmark can ask for metrics
+    pub(crate) fn add_input_metrics_with_input<F, O, M>(
+        mut self,
+        name: &str,
+        f: F,
+        mut metrics: M,
+    ) -> Self
+    where
+        F: FnMut(&mut I) -> O + 'static,
+        O: 'static,
+        M: FnMut(&I, O) -> Metrics + 'static,
+    {
+        assert!(
+            self.clone_input.is_some(),
+            "metrics that read the input need an input that can be cloned"
+        );
+        self.entries.push(Entry {
+            name: name.to_string(),
+            alt: Box::new(Measured {
+                f,
+                metrics: move |pristine: Option<&I>, output| {
+                    metrics(pristine.expect("a clone of the input was kept"), output)
+                },
+                _output: std::marker::PhantomData,
+            }),
         });
         self
     }
@@ -296,7 +416,7 @@ impl<I: 'static> InputGroup<I> {
                     );
                     &mut xs
                 };
-                let t = (entries[i].batch)(batch_inputs);
+                let t = entries[i].alt.batch(batch_inputs);
                 times[i] = t / unit as f64;
                 measured_ns += t;
             }
@@ -348,10 +468,50 @@ impl<I: 'static> InputGroup<I> {
                 diff.mean_and_stderr().1,
             ));
         }
+        let metrics = measure_metrics(&mut entries, &mut make_input, clone_input);
         Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
             timings,
-            metrics: Vec::new(),
+            metrics,
+        }
+    }
+}
+
+/// Run every alternative that has metrics once, each on its own copy of one
+/// fresh input, and gather what they computed.
+///
+/// Empty when no alternative has any, so a plain group carries nothing
+/// extra. Otherwise one record per alternative, in order, the empty record
+/// for those with none.
+fn measure_metrics<I>(
+    entries: &mut [Entry<I>],
+    make_input: &mut GenInput<I>,
+    clone_input: Option<&dyn Fn(&I) -> I>,
+) -> Vec<Metrics> {
+    if !entries.iter().any(|e| e.alt.has_metrics()) {
+        return Vec::new();
+    }
+    let pristine = make_input();
+    match clone_input {
+        Some(clone) => entries
+            .iter_mut()
+            .map(|e| {
+                if !e.alt.has_metrics() {
+                    return Metrics::new();
+                }
+                let mut input = clone(&pristine);
+                e.alt.measure(&mut input, Some(&pristine))
+            })
+            .collect(),
+        // Only a lone alternative can lack a way to clone its input, and
+        // then there is no copy to keep.
+        None => {
+            let mut input = pristine;
+            entries
+                .iter_mut()
+                .take(1)
+                .map(|e| e.alt.measure(&mut input, None))
+                .collect()
         }
     }
 }
@@ -413,7 +573,7 @@ async fn calibrate<I>(
                 );
                 &mut *xs
             };
-            timed_ns += (e.batch)(batch_inputs);
+            timed_ns += e.alt.batch(batch_inputs);
         }
         // Everything the probe cost, generating and cloning included: what
         // the ceiling below is protecting against is a probe that takes an
@@ -740,5 +900,113 @@ mod tests {
         let rate = caught as f64 / (2 * REPEATS) as f64;
         println!("detected {caught}/{} = {:.0}%", 2 * REPEATS, rate * 100.0);
         assert!(rate >= 0.70, "detection rate {rate:.2} below 0.70");
+    }
+
+    fn quick() -> Config {
+        Config::relative(0.05).with_max_time(Duration::from_millis(30))
+    }
+
+    /// What an alternative returned is handed to its metrics, once the
+    /// timing is done.
+    #[test]
+    fn metrics_are_computed_from_the_output() {
+        let timings = quick()
+            .input_group()
+            .add_input_metrics(
+                "short",
+                |_: &mut ()| vec![0u8; 100],
+                |out| Metrics::new().bytes("size", out.len()),
+            )
+            .add_input_metrics(
+                "long",
+                |_: &mut ()| vec![0u8; 400],
+                |out| Metrics::new().bytes("size", out.len()),
+            )
+            .run();
+        let sizes: Vec<f64> = timings
+            .metrics()
+            .iter()
+            .map(|m| m.get("size").expect("each has a size").value)
+            .collect();
+        assert_eq!(sizes, [100.0, 400.0]);
+    }
+
+    /// An alternative with no metrics gets the empty record, so that the
+    /// records stay lined up with the timings.
+    #[test]
+    fn an_alternative_without_metrics_gets_an_empty_record() {
+        let timings = quick()
+            .input_group()
+            .add_input("plain", |_: &mut ()| 1u8)
+            .add_input_metrics(
+                "counted",
+                |_: &mut ()| vec![0u8; 8],
+                |out| Metrics::new().count("items", out.len()),
+            )
+            .run();
+        assert_eq!(timings.metrics().len(), 2);
+        assert!(timings.metrics()[0].is_empty());
+        assert_eq!(timings.metrics()[1].get("items").unwrap().value, 8.0);
+    }
+
+    /// A group that asks for nothing carries nothing.
+    #[test]
+    fn a_plain_group_has_no_metrics() {
+        let timings = quick()
+            .input_group()
+            .add_input("a", |_: &mut ()| 1u8)
+            .add_input("b", |_: &mut ()| 2u8)
+            .run();
+        assert!(timings.metrics().is_empty());
+    }
+
+    /// The input a metric sees is the one the alternative started from, not
+    /// what it left behind.
+    #[test]
+    fn metrics_can_read_the_input_as_it_was() {
+        let timings = quick()
+            .input_group_make_input(|| vec![1u8, 2, 3])
+            .add_input_metrics_with_input(
+                "grows",
+                |v: &mut Vec<u8>| {
+                    v.push(4);
+                    v.len()
+                },
+                |before, after| {
+                    Metrics::new()
+                        .count("before", before.len())
+                        .count("after", after)
+                },
+            )
+            .add_input("other", |v: &mut Vec<u8>| v.len())
+            .run();
+        let m = &timings.metrics()[0];
+        assert_eq!(m.get("before").unwrap().value, 3.0);
+        assert_eq!(m.get("after").unwrap().value, 4.0);
+    }
+
+    /// A lone alternative has no need of a clonable input unless its
+    /// metrics read it.
+    #[test]
+    fn a_lone_alternative_computes_metrics_without_a_clonable_input() {
+        struct NotClone(Vec<u8>);
+        let timings = quick()
+            .input_group_make_input_uncloned(|| NotClone(vec![0; 5]))
+            .add_input_metrics(
+                "only",
+                |x: &mut NotClone| x.0.len(),
+                |len| Metrics::new().count("len", len),
+            )
+            .run();
+        assert_eq!(timings.metrics()[0].get("len").unwrap().value, 5.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "need an input that can be cloned")]
+    fn reading_the_input_needs_it_to_be_clonable() {
+        struct NotClone;
+        let _ = quick()
+            .input_group_make_input_uncloned(|| NotClone)
+            .add_input_metrics_with_input("x", |_: &mut NotClone| 0u8, |_, _| Metrics::new());
     }
 }

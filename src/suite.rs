@@ -1350,6 +1350,36 @@ mod report_lookup {
         assert_eq!(names, ["sets@2", "sets@10", "sets@100"]);
     }
 
+    /// Metrics computed during a run reach the groups, and the printed table.
+    #[test]
+    fn a_runs_metrics_reach_the_groups_and_the_table() {
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
+        let mut suite = cfg.suite();
+        suite.add_input_group(
+            "encoding",
+            cfg.input_group()
+                .add_input_metrics(
+                    "wide",
+                    |_: &mut ()| vec![0u8; 4096],
+                    |out| Metrics::new().bytes("size", out.len()),
+                )
+                .add_input_metrics(
+                    "narrow",
+                    |_: &mut ()| vec![0u8; 1024],
+                    |out| Metrics::new().bytes("size", out.len()),
+                ),
+        );
+        let report = suite.run();
+        let (_, group) = report.groups().next().expect("the group");
+        assert_eq!(group.candidates, ["wide", "narrow"]);
+        assert_eq!(group.metrics.len(), 1);
+        assert_eq!(group.metrics[0].name, "size");
+        assert_eq!(group.metrics[0].values, [[Some(4096.0)], [Some(1024.0)]]);
+        let table = crate::formatting::table(&report);
+        assert!(table.contains("4.00KiB"), "{table}");
+        assert!(table.contains("1.00KiB (-75%)"), "{table}");
+    }
+
     /// A group built by hand, which no lane knows about, keeps all of its
     /// alternatives rather than only the baseline.
     #[test]

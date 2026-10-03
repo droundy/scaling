@@ -173,8 +173,12 @@ postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
 
 1. Data model and formatting, from hand-built `Group`s with expect-tests. No
    runtime change.
-2. Hand-built API for `add_input_group`: `.metrics(|out: Vec<u8>| ..)`. The
-   group needs its output type as a parameter.
+2. Plumbing in `InputGroup`: an alternative can carry a metrics function,
+   `FnMut(O) -> Metrics` or `FnMut(&I, O) -> Metrics`. Once sampling is done
+   each such alternative is run once on a clone of one fresh input, outside
+   the timing, and the records travel with the `Timings` into the `Report`.
+   (There is no public hand-built API to extend, since groups are built by
+   the registry, so this is what phase 3's macros call.)
 3. Registry and macros: `#[metrics]`, the candidate shim, assembly pairing
    and diagnostics.
 4. Observers: `CountingAlloc`, `peak_bytes`, `allocations`.
