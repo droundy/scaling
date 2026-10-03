@@ -10,7 +10,8 @@
 //! `inventory::submit!` that registers the shim. That is all. In particular
 //! they do **not** wrap the function in any `#[cfg]`: a `#[cfg]` written
 //! above the attribute already strips the whole item before expansion, so a
-//! caller who wants benchmarks kept out of ordinary builds writes
+//! caller who wants benchmarks kept out of ordinary builds writes their own,
+//! under a feature name of their choosing.
 //!
 //! # Why generics never reach the registry
 //!
