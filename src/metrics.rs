@@ -252,6 +252,25 @@ impl Metrics {
         self.counted("retained", Unit::Bytes, Counted::RetainedBytes)
     }
 
+    /// The counts of the run this record is being built for, so that a metric
+    /// can be computed from them.
+    ///
+    /// ```ignore
+    /// #[scaling::metrics(group = "encode", allocation)]
+    /// fn overhead(out: Vec<u8>) -> scaling::Metrics {
+    ///     let held = scaling::Metrics::counts().map_or(0, |c| c.retained_bytes);
+    ///     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
+    /// }
+    /// ```
+    ///
+    /// `None` anywhere else, and in a metrics function that is not marked
+    /// `allocation`, since its run was not counted. The counts are those of
+    /// the candidate's own call, fixed before the function started, so
+    /// whatever the function allocates does not change them.
+    pub fn counts() -> Option<crate::alloc::AllocStats> {
+        crate::alloc::current()
+    }
+
     /// Whether any of the metrics wait on a counted run.
     #[cfg(test)]
     pub(crate) fn wants_allocation(&self) -> bool {
@@ -443,5 +462,18 @@ mod tests {
     #[should_panic(expected = "say `allocation`")]
     fn asking_for_counts_from_an_uncounted_run_is_an_error() {
         Metrics::new().peak_bytes().resolve_allocation(None);
+    }
+
+    #[test]
+    fn counts_are_available_to_a_metrics_function_while_it_runs() {
+        assert_eq!(Metrics::counts(), None);
+        let stats = crate::alloc::AllocStats {
+            retained_bytes: 42,
+            ..Default::default()
+        };
+        let provided = crate::alloc::provide(Some(stats));
+        assert_eq!(Metrics::counts(), Some(stats));
+        drop(provided);
+        assert_eq!(Metrics::counts(), None);
     }
 }

@@ -77,7 +77,7 @@ thread_local! {
 
 thread_local! {
     /// The counts of the run whose metrics function is being called, for
-    /// [`counts`]. Apart from the counters above because it is only touched
+    /// [`current`]. Apart from the counters above because it is only touched
     /// outside the allocator, where nothing stops it from being richer.
     static CURRENT: Cell<Option<AllocStats>> = const { Cell::new(None) };
 }
@@ -94,26 +94,14 @@ pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
-/// The counts of the run a metrics function is being called for, so that it
-/// can build a metric of its own from them.
-///
-/// ```ignore
-/// #[scaling::metrics(group = "encode", allocation)]
-/// fn overhead(out: Vec<u8>) -> scaling::Metrics {
-///     let held = scaling::alloc::counts().map_or(0, |c| c.retained_bytes);
-///     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
-/// }
-/// ```
-///
-/// `None` anywhere else, and in a metrics function that is not marked
-/// `allocation`, since its run was not counted. The counts are those of the
-/// candidate's own call, fixed before the function started, so whatever the
-/// function allocates does not change them.
-pub fn counts() -> Option<AllocStats> {
+/// The counts of the run a metrics function is being called for, if it is
+/// being called for one that was counted. See
+/// [`Metrics::counts`](crate::Metrics::counts).
+pub(crate) fn current() -> Option<AllocStats> {
     CURRENT.with(Cell::get)
 }
 
-/// Makes [`counts`] return `stats` until it is dropped, and then what it
+/// Makes [`current`] return `stats` until it is dropped, and then what it
 /// returned before.
 pub(crate) struct Provided(Option<AllocStats>);
 
@@ -248,17 +236,17 @@ mod tests {
 
     #[test]
     fn counts_are_there_only_while_provided() {
-        assert_eq!(counts(), None);
+        assert_eq!(current(), None);
         {
             let _outer = provide(Some(stats(5)));
-            assert_eq!(counts(), Some(stats(5)));
+            assert_eq!(current(), Some(stats(5)));
             {
                 let _inner = provide(None);
-                assert_eq!(counts(), None);
+                assert_eq!(current(), None);
             }
-            assert_eq!(counts(), Some(stats(5)));
+            assert_eq!(current(), Some(stats(5)));
         }
-        assert_eq!(counts(), None);
+        assert_eq!(current(), None);
     }
 
     #[test]
@@ -268,6 +256,6 @@ mod tests {
             panic!("a metrics function failing");
         });
         assert!(caught.is_err());
-        assert_eq!(counts(), None);
+        assert_eq!(current(), None);
     }
 }
