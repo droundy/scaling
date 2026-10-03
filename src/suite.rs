@@ -972,8 +972,11 @@ impl Report {
     /// Whether [`timing`](Report::timing), [`scaling`](Report::scaling) or
     /// [`comparison`](Report::comparison) finds something under this name.
     pub fn contains(&self, name: &str) -> bool {
-        self.resolve(name, &[Kind::Single, Kind::Scaling, Kind::Comparison])
-            .is_some()
+        // One kind at a time: a short name that fits a comparison and a
+        // candidate is still found by each of the accessors that ask for one.
+        [Kind::Single, Kind::Scaling, Kind::Comparison]
+            .iter()
+            .any(|kind| self.resolve(name, &[*kind]).is_some())
     }
 
     fn resolve(&self, name: &str, kinds: &[Kind]) -> Option<&Address> {
