@@ -40,7 +40,7 @@ impl Unit {
     /// Three significant digits, which is as much as anyone reads off a
     /// table; a metric that needs more can be a [`Unit::Custom`] on a
     /// rescaled value.
-    pub fn format(self, value: f64) -> String {
+    pub(crate) fn format(self, value: f64) -> String {
         if !value.is_finite() {
             return "-".to_string();
         }

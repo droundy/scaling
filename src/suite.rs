@@ -806,30 +806,6 @@ impl Report {
         }
     }
 
-    /// Retrieve the scalings for one group by name.
-    ///
-    /// `None` if nothing of that name was measured, if it was measured but
-    /// is of another type, or if the suite has not run.
-    /// ```
-    /// use scaling::Config;
-    ///
-    /// #[scaling::bench_scaling(name = "sum_to_100", nmin = 32)]
-    /// fn my_benchmark(n: usize) -> u64 {
-    ///     (0..n as u64).sum()
-    /// }
-    ///
-    /// let report = Config::default().run().expect("the registrations compose");
-    /// let scaling = report.get_scaling("sum_to_100").expect("it ran");
-    /// assert!(scaling.iterations > 0);
-    /// ```
-    pub fn get_scaling(&self, name: &str) -> Option<ScalingStats> {
-        if let Some((_, Found::Scaling(scaling))) = self.entries.iter().find(|(n, _)| n == name) {
-            Some(*scaling)
-        } else {
-            None
-        }
-    }
-
     /// One measurement, whichever concrete kind it turns out to be - a
     /// single scan over the report's entries, for a caller (formatting
     /// output, say) that would otherwise need one scan per kind it tries in
@@ -848,12 +824,28 @@ impl Report {
     /// caller that does not know what it is looking at can simply ask.
     pub fn stats(&self, name: &str) -> Option<Timing> {
         match self.find(name)? {
-            Found::Timing(c) if c.stats().len() == 1 => Some(c.stats()[0]),
+            Found::Timing(c) if c.timings().len() == 1 => Some(c.timings()[0]),
             _ => None,
         }
     }
 
     /// A scaling benchmark's measurement, by name.
+    ///
+    /// `None` if nothing of that name was measured, or if it was measured but
+    /// is not a scaling benchmark.
+    ///
+    /// ```
+    /// use scaling::Config;
+    ///
+    /// #[scaling::bench_scaling(name = "sum_to_100", nmin = 32)]
+    /// fn my_benchmark(n: usize) -> u64 {
+    ///     (0..n as u64).sum()
+    /// }
+    ///
+    /// let report = Config::default().run().expect("the registrations compose");
+    /// let scaling = report.scaling("sum_to_100").expect("it ran");
+    /// assert!(scaling.iterations > 0);
+    /// ```
     pub fn scaling(&self, name: &str) -> Option<ScalingStats> {
         match self.find(name)? {
             Found::Scaling(s) => Some(s),
@@ -870,7 +862,7 @@ impl Report {
     /// asking "which of these is actually fastest here" wants.
     pub fn comparison(&self, name: &str) -> Option<Timings> {
         match self.find(name)? {
-            Found::Timing(c) if c.stats().len() > 1 => Some(c),
+            Found::Timing(c) if c.timings().len() > 1 => Some(c),
             _ => None,
         }
     }
@@ -878,7 +870,7 @@ impl Report {
     /// Every flat measurement, with its name, in the order they were added.
     pub fn all_stats(&self) -> impl Iterator<Item = (&str, Timing)> {
         self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Timing(c) if c.stats().len() == 1 => Some((name.as_str(), c.stats()[0])),
+            Found::Timing(c) if c.timings().len() == 1 => Some((name.as_str(), c.timings()[0])),
             _ => None,
         })
     }
@@ -886,7 +878,7 @@ impl Report {
     /// Every comparison, with its name, in the order they were added.
     pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Timings)> {
         self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Timing(c) if c.stats().len() > 1 => Some((name.as_str(), c.clone())),
+            Found::Timing(c) if c.timings().len() > 1 => Some((name.as_str(), c.clone())),
             _ => None,
         })
     }
@@ -979,7 +971,7 @@ mod tests {
             report.scaling("scaled").is_some(),
             "the scaling benchmark reported"
         );
-        assert_eq!(report.comparison("pair").unwrap().stats().len(), 2);
+        assert_eq!(report.comparison("pair").unwrap().timings().len(), 2);
     }
 
     #[test]
@@ -1496,7 +1488,7 @@ mod report_lookup {
         assert!(report.stats("flat").is_some());
         assert!(report.scaling("scaled").is_some());
         let cmp = report.comparison("pair").expect("the comparison ran");
-        assert_eq!(cmp.stats().len(), 2);
+        assert_eq!(cmp.timings().len(), 2);
     }
 
     /// Iterating one kind skips the others rather than failing on them,
@@ -1548,7 +1540,7 @@ mod report_lookup {
 
         let fastest = cmp
             .names()
-            .zip(cmp.stats())
+            .zip(cmp.timings())
             .min_by(|a, b| {
                 a.1.ns_per_iter
                     .partial_cmp(&b.1.ns_per_iter)
@@ -1599,7 +1591,7 @@ mod comparison_config {
             report
                 .comparison("starved")
                 .unwrap()
-                .stats()
+                .timings()
                 .iter()
                 .any(|s| s.hit_limit),
             "an unreachable goal must end at the budget",
@@ -1807,7 +1799,7 @@ mod registered_by_hand {
             .comparison("e2e-sort@data")
             .expect("the comparison ran");
         // Three alternatives, two of them reported against the baseline.
-        assert_eq!(cmps.stats().len(), 3);
+        assert_eq!(cmps.timings().len(), 3);
         assert_eq!(cmps.against_baseline().count(), 2);
 
         // Everything appears in the report, under the name it registered with.
@@ -1894,7 +1886,7 @@ mod registered_by_hand {
         let cmp = report
             .comparison("e2e-sort@data")
             .expect("the comparison comes back too");
-        assert_eq!(cmp.stats().len(), 3);
+        assert_eq!(cmp.timings().len(), 3);
 
         // And the scaling benchmark, which is a third type again.
         assert!(report.scaling("e2e::scaling").is_some());
@@ -1918,7 +1910,7 @@ mod registered_by_hand {
 
         let slowest = cmp
             .names()
-            .zip(cmp.stats())
+            .zip(cmp.timings())
             .max_by(|a, b| {
                 a.1.ns_per_iter
                     .partial_cmp(&b.1.ns_per_iter)

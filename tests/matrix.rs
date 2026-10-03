@@ -101,13 +101,13 @@ fn every_pairing_is_measured() {
         let cmps = report
             .comparison(&format!("sorting@{input}"))
             .unwrap_or_else(|| panic!("sorting@{input} did not run"));
-        assert_eq!(cmps.stats().len(), 3, "three candidates on {input}");
+        assert_eq!(cmps.timings().len(), 3, "three candidates on {input}");
         assert_eq!(cmps.against_baseline().count(), 2);
     }
 
     // hashing is a different type, so it is its own lane and unaffected.
     let hashing = report.comparison("hashing@short").unwrap();
-    assert_eq!(hashing.stats().len(), 2);
+    assert_eq!(hashing.timings().len(), 2);
 
     // sized: one input function registered at two sizes.
     for size in [64, 256] {
@@ -158,7 +158,7 @@ fn lanes_of_different_types_stay_apart() {
 fn a_comparison_still_has_every_absolute_timing() {
     let report = run();
     let cmps = report.comparison("sorting@reversed").unwrap();
-    for stats in cmps.stats() {
+    for stats in cmps.timings() {
         assert!(
             stats.ns_per_iter > 0.0,
             "every cell keeps its own measured time, not only a ratio",
@@ -207,7 +207,7 @@ fn a_design_a_candidate_is_measured_like_any_other() {
     let cmps = report
         .comparison("stateful@data")
         .expect("stateful@data did not run");
-    assert_eq!(cmps.stats().len(), 2);
+    assert_eq!(cmps.timings().len(), 2);
     assert_eq!(cmps.against_baseline().count(), 1);
 }
 
@@ -253,7 +253,7 @@ fn a_generic_candidate_is_registered_once_per_listed_type() {
             .comparison(&format!("generic@{input}"))
             .unwrap_or_else(|| panic!("generic@{input} did not run"));
         assert_eq!(
-            cmps.stats().len(),
+            cmps.timings().len(),
             2,
             "both candidates should be instantiated for {input}",
         );

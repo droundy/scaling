@@ -308,24 +308,24 @@ fn every_written_benchmark_is_found_and_measured() {
     let sorting = report
         .comparison("sorting@sorting_data")
         .expect("the sorting group ran");
-    assert_eq!(sorting.stats().len(), 3);
+    assert_eq!(sorting.timings().len(), 3);
     assert_eq!(sorting.against_baseline().count(), 2);
 
     let summing = report
         .comparison("summing")
         .expect("the no-input group ran");
-    assert_eq!(summing.stats().len(), 2);
+    assert_eq!(summing.timings().len(), 2);
 
     let counting = report
         .comparison("counting@counting_data")
         .expect("the group with a Design A member ran");
-    assert_eq!(counting.stats().len(), 2);
+    assert_eq!(counting.timings().len(), 2);
     assert_eq!(counting.against_baseline().count(), 1);
 
     let caching = report
         .comparison("caching@caching_data")
         .expect("the group with a Design A bench_input ran");
-    assert_eq!(caching.stats().len(), 2);
+    assert_eq!(caching.timings().len(), 2);
     assert_eq!(caching.against_baseline().count(), 1);
 
     let shown = format!("{report}");

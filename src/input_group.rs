@@ -695,11 +695,6 @@ impl Timings {
         &self.timings
     }
 
-    /// What each alternative measured, in the order they were added.
-    pub fn stats(&self) -> &[Timing] {
-        self.timings()
-    }
-
     /// Every alternative's name and measurement, baseline first.
     pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement, Metrics)> {
         self.names()
@@ -766,7 +761,7 @@ mod tests {
     fn one_alternative_is_a_valid_input_group() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let results = cfg.input_group().add("only", || 1u64).run();
-        assert_eq!(results.stats().len(), 1);
+        assert_eq!(results.timings().len(), 1);
         assert_eq!(results.against_baseline().count(), 0);
     }
 
@@ -801,7 +796,7 @@ mod tests {
             .run();
         assert_eq!(r.baseline_name(), "sum");
         assert_eq!(r.names().collect::<Vec<_>>(), ["sum", "string"]);
-        assert_eq!(r.stats().len(), 2);
+        assert_eq!(r.timings().len(), 2);
     }
 
     /// The null case: three copies of one function differ from each other
