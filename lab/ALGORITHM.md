@@ -32,8 +32,9 @@ answer. Where something below has *not* been checked that way, it says so.
    The clock cancels inside each round, and the fixed cost per measurement
    cancels in the subtraction.
 4. **Estimate an absolute time** for each function by subtracting its two
-   batch sizes. Its ratio to the canary gives the same time in core cycles,
-   which holds still when the clock does not.
+   batch sizes. If the canary shows the clock moving, report
+   **bogo-nanoseconds** instead: the ratio to the canary, scaled to what
+   it would be at the CPU's base clock.
 5. **Put an error bar on everything by batch means, on a log scale:**
    - Cut the rounds into at least 8 contiguous blocks of at least 15
      rounds, and at most 20 blocks.
@@ -154,7 +155,7 @@ cycles a link, a multiply and an add: against the logged clock frequency
 it reads 4.04-4.08 at every clock from 1.6 to 4.4 GHz, with a 10-90%
 range of under 0.01 within a run. It is cheap, at one batch of at
 most 20 us per round, and it earns its place twice:
-- it turns any function's time into cycles (section 4);
+- it turns any function's time into bogo-nanoseconds (section 4);
 - it shows how much the clock moved, which is what a refusal message needs
   to say (section 7).
 
@@ -233,52 +234,65 @@ and it biases low by about the size of the tick bias it removes.
 - **It assumes the fixed cost scales with the clock too.** It mostly does,
   since it is instructions and cache refills.
 
-## 4. Absolute times: nanoseconds and cycles
+## 4. Absolute times: nanoseconds, or bogo-nanoseconds
 
 Ratios are the precise measurement, but people also need the absolute
 number: whether a function's speed matters at all is a question about
-nanoseconds against, say, a network round trip.
+nanoseconds against, say, a network round trip. Most often that should be
+real nanoseconds.
 
 **Nanoseconds.** For each function, `(T(2N) - T(N)) / N`, where `T` is the
-25% trimmed mean of that rung's samples. On a quiet machine this is the
-better number. Dividing by the canary only adds the canary's own noise
-there: 2.6-3.6% against 0.03% raw for `instant_now` in an earlier sweep.
+25% trimmed mean of that rung's samples. When the clock holds still this
+is the better number. Dividing by the canary would only add the canary's
+own noise: 2.6-3.6% against 0.03% raw for `instant_now` in an earlier
+sweep.
 
-**Cycles.** The ratio of the function to the canary, from section 3,
-multiplied by 4 cycles a link, is the function's cost in core cycles. A
-clock-bound function's cycle count holds still when the clock moves, which
-its nanoseconds cannot. It replaces the "bogo-nanoseconds" idea with a real
-unit. For a memory-bound function it is not a fixed number on a noisy
-machine, for the reason given in section 3.
+**Bogo-nanoseconds.** When the clock moves, nanoseconds measured now do not
+describe later. Bogo-nanoseconds are the function's ratio to the canary,
+from section 3, times the canary's cost at the CPU's base clock:
 
-**Which one is primary.** Both are always reported. The one the stopping
-rule uses is:
-- **nanoseconds** when a `quiet-bench` reservation is in effect, which the
-  crate can already detect;
-- **cycles** otherwise.
+    bogo_ns = R(f / canary) x 4 cycles / f_base
 
-**Measured on battery** (PROBLEMS.md, "On battery"). There were four
-separate 5-minute processes, unpinned, with turbo and the powersave
-governor: an ordinary laptop. The clock bounced between 1.6 and 4.4 GHz,
-and the processes' average clocks differed by 25%.
+`f_base` is the base, non-turbo frequency. Linux publishes it as
+`cpufreq/base_frequency`; it is 1.7 GHz here. For clock-bound code this
+is the time the function would take at base clock, which is exactly what
+a `quiet-bench` machine measures. Checked against that, from the battery
+and mains processes (PROBLEMS.md, "On battery"):
 
-| workload | spread of ns across processes | spread of cycles |
-| --- | --- | --- |
-| `f64_sin` | 7.7% | 0.33% |
-| `urandom_read` | 8.8% | 0.13% |
-| `str_find` | 6.8% | 0.76% |
-| `btree_miss` | 1.9% | 5.1% |
-| `copy_64mb` | 2.6% | 4.4% |
+| workload | quiet, ns | unquiesced, bogo-ns (10 processes) | unquiesced, ns |
+| --- | --- | --- | --- |
+| `f64_sin` | 33.9 | 33.9-35.2 | 13.1-32.9 |
+| `str_find` | 2.18 ms | 2.17-2.23 ms | 0.87-1.97 ms |
+| `urandom_read` | 19.1 us | 19.0-19.2 us | 7.4-17.5 us |
+| `btree_miss` | 760 | 796-1256 | 518-747 |
 
-For clock-bound code, cycles are 10-60x more reproducible than
-nanoseconds. For memory-bound code they are worse, as predicted.
+For clock-bound code, bogo-nanoseconds land within 0-4% of the quiet
+machine's real nanoseconds, from a laptop whose clock was anywhere between
+1.6 and 4.4 GHz. Across processes they are 10-60x more reproducible than
+its nanoseconds. For memory-bound code neither number holds still on an
+unquiesced machine. The two passes then disagree and say so (section 7).
 
-Cycles also travel between operating points. `f64_sin` measured 57.5
-cycles quiet at 1.7 GHz and 58.5 on battery with turbo, `str_find` 0.8%
-apart, and `urandom_read` 0.5%.
+**Which one is reported.** For each function, its time per iteration is
+reported in nanoseconds if the clock is not changing, and in
+bogo-nanoseconds if it is. The clock is changing if the canary's own
+block-to-block spread - the same blocks as the bar, the standard deviation
+of the log of the canary's time in each - exceeds a quarter of the goal.
 
-The stopping rule above, which picks nanoseconds or cycles as the primary
-number, is still a proposal.
+Over a 1,000-round measurement that spread was:
+- **quiet:** 0.03-0.08%, on mains or battery;
+- **unquiesced:** 0.5-46%, with one exception at 0.007%, a stretch where
+  the clock sat steady at turbo.
+
+In that exception the nanoseconds are real, just at a fast clock. The
+canary can only see the clock change *during* a measurement: a clock held
+steady at turbo looks still, and its nanoseconds describe that clock.
+
+**Stopping, for a single function.** The goal applies to whichever number
+will be reported: its time per iteration as best it can be measured. That
+is the nanosecond bar while the clock holds still, and the bogo-nanosecond
+bar - the bar on the ratio to the canary - once it moves. The decision is
+re-made at every check, so a clock that starts moving mid-measurement
+switches the measurement over.
 
 ## 5. The error bar
 
@@ -516,8 +530,8 @@ factors for large ones: "twice as fast", not "50% less time".
   is how well the factor is known, so ±0.6% on 2.31x means 2.30x to 2.32x.
 - **A bar wider than about 20%** prints as a factor too: `×/÷ 1.3`.
   Percentages stop being symmetric at that size.
-- **Absolute times** always print alongside, in nanoseconds, and in cycles
-  when the machine is not quiesced.
+- **Absolute times** always print alongside: in nanoseconds, or in
+  bogo-nanoseconds when the clock moved during the measurement.
 - **Flags.** `(limit)` means the budget ran out before the goal. A refused
   result prints the refusal, never the number.
 
@@ -533,7 +547,8 @@ factors for large ones: "twice as fast", not "50% less time".
 | blocks | 8 to 20 | 8 removes lucky-small stops; smaller blocks cost more |
 | first check | 120 rounds | 8 blocks x 15 |
 | check growth | 1.3x | at most 30% overshoot |
-| canary | 4 cycles a link | 4.04-4.08 against the logged clock, 1.6-4.4 GHz; verify per architecture |
+| canary | 4 cycles a link | 4.04-4.08 against the logged clock, 1.6-4.4 GHz; sets the bogo-ns scale; verify per architecture |
+| clock is changing | canary block spread > goal / 4 | quiet 0.03-0.08%, unquiesced 0.5-46% |
 | passes | 2, at a √2 looser goal | replayed, 1.2-1.3x the cost |
 | disagreement | > 2 combined bars | replayed: 3-7% of good clock-pair results trigger it |
 | third pass | random effects, refuse if bar > goal | replayed: refuses 0.1-7% of good clock-pair results |
@@ -590,17 +605,21 @@ The lab's `replay.rs` has the first two as unit tests.
 - **The crate does not restart itself.** Both passes run in one process,
   so offsets fixed for the life of a process are not caught. That is a
   stated limit (see "Limits it does not overcome"), not a hidden one.
+- **Nanoseconds, or bogo-nanoseconds.** Absolute times are in real
+  nanoseconds when the clock holds still, and in bogo-nanoseconds,
+  relative to the canary, when it moves (section 4).
+- **A single function** stops on the uncertainty of its time per
+  iteration, in whichever of those two it will be reported.
 
 ## Decisions still open
 
-1. **Cycles or bogo-nanoseconds.** Cycles are a real unit, and on battery
-   they reproduced 10-60x better than nanoseconds for clock-bound code.
-   Nanoseconds at a nominal clock are friendlier and fake.
-2. **The primary quantity for a single function**, if the proposed rule in
-   section 4 proves too blunt.
-3. **The refusal policy.** Whether a refusal fails the process (a non-zero
-   exit) by default, and what flag allows it through.
-4. **Lone `bench()` calls.** Whether a single call outside a suite does two
+1. **What failing loudly does.** When a result cannot be reproduced to its
+   goal, it is not printed as a number. That is the "fail loudly, a
+   refusal rather than a little message added to a number" from early in
+   the lab. Still open: whether that also makes the process exit non-zero,
+   failing `cargo test` or `cargo bench`, and whether some flag lets a
+   run through anyway.
+2. **Lone `bench()` calls.** Whether a single call outside a suite does two
    back-to-back passes, or one, by default.
 
 ---
@@ -620,8 +639,8 @@ asked for, 1% by default. It tells you how accurate the answer is, and
 refuses to give an answer it cannot stand behind.
 
 ```none
-parse_v1:        412.3ns ± 0.9ns   (1650 cycles)
-parse_v2:        178.4ns ± 0.4ns   (714 cycles)
+parse_v1:        412.3ns ± 0.9ns
+parse_v2:        178.4ns ± 0.4ns
 parse_v2 vs v1:  2.31x faster (±0.4%)
 ```
 
@@ -661,11 +680,20 @@ the comparison says.
 
 On a machine that has not been quiesced (see `quiet-bench`), the clock
 changes speed under load, and nanoseconds measured at one moment do not
-describe another. `scaling` also reports the time in **cycles** of the
-CPU's clock, measured against a reference loop that runs alongside your
-code. For code limited by the CPU, cycles hold still when the clock does
-not. For code limited by memory, neither number holds still. The honest
-answer then is to quiesce the machine.
+describe another. `scaling` notices, because a small reference loop runs
+alongside your code and tracks the clock. When the clock moves, it reports
+**bogo-nanoseconds** instead:
+
+```none
+parse_v1:        731.0 bogo-ns ± 1.6
+```
+
+That is how long the function would take at the CPU's base clock,
+measured against the reference loop, so it holds still while the real
+clock wanders. For code limited by the CPU, it comes out close to the
+nanoseconds a quiesced machine would measure. For code limited by memory,
+neither number holds still, and the honest answer is to quiesce the
+machine.
 
 ### What happens while it measures
 
