@@ -309,13 +309,18 @@ impl<I: 'static> InputGroup<I> {
             rounds += 1;
 
             let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
-            let (base_mean, _) = own[0].mean_and_stderr();
+            let (base_mean, base_std_error) = own[0].mean_and_stderr();
             // Good enough only when every difference is, since the report
-            // stands behind all of them at once.
-            let all_precise = (1..k).all(|i| {
-                let (_, std_error) = diffs[i].mean_and_stderr();
-                cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
-            });
+            // stands behind all of them at once. A lone alternative has no
+            // differences, so it is good enough when its own time is.
+            let all_precise = if k == 1 {
+                cfg.accuracy_met(base_mean, base_std_error)
+            } else {
+                (1..k).all(|i| {
+                    let (_, std_error) = diffs[i].mean_and_stderr();
+                    cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
+                })
+            };
             let precise_enough = rounds >= MIN_SAMPLES && measured_ns >= floor_ns && all_precise;
             if precise_enough || out_of_budget {
                 break precise_enough;
