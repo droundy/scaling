@@ -290,12 +290,12 @@ fn sizes(out: Vec<u8>) -> scaling::Metrics {
 ```
 
 A function can also read the counts itself, to build a metric of its own from
-them, with `Metrics::counts()`:
+them, with `Metrics::allocation_counts()`:
 
 ```rust,ignore
 #[scaling::metrics(group = "encode", allocation)]
 fn overhead(out: Vec<u8>) -> scaling::Metrics {
-    let held = scaling::Metrics::counts().map_or(0, |c| c.retained_bytes);
+    let held = scaling::Metrics::allocation_counts().map_or(0, |c| c.retained_bytes);
     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
 }
 ```

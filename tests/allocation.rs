@@ -141,7 +141,7 @@ fn padded() -> Vec<u8> {
 
 #[scaling::metrics(group = "kept", allocation)]
 fn waste(out: Vec<u8>) -> Metrics {
-    let held = Metrics::counts()
+    let held = Metrics::allocation_counts()
         .expect("the run was counted")
         .retained_bytes;
     Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
@@ -155,7 +155,7 @@ fn lone() -> Vec<u8> {
 
 #[scaling::metrics(group = "uncounted")]
 fn peeks(_out: Vec<u8>) -> Metrics {
-    Metrics::new().count("had counts", Metrics::counts().is_some() as u8)
+    Metrics::new().count("had counts", Metrics::allocation_counts().is_some() as u8)
 }
 
 fn report() -> scaling::Report {

@@ -258,7 +258,7 @@ impl Metrics {
     /// ```ignore
     /// #[scaling::metrics(group = "encode", allocation)]
     /// fn overhead(out: Vec<u8>) -> scaling::Metrics {
-    ///     let held = scaling::Metrics::counts().map_or(0, |c| c.retained_bytes);
+    ///     let held = scaling::Metrics::allocation_counts().map_or(0, |c| c.retained_bytes);
     ///     scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
     /// }
     /// ```
@@ -267,7 +267,7 @@ impl Metrics {
     /// `allocation`, since its run was not counted. The counts are those of
     /// the candidate's own call, fixed before the function started, so
     /// whatever the function allocates does not change them.
-    pub fn counts() -> Option<crate::alloc::AllocStats> {
+    pub fn allocation_counts() -> Option<crate::alloc::AllocStats> {
         crate::alloc::current()
     }
 
@@ -465,15 +465,15 @@ mod tests {
     }
 
     #[test]
-    fn counts_are_available_to_a_metrics_function_while_it_runs() {
-        assert_eq!(Metrics::counts(), None);
+    fn allocation_counts_are_available_to_a_metrics_function_while_it_runs() {
+        assert_eq!(Metrics::allocation_counts(), None);
         let stats = crate::alloc::AllocStats {
             retained_bytes: 42,
             ..Default::default()
         };
         let provided = crate::alloc::provide(Some(stats));
-        assert_eq!(Metrics::counts(), Some(stats));
+        assert_eq!(Metrics::allocation_counts(), Some(stats));
         drop(provided);
-        assert_eq!(Metrics::counts(), None);
+        assert_eq!(Metrics::allocation_counts(), None);
     }
 }
