@@ -1,7 +1,8 @@
 //! Measuring one or more alternatives over a shared input: [`InputGroup`].
 //!
 //! The reason to time all alternatives together rather than in pairs is the
-//! same reason a comparison's alternatives beat two separate [`bench`] calls.
+//! same reason a comparison's alternatives beat two separate benchmarks run one
+//! after the other.
 //! Whatever the machine does slowly - a clock drifting, a package warming -
 //! lands on every alternative within the same round and cancels out of the
 //! differences between them. Measured one after another instead, each would
@@ -12,24 +13,75 @@ use super::*;
 use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
-/// Never stop *voluntarily* on fewer rounds than this. See
-/// [`crate::MIN_SAMPLE_TIME`], which does most of the work.
-const MIN_SAMPLES: usize = 6;
+/// Never stop *voluntarily* on fewer rounds than this.
+///
+/// A standard deviation estimated from `k` points is itself uncertain by
+/// roughly `1/sqrt(2(k-1))` - about 32% at `k = 6`, and over 70% at
+/// `k = 2`. Stopping the instant a noisy estimate happens to dip below the
+/// target would systematically favour the runs that got lucky, so we
+/// require a handful of rounds before believing the standard error at all.
+/// [`crate::MIN_SAMPLE_TIME`] does most of the work, and this is the floor
+/// beneath it.
+///
+/// Note the emphasis: this is a floor on *concluding we are done*, not on
+/// reporting. The selection effect it defends against exists only when the
+/// standard error is the thing that stops us. If instead
+/// [`max_time`](crate::Config::with_max_time) runs out first - which is what
+/// happens to a slow function on a short budget - nothing has been selected
+/// for, and the error bar from the three or four rounds we did manage is
+/// honest, wide, and a good deal more use than none at all. So a
+/// budget-forced stop reports whatever standard error it has (and sets
+/// [`Timing::hit_limit`]).
+///
+/// Not a knob: callers control accuracy with [`Config::relative`] and
+/// [`Config::absolute`], and cost with
+/// [`max_time`](crate::Config::with_max_time), and no useful benchmark wants
+/// a different answer here.
+pub(crate) const MIN_SAMPLES: usize = 6;
 
 /// How long one round - a batch of every alternative - should take.
 /// Calibration picks the batch size aiming for this.
+///
+/// Long enough that the two `Instant::now()` calls bracketing a round - on
+/// the order of 100 ns together - stay a rounding error against it, at about
+/// 0.1%, which is far below any accuracy worth asking for.
+///
+/// It was 1ms, and shortening it is nearly free. A benchmark stops when the
+/// standard error of the mean is small enough, and that error is set by the
+/// spread *between* samples, which for the benchmarks measured here is
+/// dominated by drift the batch size does not affect - so the same number
+/// of samples is needed either way, and each one costs a tenth as much:
+///
+/// ```none
+///                    reported at 1ms / at 100us      wall at 1ms / at 100us
+///   empty closure         0.5921 / 0.5933 ns             8.9 / 1.5 ms
+///   ~3ns of arithmetic    2.6236 / 2.6594 ns            13.2 / 1.4 ms
+///   ~2.9us of arithmetic  2880.7 / 2883.6 ns            10.7 / 1.4 ms
+///   noisy 1.7us workload  1753.2 / 1766.1 ns            10.3 / 5.9 ms
+/// ```
+///
+/// The answers are unchanged and the run-to-run spread is no worse; only
+/// the cost moves. The exception is a benchmark taking an input,
+/// which report about 20% lower, because a smaller batch means a smaller
+/// input vector to index into - that lookup is harness overhead
+/// rather than the benchmark, so measuring less of it is a gain, but it is
+/// a visible change in what those two report.
 const SAMPLE_TIME: Duration = Duration::from_micros(100);
 
-/// A backstop on the round count, so the accumulators cannot grow without
-/// bound.
+/// A backstop on the round count, so the vector of samples cannot grow
+/// without bound.
+///
+/// This is about memory, not about the measurement: `max_time` is the real
+/// budget, and at [`SAMPLE_TIME`] it allows ~100_000 rounds, ten times
+/// below this.
 const MAX_SAMPLES: usize = 1_000_000;
 
 /// A generator of inputs, type-erased so that all the alternatives can share
 /// one.
 type GenInput<I> = dyn FnMut() -> I + 'static;
 
-/// One alternative's timing loop, type-erased so that alternatives may
-/// differ in what they return.
+/// One alternative, type-erased so that alternatives may differ in what they
+/// return.
 ///
 /// The erasure is at the level of a whole batch rather than a single call:
 /// what is behind the pointer is [`time_loop`] with its `F` already chosen,
@@ -37,13 +89,95 @@ type GenInput<I> = dyn FnMut() -> I + 'static;
 /// per batch rather than once per iteration. On a 9 ns function the
 /// per-iteration form costs 14%; this costs nothing measurable.
 ///
-/// It takes a batch of inputs already prepared rather than making its own,
-/// so that every alternative in a round is handed the *same* inputs. That is
-/// what makes the per-round differences genuinely paired: if each drew its
-/// own inputs and the cost varied with the input, the difference between two
-/// alternatives would carry the difference between two draws as well, and no
-/// amount of averaging distinguishes the two.
-type Batch<I> = Box<dyn FnMut(&mut [I]) -> f64 + 'static>;
+/// [`Alternative::batch`] takes a batch of inputs already prepared rather
+/// than making its own, so that every alternative in a round is handed the
+/// *same* inputs. That is what makes the per-round differences genuinely
+/// paired: if each drew its own inputs and the cost varied with the input,
+/// the difference between two alternatives would carry the difference between
+/// two draws as well, and no amount of averaging distinguishes the two.
+trait Alternative<I> {
+    /// Time a batch of iterations over `xs`, returning the total in
+    /// nanoseconds.
+    fn batch(&mut self, xs: &mut [I]) -> f64;
+
+    /// Whether [`Alternative::measure`] has anything to compute.
+    fn has_metrics(&self) -> bool {
+        false
+    }
+
+    /// Have [`Alternative::measure`] count the allocations of its run, so
+    /// that metrics can ask for them. A no-op for an alternative with no
+    /// metrics, which has no use for the count.
+    fn count_allocations(&mut self) {}
+
+    /// Run once on `input`, outside the timing, and compute the metrics from
+    /// what it returned. `pristine` is the input as it was before the run,
+    /// when there is one to give.
+    fn measure(&mut self, _input: &mut I, _pristine: Option<&I>) -> Metrics {
+        Metrics::new()
+    }
+}
+
+/// An alternative that is only timed.
+struct Timed<F>(F);
+
+impl<I, F, O> Alternative<I> for Timed<F>
+where
+    F: FnMut(&mut I) -> O,
+{
+    fn batch(&mut self, xs: &mut [I]) -> f64 {
+        time_loop(&mut self.0, xs)
+    }
+}
+
+/// An alternative that is timed, and then run once more for its metrics.
+///
+/// The function and the metrics live together because the function is
+/// needed twice and cannot be shared between two closures: sharing it
+/// through a cell would put a borrow check inside the timing loop.
+struct Measured<F, M, O> {
+    f: F,
+    metrics: M,
+    /// Whether the run is counted for its allocations.
+    count: bool,
+    _output: std::marker::PhantomData<fn() -> O>,
+}
+
+impl<I, F, M, O> Alternative<I> for Measured<F, M, O>
+where
+    F: FnMut(&mut I) -> O,
+    M: FnMut(Option<&I>, O) -> Metrics,
+{
+    fn batch(&mut self, xs: &mut [I]) -> f64 {
+        time_loop(&mut self.f, xs)
+    }
+
+    fn has_metrics(&self) -> bool {
+        true
+    }
+
+    fn count_allocations(&mut self) {
+        self.count = true;
+    }
+
+    fn measure(&mut self, input: &mut I, pristine: Option<&I>) -> Metrics {
+        // Only the alternative's own call is counted, not the metrics
+        // function that follows: what it allocates to inspect the output is
+        // not the alternative's doing.
+        let (output, counted) = if self.count {
+            let (output, stats) = crate::alloc::measure(|| (self.f)(input));
+            (output, Some(stats))
+        } else {
+            ((self.f)(input), None)
+        };
+        // For the function to read, if it wants to build a metric from them.
+        let provided = crate::alloc::provide(counted);
+        let mut metrics = (self.metrics)(pristine, output);
+        drop(provided);
+        metrics.resolve_allocation(counted);
+        metrics
+    }
+}
 
 /// Benchmarks sharing an input, gathered before any of them runs.
 #[expect(clippy::type_complexity)]
@@ -56,7 +190,7 @@ pub struct InputGroup<I> {
 
 struct Entry<I> {
     name: String,
-    batch: Batch<I>,
+    alt: Box<dyn Alternative<I>>,
 }
 
 impl Config {
@@ -82,9 +216,9 @@ impl Config {
     /// directly and does not need `I: Clone`.
     ///
     /// Neither the generating nor the cloning is timed, but both are paid
-    /// out of [`Config::max_time`].
+    /// out of [`max_time`](crate::Config::with_max_time).
     ///
-    /// Like [`Config::input_group`]: this assembles a registered input group
+    /// Like `Config::input_group`: this assembles a registered input group
     /// or matrix lane.
     pub(crate) fn input_group_make_input<G, I: Clone + 'static>(
         &self,
@@ -135,17 +269,83 @@ impl<I: 'static> InputGroup<I> {
     ///
     /// The alternatives must agree on the input type, but not on what they
     /// return: each is timed by its own instantiation of the timing loop,
-    /// and only that loop, not its `O`, is visible to [`run`].
-    ///
-    /// [`run`]: InputGroup::run
-    pub fn add_input<F, O>(mut self, name: &str, mut f: F) -> Self
+    /// and only that loop, not its `O`, is visible to the group's `run`.
+    pub fn add_input<F, O>(mut self, name: &str, f: F) -> Self
     where
         F: FnMut(&mut I) -> O + 'static,
     {
         self.entries.push(Entry {
             name: name.to_string(),
-            batch: Box::new(move |xs: &mut [I]| time_loop(&mut f, xs)),
+            alt: Box::new(Timed(f)),
         });
+        self
+    }
+
+    /// Like [`InputGroup::add_input`], and once the timing is done the
+    /// alternative is run one more time and `metrics` computes extra numbers
+    /// from what it returned.
+    ///
+    /// `metrics` takes the output by value, so it needs no `Clone`, and may
+    /// reuse or check it. The run is outside the timing and happens once, so
+    /// it suits quantities that do not vary from run to run.
+    pub fn add_input_metrics<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
+    where
+        F: FnMut(&mut I) -> O + 'static,
+        O: 'static,
+        M: FnMut(O) -> Metrics + 'static,
+    {
+        self.entries.push(Entry {
+            name: name.to_string(),
+            alt: Box::new(Measured {
+                f,
+                metrics: move |_: Option<&I>, output| metrics(output),
+                count: false,
+                _output: std::marker::PhantomData,
+            }),
+        });
+        self
+    }
+
+    /// Like [`InputGroup::add_input_metrics`], and `metrics` is also given
+    /// the input as it was before the run, which the alternative is free to
+    /// have changed.
+    ///
+    /// # Panics
+    ///
+    /// If the group has no way to clone its input, since the pristine copy
+    /// has to come from somewhere.
+    pub fn add_input_metrics_with_input<F, O, M>(mut self, name: &str, f: F, mut metrics: M) -> Self
+    where
+        F: FnMut(&mut I) -> O + 'static,
+        O: 'static,
+        M: FnMut(&I, O) -> Metrics + 'static,
+    {
+        assert!(
+            self.clone_input.is_some(),
+            "metrics that read the input need an input that can be cloned"
+        );
+        self.entries.push(Entry {
+            name: name.to_string(),
+            alt: Box::new(Measured {
+                f,
+                metrics: move |pristine: Option<&I>, output| {
+                    metrics(pristine.expect("a clone of the input was kept"), output)
+                },
+                count: false,
+                _output: std::marker::PhantomData,
+            }),
+        });
+        self
+    }
+
+    /// Count the allocations of the run that the alternative added last is
+    /// given for its metrics, so that they can ask for them.
+    ///
+    /// Does nothing for an alternative without metrics.
+    pub fn counting_allocations(mut self) -> Self {
+        if let Some(last) = self.entries.last_mut() {
+            last.alt.count_allocations();
+        }
         self
     }
 
@@ -181,7 +381,7 @@ impl<I: 'static> InputGroup<I> {
     ///    alternative has had [`crate::MIN_SAMPLE_TIME`] of measuring, and
     ///    *every* difference from the baseline is measured finely enough to
     ///    detect a change the size of the accuracy goal. Running out of
-    ///    [`Config::max_time`] stops it too, and marks the results.
+    ///    [`max_time`](crate::Config::with_max_time) stops it too, and marks the results.
     ///
     /// Each difference is accumulated per round rather than assembled from
     /// two separately measured means - see [`Timing::std_error`] for why
@@ -208,7 +408,7 @@ impl<I: 'static> InputGroup<I> {
         let _machine = Machine::claim();
         // `k` times the budget, because `k` timings come out of this: at the
         // single budget each alternative would get a `k`th of the wall clock
-        // a lone `bench` call is allowed, for the same target.
+        // a lone benchmark is allowed, for the same target.
         let clock = Clock::new(self.cfg.max_time * self.entries.len().max(1) as u32);
         // A family of `k - 1`: one comparison is reported per alternative
         // beyond the baseline, and nothing outside this set shares the
@@ -227,7 +427,7 @@ impl<I: 'static> InputGroup<I> {
     /// differences this reports cancel the machine's slow movement only
     /// because every alternative met that movement within the same round.
     ///
-    /// `clock` must be built with `k` times [`Config::max_time`], as the
+    /// `clock` must be built with `k` times [`max_time`](crate::Config::with_max_time), as the
     /// caller above does.
     ///
     /// # Panics
@@ -296,7 +496,7 @@ impl<I: 'static> InputGroup<I> {
                     );
                     &mut xs
                 };
-                let t = (entries[i].batch)(batch_inputs);
+                let t = entries[i].alt.batch(batch_inputs);
                 times[i] = t / unit as f64;
                 measured_ns += t;
             }
@@ -309,13 +509,18 @@ impl<I: 'static> InputGroup<I> {
             rounds += 1;
 
             let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
-            let (base_mean, _) = own[0].mean_and_stderr();
+            let (base_mean, base_std_error) = own[0].mean_and_stderr();
             // Good enough only when every difference is, since the report
-            // stands behind all of them at once.
-            let all_precise = (1..k).all(|i| {
-                let (_, std_error) = diffs[i].mean_and_stderr();
-                cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
-            });
+            // stands behind all of them at once. A lone alternative has no
+            // differences, so it is good enough when its own time is.
+            let all_precise = if k == 1 {
+                cfg.accuracy_met(base_mean, base_std_error)
+            } else {
+                (1..k).all(|i| {
+                    let (_, std_error) = diffs[i].mean_and_stderr();
+                    cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
+                })
+            };
             let precise_enough = rounds >= MIN_SAMPLES && measured_ns >= floor_ns && all_precise;
             if precise_enough || out_of_budget {
                 break precise_enough;
@@ -348,9 +553,50 @@ impl<I: 'static> InputGroup<I> {
                 diff.mean_and_stderr().1,
             ));
         }
+        let metrics = measure_metrics(&mut entries, &mut make_input, clone_input);
         Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
             timings,
+            metrics,
+        }
+    }
+}
+
+/// Run every alternative that has metrics once, each on its own copy of one
+/// fresh input, and gather what they computed.
+///
+/// Empty when no alternative has any, so a plain group carries nothing
+/// extra. Otherwise one record per alternative, in order, the empty record
+/// for those with none.
+fn measure_metrics<I>(
+    entries: &mut [Entry<I>],
+    make_input: &mut GenInput<I>,
+    clone_input: Option<&dyn Fn(&I) -> I>,
+) -> Vec<Metrics> {
+    if !entries.iter().any(|e| e.alt.has_metrics()) {
+        return Vec::new();
+    }
+    let pristine = make_input();
+    match clone_input {
+        Some(clone) => entries
+            .iter_mut()
+            .map(|e| {
+                if !e.alt.has_metrics() {
+                    return Metrics::new();
+                }
+                let mut input = clone(&pristine);
+                e.alt.measure(&mut input, Some(&pristine))
+            })
+            .collect(),
+        // Only a lone alternative can lack a way to clone its input, and
+        // then there is no copy to keep.
+        None => {
+            let mut input = pristine;
+            entries
+                .iter_mut()
+                .take(1)
+                .map(|e| e.alt.measure(&mut input, None))
+                .collect()
         }
     }
 }
@@ -375,8 +621,16 @@ fn clone_into<I>(master: &[I], xs: &mut Vec<I>, clone_input: &dyn Fn(&I) -> I) {
 }
 
 /// Find a batch size whose measured duration, summed over every alternative,
-/// reaches [`SAMPLE_TIME`]: the same extrapolation
-/// [`Config::bench_make_input`] does, over a whole round.
+/// reaches [`SAMPLE_TIME`].
+///
+/// Returns the batch size and how many iterations of each alternative the
+/// probes ran, which count towards [`Timing::iterations`] even though their
+/// timings are discarded.
+///
+/// Calibration yields between probes, so that in a suite it is interleaved
+/// like everything else. Doing it eagerly instead would put every
+/// benchmark's choice of batch size at the very start of the session, in the
+/// one thermal state interleaving exists to stop trusting.
 async fn calibrate<I>(
     make_input: &mut GenInput<I>,
     entries: &mut [Entry<I>],
@@ -385,10 +639,30 @@ async fn calibrate<I>(
     clone_input: Option<&dyn Fn(&I) -> I>,
     clock: &Clock,
 ) -> (usize, u64) {
+    // A ceiling on the *total* cost of one probe, setup as well as timing.
+    // Ordinarily the extrapolation below is driven by the timed portion
+    // approaching `SAMPLE_TIME`, but when a benchmark's cost is optimised
+    // away that portion never grows however large `unit` gets - while untimed
+    // input construction does, unboundedly, and before the budget check can
+    // ever run, since the allocation is itself what takes the time. A
+    // hundredth of the budget rather than some large fraction of it, to bound
+    // memory as well: on fast hardware a looser ceiling buys proportionally
+    // more allocation before it fires.
     let probe_ceiling_ns = (clock.budget() / 100)
         .max(Duration::from_millis(5))
         .as_secs_f64()
         * 1e9;
+    // Two more ceilings on `unit`, needing no timing at all, whichever is
+    // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with the
+    // benchmark *and* the input both trivial (`|| {}`, an input of `()`) the
+    // optimiser can delete the whole batch, so the time reads as ~0 however
+    // large `unit` grows. `MAX_CALIBRATION_BYTES` covers an `I` whose
+    // per-clone cost is real but too small for `probe_ceiling_ns` to catch
+    // before millions of copies - an array, a plain struct - since `size_of`
+    // sees a `Vec` or `String` as its inline handle only. That last case is
+    // left to the wall-clock ceiling above, which bounds it only indirectly:
+    // between the three every `I` has some backstop and none has a hard
+    // guarantee, so keep inputs small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
     const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
     let unit_cap =
@@ -412,13 +686,18 @@ async fn calibrate<I>(
                 );
                 &mut *xs
             };
-            timed_ns += (e.batch)(batch_inputs);
+            timed_ns += e.alt.batch(batch_inputs);
         }
         // Everything the probe cost, generating and cloning included: what
         // the ceiling below is protecting against is a probe that takes an
         // age, and it does not matter which part of it was slow.
         let total_ns = probe_start.elapsed().as_secs_f64() * 1e9;
         probed += unit as u64;
+        // Accept immediately, without ever retrying at this size, as soon as
+        // *any* ceiling is reached: reaching the target is the ordinary case,
+        // `probe_ceiling_ns` is what saves us when construction dominates, and
+        // `unit_cap` is the timing-blind backstop above. Retrying here would
+        // just re-pay the same large cost for no benefit.
         if timed_ns >= target
             || total_ns >= probe_ceiling_ns
             || unit >= unit_cap
@@ -430,6 +709,12 @@ async fn calibrate<I>(
         if !clock.yield_now().await {
             return (unit, probed);
         }
+        // Extrapolate from whichever cost is closer to its own ceiling: the
+        // timed portion approaching the target, or the *total* probe cost
+        // approaching `probe_ceiling_ns`. Both factors are ceilings on how
+        // much bigger the *next* probe should be, so growth decelerates
+        // smoothly as either limit is approached instead of overshooting it by
+        // up to 100x.
         let factor_time = (target / timed_ns.max(1.0)).clamp(2.0, 100.0);
         let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
         unit = ((unit as f64 * factor_time.min(factor_safety)).ceil() as usize)
@@ -438,12 +723,23 @@ async fn calibrate<I>(
     }
 }
 
-/// What running an input group measured: a [`Timing`] for every alternative,
-/// and every alternative's difference from the baseline when there is one.
+/// A comparison's results: a [`Timing`] for each candidate, baseline first.
+///
+/// [`Report::comparison`] gives one, and [`Report::all_comparisons`] gives each
+/// of them. [`names`](Timings::names), [`timings`](Timings::timings) and
+/// [`metrics`](Timings::metrics) agree on the order, so the *i*th of each
+/// belongs to the same candidate. Each candidate after the baseline carries its
+/// [`difference`](Timing::difference) from it, and
+/// [`against_baseline`](Timings::against_baseline) pairs those with their
+/// names. Printing one with `{}` shows just these candidates.
 #[derive(Debug, Clone)]
 pub struct Timings {
     names: Vec<String>,
     timings: Vec<Timing>,
+    /// What each candidate produced besides a time, in the same order as
+    /// `timings`. Empty when nothing was computed, so a plain run carries
+    /// nothing extra.
+    metrics: Vec<Metrics>,
 }
 
 impl Timings {
@@ -452,6 +748,7 @@ impl Timings {
         Timings {
             names: vec!["nothing".to_string()],
             timings: vec![timing],
+            metrics: Vec::new(),
         }
     }
 
@@ -460,45 +757,70 @@ impl Timings {
         Timings {
             names: names.iter().map(|name| (*name).to_string()).collect(),
             timings: timings.to_vec(),
+            metrics: Vec::new(),
         }
     }
 
-    /// The name of the baseline - the first alternative that was added.
+    /// Attaches what each candidate produced besides a time, one record per
+    /// candidate in the order they were added.
+    #[allow(dead_code)] // until a run computes any
+    pub(crate) fn with_metrics(mut self, metrics: Vec<Metrics>) -> Self {
+        assert_eq!(
+            metrics.len(),
+            self.timings.len(),
+            "one record of metrics per alternative"
+        );
+        self.metrics = metrics;
+        self
+    }
+
+    /// What each candidate produced besides a time, one record for each, in the
+    /// order of [`names`](Timings::names). The slice is empty, rather than full
+    /// of empty records, when no candidate computed anything.
+    ///
+    /// To read one candidate's record by its name, ask the report:
+    /// [`Report::metrics`].
+    pub fn metrics(&self) -> &[Metrics] {
+        &self.metrics
+    }
+
+    /// The name of the baseline, the first candidate.
     pub fn baseline_name(&self) -> &str {
         &self.names[0]
     }
 
-    /// Every alternative's name, baseline first, in the order they were
-    /// added.
+    /// Every candidate's name, baseline first.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.names.iter().map(|s| s.as_str())
     }
 
-    /// What each alternative measured, in the order they were added.
+    /// What each candidate measured, in the order of [`names`](Timings::names).
     pub fn timings(&self) -> &[Timing] {
         &self.timings
     }
 
-    /// What each alternative measured, in the order they were added.
-    pub fn stats(&self) -> &[Timing] {
-        self.timings()
-    }
-
-    /// Every alternative's name and measurement, baseline first.
-    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement)> {
+    /// Every candidate's name and measurement, baseline first.
+    pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement, Metrics)> {
         self.names()
-            .map(str::to_string)
-            .zip(self.timings.iter().map(|t| crate::Measurement::Timing(*t)))
+            .enumerate()
+            .map(|(i, name)| {
+                (
+                    name.to_string(),
+                    crate::Measurement::Timing(self.timings[i]),
+                    self.metrics.get(i).cloned().unwrap_or_default(),
+                )
+            })
             .collect()
     }
 
-    /// Each alternative beyond the baseline, paired with its name, as a
-    /// [`Timing`] against the baseline.
+    /// Each candidate after the baseline, paired with its name. Each
+    /// [`Timing`] carries its [`difference`](Timing::difference) from the
+    /// baseline.
     pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {
         (1..self.timings.len()).map(move |i| (self.names[i].as_str(), self.timings[i]))
     }
 
-    /// Whether any alternative differed from the baseline.
+    /// Whether any candidate differed significantly from the baseline.
     pub fn any_changed(&self) -> bool {
         self.against_baseline().any(|(_, c)| c.is_changed())
     }
@@ -544,7 +866,7 @@ mod tests {
     fn one_alternative_is_a_valid_input_group() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let results = cfg.input_group().add("only", || 1u64).run();
-        assert_eq!(results.stats().len(), 1);
+        assert_eq!(results.timings().len(), 1);
         assert_eq!(results.against_baseline().count(), 0);
     }
 
@@ -579,7 +901,7 @@ mod tests {
             .run();
         assert_eq!(r.baseline_name(), "sum");
         assert_eq!(r.names().collect::<Vec<_>>(), ["sum", "string"]);
-        assert_eq!(r.stats().len(), 2);
+        assert_eq!(r.timings().len(), 2);
     }
 
     /// The null case: three copies of one function differ from each other
@@ -708,5 +1030,145 @@ mod tests {
         let rate = caught as f64 / (2 * REPEATS) as f64;
         println!("detected {caught}/{} = {:.0}%", 2 * REPEATS, rate * 100.0);
         assert!(rate >= 0.70, "detection rate {rate:.2} below 0.70");
+    }
+
+    fn quick() -> Config {
+        Config::relative(0.05).with_max_time(Duration::from_millis(30))
+    }
+
+    /// What an alternative returned is handed to its metrics, once the
+    /// timing is done.
+    #[test]
+    fn metrics_are_computed_from_the_output() {
+        let timings = quick()
+            .input_group()
+            .add_input_metrics(
+                "short",
+                |_: &mut ()| vec![0u8; 100],
+                |out| Metrics::new().bytes("size", out.len()),
+            )
+            .add_input_metrics(
+                "long",
+                |_: &mut ()| vec![0u8; 400],
+                |out| Metrics::new().bytes("size", out.len()),
+            )
+            .run();
+        let sizes: Vec<f64> = timings
+            .metrics()
+            .iter()
+            .map(|m| m.get("size").expect("each has a size").as_f64())
+            .collect();
+        assert_eq!(sizes, [100.0, 400.0]);
+    }
+
+    /// An alternative with no metrics gets the empty record, so that the
+    /// records stay lined up with the timings.
+    #[test]
+    fn an_alternative_without_metrics_gets_an_empty_record() {
+        let timings = quick()
+            .input_group()
+            .add_input("plain", |_: &mut ()| 1u8)
+            .add_input_metrics(
+                "counted",
+                |_: &mut ()| vec![0u8; 8],
+                |out| Metrics::new().count("items", out.len()),
+            )
+            .run();
+        assert_eq!(timings.metrics().len(), 2);
+        assert!(timings.metrics()[0].is_empty());
+        assert_eq!(timings.metrics()[1].get("items").unwrap().as_f64(), 8.0);
+    }
+
+    /// A group that asks for nothing carries nothing.
+    #[test]
+    fn a_plain_group_has_no_metrics() {
+        let timings = quick()
+            .input_group()
+            .add_input("a", |_: &mut ()| 1u8)
+            .add_input("b", |_: &mut ()| 2u8)
+            .run();
+        assert!(timings.metrics().is_empty());
+    }
+
+    /// The input a metric sees is the one the alternative started from, not
+    /// what it left behind.
+    #[test]
+    fn metrics_can_read_the_input_as_it_was() {
+        let timings = quick()
+            .input_group_make_input(|| vec![1u8, 2, 3])
+            .add_input_metrics_with_input(
+                "grows",
+                |v: &mut Vec<u8>| {
+                    v.push(4);
+                    v.len()
+                },
+                |before, after| {
+                    Metrics::new()
+                        .count("before", before.len())
+                        .count("after", after)
+                },
+            )
+            .add_input("other", |v: &mut Vec<u8>| v.len())
+            .run();
+        let m = &timings.metrics()[0];
+        assert_eq!(m.get("before").unwrap().as_f64(), 3.0);
+        assert_eq!(m.get("after").unwrap().as_f64(), 4.0);
+    }
+
+    /// A lone alternative has no need of a clonable input unless its
+    /// metrics read it.
+    #[test]
+    fn a_lone_alternative_computes_metrics_without_a_clonable_input() {
+        struct NotClone(Vec<u8>);
+        let timings = quick()
+            .input_group_make_input_uncloned(|| NotClone(vec![0; 5]))
+            .add_input_metrics(
+                "only",
+                |x: &mut NotClone| x.0.len(),
+                |len| Metrics::new().count("len", len),
+            )
+            .run();
+        assert_eq!(timings.metrics()[0].get("len").unwrap().as_f64(), 5.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "need an input that can be cloned")]
+    fn reading_the_input_needs_it_to_be_clonable() {
+        struct NotClone;
+        let _ = quick()
+            .input_group_make_input_uncloned(|| NotClone)
+            .add_input_metrics_with_input("x", |_: &mut NotClone| 0u8, |_, _| Metrics::new());
+    }
+
+    /// Counting the run is what lets metrics ask for the counts. (Without
+    /// the counting allocator installed they are all zero, which is why
+    /// assembly refuses a program that asks for them without it.)
+    #[test]
+    fn counting_the_run_lets_metrics_ask_for_allocations() {
+        let timings = quick()
+            .input_group()
+            .add_input_metrics(
+                "only",
+                |_: &mut ()| 1u8,
+                |_| Metrics::new().peak_allocated_bytes().allocation_count(),
+            )
+            .counting_allocations()
+            .run();
+        let m = &timings.metrics()[0];
+        assert_eq!(m.get("alloc peak").unwrap().as_f64(), 0.0);
+        assert_eq!(m.get("alloc count").unwrap().as_f64(), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "say `allocation`")]
+    fn asking_for_allocations_of_an_uncounted_run_is_an_error() {
+        quick()
+            .input_group()
+            .add_input_metrics(
+                "only",
+                |_: &mut ()| 1u8,
+                |_| Metrics::new().peak_allocated_bytes(),
+            )
+            .run();
     }
 }

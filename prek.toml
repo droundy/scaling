@@ -22,6 +22,14 @@ hooks = [
         types = ["rust"],
         pass_filenames = false,
     },
+    {
+        id = "cargo-doc",
+        name = "cargo doc, private items too",
+        language = "system",
+        entry = "cargo rustdoc -p scaling --lib -- --document-private-items -D warnings",
+        types = ["rust"],
+        pass_filenames = false,
+    },
 ]
 
 [[repos]]

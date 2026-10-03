@@ -37,18 +37,18 @@ pub(crate) fn noop_alt(set: InputGroup<ErasedInput>, _: &str) -> InputGroup<Eras
 pub struct Registered {
     /// What the report calls this, conventionally module-qualified so that
     /// two benchmarks of the same name in different modules do not collide.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// The crate this was registered from, as its own `Cargo.toml` spells
     /// it - `env!("CARGO_PKG_NAME")` evaluates where the registration is
     /// written, not where it is collected.
-    pub crate_name: &'static str,
+    pub(crate) crate_name: &'static str,
     /// That crate's version, from `env!("CARGO_PKG_VERSION")`.
     ///
     /// Together with `crate_name` this says where a registration came from,
     /// which is what distinguishes the same benchmark registered by two
     /// versions of one crate - an old one pulled in as a dev-dependency to
     /// compare against.
-    pub crate_version: &'static str,
+    pub(crate) crate_version: &'static str,
     /// Adds itself with [`Suite::add`], [`Suite::add_input`],
     /// [`Suite::add_make_input`], [`Suite::add_scaling`] or
     /// [`Suite::add_scaling_gen`] - which one, and any input generator or
@@ -86,7 +86,28 @@ pub struct Registered {
     /// types at the point it writes it, so `F`, `I` and `O` are resolved
     /// there and the shim that comes out has a fixed signature.
     ///
-    pub add: fn(&mut Suite, &str),
+    pub(crate) add: fn(&mut Suite, &str),
+}
+
+impl Registered {
+    /// What generated code calls to register a standalone benchmark. A
+    /// constructor rather than a struct literal, so that this can gain fields
+    /// without the code the macros wrote for an earlier version stopping
+    /// compiling.
+    #[doc(hidden)]
+    pub const fn new(
+        name: &'static str,
+        crate_name: &'static str,
+        crate_version: &'static str,
+        add: fn(&mut Suite, &str),
+    ) -> Self {
+        Registered {
+            name,
+            crate_name,
+            crate_version,
+            add,
+        }
+    }
 }
 
 inventory::collect!(Registered);
@@ -154,6 +175,17 @@ impl ErasedInput {
             .downcast_mut::<I>()
             .expect("input type was checked during assembly")
     }
+
+    /// The input, as the type it really is, for reading.
+    ///
+    /// # Panics
+    ///
+    /// As [`ErasedInput::get_mut`].
+    pub fn get<I: Any>(&self) -> &I {
+        self.value
+            .downcast_ref::<I>()
+            .expect("input type was checked during assembly")
+    }
 }
 
 impl Clone for ErasedInput {
@@ -189,25 +221,97 @@ pub struct Candidate {
     /// constructed in practice - a function with nothing to compare against
     /// is written as a plain `#[bench]`, which registers a [`Registered`]
     /// instead - but an empty slice is not itself invalid here, just inert.
-    pub groups: &'static [&'static str],
+    pub(crate) groups: &'static [&'static str],
     /// What to call this candidate in the report.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// The type of input it takes, which is what it is paired on. A function
     /// rather than the id itself, because a registration is a `static` and
     /// so must be built in a `const` context.
-    pub input_type: fn() -> TypeId,
+    pub(crate) input_type: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
-    pub input_type_name: &'static str,
+    pub(crate) input_type_name: &'static str,
     /// Whether this is the one the others are reported against, in every
     /// group it belongs to. If nobody in a lane says so, assembly picks the
     /// first by name; adding a candidate sorting earlier then moves the
     /// baseline, which is why the report names it.
-    pub is_baseline: bool,
-    pub crate_name: &'static str,
-    pub crate_version: &'static str,
+    pub(crate) is_baseline: bool,
+    pub(crate) crate_name: &'static str,
+    pub(crate) crate_version: &'static str,
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
-    pub add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
+    pub(crate) add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
+    /// How this candidate takes part in a [`MetricsFn`]: what it returns,
+    /// and how to add itself so that what it returns is handed on. `None`
+    /// for a candidate whose output cannot be handed on - one that returns a
+    /// borrow, or an `impl Trait`, or is generic in it - which is simply
+    /// never given metrics.
+    pub(crate) metrics: Option<CandidateMetrics>,
+}
+
+impl Candidate {
+    /// What generated code calls to register a candidate. See
+    /// [`Registered::new`].
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        groups: &'static [&'static str],
+        name: &'static str,
+        input_type: fn() -> TypeId,
+        input_type_name: &'static str,
+        is_baseline: bool,
+        crate_name: &'static str,
+        crate_version: &'static str,
+        add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
+    ) -> Self {
+        Candidate {
+            groups,
+            name,
+            input_type,
+            input_type_name,
+            is_baseline,
+            crate_name,
+            crate_version,
+            add_alt,
+            metrics: None,
+        }
+    }
+
+    /// Say how this candidate takes part in a [`MetricsFn`], when what it
+    /// returns can be handed on.
+    #[doc(hidden)]
+    pub const fn with_metrics(mut self, metrics: CandidateMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+}
+
+/// What a [`Candidate`] needs to be given metrics.
+///
+/// Separate from the candidate's plain `add_alt` because which metrics function it
+/// is given is decided at assembly, by looking at every registration, and
+/// the shim that adds the candidate cannot know that when it is written.
+pub struct CandidateMetrics {
+    /// The type it returns, which is what a metrics function is paired to it
+    /// on.
+    pub(crate) output_type: fn() -> TypeId,
+    /// Like [`Candidate::add_alt`], and the alternative is then also run
+    /// once more for the metrics function it is given.
+    pub(crate) add_alt:
+        fn(InputGroup<ErasedInput>, &str, &'static MetricsFn) -> InputGroup<ErasedInput>,
+}
+
+impl CandidateMetrics {
+    /// See [`Registered::new`].
+    #[doc(hidden)]
+    pub const fn new(
+        output_type: fn() -> TypeId,
+        add_alt: fn(InputGroup<ErasedInput>, &str, &'static MetricsFn) -> InputGroup<ErasedInput>,
+    ) -> Self {
+        CandidateMetrics {
+            output_type,
+            add_alt,
+        }
+    }
 }
 
 impl fmt::Debug for Candidate {
@@ -227,6 +331,120 @@ impl fmt::Debug for Candidate {
 
 inventory::collect!(Candidate);
 
+/// A function that computes extra numbers about what a candidate returned,
+/// for every candidate of the groups it names that returns that type.
+///
+/// Registered separately from the candidates for the reason the candidates
+/// and inputs are separate: it names a group and a type and nothing else, so
+/// adding a candidate adds its metrics, and a new metric does not mean
+/// editing every candidate.
+///
+/// The function takes the output by value, which a registry cannot name, so
+/// it is registered as a shim: one that is handed the output with its type
+/// erased and puts the type back before the call.
+pub struct MetricsFn {
+    /// Every group it applies to.
+    pub(crate) groups: &'static [&'static str],
+    /// What it is called, for diagnostics.
+    pub(crate) name: &'static str,
+    /// The type it takes, which is what it is paired to candidates on.
+    pub(crate) output_type: fn() -> TypeId,
+    /// That type as the source spells it, for diagnostics.
+    pub(crate) output_type_name: &'static str,
+    /// The type of input it also reads, when it does. Then it only applies
+    /// to candidates measured on that type.
+    pub(crate) input_type: Option<fn() -> TypeId>,
+    /// That type as the source spells it, empty when it reads none.
+    pub(crate) input_type_name: &'static str,
+    pub(crate) crate_name: &'static str,
+    pub(crate) crate_version: &'static str,
+    /// Whether the candidate's run is counted for its allocations, which the
+    /// function can then ask to show. Needs [`crate::Allocator`]
+    /// to be the global allocator.
+    pub(crate) allocation: bool,
+    /// Calls the function. The input is given when [`MetricsFn::input_type`]
+    /// is `Some`: as it was before the candidate ran.
+    pub(crate) eval: fn(Option<&ErasedInput>, Box<dyn Any>) -> crate::Metrics,
+}
+
+impl MetricsFn {
+    /// What generated code calls to register a function that takes only a
+    /// candidate's output. See [`Registered::new`].
+    #[doc(hidden)]
+    pub const fn new(
+        groups: &'static [&'static str],
+        name: &'static str,
+        output_type: fn() -> TypeId,
+        output_type_name: &'static str,
+        crate_name: &'static str,
+        crate_version: &'static str,
+        eval: fn(Option<&ErasedInput>, Box<dyn Any>) -> crate::Metrics,
+    ) -> Self {
+        MetricsFn {
+            groups,
+            name,
+            output_type,
+            output_type_name,
+            input_type: None,
+            input_type_name: "",
+            crate_name,
+            crate_version,
+            allocation: false,
+            eval,
+        }
+    }
+
+    /// Say that the function also reads the input, of this type.
+    #[doc(hidden)]
+    pub const fn reading_input(mut self, type_id: fn() -> TypeId, type_name: &'static str) -> Self {
+        self.input_type = Some(type_id);
+        self.input_type_name = type_name;
+        self
+    }
+
+    /// Say that the candidate's run is to be counted for its allocations.
+    #[doc(hidden)]
+    pub const fn counting_allocations(mut self) -> Self {
+        self.allocation = true;
+        self
+    }
+
+    /// Whether the function also reads the input.
+    #[doc(hidden)]
+    pub fn reads_input(&self) -> bool {
+        self.input_type.is_some()
+    }
+
+    /// Whether the candidate's run is counted for its allocations.
+    #[doc(hidden)]
+    pub fn counts_allocations(&self) -> bool {
+        self.allocation
+    }
+
+    /// Call the function, with the candidate's output and, if
+    /// [`MetricsFn::reads_input`], the input as it was before the run.
+    #[doc(hidden)]
+    pub fn call(&self, pristine: Option<&ErasedInput>, output: Box<dyn Any>) -> crate::Metrics {
+        (self.eval)(pristine, output)
+    }
+}
+
+impl fmt::Debug for MetricsFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetricsFn")
+            .field("groups", &self.groups)
+            .field("name", &self.name)
+            .field("output_type_name", &self.output_type_name)
+            .field("input_type_name", &self.input_type_name)
+            .field("crate_name", &self.crate_name)
+            .field("crate_version", &self.crate_version)
+            .field("allocation", &self.allocation)
+            .finish()
+    }
+}
+
+inventory::collect!(MetricsFn);
+
 /// One input every candidate of its type, in a group this shares with it, is
 /// measured on.
 #[derive(Debug)]
@@ -236,25 +454,50 @@ pub struct Input {
     /// `"contains"`, say - without those groups' candidates being compared
     /// with each other: pairing only ever happens within one shared group
     /// name at a time.
-    pub groups: &'static [&'static str],
+    pub(crate) groups: &'static [&'static str],
     /// What to call this input in the report.
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// Which crate registered it, and at what version.
     ///
     /// Inputs carry this for the opposite reason candidates do: not to tell
-    /// several versions apart, but to pick one of them. See
-    /// [`crate::assemble::Lane::inputs`].
-    pub crate_name: &'static str,
-    pub crate_version: &'static str,
+    /// several versions apart, but to pick one of them. See `Lane::inputs` in
+    /// the assembly code.
+    pub(crate) crate_name: &'static str,
+    pub(crate) crate_version: &'static str,
     /// The type it produces, which is what candidates are paired to it on.
-    pub type_id: fn() -> TypeId,
+    pub(crate) type_id: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
-    pub type_name: &'static str,
+    pub(crate) type_name: &'static str,
     /// Called once for each timed iteration - a round makes a batch of them.
     /// With multiple candidates each value is cloned for each, so that all of
     /// them meet the same input; a singleton uses it directly. See
     /// [`ErasedInput`].
-    pub make: fn() -> ErasedInput,
+    pub(crate) make: fn() -> ErasedInput,
+}
+
+impl Input {
+    /// What generated code calls to register an input. See
+    /// [`Registered::new`].
+    #[doc(hidden)]
+    pub const fn new(
+        groups: &'static [&'static str],
+        name: &'static str,
+        crate_name: &'static str,
+        crate_version: &'static str,
+        type_id: fn() -> TypeId,
+        type_name: &'static str,
+        make: fn() -> ErasedInput,
+    ) -> Self {
+        Input {
+            groups,
+            name,
+            crate_name,
+            crate_version,
+            type_id,
+            type_name,
+            make,
+        }
+    }
 }
 
 inventory::collect!(Input);

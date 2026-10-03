@@ -21,6 +21,7 @@ fn noop_waker() -> Waker {
 }
 
 /// Drive one future to completion, polling it in a tight loop.
+#[cfg(test)]
 pub(crate) fn block_on<F: Future>(clock: &Clock, future: F) -> F::Output {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);

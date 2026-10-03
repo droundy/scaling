@@ -8,13 +8,12 @@
 //! keeping side by side: if one passes and the other fails, the fault is in
 //! the macro rather than in the registry.
 //!
-//! Driven through [`scaling::runner::measure`] rather than `Config::suite`:
+//! Driven through [`Config::run`] rather than `Config::suite`:
 //! building a `Suite` is `pub(crate)`, so an ordinary integration test -
 //! which links `scaling` the way any downstream crate would - has no way to
 //! get hold of one and can only ever reach the registry through the
 //! runner's public entry point.
 
-use scaling::runner::measure;
 use scaling::Config;
 use std::time::Duration;
 
@@ -234,7 +233,7 @@ fn options(max_time_ms: u64) -> Config {
 
 #[test]
 fn every_written_benchmark_is_found_and_measured() {
-    let report = measure(&options(50)).expect("these registrations compose");
+    let report = options(50).run().expect("these registrations compose");
 
     for name in [
         "plain",
@@ -253,18 +252,18 @@ fn every_written_benchmark_is_found_and_measured() {
             .unwrap_or_else(|| panic!("{name} not registered"))
             .to_string();
         assert!(
-            report.stats(&full).is_some(),
+            report.timing(&full).is_ok(),
             "{name} was registered but never measured",
         );
     }
-    assert!(report.stats("renamed").is_some());
+    assert!(report.timing("renamed").is_ok());
 
     let scaling_key = report
         .names()
         .find(|k| k.ends_with("scales"))
         .expect("the scaling benchmark registered")
         .to_string();
-    assert!(report.scaling(&scaling_key).is_some());
+    assert!(report.scaling(&scaling_key).is_ok());
 
     let gen_scaling_key = report
         .names()
@@ -272,7 +271,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the make_input scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&gen_scaling_key).is_some(),
+        report.scaling(&gen_scaling_key).is_ok(),
         "a scaling benchmark with make_input should measure just like one without",
     );
 
@@ -282,7 +281,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the &T scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&ref_scaling_key).is_some(),
+        report.scaling(&ref_scaling_key).is_ok(),
         "&T should measure exactly as &mut T does",
     );
 
@@ -292,7 +291,7 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the owned-input scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&owned_scaling_key).is_some(),
+        report.scaling(&owned_scaling_key).is_ok(),
         "T by value should measure exactly as &T and &mut T do",
     );
 
@@ -302,31 +301,31 @@ fn every_written_benchmark_is_found_and_measured() {
         .expect("the setup-once scaling benchmark registered")
         .to_string();
     assert!(
-        report.scaling(&persistent_scaling_key).is_some(),
+        report.scaling(&persistent_scaling_key).is_ok(),
         "a scaling benchmark with a setup-once function should measure like any other",
     );
 
     let sorting = report
         .comparison("sorting@sorting_data")
         .expect("the sorting group ran");
-    assert_eq!(sorting.stats().len(), 3);
+    assert_eq!(sorting.timings().len(), 3);
     assert_eq!(sorting.against_baseline().count(), 2);
 
     let summing = report
         .comparison("summing")
         .expect("the no-input group ran");
-    assert_eq!(summing.stats().len(), 2);
+    assert_eq!(summing.timings().len(), 2);
 
     let counting = report
         .comparison("counting@counting_data")
         .expect("the group with a Design A member ran");
-    assert_eq!(counting.stats().len(), 2);
+    assert_eq!(counting.timings().len(), 2);
     assert_eq!(counting.against_baseline().count(), 1);
 
     let caching = report
         .comparison("caching@caching_data")
         .expect("the group with a Design A bench_input ran");
-    assert_eq!(caching.stats().len(), 2);
+    assert_eq!(caching.timings().len(), 2);
     assert_eq!(caching.against_baseline().count(), 1);
 
     let shown = format!("{report}");
@@ -340,7 +339,7 @@ fn every_written_benchmark_is_found_and_measured() {
 /// in different modules do not collide.
 #[test]
 fn names_default_to_the_module_path() {
-    let report = measure(&options(20)).expect("these registrations compose");
+    let report = options(20).run().expect("these registrations compose");
 
     assert!(
         report.names().any(|k| k.ends_with("::plain")),
@@ -361,7 +360,7 @@ fn names_default_to_the_module_path() {
 /// if it is the baseline that is the `baseline` word doing it.
 #[test]
 fn the_declared_baseline_is_used() {
-    let report = measure(&options(20)).expect("these registrations compose");
+    let report = options(20).run().expect("these registrations compose");
 
     let cmps = report.comparison("sorting@sorting_data").unwrap();
     let against: Vec<&str> = cmps.against_baseline().map(|(n, _)| n).collect();

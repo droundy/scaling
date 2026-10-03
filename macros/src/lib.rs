@@ -10,7 +10,8 @@
 //! `inventory::submit!` that registers the shim. That is all. In particular
 //! they do **not** wrap the function in any `#[cfg]`: a `#[cfg]` written
 //! above the attribute already strips the whole item before expansion, so a
-//! caller who wants benchmarks kept out of ordinary builds writes
+//! caller who wants benchmarks kept out of ordinary builds writes their own,
+//! under a feature name of their choosing.
 //!
 //! # Why generics never reach the registry
 //!
@@ -26,7 +27,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{parse_macro_input, Expr, FnArg, ItemFn, LitInt, LitStr, ReturnType, Type};
 
-/// Register a benchmark.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -36,7 +37,7 @@ pub fn bench(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Register a scaling benchmark.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn bench_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -60,6 +61,9 @@ struct Args {
     /// to. Empty means none - a plain standalone registration.
     groups: Vec<LitStr>,
     baseline: bool,
+    /// `allocation`: count the allocations of the candidate's run, for a
+    /// metrics function to show.
+    allocation: bool,
     input: Option<Expr>,
     make_input: Option<Expr>,
     nmin: Option<LitInt>,
@@ -78,6 +82,7 @@ impl syn::parse::Parse for Args {
             match key.to_string().as_str() {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
+                "allocation" => args.allocation = true,
                 "name" => {
                     input.parse::<syn::Token![=]>()?;
                     args.name = Some(input.parse()?);
@@ -155,7 +160,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, input, make_input, \
+                             name, group, baseline, allocation, input, make_input, \
                              nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -388,6 +393,58 @@ fn type_name(ty: &Type) -> TokenStream2 {
     quote!(#out)
 }
 
+/// Whether `tokens` mention any of the identifiers in `names`.
+fn mentions(tokens: TokenStream2, names: &[String]) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => names.contains(&ident.to_string()),
+        proc_macro2::TokenTree::Group(group) => mentions(group.stream(), names),
+        _ => false,
+    })
+}
+
+/// The type a candidate returns, when it can be handed on to a metrics
+/// function: `None` for a type that cannot be named in a registration.
+///
+/// A function with no return type returns `()`. Anything that borrows (`&`
+/// or a lifetime), is `impl Trait` or `dyn Trait`, or is spelled with one
+/// of the function's own generic parameters is left out - such a type is
+/// either not `'static`, which handing it on as `dyn Any` needs, or is not
+/// one type for the registration to name. The candidate is still measured,
+/// and simply never has metrics.
+fn handed_on_output(func: &ItemFn) -> Option<Type> {
+    if returns_repeatable_closure(&func.sig) != Repeatable::No {
+        return None;
+    }
+    let ty: Type = match &func.sig.output {
+        ReturnType::Default => syn::parse_quote!(()),
+        ReturnType::Type(_, ty) => (**ty).clone(),
+    };
+    let generics: Vec<String> = func
+        .sig
+        .generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Type(t) => t.ident.to_string(),
+            syn::GenericParam::Lifetime(l) => l.lifetime.ident.to_string(),
+            syn::GenericParam::Const(c) => c.ident.to_string(),
+        })
+        .collect();
+    let spelled = quote!(#ty);
+    let text = spelled.to_string();
+    let words: Vec<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+        .collect();
+    if text.contains('&')
+        || text.contains('\'')
+        || words.iter().any(|w| matches!(*w, "impl" | "dyn" | "_"))
+        || mentions(spelled, &generics)
+    {
+        return None;
+    }
+    Some(ty)
+}
+
 /// The `TypeId::of` expression and the printable name for `ty`, or `()`'s
 /// when there is none.
 fn ty_id_and_name(ty: Option<&Type>) -> (TokenStream2, TokenStream2) {
@@ -457,7 +514,19 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
+fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
+    if args.allocation {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`allocation` belongs to `#[scaling::metrics]`, which says it counts the \
+             allocations of the candidates it computes metrics for",
+        ));
+    }
+    Ok(())
+}
+
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
+    allocation_is_for_metrics(&args, &func)?;
     if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
         return Err(syn::Error::new(
             n.span(),
@@ -664,12 +733,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     #body;
                 }
                 ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered {
-                        name: #name,
-                        crate_name: ::core::env!("CARGO_PKG_NAME"),
-                        crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        add: #shim,
-                    }
+                    ::scaling::registry::Registered::new(
+                        #name,
+                        ::core::env!("CARGO_PKG_NAME"),
+                        ::core::env!("CARGO_PKG_VERSION"),
+                        #shim,
+                    )
                 }
             }
         }
@@ -738,12 +807,12 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                     #body;
                 }
                 ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered {
-                        name: #name,
-                        crate_name: ::core::env!("CARGO_PKG_NAME"),
-                        crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                        add: #shim,
-                    }
+                    ::scaling::registry::Registered::new(
+                        #name,
+                        ::core::env!("CARGO_PKG_NAME"),
+                        ::core::env!("CARGO_PKG_VERSION"),
+                        #shim,
+                    )
                 }
             }
         }
@@ -762,8 +831,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     })
 }
 
-/// Register one input, shared by every candidate of a matching type in one
-/// or more of the named groups.
+// Documented where it is re-exported, in the `scaling` crate.
 #[proc_macro_attribute]
 pub fn input(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as Args);
@@ -792,6 +860,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         return Err(e);
     }
     let declared = kind.ty().cloned();
+    let output = handed_on_output(&func);
 
     // One registration per listed type, or a single one at whatever the
     // signature says.
@@ -848,13 +917,65 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
         let call = call_expr(fname, ty.as_ref());
         let alt_body = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
-            let repeatable = repeatable_call(call);
+            let repeatable = repeatable_call(call.clone());
             quote! {
                 let mut __action = ::core::option::Option::None;
                 __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
             }
         } else {
             quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call))
+        };
+        // The same alternative, in the form that is run once more for the
+        // metrics function assembly pairs it with. Which function that is
+        // is not known here, so the shim is handed it.
+        let metrics = match &output {
+            Some(output) => {
+                let alt_metrics = format_ident!("__scaling_malt_metrics_{}_{}", fname, n);
+                out.extend(quote! {
+                    #[doc(hidden)]
+                    fn #alt_metrics(
+                        __set: ::scaling::registry::InputGroup<::scaling::registry::ErasedInput>,
+                        __name: &str,
+                        __metrics: &'static ::scaling::registry::MetricsFn,
+                    ) -> ::scaling::registry::InputGroup<::scaling::registry::ErasedInput> {
+                        let __set = if __metrics.reads_input() {
+                            __set.add_input_metrics_with_input(
+                                __name,
+                                |__e: &mut ::scaling::registry::ErasedInput| #call,
+                                move |__before: &::scaling::registry::ErasedInput, __out: #output| {
+                                    __metrics.call(
+                                        ::core::option::Option::Some(__before),
+                                        ::std::boxed::Box::new(__out),
+                                    )
+                                },
+                            )
+                        } else {
+                            __set.add_input_metrics(
+                                __name,
+                                |__e: &mut ::scaling::registry::ErasedInput| #call,
+                                move |__out: #output| {
+                                    __metrics.call(
+                                        ::core::option::Option::None,
+                                        ::std::boxed::Box::new(__out),
+                                    )
+                                },
+                            )
+                        };
+                        if __metrics.counts_allocations() {
+                            __set.counting_allocations()
+                        } else {
+                            __set
+                        }
+                    }
+                });
+                quote! {
+                    .with_metrics(::scaling::registry::CandidateMetrics::new(
+                        ::core::any::TypeId::of::<#output>,
+                        #alt_metrics,
+                    ))
+                }
+            }
+            None => quote!(),
         };
         out.extend(quote! {
             #[doc(hidden)]
@@ -865,23 +986,151 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 #alt_body
             }
             ::scaling::inventory::submit! {
-                ::scaling::registry::Candidate {
-                    groups: #groups,
-                    name: #name,
-                    input_type: #ty_id,
-                    input_type_name: #ty_name,
-                    is_baseline: #baseline,
-                    crate_name: ::core::env!("CARGO_PKG_NAME"),
-                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    add_alt: #alt,
-                }
+                ::scaling::registry::Candidate::new(
+                    #groups,
+                    #name,
+                    #ty_id,
+                    #ty_name,
+                    #baseline,
+                    ::core::env!("CARGO_PKG_NAME"),
+                    ::core::env!("CARGO_PKG_VERSION"),
+                    #alt,
+                ) #metrics
             }
         });
     }
     Ok(out)
 }
 
+// Documented where it is re-exported, in the `scaling` crate.
+#[proc_macro_attribute]
+pub fn metrics(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as Args);
+    let func = parse_macro_input!(item as ItemFn);
+    expand_metrics(args, func)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    if args.groups.is_empty() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`#[scaling::metrics]` needs `group = \"...\"` (or `group(\"a\", \"b\", ...)`) \
+             to say which group or groups it computes metrics for",
+        ));
+    }
+    if args.baseline
+        || args.input.is_some()
+        || args.make_input.is_some()
+        || args.nmin.is_some()
+        || !args.types.is_empty()
+        || !args.sizes.is_empty()
+    {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "a metrics function takes only `group`, `name` and `allocation`",
+        ));
+    }
+    let params: Vec<&syn::PatType> = func
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            FnArg::Typed(t) => Ok(t),
+            FnArg::Receiver(r) => Err(syn::Error::new(
+                r.span(),
+                "a metrics function must be a free function, not a method",
+            )),
+        })
+        .collect::<syn::Result<_>>()?;
+    let by_value = |ty: &Type| match ty {
+        Type::Reference(r) => Err(syn::Error::new(
+            r.span(),
+            "a metrics function takes the output by value: `fn(out: T)`, or \
+             `fn(input: &I, out: T)` to read the input as well",
+        )),
+        other => Ok(other.clone()),
+    };
+    let (input, output): (Option<Type>, Type) = match params.as_slice() {
+        [out] => (None, by_value(&out.ty)?),
+        [input, out] => match &*input.ty {
+            Type::Reference(r) if r.mutability.is_none() => {
+                (Some((*r.elem).clone()), by_value(&out.ty)?)
+            }
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "a metrics function that reads the input takes it as `&I`, \
+                     before the output",
+                ))
+            }
+        },
+        _ => {
+            return Err(syn::Error::new(
+                func.sig.inputs.span(),
+                "a metrics function takes the output, or the input (as `&I`) and \
+                 then the output",
+            ))
+        }
+    };
+
+    let groups = groups_array(&args.groups);
+    let fname = &func.sig.ident;
+    let name = name_or_bare(&args.name, fname);
+    let allocation = args.allocation;
+    let shim = format_ident!("__scaling_metrics_{}", fname);
+    let output_name = type_name(&output);
+    let (reads_input, call) = match &input {
+        Some(ty) => (
+            {
+                let input_name = type_name(ty);
+                quote!(.reading_input(::core::any::TypeId::of::<#ty>, #input_name))
+            },
+            quote!(#fname(
+                __pristine.expect("scaling: this metrics function reads the input, but none was kept - please report this bug").get::<#ty>(),
+                __output,
+            )),
+        ),
+        None => (quote!(), quote!(#fname(__output))),
+    };
+    let counts_allocations = if allocation {
+        quote!(.counting_allocations())
+    } else {
+        quote!()
+    };
+    Ok(quote! {
+        #[allow(clippy::ptr_arg)]
+        #func
+        #[doc(hidden)]
+        fn #shim(
+            __pristine: ::core::option::Option<&::scaling::registry::ErasedInput>,
+            __output: ::std::boxed::Box<dyn ::core::any::Any>,
+        ) -> ::scaling::Metrics {
+            let __output: #output = *__output.downcast::<#output>().unwrap_or_else(|_| {
+                ::core::panic!(
+                    "scaling: a candidate's output was not the type this metrics function \
+                     takes - please report this bug"
+                )
+            });
+            #call
+        }
+        ::scaling::inventory::submit! {
+            ::scaling::registry::MetricsFn::new(
+                #groups,
+                #name,
+                ::core::any::TypeId::of::<#output>,
+                #output_name,
+                ::core::env!("CARGO_PKG_NAME"),
+                ::core::env!("CARGO_PKG_VERSION"),
+                #shim,
+            ) #reads_input #counts_allocations
+        }
+    })
+}
+
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    allocation_is_for_metrics(&args, &func)?;
     if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -1037,15 +1286,15 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         out.extend(quote! {
             #shim_body
             ::scaling::inventory::submit! {
-                ::scaling::registry::Input {
-                    groups: #groups,
-                    name: #name,
-                    crate_name: ::core::env!("CARGO_PKG_NAME"),
-                    crate_version: ::core::env!("CARGO_PKG_VERSION"),
-                    type_id: ::core::any::TypeId::of::<#ty>,
-                    type_name: #ty_name,
-                    make: #shim,
-                }
+                ::scaling::registry::Input::new(
+                    #groups,
+                    #name,
+                    ::core::env!("CARGO_PKG_NAME"),
+                    ::core::env!("CARGO_PKG_VERSION"),
+                    ::core::any::TypeId::of::<#ty>,
+                    #ty_name,
+                    #shim,
+                )
             }
         });
     }

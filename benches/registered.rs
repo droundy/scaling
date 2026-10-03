@@ -1,10 +1,9 @@
 //! A benchmark binary, entire.
 //!
-//! Every benchmark below says what it is where it is written, and the last
-//! line is the whole program - no `Config`, no `Suite`, no `add` per
-//! benchmark, no decision about what to do when listing was asked for, no
-//! `println!`. All of that is the runner's; see `scaling::Config` for a
-//! tighter accuracy target or time budget.
+//! Every benchmark below says what it is where it is written, and the `main`
+//! at the end is the whole program: one call, with no `Suite`, no `add` per
+//! benchmark and no `println!`. All of that is `Config::run_and_print`'s; build
+//! a `scaling::Config` for a tighter accuracy target or time budget.
 
 fn work(n: usize) -> u64 {
     (0..n as u64).fold(0u64, |a, x| a.wrapping_mul(31).wrapping_add(x))
@@ -83,4 +82,30 @@ fn sawtooth() -> Vec<u64> {
     (0..400u64).map(|i| (i * 7) % 64).collect()
 }
 
-scaling::main!();
+// ---- extra numbers beside the time: what each candidate wrote ----
+
+#[scaling::input(group = "encoding")]
+fn text() -> String {
+    "abcd".repeat(100)
+}
+
+#[scaling::bench(group = "encoding", baseline)]
+fn plain(s: &mut String) -> Vec<u8> {
+    s.clone().into_bytes()
+}
+
+#[scaling::bench(group = "encoding")]
+fn doubled(s: &mut String) -> Vec<u8> {
+    let mut bytes = s.clone().into_bytes();
+    bytes.extend_from_slice(s.as_bytes());
+    bytes
+}
+
+#[scaling::metrics(group = "encoding")]
+fn sizes(out: Vec<u8>) -> scaling::Metrics {
+    scaling::Metrics::new().bytes("size", out.len())
+}
+
+fn main() -> Result<(), scaling::RegistrationError> {
+    scaling::Config::default().run_and_print()
+}
