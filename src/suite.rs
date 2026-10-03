@@ -380,6 +380,12 @@ impl Suite {
     /// Nothing is added when this returns `Err`: the registrations are
     /// checked in full before the first one is added, so a suite is never
     /// left holding half of a set that did not check out.
+    ///
+    /// `Err` also carries the warnings, after the errors, and
+    /// [`Diagnostic::is_fatal`](crate::assemble::Diagnostic::is_fatal) tells
+    /// them apart: what is wrong is often why something went unused, and a
+    /// caller that fixes only what stopped the run should not have to run it
+    /// again to hear the rest.
     pub(crate) fn try_add_registered(
         &mut self,
     ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
@@ -435,6 +441,7 @@ impl Suite {
             }
         }
         if !fatal.is_empty() {
+            fatal.extend(warnings);
             return Err(fatal);
         }
 

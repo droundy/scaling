@@ -1,6 +1,7 @@
 //! Running the registered benchmarks: [`Config::run_and_print`] and
 //! [`Config::run`].
 
+use crate::assemble::Diagnostic;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
 use std::process::ExitCode;
@@ -163,14 +164,24 @@ impl Config {
     /// warn alike.
     fn assemble(&self) -> Result<Suite, RegistrationError> {
         let mut suite = self.suite();
-        let assembled = suite
-            .try_add_registered()
-            .map_err(|problems| RegistrationError {
-                problems: problems.iter().map(ToString::to_string).collect(),
-            })?;
-        for warning in &assembled.warnings {
-            eprintln!("warning: {warning}");
-        }
+        let assembled = suite.try_add_registered().map_err(|diagnostics| {
+            // Warnings come with the errors, so they are said whether or not
+            // the run goes ahead.
+            let (fatal, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) =
+                diagnostics.into_iter().partition(Diagnostic::is_fatal);
+            warn(&warnings);
+            RegistrationError {
+                problems: fatal.iter().map(ToString::to_string).collect(),
+            }
+        })?;
+        warn(&assembled.warnings);
         Ok(suite)
+    }
+}
+
+/// Say on stderr what went unused.
+fn warn(warnings: &[Diagnostic]) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
     }
 }
