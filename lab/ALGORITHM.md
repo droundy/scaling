@@ -36,12 +36,15 @@ answer. Where something below has *not* been checked that way, it says so.
    **bogo-nanoseconds** instead: the ratio to the canary, scaled to what
    it would be at the CPU's base clock.
 5. **Put an error bar on everything by batch means, on a log scale:**
-   - Cut the rounds into at least 8 contiguous blocks of at least 15
-     rounds, and at most 20 blocks.
+   - Cut the rounds into at least 8 contiguous blocks, and at most 20. A
+     block is the fewest rounds that hold every combination of batch sizes
+     the estimate needs: 15 when both functions have two, and a single
+     round when a slow function has one.
    - Estimate in each block.
    - The spread of the logs is the bar, read as a factor.
 6. **Stop** when every number the user asked about is known to within the
-   goal as a factor. Check first at 120 rounds, then every 1.3x more.
+   goal as a factor. Check first at the 8-block floor - 120 rounds for
+   fast functions, 8 calls for a slow one - then every 1.3x more.
 7. **Measure everything twice**, as two whole passes over the suite, each
    at a goal √2 looser, and combine them. Two passes that disagree get a
    third. A result that still cannot meet its goal is refused, not printed.
@@ -70,8 +73,11 @@ order.
 
 ## 1. Calibration: two batch sizes per function
 
-**What.** Run one untimed batch, then time batches of `n = 1, 2, 4, ...`
-until the next doubling would exceed **20 us**. Re-time the last size three
+**What.** Time one call, and keep it out of every estimate: it is the
+coldest call there will be, and it decides the path. If it exceeds **1
+ms**, calibration is over - the function has one rung, `n = 1`, and has
+cost one call to find that out. Otherwise time batches of
+`n = 1, 2, 4, ...` until the next doubling would exceed **20 us**. Re-time the last size three
 times and take the median. The rungs are the last two sizes, `N` and `2N`,
 and the lower one has to be at least 100 ns.
 
@@ -300,7 +306,14 @@ switches the measurement over.
 ## 5. The error bar
 
 **What.** Cut the rounds so far into `b` contiguous blocks, in order, with
-`b = clamp(rounds / 15, 8, 20)`. Compute the estimate in each block and take
+`b = clamp(rounds / k, 8, 20)`. Here `k` is the block size, set by the
+combinations of batch sizes the estimate needs every block to hold:
+- **`k = 15`** when both sides have two rungs: the 2x2 ratio, or a fast
+  function's two-rung time;
+- **`k = 6`** when one side has one rung and the other two: a slow
+  function against the 20 us canary;
+- **`k = 1`** when nothing needs combining: a slow function's own time,
+  or two slow functions compared. Compute the estimate in each block and take
 its log. The bar is the standard error of those logs,
 
     sigma = sd(ln R_1 .. ln R_b) / sqrt(b)
@@ -353,13 +366,45 @@ and the bar overstates the error. A cutoff that tightens as blocks get
 fewer, from a chi-square bound on the bar, also works, but costs at least
 as much for the same safety (PROBLEMS.md, "Why a ratio blows up").
 
+**Why a block can be one call.** The 15 rounds exist only so a block has
+every cell the estimate needs. A slow function timed one call at a time
+has one cell, so a block is one call, and the 8-block floor is 8 calls.
+Without this, the floor of 120 rounds would cost a one-second function two
+minutes a pass, where the crate it replaces took about 6 samples.
+
+Replayed on real slow workloads, with blocks of one call: `copy_64mb`
+(6.2 ms, memory-bound), `str_find` (2.2 ms), and `slow_cpu` pinned (0.6 and
+9.5 ms). The truth was each recording's whole-run trimmed mean, from 2,400
+trials per rule and goal:
+
+| rule | calls per pass | blowups, 1% goal | blowups, 0.5% goal |
+| --- | --- | --- | --- |
+| 8-call floor | 8.0-8.2 | 2 | 20 |
+| 6-call floor, chi-square 90% cutoff | 6.0-8.1 | 0 | 23 |
+| 4-call floor, chi-square 90% cutoff | 4.0-6.4 | 1 | 36 |
+| 20-call floor | 20 | 0 | 69 |
+
+All of the 0.5% blowups are `copy_64mb`, whose memory wander no number of
+calls fixes (section 7). The quiet slow functions met the goal at the
+floor itself. So 8 calls holds, with the same rule as everywhere else.
+
+Where calls are dearer still, a cutoff that tightens as blocks get fewer
+is the tool. It lost to the floor for fast functions, where extra blocks
+are cheap. For slow ones it buys a 6-call floor at no cost in blowups.
+
+**When even the floor does not fit.** A function whose 8 calls exceed the
+time budget is reported with the calls it has, marked `(limit)`. Its bar
+is widened by Student's t for its degrees of freedom, so that it stays
+honest. One call gets no bar at all.
+
 **Why at most 20.** As data accumulates, blocks should grow longer rather
 than only more numerous, so that each outlasts more of the correlation.
 
 ## 6. Stopping
 
-**What.** Check at 120 rounds, the floor of 8 blocks of 15, and then each
-time the round count has grown by 1.3x. Stop when every number the user
+**What.** Check at the floor of 8 blocks - 120 rounds when blocks are 15,
+8 calls when they are one - and then each time the round count has grown
+by 1.3x. Stop when every number the user
 asked about has a bar `sigma <= ln(1 + goal)`, or when the time budget runs
 out.
 
@@ -380,6 +425,10 @@ rounds per trial were 156 at a 2% goal, 342 at 1% and 905 at 0.5%. A round
 of five functions took about 13 ms, and a round of just two functions and
 the canary is far cheaper. The 8-block floor accounts for most of the
 2%-goal cost and almost none of the 0.5%.
+
+For a slow function the floor is the cost: 8 calls a pass, 16 for the two
+passes, and 24 if they disagree. Add the one discarded first call. A
+one-second function costs about 17 seconds.
 
 ## 7. Two passes, and refusing
 
@@ -552,9 +601,9 @@ factors for large ones: "twice as fast", not "50% less time".
 | batch floor | 100 ns | ~370 ns harness cost per measurement |
 | one rung only | calls over 1 ms | known-answer test: one rung 25-40% cheaper at 0.23-0.95 ms, no less accurate |
 | trim | 25% each end | swept 0/10/25/40%; any trim removes tick bias, 25% matches the reference |
-| rounds per block | >= 15 | each block needs both rungs of both functions |
+| rounds per block | 15, 6 or 1 | the fewest that hold every cell: 2x2, 1x2, or one rung |
 | blocks | 8 to 20 | 8 removes lucky-small stops; smaller blocks cost more |
-| first check | 120 rounds | 8 blocks x 15 |
+| first check | the 8-block floor | 120 rounds fast, 8 calls slow |
 | check growth | 1.3x | at most 30% overshoot |
 | canary | 4 cycles a link | 4.04-4.08 against the logged clock, 1.6-4.4 GHz; sets the bogo-ns scale; verify per architecture |
 | clock is changing | canary block spread > goal / 4 | quiet 0.03-0.08%, unquiesced 0.5-46% |
