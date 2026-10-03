@@ -106,7 +106,7 @@ pub struct ScalingStats {
     /// floor, not a verdict on the code. Nothing in [`Config::run_and_print`](crate::Config::run_and_print) fails
     /// a run over it, so a script wanting to gate on it checks
     /// `scaling.is_none()` itself. If you expected a real law and see
-    /// `None`, a longer [`Config::max_time`](crate::Config::max_time) or a
+    /// `None`, a longer [`max_time`](crate::Config::with_max_time) or a
     /// wider `nmin` range is usually the fix, not a sign the function has
     /// no scaling behavior at all.
     pub scaling: Option<Scaling>,

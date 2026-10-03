@@ -24,14 +24,14 @@ use std::time::Instant;
 /// Note the emphasis: this is a floor on *concluding we are done*, not on
 /// reporting. The selection effect it defends against exists only when the
 /// standard error is the thing that stops us. If instead
-/// [`Config::max_time`] runs out first - which is what happens to a slow
+/// [`max_time`](crate::Config::with_max_time) runs out first - which is what happens to a slow
 /// function on a short budget - nothing has been selected for, and the
 /// error bar from the three or four samples we did manage is honest, wide,
 /// and a good deal more use than none at all. So a budget-forced stop
 /// reports whatever standard error it has (and sets [`Timing::hit_limit`]).
 ///
 /// Not a knob: callers control accuracy with [`Config::relative`] and
-/// [`Config::absolute`], and cost with [`Config::max_time`], and no useful
+/// [`Config::absolute`], and cost with [`max_time`](crate::Config::with_max_time), and no useful
 /// benchmark wants a different answer here.
 #[cfg(test)]
 const MIN_SAMPLES: usize = 6;

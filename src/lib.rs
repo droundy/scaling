@@ -23,7 +23,7 @@ is given an input of its own. The shared input is generated for each
 iteration, a batch of them to a round, and cloned for each candidate, so every
 candidate in a round is measured on the same values. That is why the input
 type must be `Clone` when a group has more than one candidate, and the
-generating and cloning are paid for out of [`Config::max_time`], though they
+generating and cloning are paid for out of [`max_time`](crate::Config::with_max_time), though they
 are not timed. A setup-once candidate uses the shared input only
 when its returned closure is first built; later inputs are still generated,
 but that cached closure is called without them. Comparison candidates must
@@ -717,7 +717,7 @@ pub use scaling_macros::input;
 /// Once for each cell, after its timing is finished, so it cannot disturb the
 /// timing. One value is made by the group's input generator and cloned for each
 /// candidate, and each candidate is called once on its copy. That run is not
-/// timed and does not count against [`Config::max_time`]; it costs one call of
+/// timed and does not count against [`max_time`](crate::Config::with_max_time); it costs one call of
 /// the candidate and one of your function, for each candidate and input. There
 /// is no way to skip it yet.
 ///
@@ -790,7 +790,7 @@ use std::time::*;
 ///
 /// Measured time, not wall-clock time: an input that is slow to build would
 /// otherwise satisfy the floor by being built, and construction is not
-/// evidence about the function. [`Config::max_time`] is the opposite - a
+/// evidence about the function. [`max_time`](crate::Config::with_max_time) is the opposite - a
 /// wall-clock cap, because that is a promise about how long the caller waits -
 /// so the two clocks are deliberately different.
 ///
@@ -814,7 +814,7 @@ use std::time::*;
 /// honesty: past a few milliseconds the `±` shrinks faster than the answer
 /// settles, so sampling harder yields a tighter number that is less true.
 /// Reproducibility beyond this is the caller's to ask for, with
-/// [`Config::target_rel_error`].
+/// [`target_rel_error`](crate::Config::with_relative_error).
 const MIN_SAMPLE_TIME: Duration = Duration::from_millis(3);
 
 /// Roughly the longest a single benchmark should take.
@@ -838,58 +838,15 @@ const MAX_BENCH_TIME: Duration = Duration::from_secs(10);
 /// // "to within 50 nanoseconds, and do not spend more than a second"
 /// let quick = Config::absolute(Duration::from_nanos(50))
 ///     .with_max_time(Duration::from_secs(1));
-/// # let _ = (tight.target_rel_error, quick.target_abs_error);
+/// # let _ = (tight, quick);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Stop once the standard error falls below this fraction of the
-    /// measurement (`0.01` = 1%).
-    ///
-    /// A comparison reads this as a *sensitivity* rather than a precision:
-    /// the smallest difference worth detecting, as a fraction of the
-    /// baseline. See [`Timing::min_detectable_difference`], which is what
-    /// that floor came to on a result that reported no change.
-    pub target_rel_error: f64,
-    /// Stop once the standard error falls below this duration.
-    ///
-    /// Sampling stops as soon as *either* goal is met, so whichever is
-    /// coarser for the function at hand is the one that ends up governing.
-    /// That is the point of having both: a 1% relative goal on a 1 ns
-    /// function asks for a precision finer than the clock can resolve, and
-    /// would otherwise spend the whole budget failing to reach it. An
-    /// absolute floor puts a bound on how much precision is worth chasing.
-    ///
-    /// `Duration::ZERO` disables it, leaving `target_rel_error` alone in
-    /// charge.
-    ///
-    /// As with [`Config::target_rel_error`], the `compare_*` functions read
-    /// this as the smallest difference worth detecting rather than as a
-    /// precision.
-    pub target_abs_error: Duration,
-    /// Give up after roughly this much wall-clock time even if neither goal
-    /// was reached, setting [`Timing::hit_limit`].
-    ///
-    /// Wall clock rather than measured time, because this is a promise about
-    /// how long the caller waits - a benchmark whose input is slow to build
-    /// has still taken that long. A comparison allows this much per
-    /// alternative, since each produces its own [`Timing`] and would otherwise
-    /// get a fraction of the budget one benchmark gets for the same target.
-    ///
-    /// So building inputs counts against it. That means every call of
-    /// `make_input` or of an `#[input]` function, every clone handed to a
-    /// comparison's candidates, and dropping them afterwards, though none of
-    /// it counts towards the measurement. Two things do not count. One is
-    /// work done once before the benchmark starts, such as evaluating
-    /// `input = <value>` (each clone of that value still does). The other,
-    /// in a suite, is the time other benchmarks spend on their turns.
-    ///
-    /// The consequence is that an expensive input eats into the budget. The
-    /// run still ends on time, but with fewer samples, so a wider `±` and
-    /// likely [`Timing::hit_limit`]. When an input costs much more to build
-    /// than the function costs to run, raise `max_time` to match. The
-    /// deadline is checked between samples, so a run can overshoot it by
-    /// one sample's worth of input building and calls.
-    pub max_time: Duration,
+    // Set by `with_relative_error`, `with_absolute_error` and `with_max_time`,
+    // which document them.
+    pub(crate) target_rel_error: f64,
+    pub(crate) target_abs_error: Duration,
+    pub(crate) max_time: Duration,
 }
 
 impl Default for Config {
@@ -917,25 +874,67 @@ impl Config {
         Config::default().with_absolute_error(error)
     }
 
-    /// Set [`Config::target_rel_error`], keeping every other setting.
+    /// Stop once the standard error falls below `fraction` of the measurement
+    /// (`0.01` = 1%), keeping every other setting.
     ///
-    /// `0.0` disables the relative goal, leaving `target_abs_error` alone in
-    /// charge. These take `self` by value and hand it back, so they chain:
+    /// A comparison reads this as a *sensitivity* rather than a precision: the
+    /// smallest difference worth detecting, as a fraction of the baseline. See
+    /// [`Timing::min_detectable_difference`], which is what that floor came to
+    /// on a result that reported no change.
+    ///
+    /// `0.0` disables the relative goal, leaving the absolute one
+    /// ([`with_absolute_error`](Config::with_absolute_error)) alone in charge.
+    /// These take `self` by value and hand it back, so they chain:
     /// `Config::default().with_relative_error(0.0).with_absolute_error(e)`.
     pub fn with_relative_error(mut self, fraction: f64) -> Self {
         self.target_rel_error = fraction;
         self
     }
 
-    /// Set [`Config::target_abs_error`], keeping every other setting.
+    /// Stop once the standard error falls below `error`, keeping every other
+    /// setting.
     ///
-    /// `Duration::ZERO` disables the absolute goal.
+    /// Sampling stops as soon as *either* goal is met, so whichever is coarser
+    /// for the function at hand is the one that ends up governing. That is the
+    /// point of having both: a 1% relative goal on a 1 ns function asks for a
+    /// precision finer than the clock can resolve, and would otherwise spend
+    /// the whole budget failing to reach it. An absolute floor puts a bound on
+    /// how much precision is worth chasing.
+    ///
+    /// `Duration::ZERO` disables it, leaving the relative goal
+    /// ([`with_relative_error`](Config::with_relative_error)) alone in charge.
+    ///
+    /// As with the relative goal, a comparison reads this as the smallest
+    /// difference worth detecting rather than as a precision.
     pub fn with_absolute_error(mut self, error: Duration) -> Self {
         self.target_abs_error = error;
         self
     }
 
-    /// Set [`Config::max_time`], keeping every other setting.
+    /// Give up after roughly `max_time` of wall-clock time even if neither
+    /// accuracy goal was reached, setting [`Timing::hit_limit`], keeping every
+    /// other setting.
+    ///
+    /// Wall clock rather than measured time, because this is a promise about
+    /// how long the caller waits - a benchmark whose input is slow to build has
+    /// still taken that long. A comparison allows this much per alternative,
+    /// since each produces its own [`Timing`] and would otherwise get a
+    /// fraction of the budget one benchmark gets for the same target.
+    ///
+    /// So building inputs counts against it. That means every call of
+    /// `make_input` or of an `#[input]` function, every clone handed to a
+    /// comparison's candidates, and dropping them afterwards, though none of it
+    /// counts towards the measurement. Two things do not count. One is work
+    /// done once before the benchmark starts, such as evaluating
+    /// `input = <value>` (each clone of that value still does). The other, in a
+    /// suite, is the time other benchmarks spend on their turns.
+    ///
+    /// The consequence is that an expensive input eats into the budget. The run
+    /// still ends on time, but with fewer samples, so a wider `±` and likely
+    /// [`Timing::hit_limit`]. When an input costs much more to build than the
+    /// function costs to run, raise `max_time` to match. The deadline is
+    /// checked between samples, so a run can overshoot it by one sample's worth
+    /// of input building and calls.
     pub fn with_max_time(mut self, max_time: Duration) -> Self {
         self.max_time = max_time;
         self

@@ -164,7 +164,7 @@ impl Config {
     /// directly and does not need `I: Clone`.
     ///
     /// Neither the generating nor the cloning is timed, but both are paid
-    /// out of [`Config::max_time`].
+    /// out of [`max_time`](crate::Config::with_max_time).
     ///
     /// Like [`Config::input_group`]: this assembles a registered input group
     /// or matrix lane.
@@ -331,7 +331,7 @@ impl<I: 'static> InputGroup<I> {
     ///    alternative has had [`crate::MIN_SAMPLE_TIME`] of measuring, and
     ///    *every* difference from the baseline is measured finely enough to
     ///    detect a change the size of the accuracy goal. Running out of
-    ///    [`Config::max_time`] stops it too, and marks the results.
+    ///    [`max_time`](crate::Config::with_max_time) stops it too, and marks the results.
     ///
     /// Each difference is accumulated per round rather than assembled from
     /// two separately measured means - see [`Timing::std_error`] for why
@@ -377,7 +377,7 @@ impl<I: 'static> InputGroup<I> {
     /// differences this reports cancel the machine's slow movement only
     /// because every alternative met that movement within the same round.
     ///
-    /// `clock` must be built with `k` times [`Config::max_time`], as the
+    /// `clock` must be built with `k` times [`max_time`](crate::Config::with_max_time), as the
     /// caller above does.
     ///
     /// # Panics
