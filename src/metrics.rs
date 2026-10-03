@@ -298,10 +298,16 @@ enum Counted {
     NetAllocatedBytes,
 }
 
+/// What an alternative that computed nothing has, for a caller that is handed a
+/// reference.
+pub(crate) static NO_METRICS: Metrics = Metrics::new();
+
 impl Metrics {
     /// An empty record.
-    pub fn new() -> Self {
-        Metrics::default()
+    pub const fn new() -> Self {
+        Metrics {
+            entries: Vec::new(),
+        }
     }
 
     fn put(mut self, name: &str, entry: Entry) -> Self {

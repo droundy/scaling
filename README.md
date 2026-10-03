@@ -134,8 +134,10 @@ fn main() -> std::process::ExitCode {
 
 `config.run()` hands back the results instead of printing them, for a script
 that wants to look at the numbers rather than show them - reached by name,
-since nobody wrote those names down: they come from the module and function
-each benchmark was declared in.
+since nobody wrote those names down: a standalone benchmark is named for its
+module and function, and a candidate of a group `group:candidate@input`.
+`report.names()` lists them, and a shorter name will do wherever it fits only
+one.
 
 For custom output, `Report::groups()` gives each logical group as a `Group`,
 in name order. A `Group` prints itself as a table, and `println!("{report}")`

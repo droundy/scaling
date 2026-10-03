@@ -125,12 +125,11 @@ fn count_elsewhere(_: ()) -> Metrics {
     everything()
 }
 
-/// The four counts of one candidate, by the name its entry has.
+/// The four counts of one candidate, by its name.
 fn counts(report: &scaling::Report, entry: &str) -> (f64, f64, f64, f64) {
-    let timings = report
-        .get_timings(entry)
-        .unwrap_or_else(|| panic!("the entry {entry}"));
-    let m = &timings.metrics()[0];
+    let m = report
+        .metrics(entry)
+        .unwrap_or_else(|| panic!("the candidate {entry}"));
     let get = |name: &str| {
         m.get(name)
             .unwrap_or_else(|| panic!("{name} of {entry}"))
@@ -155,33 +154,33 @@ fn counts_are_of_the_allocations_a_candidate_makes() {
     let report = report();
     // (count, peak, total, net)
     assert_eq!(
-        counts(&report, "once::once"),
+        counts(&report, "once:once"),
         (1.0, 10_000.0, 10_000.0, 10_000.0)
     );
     // All of it was freed again.
     assert_eq!(
-        counts(&report, "churn::churn"),
+        counts(&report, "churn:churn"),
         (3.0, 10_000.0, 13_000.0, 0.0)
     );
     // The 100 it began with, and the 800 it grew by.
-    assert_eq!(counts(&report, "grow::grow"), (2.0, 900.0, 900.0, 900.0));
+    assert_eq!(counts(&report, "grow:grow"), (2.0, 900.0, 900.0, 900.0));
 
-    let (count, peak, total, net) = counts(&report, "kept_some::kept_some");
+    let (count, peak, total, net) = counts(&report, "kept_some:kept_some");
     assert_eq!((count, total, net), (2.0, 4_100.0, 100.0));
     assert!(peak >= 4_000.0, "{peak}");
 
     // Freeing what it was handed is negative and allocates nothing.
     assert_eq!(
-        counts(&report, "release::release@big"),
+        counts(&report, "release:release@big"),
         (0.0, 0.0, 0.0, -50_000.0)
     );
 
     // The 50_000 bytes of input were held already; only the 100 are its own.
-    let (count, peak, total, net) = counts(&report, "held::small@held_input");
+    let (count, peak, total, net) = counts(&report, "held:small@held_input");
     assert_eq!((count, peak, total, net), (1.0, 100.0, 100.0, 0.0));
 
     // Spawning a thread allocates a little here; the 100_000 are the thread's.
-    let (_, peak, _, _) = counts(&report, "elsewhere::elsewhere");
+    let (_, peak, _, _) = counts(&report, "elsewhere:elsewhere");
     assert!(peak < 100_000.0, "{peak}");
 }
 
@@ -309,11 +308,8 @@ fn a_metrics_function_can_read_the_counts_to_build_its_own_metric() {
 #[test]
 fn a_function_not_marked_allocation_has_no_counts() {
     let report = report();
-    let results = report
-        .get_timings("uncounted::lone")
+    let metrics = report
+        .metrics("uncounted:lone")
         .expect("the lone candidate");
-    assert_eq!(
-        results.metrics()[0].get("had counts").map(|v| v.as_f64()),
-        Some(0.0)
-    );
+    assert_eq!(metrics.get("had counts").map(|v| v.as_f64()), Some(0.0));
 }

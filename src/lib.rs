@@ -498,6 +498,7 @@ mod difference;
 mod formatting;
 mod input_group;
 mod metrics;
+mod names;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///
@@ -774,10 +775,16 @@ pub use scaling_macros::input;
 ///
 /// # Reading them back
 ///
-/// A script that measured with [`Config::run`] gets each alternative's
-/// record from [`Timings::metrics`], in the order of [`Timings::names`]:
-/// `report.comparison("encode@text")?.metrics()[0].get("size")`. A candidate
-/// with no metrics has an empty record.
+/// A script that measured with [`Config::run`] asks the [`Report`] for a
+/// candidate's record by its name: `report.metrics("encode:json@text")?` is a
+/// [`Metrics`], whose [`get`](Metrics::get) gives a value by the name you put it
+/// under, and a shorter name such as `"json"` does as well when only one
+/// candidate has it. A candidate with no metrics has an empty record. See
+/// [Names](Report#names).
+///
+/// To have all of a group's candidates on one input together, ask for the
+/// [`Report::comparison`]: [`Timings::metrics`] gives the records in the order
+/// of [`Timings::names`].
 pub use scaling_macros::metrics;
 
 #[cfg(test)]

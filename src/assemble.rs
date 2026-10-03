@@ -14,6 +14,7 @@
 //! measuring nothing. That makes every diagnostic below testable without a
 //! benchmark, a machine claim, or a linker.
 
+use crate::names;
 use crate::registry::{Candidate, ErasedInput, Input, MetricsFn, Registered};
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -463,7 +464,7 @@ pub struct Lane {
     /// A group with candidates but no registered input at all gets a single
     /// synthetic entry here whose `name` is empty - the unit input every
     /// no-input group has always implicitly taken. `comparison_name` and
-    /// `flat_name` both recognise that empty name and omit the `@input`
+    /// `candidate_name` both recognise that empty name and omit the `@input`
     /// suffix it would otherwise produce, which is what keeps a plain
     /// `group = "sort"` declaration, with no `#[input]` anywhere, printing
     /// as `sort` rather than `sort@`. A group with a real, named
@@ -487,38 +488,47 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// What a cell of this lane is called.
-    ///
-    /// A lane with two or more candidates is named for the group and input.
-    /// A lone candidate is named for the candidate as well, since it has no
-    /// baseline to compare against - see [`Lane::flat_name`].
-    ///
-    /// The type is appended only when [`Lane::needs_type_suffix`] says
-    /// another lane of this group has an input of the same name - two lanes
-    /// each with a `small` input, say. Without that, `group@small` from one
-    /// lane collides with `group@small` from the other: both resolve to the
-    /// same report entry, and the second silently overwrites the first's
-    /// result.
+    /// The type to tell this lane's names apart by, when
+    /// [`Lane::needs_type_suffix`] says another lane of the group has an input
+    /// of the same name - two lanes each with a `small` input, say. Without
+    /// that, `group@small` from one lane collides with `group@small` from the
+    /// other: both resolve to the same report entry, and the second silently
+    /// overwrites the first's result.
+    fn type_suffix(&self) -> Option<&str> {
+        self.needs_type_suffix.then_some(self.type_name)
+    }
+
+    /// What the comparison of this lane's candidates on `input` is called:
+    /// `group@input`, with the type if it is needed. See [`names`].
     pub fn comparison_name(&self, input: &Named<Input>) -> String {
-        if input.name.is_empty() {
-            if self.needs_type_suffix {
-                format!("{} ({})", self.group, self.type_name)
-            } else {
-                self.group.to_string()
-            }
-        } else if self.needs_type_suffix {
-            format!("{}@{} ({})", self.group, input.name, self.type_name)
-        } else {
-            format!("{}@{}", self.group, input.name)
+        names::comparison_name(self.group, &input.name, self.type_suffix())
+    }
+
+    /// What `candidate` is called on `input`: `group:candidate@input`, with
+    /// the type if it is needed. See [`names`].
+    pub fn candidate_name(&self, candidate: &str, input: &Named<Input>) -> String {
+        names::candidate_name(self.group, candidate, &input.name, self.type_suffix())
+    }
+
+    /// What the report entry for `input` is called. A lane with two or more
+    /// candidates is named for the group and input, since it is a comparison.
+    /// A lone candidate has no baseline to compare against, so it is named for
+    /// the candidate as well.
+    pub fn entry_name(&self, input: &Named<Input>) -> String {
+        match self.candidates.as_slice() {
+            [only] => self.candidate_name(&only.name, input),
+            _ => self.comparison_name(input),
         }
     }
 
-    pub fn flat_name(&self, candidate: &Named<Candidate>, input: &Named<Input>) -> String {
-        if input.name.is_empty() {
-            format!("{}::{}", self.group, candidate.name)
-        } else {
-            format!("{}::{}@{}", self.group, candidate.name, input.name)
-        }
+    /// The shorter ways to write [`Lane::comparison_name`].
+    pub(crate) fn comparison_forms(&self, input: &Named<Input>) -> Vec<String> {
+        names::comparison_forms(self.group, &input.name, self.type_suffix())
+    }
+
+    /// The shorter ways to write [`Lane::candidate_name`].
+    pub(crate) fn candidate_forms(&self, candidate: &str, input: &Named<Input>) -> Vec<String> {
+        names::candidate_forms(self.group, candidate, &input.name, self.type_suffix())
     }
 }
 
@@ -1932,10 +1942,7 @@ pub(crate) mod lane_tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].candidates.len(), 1);
-        assert_eq!(
-            lanes[0].flat_name(&lanes[0].candidates[0], &lanes[0].inputs[0]),
-            "m::only@i"
-        );
+        assert_eq!(lanes[0].entry_name(&lanes[0].inputs[0]), "m:only@i");
     }
 
     #[test]

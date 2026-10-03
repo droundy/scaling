@@ -44,9 +44,11 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
+use crate::metrics::NO_METRICS;
+use crate::names::{self, Address, Kind};
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -458,15 +460,7 @@ impl Suite {
                         _ => (c.reg.add_alt)(group, &c.name),
                     };
                 }
-                let name = if lane.candidates.len() == 1 {
-                    let c = lane
-                        .candidates
-                        .first()
-                        .expect("assemble never builds a lane with no candidates");
-                    lane.flat_name(c, input)
-                } else {
-                    lane.comparison_name(input)
-                };
+                let name = lane.entry_name(input);
                 self.add_input_group(&name, group);
             }
         }
@@ -537,37 +531,48 @@ impl Display for Group {
 ///
 /// # Two ways to look
 ///
-/// By **entry**: there is one entry for each standalone benchmark, and for each
-/// input of each group. [`timing`](Report::timing),
-/// [`comparison`](Report::comparison), [`scaling`](Report::scaling),
-/// [`get_timings`](Report::get_timings), [`contains`](Report::contains),
-/// [`names`](Report::names), [`all_timings`](Report::all_timings) and
-/// [`all_comparisons`](Report::all_comparisons) take or give an entry's name.
+/// By **name**: everything that was timed has one.
+/// [`timing`](Report::timing) gives a standalone benchmark's measurement, or a
+/// group's candidate's on one input, and [`metrics`](Report::metrics) what it
+/// computed besides a time. [`scaling`](Report::scaling) gives a scaling
+/// benchmark's, and [`comparison`](Report::comparison) all of a group's
+/// candidates on one input together. [`names`](Report::names) lists the names
+/// of what has a single [`Timing`] or a scaling measurement,
+/// [`all_timings`](Report::all_timings) pairs each with its measurement, and
+/// [`all_comparisons`](Report::all_comparisons) lists the comparisons.
 ///
 /// By **group**: [`groups`](Report::groups) gives each group as a [`Group`],
-/// which prints itself as a table, keyed by the group's own name. It is the
-/// only place a group's name is used on its own.
+/// which prints itself as a table, keyed by the group's own name.
 ///
 /// # Names
 ///
-/// The name of an entry says what it is:
-///
-/// | entry | name |
+/// | what | name |
 /// |---|---|
 /// | a standalone benchmark | `module::function`, or its `name = ".."` |
-/// | a comparison: an input of a group, with two or more candidates | `group@input`, or just `group` if the group has no `#[scaling::input]` |
-/// | a candidate alone on an input of its group | `group::candidate@input`, or `group::candidate` with no input |
+/// | a candidate of a group | `group:candidate@input`, or `group:candidate` if the group has no `#[scaling::input]` |
+/// | a group's candidates on one input, together | `group@input`, or `group` if the group has no input |
 ///
 /// where `input` and `candidate` are the function's name, or its `name = ".."`.
+/// The last is a comparison, which [`comparison`](Report::comparison) takes and
+/// [`names`](Report::names) does not list, since every candidate in it already
+/// has a name; [`all_comparisons`](Report::all_comparisons) lists them.
+///
 /// Two further rules apply when names would otherwise collide: if two inputs of
-/// different types in one group share a name, the type follows the comparison's
-/// name, as in `group@input (Vec<u8>)`; and if one name is registered by more
-/// than one crate or version, as when benchmarking against an older release of
-/// your own crate, the least that tells them apart is added, as `name@crate`,
+/// different types in one group share a name, the type follows the name, as in
+/// `group:candidate@input (Vec<u8>)`; and if one name is registered by more than
+/// one crate or version, as when benchmarking against an older release of your
+/// own crate, the least that tells them apart is added, as `name@crate`,
 /// `name@version` or `name@crate-version`.
 ///
-/// Nobody writes these names down, so [`names`](Report::names) lists what a run
-/// produced.
+/// ## Shorter names
+///
+/// Nobody wants to write all of that, so a name may be shortened, as long as
+/// what is left still picks out one thing. From the front, the module of a
+/// standalone benchmark may be left off (`fib` for `bench::fib`) and so may the
+/// `group:` of a candidate. From the back, the ` (type)` may go, and so may the
+/// `@input`, when the group has only one. A name that fits more than one thing
+/// finds nothing, since a guess between them would be a wrong answer some of the
+/// time; the full name of one thing always finds it.
 ///
 /// ```
 /// use scaling::Config;
@@ -590,17 +595,31 @@ impl Display for Group {
 ///
 /// let mut names: Vec<&str> = report.names().collect();
 /// names.sort();
-/// assert_eq!(names, ["sorting@reversed", "sum"]);
+/// assert_eq!(names, ["sorting:stable@reversed", "sorting:unstable@reversed", "sum"]);
 ///
+/// // A standalone benchmark, and one candidate of a group by its full name.
 /// assert!(report.timing("sum").is_some());
+/// let unstable = report.timing("sorting:unstable@reversed").expect("it ran");
+/// // It was compared with the baseline, so it says by how much.
+/// assert!(unstable.difference().is_some());
+///
+/// // The same candidate, by any name that only it fits.
+/// assert_eq!(report.timing("unstable"), Some(unstable));
+/// assert_eq!(report.timing("sorting:unstable"), Some(unstable));
+///
+/// // The whole comparison is `group@input`, or just `group` with one input.
 /// assert!(report.comparison("sorting@reversed").is_some());
-/// // The group's own name is only for `groups`.
-/// assert!(report.comparison("sorting").is_none());
+/// assert!(report.comparison("sorting").is_some());
+///
+/// // A group is also a table.
 /// assert_eq!(report.groups().map(|(name, _)| name).collect::<Vec<_>>(), ["sorting", "sum"]);
 /// ```
 pub struct Report {
     entries: Vec<(String, Found)>,
     groups: BTreeMap<String, Group>,
+    /// Everything that can be asked for by name, in the order the entries
+    /// were added and each entry's own name before its candidates'.
+    addresses: Vec<Address>,
 }
 
 /// One column of a group while it is being assembled.
@@ -744,24 +763,24 @@ fn only_cell(name: &str, timings: &Timings) -> Vec<(String, Measurement, Metrics
 
 impl Report {
     fn new(entries: Vec<(String, Found)>, lanes: &[crate::assemble::Lane]) -> Self {
-        let by_name: HashMap<&str, &Found> = entries
+        let by_name: HashMap<&str, usize> = entries
             .iter()
-            .map(|(name, found)| (name.as_str(), found))
+            .enumerate()
+            .map(|(at, (name, _))| (name.as_str(), at))
             .collect();
         let mut grouped: BTreeMap<String, GroupBuilder> = BTreeMap::new();
-        let mut represented = BTreeSet::new();
+        // What each entry can be asked for, entry by entry so that `names`
+        // goes in the order the entries were added. An entry is represented
+        // once a lane or the loop below has addressed it.
+        let mut addressed: Vec<Vec<Address>> = vec![Vec::new(); entries.len()];
 
         for lane in lanes {
             for input in &lane.inputs {
                 let single = lane.candidates.len() == 1;
-                let entry_name = if single {
-                    lane.flat_name(&lane.candidates[0], input)
-                } else {
-                    lane.comparison_name(input)
-                };
-                let Some(found) = by_name.get(entry_name.as_str()) else {
+                let Some(&at) = by_name.get(lane.entry_name(input).as_str()) else {
                     continue;
                 };
+                let found = &entries[at].1;
                 // A lane's candidates are timed, so a scaling result here is
                 // not something a lane produces. If one turns up anyway it is
                 // left unclaimed, and so still shown below under its own name
@@ -786,15 +805,17 @@ impl Report {
                     results,
                     !single,
                 );
-                represented.insert(entry_name);
+                if addressed[at].is_empty() {
+                    addressed[at] = lane_addresses(lane, input, at, found);
+                }
             }
         }
 
         // Whatever no lane claimed: standalone benchmarks, and groups built
         // by hand with `add_input_group`. Each is a group of its own, under
         // its own name, with the unit input.
-        for (name, found) in &entries {
-            if represented.contains(name) {
+        for (at, (name, found)) in entries.iter().enumerate() {
+            if !addressed[at].is_empty() {
                 continue;
             }
             let (results, compared) = match found {
@@ -811,6 +832,7 @@ impl Report {
                 .entry(name.clone())
                 .or_default()
                 .add(TypedInput::default(), results, compared);
+            addressed[at] = own_addresses(name, found, at);
         }
 
         let groups = grouped
@@ -820,8 +842,106 @@ impl Report {
                 (name, group)
             })
             .collect();
-        Report { entries, groups }
+        Report {
+            entries,
+            groups,
+            addresses: addressed.into_iter().flatten().collect(),
+        }
     }
+}
+
+/// The names `found`, the result for `input` of `lane`, can be asked for: the
+/// comparison as a whole if there is one, and each candidate in it.
+fn lane_addresses(
+    lane: &crate::assemble::Lane,
+    input: &crate::assemble::Named<Input>,
+    entry: usize,
+    found: &Found,
+) -> Vec<Address> {
+    let timings = match found {
+        Found::Timing(timings) => timings,
+        Found::Scaling(_) => {
+            let candidate = &lane.candidates[0].name;
+            return vec![Address::new(
+                lane.candidate_name(candidate, input),
+                lane.candidate_forms(candidate, input),
+                Kind::Scaling,
+                entry,
+                0,
+            )];
+        }
+    };
+    let candidate = |alt: usize, name: &str| {
+        Address::new(
+            lane.candidate_name(name, input),
+            lane.candidate_forms(name, input),
+            Kind::Single,
+            entry,
+            alt,
+        )
+    };
+    if lane.candidates.len() == 1 {
+        return vec![candidate(0, &lane.candidates[0].name)];
+    }
+    let mut addresses = vec![Address::new(
+        lane.comparison_name(input),
+        lane.comparison_forms(input),
+        Kind::Comparison,
+        entry,
+        0,
+    )];
+    addresses.extend(
+        timings
+            .names()
+            .enumerate()
+            .map(|(alt, name)| candidate(alt, name)),
+    );
+    addresses
+}
+
+/// The names an entry that no lane claimed can be asked for, under its own
+/// name: a standalone benchmark, or a group built by hand, whose alternatives
+/// are then `entry:alternative`.
+fn own_addresses(name: &str, found: &Found, entry: usize) -> Vec<Address> {
+    let forms = names::path_forms(name);
+    let timings = match found {
+        Found::Scaling(_) => {
+            return vec![Address::new(
+                name.to_string(),
+                forms,
+                Kind::Scaling,
+                entry,
+                0,
+            )];
+        }
+        Found::Timing(timings) if timings.timings().len() == 1 => {
+            return vec![Address::new(
+                name.to_string(),
+                forms,
+                Kind::Single,
+                entry,
+                0,
+            )];
+        }
+        Found::Timing(timings) => timings,
+    };
+    let mut addresses = vec![Address::new(
+        name.to_string(),
+        forms,
+        Kind::Comparison,
+        entry,
+        0,
+    )];
+    addresses.extend(timings.names().enumerate().map(|(alt, alternative)| {
+        Address::new(
+            names::alternative_name(name, alternative),
+            names::alternative_forms(name, alternative),
+            Kind::Single,
+            entry,
+            alt,
+        )
+    }));
+    addresses
 }
 
 impl Report {
@@ -835,21 +955,43 @@ impl Report {
             .map(|(name, group)| (name.as_str(), group))
     }
 
-    /// What every entry is called, in the order they were added: the names the
-    /// other methods take. See [Names](Report#names) for how they are made up.
+    /// What every standalone benchmark, scaling benchmark and group candidate
+    /// is called, in the order they were added: the names
+    /// [`timing`](Report::timing), [`metrics`](Report::metrics) and
+    /// [`scaling`](Report::scaling) take. A comparison of a group's candidates
+    /// is not listed, for the candidates in it are; see
+    /// [`all_comparisons`](Report::all_comparisons). See
+    /// [Names](Report#names) for how they are made up.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|(name, _)| name.as_str())
+        self.addresses
+            .iter()
+            .filter(|address| address.kind != Kind::Comparison)
+            .map(|address| address.full.as_str())
     }
 
-    /// Whether anything was measured under this name.
+    /// Whether [`timing`](Report::timing), [`scaling`](Report::scaling) or
+    /// [`comparison`](Report::comparison) finds something under this name.
     pub fn contains(&self, name: &str) -> bool {
-        self.entries.iter().any(|(n, _)| n == name)
+        self.resolve(name, &[Kind::Single, Kind::Scaling, Kind::Comparison])
+            .is_some()
     }
 
-    /// Retrieve the timings for one group by name.
+    fn resolve(&self, name: &str, kinds: &[Kind]) -> Option<&Address> {
+        names::resolve(&self.addresses, name, kinds)
+    }
+
+    /// The timing of one thing by name: a standalone benchmark, or one
+    /// candidate of a group on one input. See [Names](Report#names), which also
+    /// says which shorter names find it.
     ///
-    /// `None` if nothing of that name was measured, if it was measured but
-    /// is of another type, or if the suite has not run.
+    /// A candidate that was compared with a baseline carries its
+    /// [`difference`](Timing::difference) from it; the baseline's own is `None`.
+    /// A caller wanting every candidate on an input together asks for the
+    /// [`comparison`](Report::comparison).
+    ///
+    /// `None` if the name is not that of one timed thing - nothing has it, it
+    /// fits several, or it is a scaling benchmark or a comparison.
+    ///
     /// ```
     /// use scaling::Config;
     ///
@@ -859,39 +1001,29 @@ impl Report {
     /// }
     ///
     /// let report = Config::default().run().expect("the registrations compose");
-    /// let timings = report.get_timings("sum_to_100").expect("it ran");
-    /// let timing = timings.timings()[0];
+    /// let timing = report.timing("sum_to_100").expect("it ran");
     /// assert!(timing.ns_per_iter > 0.0);
     /// ```
-    pub fn get_timings(&self, name: &str) -> Option<Timings> {
-        if let Some((_, Found::Timing(timings))) = self.entries.iter().find(|(n, _)| n == name) {
-            Some(timings.clone())
-        } else {
-            None
+    pub fn timing(&self, name: &str) -> Option<Timing> {
+        let address = self.resolve(name, &[Kind::Single])?;
+        match &self.entries[address.entry].1 {
+            Found::Timing(timings) => timings.timings().get(address.alt).copied(),
+            Found::Scaling(_) => None,
         }
     }
 
-    /// One measurement, whichever concrete kind it turns out to be - a
-    /// single scan over the report's entries, for a caller (formatting
-    /// output, say) that would otherwise need one scan per kind it tries in
-    /// turn, as [`Report::timing`]/[`Report::scaling`]/[`Report::comparison`]
-    /// each do their own.
-    pub(crate) fn find(&self, name: &str) -> Option<Found> {
-        self.entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, found)| found.clone())
-    }
-
-    /// A single measurement, by name: a standalone benchmark, or a group's
-    /// candidate that is alone on its input. See [Names](Report#names).
+    /// What one thing computed besides its time, by the names
+    /// [`timing`](Report::timing) takes.
     ///
-    /// `None` if that name was something else - a comparison, say - so a
-    /// caller that does not know what it is looking at can simply ask.
-    pub fn timing(&self, name: &str) -> Option<Timing> {
-        match self.find(name)? {
-            Found::Timing(c) if c.timings().len() == 1 => Some(c.timings()[0]),
-            _ => None,
+    /// Empty if it computed nothing, and `None` if the name is not that of one
+    /// timed thing. See [`Metrics`] for reading what is in it.
+    pub fn metrics(&self, name: &str) -> Option<&Metrics> {
+        let address = self.resolve(name, &[Kind::Single])?;
+        match &self.entries[address.entry].1 {
+            Found::Timing(timings) => {
+                Some(timings.metrics().get(address.alt).unwrap_or(&NO_METRICS))
+            }
+            Found::Scaling(_) => None,
         }
     }
 
@@ -913,41 +1045,55 @@ impl Report {
     /// assert!(scaling.iterations > 0);
     /// ```
     pub fn scaling(&self, name: &str) -> Option<ScalingStats> {
-        match self.find(name)? {
-            Found::Scaling(s) => Some(s),
-            _ => None,
+        let address = self.resolve(name, &[Kind::Scaling])?;
+        match &self.entries[address.entry].1 {
+            Found::Scaling(stats) => Some(*stats),
+            Found::Timing(_) => None,
         }
     }
 
-    /// A comparison's results, by name: an input of a group with two or more
-    /// candidates, named `group@input`. See [Names](Report#names).
+    /// A comparison's results, by name: a group's candidates on one input,
+    /// named `group@input`, or just `group` if the group has no input. See
+    /// [Names](Report#names), which also says which shorter names find it.
     ///
-    /// What comes back carries every alternative's own measurement as well as
+    /// What comes back carries every candidate's own measurement as well as
     /// its difference from the baseline, so this is what a script asking
-    /// "which of these is actually fastest here" wants.
+    /// "which of these is actually fastest here" wants. For one candidate on
+    /// its own, ask [`timing`](Report::timing).
     pub fn comparison(&self, name: &str) -> Option<Timings> {
-        match self.find(name)? {
-            Found::Timing(c) if c.timings().len() > 1 => Some(c),
-            _ => None,
+        let address = self.resolve(name, &[Kind::Comparison])?;
+        match &self.entries[address.entry].1 {
+            Found::Timing(timings) => Some(timings.clone()),
+            Found::Scaling(_) => None,
         }
     }
 
-    /// Every measurement that is a single [`Timing`], with its name, in the
-    /// order they were added: the flat benchmarks, and a group's candidates
-    /// that are alone on their input. See [`Report::timing`].
+    /// Every standalone benchmark and every group candidate, with its name and
+    /// its [`Timing`], in the order they were added: the names
+    /// [`names`](Report::names) lists, less the scaling benchmarks. See
+    /// [`Report::timing`].
     pub fn all_timings(&self) -> impl Iterator<Item = (&str, Timing)> {
-        self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Timing(c) if c.timings().len() == 1 => Some((name.as_str(), c.timings()[0])),
-            _ => None,
-        })
+        self.addresses
+            .iter()
+            .filter(|address| address.kind == Kind::Single)
+            .filter_map(|address| match &self.entries[address.entry].1 {
+                Found::Timing(timings) => Some((
+                    address.full.as_str(),
+                    timings.timings().get(address.alt).copied()?,
+                )),
+                Found::Scaling(_) => None,
+            })
     }
 
     /// Every comparison, with its name, in the order they were added.
     pub fn all_comparisons(&self) -> impl Iterator<Item = (&str, Timings)> {
-        self.entries.iter().filter_map(|(name, found)| match found {
-            Found::Timing(c) if c.timings().len() > 1 => Some((name.as_str(), c.clone())),
-            _ => None,
-        })
+        self.addresses
+            .iter()
+            .filter(|address| address.kind == Kind::Comparison)
+            .filter_map(|address| match &self.entries[address.entry].1 {
+                Found::Timing(timings) => Some((address.full.as_str(), timings.clone())),
+                Found::Scaling(_) => None,
+            })
     }
 }
 
@@ -1319,11 +1465,7 @@ mod report_lookup {
             .iter()
             .map(|lane| {
                 let input = &lane.inputs[0];
-                let name = if lane.candidates.len() == 1 {
-                    lane.flat_name(&lane.candidates[0], input)
-                } else {
-                    lane.comparison_name(input)
-                };
+                let name = lane.entry_name(input);
                 let names: Vec<&str> = lane.candidates.iter().map(|c| c.name.as_str()).collect();
                 let timings: Vec<Timing> = names
                     .iter()
@@ -1580,8 +1722,12 @@ mod report_lookup {
         );
         let report = suite.run();
 
+        // The comparison as a whole is not a single timing, but each of its
+        // alternatives is, under the name the comparison gives it.
         let flat: Vec<&str> = report.all_timings().map(|(n, _)| n).collect();
-        assert_eq!(flat, ["one", "two"], "the comparison is not a `Stats`");
+        assert_eq!(flat, ["one", "two", "pair:a", "pair:b"]);
+        let listed: Vec<&str> = report.names().collect();
+        assert_eq!(listed, flat);
         let cmps: Vec<&str> = report.all_comparisons().map(|(n, _)| n).collect();
         assert_eq!(cmps, ["pair"]);
     }
@@ -2270,7 +2416,8 @@ mod versions_and_rivals {
     fn the_redundant_input_is_measured_once() {
         let (_tokens, report) = run();
         let matrix_entries: Vec<&str> = report
-            .names()
+            .all_comparisons()
+            .map(|(name, _)| name)
             .filter(|k| k.starts_with("mixing@"))
             .collect();
         assert_eq!(
