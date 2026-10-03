@@ -37,6 +37,7 @@ match scaling::quiet::status() {
 ```
 */
 
+use crate::cpus::{format_cpu_list, parse_cpu_list, pin_thread, CPUS_PATH};
 use std::fmt::{self, Display, Formatter};
 
 /// Environment variable naming the reserved CPU list, e.g. `"2"` or
@@ -94,10 +95,6 @@ fn lock_is_available() -> bool {
     false
 }
 
-/// Where `quiet-bench` records the reserved CPUs. On `/run`, which is a
-/// tmpfs, so the record cannot survive a reboot and go stale.
-pub const CPUS_PATH: &str = "/run/quiet-bench.cpus";
-
 /// What `scaling` found when it looked for a quiesced environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -143,7 +140,7 @@ impl Display for Status {
 /// The reserved CPU list, if there is one.
 ///
 /// Prefers [`CPUS_VAR`], which `quiet-bench run` sets for its child, and
-/// falls back to [`CPUS_PATH`], so a benchmark launched some other way
+/// falls back to the record `quiet-bench` leaves in `/run/quiet-bench.cpus`, so a benchmark launched some other way
 /// still notices a machine-wide reservation.
 pub fn reserved_cpus() -> Option<String> {
     if let Ok(v) = std::env::var(CPUS_VAR) {
@@ -186,104 +183,6 @@ pub fn current_affinity() -> Option<String> {
 #[cfg(not(target_os = "linux"))]
 pub fn current_affinity() -> Option<String> {
     None
-}
-
-/// Expand a Linux CPU list like `"1,3-5"` into `[1, 3, 4, 5]`.
-///
-/// Returns `Err` with a human-readable reason if the list is malformed.
-pub fn parse_cpu_list(list: &str) -> Result<Vec<usize>, String> {
-    let mut out = Vec::new();
-    for part in list.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        match part.split_once('-') {
-            Some((lo, hi)) => {
-                let lo: usize = lo
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("bad CPU number {:?}", lo.trim()))?;
-                let hi: usize = hi
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("bad CPU number {:?}", hi.trim()))?;
-                if hi < lo {
-                    return Err(format!("descending CPU range {part:?}"));
-                }
-                out.extend(lo..=hi);
-            }
-            None => out.push(
-                part.parse()
-                    .map_err(|_| format!("bad CPU number {part:?}"))?,
-            ),
-        }
-    }
-    if out.is_empty() {
-        return Err("empty CPU list".to_string());
-    }
-    out.sort_unstable();
-    out.dedup();
-    Ok(out)
-}
-
-/// Render a set of CPU numbers as a Linux CPU list, collapsing runs
-/// (`[1, 3, 4, 5]` becomes `"1,3-5"`).
-pub fn format_cpu_list(cpus: &[usize]) -> String {
-    let mut sorted = cpus.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    let mut parts: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < sorted.len() {
-        let start = sorted[i];
-        let mut end = start;
-        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
-            i += 1;
-            end = sorted[i];
-        }
-        if start == end {
-            parts.push(start.to_string());
-        } else {
-            parts.push(format!("{start}-{end}"));
-        }
-        i += 1;
-    }
-    parts.join(",")
-}
-
-/// Pin the thread with kernel task id `tid` to `cpus`. A `tid` of 0 means
-/// the calling thread.
-///
-/// The one place the affinity mask is built, because getting it wrong is a
-/// memory-safety question rather than a behavioural one: `CPU_SET` writes
-/// into a fixed-size bitmap, so a cpu id past its end has to be dropped
-/// here rather than written past the end of the set.
-#[cfg(target_os = "linux")]
-pub fn pin_thread(tid: i32, cpus: &[usize]) -> Result<(), std::io::Error> {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        for &c in cpus {
-            if c < libc::CPU_SETSIZE as usize {
-                libc::CPU_SET(c, &mut set);
-            }
-        }
-        if libc::sched_setaffinity(tid, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-/// Pin the thread with kernel task id `tid` to `cpus`. Always fails on
-/// non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
-pub fn pin_thread(_tid: i32, _cpus: &[usize]) -> Result<(), std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "CPU pinning is only supported on Linux",
-    ))
 }
 
 /// Pin the calling thread to `cpus`.
@@ -374,7 +273,7 @@ pub(crate) fn pin_if_reserved() {
 /// Benchmarks contend at two scopes, so this closes both. A process-wide
 /// mutex makes parallel test threads take turns - pinned to one core they
 /// cannot run faster in parallel anyway, they only interleave and spoil each
-/// other's timings. An `flock` on [`CPUS_PATH`] then does the same between
+/// other's timings. An `flock` on that record (`/run/quiet-bench.cpus`) then does the same between
 /// separate benchmark processes. The kernel drops a file lock when the
 /// process holding it dies, so a benchmark killed with `SIGKILL` or
 /// interrupted at the terminal cannot strand the CPU the way a PID file

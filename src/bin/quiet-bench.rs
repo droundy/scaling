@@ -36,11 +36,15 @@ fn main() {
     std::process::exit(linux::run());
 }
 
+// Shared with the library by path, not through its public API: see the file.
+#[cfg(target_os = "linux")]
+#[path = "../cpus.rs"]
+mod cpus;
+
 #[cfg(target_os = "linux")]
 mod linux {
-    use scaling::quiet::{
-        format_cpu_list, parse_cpu_list, pin_thread, status, Status, CPUS_PATH, CPUS_VAR,
-    };
+    use super::cpus::{format_cpu_list, parse_cpu_list, pin_thread, CPUS_PATH};
+    use scaling::quiet::{status, Status, CPUS_VAR};
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;

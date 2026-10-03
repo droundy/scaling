@@ -493,6 +493,7 @@ them the way a quiesced run's would be trusted.
 mod alloc;
 mod assemble;
 mod bench;
+mod cpus;
 mod difference;
 mod formatting;
 mod input_group;
