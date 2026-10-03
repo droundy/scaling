@@ -596,6 +596,44 @@ then go to a third pass or a refusal, rather than giving a confident wrong
 number. Mixed and memory pairs disagree in 45-75% of pass pairs at every
 goal, and should be refused unquiesced.
 
+**On mains, while the machine was in use.** Six more unpinned processes
+were collected, with other work running on the machine. Their average canary
+times ranged 1.50-2.16 ns a link. Across them:
+
+- `str_find` spread 0.18% in cycles against 12% in nanoseconds, and
+  `urandom_read` 0.20% against 12%.
+- `f64_sin` spread 1.3% in cycles. That is not a fixed offset: within
+  three of the six processes, its ratio to the canary jumped 3-6% in
+  bursts, matching when other cores were busy compiling and replaying. The
+  other three processes were flat.
+
+So there are two different things a second process sees that one process
+cannot: offsets fixed for a whole process, as with `str_find` on battery,
+and episodes caused by other work.
+
+**Clock sensitivity predicts which ratios will wander.** The canary is in
+every round, so each workload's slope against it can be measured from the
+run itself. Clock-bound code sits at 0.86-0.99, `btree_miss` at -0.17 to
+0.31, and `copy_64mb` at 0.23-0.52. A ratio's wander over 1,000-round
+windows is then predicted by
+
+    |sensitivity_A - sensitivity_B| x sd(clock)
+
+The log of this prediction correlates with the log of the observed wander
+at 0.92, across 195 pairs in 13 unquiesced recordings. Refusing a pair
+whose prediction exceeds twice the goal refused every mixed pair across
+processes, and none of the mixed pairs it let through blew up.
+
+**The third pass, replayed.** The first rule tried counted the spread
+between two passes into the bar, and refused 2-26% of good clock-pair
+results. Reporting agreeing passes on their own bars, and combining a
+third by random effects only when two disagree, refuses 0.1-7%. With
+passes in separate processes, plus the clock-sensitivity check, clock-pair
+results that were reported blew up 0% of the time at a 2% goal, 0-1.2% at
+1% and 1.1-1.2% at 0.5%. A single pass blew up 3.3-3.6%, 6.7-7.1% and
+11-21%. Most 0.5% comparisons were refused, so an unquiesced laptop can
+promise clock-bound ratios to about 1-2%, and not tighter.
+
 ---
 
 ## How they interact

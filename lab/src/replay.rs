@@ -2016,7 +2016,8 @@ fn dump_trials(
         // Reruns (`LAB_RERUN_GAPS=g1,g2,...`, in rounds after this trial
         // ends): the same trial again, and the same budget split into two
         // trials at a goal looser by sqrt 2, the second `g` rounds after the
-        // first. Positions wrap, so a late trial reruns near the start.
+        // first, and a third `g` after that for when the two disagree.
+        // Positions wrap, so a late trial reruns near the start.
         if label == "paired" {
             let wrap = |p: usize| p % rs.len().saturating_sub(2 * PAIR_CAP).max(1);
             let half = (std::f64::consts::SQRT_2 * target.ln_1p()).exp_m1();
@@ -2025,7 +2026,8 @@ fn dump_trials(
                 let again = pair_trial(rs, wrap(s + n + g), est, target);
                 let first = pair_trial(rs, s, est, half);
                 let second = pair_trial(rs, wrap(s + first.rounds + g), est, half);
-                let _ = write!(w, "\t{g}:{};{};{}", f(&again), f(&first), f(&second));
+                let third = pair_trial(rs, wrap(s + first.rounds + second.rounds + 2 * g), est, half);
+                let _ = write!(w, "\t{g}:{};{};{};{}", f(&again), f(&first), f(&second), f(&third));
             }
         }
         let _ = writeln!(w);

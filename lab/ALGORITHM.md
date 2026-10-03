@@ -383,14 +383,32 @@ rounds or more, against 5% of all trials.
 1. Run the whole suite once at a per-pass goal of
    `sigma <= sqrt(2) * ln(1 + goal)`.
 2. Run the whole suite again, the same way.
-3. For each result, combine the passes: the inverse-variance weighted mean
-   of `ln R`, with combined bar `max(sqrt(1 / (w_1 + w_2)), |x_1 - x_2| / 2)`.
-4. If the passes **disagree** - `|x_1 - x_2| > 2 * sqrt(sigma_1^2 + sigma_2^2)`
-   - run that comparison a third time and combine all three the same way,
-   with the bar including the spread between passes.
-5. If the combined bar still misses the goal, **refuse**. Report that the
-   machine could not reproduce this number to the goal, and how far the
-   passes were apart.
+3. **Check clock sensitivity.** For each function, take its *clock
+   sensitivity*: the slope of its log time against the canary's, over
+   windows of rounds. Clock-bound code sits at 0.86-0.99, `btree_miss` at
+   -0.17 to 0.31, and `copy_64mb` at 0.23-0.52. If the two functions'
+   sensitivities differ by more than **twice the goal divided by the
+   clock's spread**, refuse the comparison: its ratio has no fixed value on
+   this machine. This happens before any combining, and the message says
+   why (see "Knowing a ratio cannot be fixed" below).
+4. If the passes **agree** - `|x_1 - x_2| <= 2 * sqrt(sigma_1^2 + sigma_2^2)`
+   - report their inverse-variance weighted mean of `ln R`, with bar
+   `sqrt(1 / (w_1 + w_2))`.
+5. If they **disagree**, run that comparison a third time and combine all
+   three by random effects (DerSimonian-Laird). That estimates how much
+   the passes really differ beyond their own bars, and adds it to each
+   pass's variance. If the combined bar misses the goal, **refuse**:
+   report that the machine could not reproduce this number to the goal,
+   and how far the passes were apart.
+
+**Why not count the spread between two passes into the bar.** This was
+the first version of the rule. It is wrong: with two passes, the spread
+between them is a one-degree-of-freedom estimate. Replayed, it refused
+2-26% of clock-pair results that were fine, the more the tighter the
+goal. The rule above refuses 0.1-7% of them. The results it reports had
+no blowups on the quiet recordings, and at most 3 in about 3,100 trials
+on the noisy ones, against 10 for a single pass. That is over all six
+long recordings, with passes 1 or 10 minutes apart.
 
 **Why passes, and why whole-suite.** Replayed with a second trial started
 `g` rounds after the first ended, at about 79 rounds a second:
@@ -430,21 +448,62 @@ The user can ask for a looser goal, or for "run until the time limit" with
 no goal at all. A result that merely ran out of budget before meeting its
 goal is a different case: it is printed, and marked `(limit)`.
 
+**Passes in separate processes.** The harshest test is each pass in its
+own process. That is what rerunning a benchmark binary does, and the gap
+in time comes with it. Here 4 unpinned processes ran on battery and 6 on
+mains, the latter while the machine was in use. Clock-bound pairs:
+
+| goal | one pass blows up | refused | still blown when reported |
+| --- | --- | --- | --- |
+| 2% | 3.3-3.6% | 10% | 0% |
+| 1% | 6.7-7.1% | 37-61% | 0-1.2% |
+| 0.5% | 11-21% | 79-87% | 1.1-1.2% |
+
+All mixed pairs are refused, by the clock-sensitivity check, and none are
+reported. On an unquiesced laptop, then, a ratio between clock-bound
+functions is reproducible to 1-2%. Tighter than that needs a quiesced
+machine, and the algorithm says so rather than printing a number.
+
+Two things make separate processes harsher than one long recording:
+
+- **Offsets fixed for the life of a process.** On battery, one process
+  measured `str_find` 0.6-2.3% high in all eight of its windows, while the
+  other three agreed with each other. The likely cause is layout: which
+  addresses a process's inputs and code land at.
+- **Episodes from other work on the machine.** On mains, `f64_sin`'s ratio
+  to the canary jumped 3-6% in bursts within three of the six processes,
+  matching when other cores were busy compiling and replaying. The other
+  three processes were flat.
+
+A second pass in the same process catches the episodes, but not the fixed
+offsets.
+
 **Not yet validated:**
-- The third-pass and refusal rules have not been replayed. The two-pass
-  numbers above have.
-- **Separate processes see what one process cannot** (PROBLEMS.md, "On
-  battery"). Of four unpinned processes on battery, one measured
-  `str_find`'s ratio to the canary 1.7% away from the other three. That is
-  four times the bar each process claimed, and it held for the whole run.
-  A second pass inside the same process would have agreed with the first.
-  The cause may be layout - which addresses a process's inputs and code
-  land at - as with the memory canary's 20% between processes. A suite's
-  two passes in one process catch drift, but only rerunning the binary
-  catches this.
 - A lone `bench()` call outside a suite has no gap to borrow. It can only
   do its two passes back to back, which catches fewer drift blowups (60-71%
   rather than 72-100%) but all of the statistical ones.
+- The random-effects rule was replayed with all three passes at a √2
+  looser goal. A third pass at the full goal might do better.
+
+### Knowing a ratio cannot be fixed
+
+The canary is in every round, so each function's response to the clock
+can be measured from the run itself. Regress its log time on the canary's,
+over windows of 1,000 rounds. A ratio's wander is then predicted by
+
+    |sensitivity_A - sensitivity_B| x sd(clock over windows)
+
+Across 195 pairs in 13 unquiesced recordings, the log of this prediction
+correlates with the log of the observed wander at 0.92: btree vs clock-bound
+pairs predicted 17% and saw 16%; cpu_canary vs str_find predicted 0.2%
+and saw 0.4%.
+
+This is the canary doing what it was first imagined for: not correcting a
+number, but saying why the machine cannot produce it. A refusal can say
+
+    btree_lookup vs hash_lookup: not reproducible to 1%
+        hash_lookup follows the CPU clock (sensitivity 0.97); btree_lookup
+        barely does (0.12), and the clock moved by 18% during the run
 
 ## 8. Reporting
 
@@ -477,6 +536,8 @@ factors for large ones: "twice as fast", not "50% less time".
 | canary | 4 cycles a link | 4.04-4.08 against the logged clock, 1.6-4.4 GHz; verify per architecture |
 | passes | 2, at a √2 looser goal | replayed, 1.2-1.3x the cost |
 | disagreement | > 2 combined bars | replayed: 3-7% of good clock-pair results trigger it |
+| third pass | random effects, refuse if bar > goal | replayed: refuses 0.1-7% of good clock-pair results |
+| clock-sensitivity refusal | predicted wander > 2x goal | separate processes: refuses every mixed pair; 0% blown at 2% goal |
 | default goal | 1% | the crate's existing default |
 
 ## Limits it does not overcome
@@ -524,8 +585,9 @@ The lab's `replay.rs` has the first two as unit tests.
    section 4 proves too blunt.
 3. **The refusal policy.** Whether a refusal fails the process (a non-zero
    exit) by default, and what flag allows it through.
-4. **The third-pass rule.** It needs replaying with three trials per
-   comparison before it is trusted.
+4. **What a laptop can promise.** Unquiesced, clock-bound ratios reproduce
+   to 1-2% across processes, and tighter goals are mostly refused. Should
+   the default goal differ when no `quiet-bench` reservation is found?
 5. **Separate processes.** Whether to recommend running a benchmark
    binary twice, or have the crate re-exec itself for its second pass, so
    that process-level shifts are caught too.
