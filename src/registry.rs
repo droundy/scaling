@@ -14,6 +14,8 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 
+/// Counts what a closure allocates, for the tests of the counting allocator.
+pub use crate::alloc::measure as measure_allocations;
 pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
 
@@ -154,6 +156,17 @@ impl ErasedInput {
             .downcast_mut::<I>()
             .expect("input type was checked during assembly")
     }
+
+    /// The input, as the type it really is, for reading.
+    ///
+    /// # Panics
+    ///
+    /// As [`ErasedInput::get_mut`].
+    pub fn get<I: Any>(&self) -> &I {
+        self.value
+            .downcast_ref::<I>()
+            .expect("input type was checked during assembly")
+    }
 }
 
 impl Clone for ErasedInput {
@@ -208,6 +221,28 @@ pub struct Candidate {
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
     pub add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
+    /// How this candidate takes part in a [`MetricsFn`]: what it returns,
+    /// and how to add itself so that what it returns is handed on. `None`
+    /// for a candidate whose output cannot be handed on - one that returns a
+    /// borrow, or an `impl Trait`, or is generic in it - which is simply
+    /// never given metrics.
+    pub metrics: Option<CandidateMetrics>,
+}
+
+/// What a [`Candidate`] needs to be given metrics.
+///
+/// Separate from [`Candidate::add_alt`] because which metrics function it
+/// is given is decided at assembly, by looking at every registration, and
+/// the shim that adds the candidate cannot know that when it is written.
+pub struct CandidateMetrics {
+    /// The type it returns, which is what a metrics function is paired to it
+    /// on.
+    pub output_type: fn() -> TypeId,
+    /// That type as the source spells it, for diagnostics.
+    pub output_type_name: &'static str,
+    /// Like [`Candidate::add_alt`], and the alternative is then also run
+    /// once more for the metrics function it is given.
+    pub add_alt: fn(InputGroup<ErasedInput>, &str, &'static MetricsFn) -> InputGroup<ErasedInput>,
 }
 
 impl fmt::Debug for Candidate {
@@ -226,6 +261,58 @@ impl fmt::Debug for Candidate {
 }
 
 inventory::collect!(Candidate);
+
+/// A function that computes extra numbers about what a candidate returned,
+/// for every candidate of the groups it names that returns that type.
+///
+/// Registered separately from the candidates for the reason the candidates
+/// and inputs are separate: it names a group and a type and nothing else, so
+/// adding a candidate adds its metrics, and a new metric does not mean
+/// editing every candidate.
+///
+/// The function takes the output by value, which a registry cannot name, so
+/// it is registered as a shim: one that is handed the output with its type
+/// erased and puts the type back before the call.
+pub struct MetricsFn {
+    /// Every group it applies to.
+    pub groups: &'static [&'static str],
+    /// What it is called, for diagnostics.
+    pub name: &'static str,
+    /// The type it takes, which is what it is paired to candidates on.
+    pub output_type: fn() -> TypeId,
+    /// That type as the source spells it, for diagnostics.
+    pub output_type_name: &'static str,
+    /// The type of input it also reads, when it does. Then it only applies
+    /// to candidates measured on that type.
+    pub input_type: Option<fn() -> TypeId>,
+    /// That type as the source spells it, empty when it reads none.
+    pub input_type_name: &'static str,
+    pub crate_name: &'static str,
+    pub crate_version: &'static str,
+    /// Whether the candidate's run is counted for its allocations, which the
+    /// function can then ask to show. Needs [`crate::Allocator`]
+    /// to be the global allocator.
+    pub allocation: bool,
+    /// Calls the function. The input is given when [`MetricsFn::input_type`]
+    /// is `Some`: as it was before the candidate ran.
+    pub eval: fn(Option<&ErasedInput>, Box<dyn Any>) -> crate::Metrics,
+}
+
+impl fmt::Debug for MetricsFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetricsFn")
+            .field("groups", &self.groups)
+            .field("name", &self.name)
+            .field("output_type_name", &self.output_type_name)
+            .field("input_type_name", &self.input_type_name)
+            .field("crate_name", &self.crate_name)
+            .field("crate_version", &self.crate_version)
+            .field("allocation", &self.allocation)
+            .finish()
+    }
+}
+
+inventory::collect!(MetricsFn);
 
 /// One input every candidate of its type, in a group this shares with it, is
 /// measured on.

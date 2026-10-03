@@ -390,6 +390,10 @@ done once-per-iteration *will* be counted in the final times.
 * For one taking an input, we also do a lookup into a big vector in order to
   get the input for that iteration.
 * If you compile your program unoptimised, there may be additional overhead.
+* If you install the counting [`Allocator`] to report allocations, it counts
+  every allocation, including those made inside timed code, which costs a few
+  instructions each. The baseline pays it too, so a comparison stays fair, but
+  an allocation-heavy benchmark reads a little slower than it would without it.
 
 The cost of the above operations depend on the details of your benchmark;
 namely: (1) how large is the return value? and (2) does the benchmark evict
@@ -484,8 +488,10 @@ the error bar stays tight and looks fully earned. There is no flag that
 turns that into a caught case; the only fix is a quieter machine, or
 judging results from CI with that firmly in mind rather than trusting
 them the way a quiesced run's would be trusted.
+[`#[scaling::metrics]`]: macro@metrics
 */
 
+mod alloc;
 /// Assembling registered benchmarks into a suite.
 #[doc(hidden)]
 pub mod assemble;
@@ -493,6 +499,7 @@ mod bench;
 mod difference;
 mod formatting;
 mod input_group;
+mod metrics;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///
@@ -512,8 +519,11 @@ pub(crate) mod significant;
 // itself.
 pub use self::bench::Timing;
 
+pub use self::alloc::{Allocations, Allocator};
 pub use self::difference::Difference;
 pub use self::input_group::Timings;
+pub(crate) use self::metrics::MetricColumn;
+pub use self::metrics::{Metrics, Unit};
 pub use self::scaling::{Scaling, ScalingStats};
 pub use self::suite::{Group, Report};
 pub(crate) use self::suite::{Measurement, TypedInput};
@@ -526,9 +536,248 @@ pub(crate) use self::suite::{Assembled, Suite};
 #[doc(hidden)]
 pub use inventory;
 
-/// Attribute macros that register a benchmark where it is written, rather
-/// than requiring it be added to a suite by hand.
-pub use scaling_macros::{bench, bench_scaling, input};
+// The attribute macros register a benchmark where it is written, rather than
+// requiring it be added to a suite by hand. They are documented here, on the
+// re-exports, because that is where rustdoc shows the documentation of a
+// proc macro, and it lets the examples use this crate.
+
+/// Registers a function as a benchmark, or as a candidate in a comparison.
+///
+/// ```
+/// #[scaling::bench]
+/// fn sum() -> u64 { (0..1000u64).sum() }
+///
+/// // One input, built fresh for each iteration.
+/// #[scaling::bench(make_input = || vec![3, 1, 2])]
+/// fn sort(v: &mut Vec<i32>) { v.sort() }
+///
+/// // A candidate in a comparison; see `input` for its input.
+/// #[scaling::bench(group = "sorting", baseline)]
+/// fn stable(v: &mut Vec<u64>) { v.sort() }
+/// ```
+///
+/// A standalone benchmark is reported as `module::function`; a candidate by its
+/// bare function name. The function takes no argument, or one input, and should
+/// return something that depends on its work, which `scaling` passes through
+/// [`std::hint::black_box`] so that the optimiser cannot delete the work (see
+/// caveat 2 in the crate docs).
+///
+/// # Options
+///
+/// | option | meaning |
+/// |---|---|
+/// | `name = "text"` | What the report calls it, in place of the function's name. |
+/// | `input = <expr>` | Each iteration is given a clone of this value, so its type must be `Clone`. Not with `make_input`, and not with `group`. |
+/// | `make_input = <closure>` | Each iteration is given a value this builds. Not with `input`, and not with `group`. |
+/// | `group = "name"` or `group("a", "b")` | Makes it one candidate of a comparison, in one group or several at once. It is measured on every [`input`](macro@input) of its group that has its input type. |
+/// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
+/// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
+///
+/// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
+/// standalone benchmark, where the function consumes it. A function returning
+/// `impl Fn() -> O` or `impl FnMut() -> O` is a setup-once benchmark: the
+/// function runs once and the closure it returns is what is timed.
+///
+/// The output of a candidate can also be given to a [`metrics`](macro@metrics)
+/// function, to report more than a time.
+pub use scaling_macros::bench;
+
+/// Registers a function as a scaling benchmark, measured at several sizes to
+/// find how its cost grows as a power of `N`.
+///
+/// ```
+/// #[scaling::bench_scaling(nmin = 0)]
+/// fn sum_to(n: usize) -> u64 { (0..n as u64).sum() }
+/// ```
+///
+/// The function takes the size `n`, or, with `make_input`, an input that was
+/// built for that size.
+///
+/// | option | meaning |
+/// |---|---|
+/// | `nmin = N` | Required. The size to start climbing from. |
+/// | `make_input = \|n\| ...` | Builds an input for size `n`, before the timing and once for each sample. The function then takes `&mut I`. |
+/// | `name = "text"` | What the report calls it, in place of the function's name. |
+///
+/// `input` and `group` do not apply: the input has to vary with `n`, and what
+/// a scaling benchmark measures is not something a comparison compares. A
+/// function returning `impl Fn() -> O` is set up once for each size.
+pub use scaling_macros::bench_scaling;
+
+/// Registers an input, shared by every candidate of its group that takes its
+/// type.
+///
+/// ```
+/// #[scaling::input(group = "sorting", name = "reversed")]
+/// fn reversed() -> Vec<u64> { (0..400u64).rev().collect() }
+///
+/// // One input for each size, named `ramp@64` and `ramp@256`.
+/// #[scaling::input(group = "sorting", sizes(64, 256))]
+/// fn ramp(n: usize) -> Vec<u64> { (0..n as u64).collect() }
+///
+/// #[scaling::bench(group = "sorting", baseline)]
+/// fn stable(v: &mut Vec<u64>) { v.sort() }
+/// ```
+///
+/// Candidates and inputs name the group and a type, never each other: every
+/// candidate is measured on every input of its group and type, so adding an
+/// input extends the comparison without touching the candidates.
+///
+/// | option | meaning |
+/// |---|---|
+/// | `group = "name"` or `group("a", "b")` | Required. The group or groups it feeds, without those groups being compared with each other. |
+/// | `name = "text"` | What the input is called in the report, in place of the function's name. |
+/// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
+/// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
+///
+/// The function takes no argument (or the size) and returns the input, whose
+/// type must be `Clone`: it is generated for each iteration and cloned for each
+/// candidate. A function returning `impl Fn() -> T` is set up once.
+pub use scaling_macros::input;
+
+/// Computes extra numbers from what the candidates of a group returned, so
+/// that they are shown beside the times: how many bytes a serializer wrote, how
+/// well its output compresses, how much memory it held.
+///
+/// ```
+/// use scaling::Metrics;
+///
+/// #[scaling::input(group = "encode")]
+/// fn text() -> String { "abcd".repeat(100) }
+///
+/// #[scaling::bench(group = "encode", baseline)]
+/// fn plain(s: &mut String) -> Vec<u8> { s.clone().into_bytes() }
+///
+/// #[scaling::bench(group = "encode")]
+/// fn doubled(s: &mut String) -> Vec<u8> {
+///     let mut bytes = s.clone().into_bytes();
+///     bytes.extend_from_slice(s.as_bytes());
+///     bytes
+/// }
+///
+/// // Applies to `plain` and `doubled`, and to any candidate of "encode"
+/// // that returns a `Vec<u8>`, now or added later.
+/// #[scaling::metrics(group = "encode")]
+/// fn sizes(out: Vec<u8>) -> Metrics {
+///     Metrics::new().bytes("size", out.len())
+/// }
+/// ```
+///
+/// which prints the size beside each time:
+///
+/// ```none
+/// encode@text (String)  baseline: plain
+/// candidate               time          size
+/// plain       51.50ns ± 0.03ns          400B
+/// doubled       +205.6% ± 0.4%  800B (+100%)
+/// ```
+///
+/// # Options
+///
+/// | option | meaning |
+/// |---|---|
+/// | `group = "name"` or `group("a", "b")` | Required. The group or groups whose candidates it computes metrics for. |
+/// | `allocation` | Counts the allocations of each candidate's run, which the function can then ask to show. See [Counting allocations](#counting-allocations). |
+/// | `name = "text"` | What the function is called in diagnostics, in place of its own name. |
+///
+/// # The function
+///
+/// It takes the output by value, so it needs no `Clone` and may reuse or check
+/// it, and returns a [`Metrics`]. There are two forms:
+///
+/// | signature | gets |
+/// |---|---|
+/// | `fn(out: O) -> Metrics` | what the candidate returned |
+/// | `fn(input: &I, out: O) -> Metrics` | also the input, as it was before the candidate ran, which the candidate was free to change |
+///
+/// The second form needs an input that can be cloned, which a group's inputs
+/// always are. `O` must be a type that can be named in a registration: not a
+/// reference, nor anything with a lifetime, `impl Trait` or `dyn Trait` in it,
+/// nor spelled with a generic parameter of the candidate. A candidate whose
+/// output cannot be named is measured as usual and has no metrics. `()` is
+/// fine, and with `allocation` is how a candidate that returns nothing gets its
+/// counts.
+///
+/// # Which candidates get it
+///
+/// A function applies to every candidate in one of its groups that returns `O`
+/// (and, for the second form, that is measured on an input of type `I`).
+/// Candidates and functions name the group and a type and never each other, so
+/// a candidate added later is picked up.
+///
+/// Each candidate has at most one: a second function for the same group and
+/// type is reported as a contradiction before anything runs, and a function
+/// that no candidate in any of its groups returns the type of is reported as a
+/// warning, since it computed nothing. A function that several versions of one
+/// crate have registered counts once, as the newest. To compute several numbers
+/// about one type, return them all from one function.
+///
+/// # When it runs
+///
+/// Once for each cell, after its timing is finished, so it cannot disturb the
+/// timing. One value is made by the group's input generator and cloned for each
+/// candidate, and each candidate is called once on its copy. That run is not
+/// timed and does not count against [`Config::max_time`]; it costs one call of
+/// the candidate and one of your function, for each candidate and input. There
+/// is no way to skip it yet.
+///
+/// Because it is one run, a metric is a single value, not a mean with an error
+/// bar: it suits quantities that do not vary from run to run, like a size. If
+/// the input is random, seed the generator, or the number will differ from one
+/// run of the benchmark to the next.
+///
+/// # Counting allocations
+///
+/// How much memory a candidate used is not in what it returned. Install the
+/// counting [`Allocator`], mark the function `allocation`, and ask for the
+/// numbers to show:
+///
+/// ```
+/// #[global_allocator]
+/// static ALLOC: scaling::Allocator = scaling::Allocator::new();
+///
+/// #[scaling::bench(group = "build")]
+/// fn grow() -> Vec<u8> { vec![0u8; 10_000] }
+///
+/// #[scaling::metrics(group = "build", allocation)]
+/// fn memory(out: Vec<u8>) -> scaling::Metrics {
+///     scaling::Metrics::new()
+///         .bytes("size", out.len())
+///         .peak_allocated_bytes()  // the most it held at once: `alloc peak`
+///         .allocation_count()      // how many times it asked for memory: `alloc count`
+///         .total_allocated_bytes() // how much it asked for in all: `alloc total`
+///         .net_allocated_bytes()   // held at the end, net of what it freed: `alloc net`
+/// }
+/// ```
+///
+/// Only the candidate's own call, on its own thread, is counted: not its input,
+/// which it was handed, and not what your function does with the output. A
+/// function can also read the numbers, to build a metric of its own, with
+/// [`Metrics::allocations`]. See [`Allocator`] for what is and is not seen, and
+/// what installing it costs: it counts whenever it is installed, not only on
+/// this run, so it slows allocation-heavy code a little, the baseline included.
+///
+/// A program that asks for counts without installing the allocator is refused
+/// before anything runs, rather than shown zeros, and a function that asks for
+/// them without `allocation` fails with a message saying so.
+///
+/// # How the numbers are shown
+///
+/// As columns beside the time, named as you named them. The baseline's value is
+/// absolute and every other candidate's is `value (Δ%)` against it; there is no
+/// `±`, since a metric is not sampled, and no notion of which direction is
+/// better, so nothing is marked best. With several inputs and one or two
+/// metrics the metrics are lines under each time in one grid; otherwise each
+/// input gets a table. See "Reading the output" in the crate docs for how a
+/// group that is too wide is laid out.
+///
+/// # Reading them back
+///
+/// A script that measured with [`runner::measure`] gets each alternative's
+/// record from [`Timings::metrics`], in the order of [`Timings::names`]:
+/// `report.comparison("encode@text")?.metrics()[0].get("size")`. A candidate
+/// with no metrics has an empty record.
+pub use scaling_macros::metrics;
 
 /// A whole benchmark binary, in one line.
 ///

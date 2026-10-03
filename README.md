@@ -222,6 +222,108 @@ A group with just one input - the common case, and the only shape a plain
 `group = "..."` with no `#[input]` at all ever has - prints as an ordinary
 comparison instead, with no grid to read.
 
+## Metrics
+
+A timing is not always the whole story about a candidate. A serializer is also
+judged by how many bytes it wrote, and a compressor by what it saved.
+`#[scaling::metrics]` computes extra numbers from what the candidates of a
+group returned, and they are printed beside the time. This is the short tour;
+[`#[scaling::metrics]`] is the reference for everything it accepts:
+
+```rust
+use scaling::Metrics;
+
+#[scaling::input(group = "encode")]
+fn text() -> String { "abcd".repeat(100) }
+
+#[scaling::bench(group = "encode", baseline)]
+fn plain(s: &mut String) -> Vec<u8> { s.clone().into_bytes() }
+
+#[scaling::bench(group = "encode")]
+fn doubled(s: &mut String) -> Vec<u8> {
+    let mut bytes = s.clone().into_bytes();
+    bytes.extend_from_slice(s.as_bytes());
+    bytes
+}
+
+#[scaling::metrics(group = "encode")]
+fn sizes(out: Vec<u8>) -> Metrics {
+    Metrics::new().bytes("size", out.len())
+}
+```
+
+`sizes` names a group and takes a `Vec<u8>`, so it applies to every candidate
+of `encode` that returns one - and to candidates added later, without editing
+it. It takes the output by value, so it needs no `Clone` and may reuse the
+buffer. A metrics function that also wants the input, as it was before the
+candidate ran, takes it first as `&I`: `fn ratio(input: &String, out:
+Vec<u8>) -> Metrics`.
+
+Each candidate is run once more after the timing is done, outside it, and
+its output is handed over, so a metric is the number from one run: suited to
+things that do not vary from run to run, such as a size. A group has one
+metrics function for each type its candidates return; a second for the same
+type is reported as a contradiction. A candidate that returns another type,
+or one that cannot be named in a registration (`impl Trait`, a borrow, or a
+generic parameter), is measured as usual and has no metrics. Build the numbers with
+`Metrics::bytes`, `count`, `ratio`, `percent` and `seconds`, or `value`
+followed by `unit` for anything else.
+
+### Counting allocations
+
+How much memory a candidate used is not in what it returned. Install the
+counting allocator, mark the metrics function `allocation`, and ask for the
+numbers you want to see:
+
+```rust,ignore
+#[global_allocator]
+static ALLOC: scaling::Allocator = scaling::Allocator::new();
+
+#[scaling::metrics(group = "encode", allocation)]
+fn sizes(out: Vec<u8>) -> scaling::Metrics {
+    scaling::Metrics::new()
+        .bytes("size", out.len())
+        .peak_allocated_bytes()  // the most it held at once: `alloc peak`
+        .allocation_count()      // how many times it asked for memory: `alloc count`
+        .total_allocated_bytes() // how much it asked for in all: `alloc total`
+        .net_allocated_bytes()   // held at the end, net of what it freed: `alloc net`
+}
+```
+
+A function can also read the numbers itself, to build a metric of its own from
+them, with `Metrics::allocations()`:
+
+```rust,ignore
+#[scaling::metrics(group = "encode", allocation)]
+fn overhead(out: Vec<u8>) -> scaling::Metrics {
+    let held = scaling::Metrics::allocations().map_or(0, |a| a.net_allocated_bytes);
+    scaling::Metrics::new().ratio("held per byte", held as f64 / out.len() as f64)
+}
+```
+
+It returns `None` in a function that is not marked `allocation`, since its run
+was not counted, and `Metrics::allocator_installed()` says whether the
+allocator is in use.
+
+Only the candidate's own call is counted: not its input, which it was
+handed, and not what `sizes` does with the output. A program that asks for
+counts without installing the allocator is refused before anything runs,
+rather than shown zeros; asking for them without `allocation` in the attribute
+fails with a message saying so. The counters are per thread, so a candidate
+that hands its work to other threads is counted only for what it does itself,
+and since the allocator counts everything once it is installed, it slows
+allocation-heavy code a little - the baseline included.
+
+A group with metrics prints them beside the time, and under it when there
+are several inputs and one or two metrics:
+
+```none
+encode@text (String)  baseline: plain
+candidate               time          size
+plain       51.50ns ± 0.03ns          400B
+doubled       +205.6% ± 0.4%  800B (+100%)
+```
+
 ## Why measuring them together matters
 
 Benchmarks run one after another are measured in different machines: the

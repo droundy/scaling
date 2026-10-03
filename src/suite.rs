@@ -44,7 +44,7 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
-use crate::registry::{Candidate, Input, Registered};
+use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Display, Formatter};
@@ -384,7 +384,8 @@ impl Suite {
         let regs: Vec<&'static Registered> = inventory::iter::<Registered>().collect();
         let cands: Vec<&'static Candidate> = inventory::iter::<Candidate>().collect();
         let inputs: Vec<&'static Input> = inventory::iter::<Input>().collect();
-        self.assemble_registered(&regs, &cands, &inputs)
+        let metrics: Vec<&'static MetricsFn> = inventory::iter::<MetricsFn>().collect();
+        self.assemble_with_metrics(&regs, &cands, &inputs, &metrics)
     }
 
     /// [`Suite::try_add_registered`], taking the registrations as explicit
@@ -392,19 +393,45 @@ impl Suite {
     /// really are outside a test, but reading them there would mean a set
     /// built to test one contradiction shares a process-wide registry with
     /// every other test's registrations.
+    #[cfg(test)]
     fn assemble_registered(
         &mut self,
         regs: &[&'static Registered],
         cands: &[&'static Candidate],
         inputs: &[&'static Input],
     ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
-        let (plan, problems) = crate::assemble::plan(regs, cands, inputs);
+        self.assemble_with_metrics(regs, cands, inputs, &[])
+    }
+
+    /// [`Suite::assemble_registered`], and candidates are given the metrics
+    /// functions that apply to them.
+    fn assemble_with_metrics(
+        &mut self,
+        regs: &[&'static Registered],
+        cands: &[&'static Candidate],
+        inputs: &[&'static Input],
+        metrics: &[&'static MetricsFn],
+    ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
+        let (plan, problems) = crate::assemble::plan_with_metrics(regs, cands, inputs, metrics);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
         // other error, not a field on the returned value that a caller
         // discarding the result never sees. An orphan is different: it means
         // something registered went unused, and everything else still ran.
-        let (fatal, warnings): (Vec<_>, Vec<_>) = problems.into_iter().partition(|p| p.is_fatal());
+        let (mut fatal, warnings): (Vec<_>, Vec<_>) =
+            problems.into_iter().partition(|p| p.is_fatal());
+        // Said once for each function, however many candidates it serves.
+        if !crate::alloc::installed() {
+            let mut named: Vec<&'static str> = Vec::new();
+            for m in plan.lanes.iter().flat_map(|l| l.metrics.iter().flatten()) {
+                if m.allocation && !named.contains(&m.name) {
+                    named.push(m.name);
+                    fatal.push(crate::assemble::Diagnostic::AllocatorNotInstalled {
+                        name: m.name.to_string(),
+                    });
+                }
+            }
+        }
         if !fatal.is_empty() {
             return Err(fatal);
         }
@@ -422,8 +449,13 @@ impl Suite {
                 // values; a singleton uses them directly.
                 let make = input.reg.make;
                 let mut group = cfg.input_group_make_input(make);
-                for c in &lane.candidates {
-                    group = (c.reg.add_alt)(group, &c.name);
+                for (n, c) in lane.candidates.iter().enumerate() {
+                    // A candidate with a metrics function is added in the
+                    // form that is run once more for it.
+                    group = match (lane.metrics.get(n).copied().flatten(), &c.reg.metrics) {
+                        (Some(m), Some(returns)) => (returns.add_alt)(group, &c.name, m),
+                        _ => (c.reg.add_alt)(group, &c.name),
+                    };
                 }
                 let name = if lane.candidates.len() == 1 {
                     let c = lane
@@ -483,6 +515,11 @@ pub struct Group {
     /// group can span several input types, and each type is its own
     /// comparison with its own baseline.
     pub(crate) baselines: Vec<Option<usize>>,
+    /// What else was computed for each cell, one column per metric name,
+    /// laid out like `measurements`. Empty when nothing was computed. The
+    /// columns are the union of the metric names across the group, in the
+    /// order first met going down the rows and across the inputs.
+    pub(crate) metrics: Vec<MetricColumn>,
 }
 
 impl Display for Group {
@@ -501,7 +538,7 @@ pub struct Report {
 #[derive(Default)]
 struct Column {
     baseline: Option<String>,
-    cells: BTreeMap<String, Measurement>,
+    cells: BTreeMap<String, (Measurement, Metrics)>,
 }
 
 /// A [`Group`] before its rows and columns are laid out.
@@ -516,7 +553,12 @@ struct GroupBuilder {
 }
 
 impl GroupBuilder {
-    fn add(&mut self, input: TypedInput, results: Vec<(String, Measurement)>, compared: bool) {
+    fn add(
+        &mut self,
+        input: TypedInput,
+        results: Vec<(String, Measurement, Metrics)>,
+        compared: bool,
+    ) {
         let at = match self.columns.iter().position(|(seen, _)| *seen == input) {
             Some(at) => at,
             None => {
@@ -526,14 +568,52 @@ impl GroupBuilder {
         };
         let column = &mut self.columns[at].1;
         column.baseline = compared
-            .then(|| results.first().map(|(name, _)| name.clone()))
+            .then(|| results.first().map(|(name, _, _)| name.clone()))
             .flatten();
-        for (candidate, measurement) in results {
+        for (candidate, measurement, metrics) in results {
             if !self.candidates.contains(&candidate) {
                 self.candidates.push(candidate.clone());
             }
-            column.cells.insert(candidate, measurement);
+            column.cells.insert(candidate, (measurement, metrics));
         }
+    }
+
+    /// One column per metric name met in any cell, taking its unit
+    /// from the first cell that has it.
+    fn metric_columns(&self) -> Vec<MetricColumn> {
+        let mut columns: Vec<MetricColumn> = Vec::new();
+        for candidate in &self.candidates {
+            for (_, column) in &self.columns {
+                let Some((_, metrics)) = column.cells.get(candidate) else {
+                    continue;
+                };
+                for (name, _, unit) in metrics.iter() {
+                    if !columns.iter().any(|c| c.name == name) {
+                        columns.push(MetricColumn {
+                            name: name.to_string(),
+                            unit,
+                            values: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+        for column in &mut columns {
+            column.values = self
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    self.columns
+                        .iter()
+                        .map(|(_, cells)| {
+                            let (_, metrics) = cells.cells.get(candidate)?;
+                            metrics.get(&column.name)
+                        })
+                        .collect()
+                })
+                .collect();
+        }
+        columns
     }
 
     fn build(mut self, name: String) -> Group {
@@ -565,18 +645,34 @@ impl GroupBuilder {
             .map(|candidate| {
                 self.columns
                     .iter()
-                    .map(|(_, column)| column.cells.get(candidate).copied())
+                    .map(|(_, column)| column.cells.get(candidate).map(|(m, _)| *m))
                     .collect()
             })
             .collect();
+        let metrics = self.metric_columns();
         Group {
             name,
             candidates: self.candidates,
             inputs,
             measurements,
             baselines,
+            metrics,
         }
     }
+}
+
+/// The first alternative of `timings` as the only cell, under `name`.
+///
+/// For an entry that is not a comparison: its one result is the whole
+/// cell, whatever the group it ran in called the alternative.
+fn only_cell(name: &str, timings: &Timings) -> Vec<(String, Measurement, Metrics)> {
+    timings
+        .measurements()
+        .into_iter()
+        .next()
+        .map(|(_, measurement, metrics)| (name.to_string(), measurement, metrics))
+        .into_iter()
+        .collect()
 }
 
 impl Report {
@@ -604,23 +700,15 @@ impl Report {
                 // left unclaimed, and so still shown below under its own name
                 // rather than dropped.
                 let results = match found {
-                    Found::Timing(timings) if single => timings
-                        .timings()
-                        .first()
-                        .map(|timing| {
-                            vec![(
-                                lane.candidates[0].name.clone(),
-                                Measurement::Timing(*timing),
-                            )]
-                        })
-                        .unwrap_or_default(),
-                    Found::Timing(timings) => timings.measurements(),
-                    Found::Scaling(scaling) if single => {
-                        vec![(
-                            lane.candidates[0].name.clone(),
-                            Measurement::Scaling(*scaling),
-                        )]
+                    Found::Timing(timings) if single => {
+                        only_cell(&lane.candidates[0].name, timings)
                     }
+                    Found::Timing(timings) => timings.measurements(),
+                    Found::Scaling(scaling) if single => vec![(
+                        lane.candidates[0].name.clone(),
+                        Measurement::Scaling(*scaling),
+                        Metrics::new(),
+                    )],
                     Found::Scaling(_) => continue,
                 };
                 grouped.entry(lane.group.to_string()).or_default().add(
@@ -646,17 +734,11 @@ impl Report {
                 Found::Timing(timings) if timings.timings().len() > 1 => {
                     (timings.measurements(), true)
                 }
-                Found::Timing(timings) => (
-                    timings
-                        .timings()
-                        .first()
-                        .map(|timing| vec![(name.clone(), Measurement::Timing(*timing))])
-                        .unwrap_or_default(),
+                Found::Timing(timings) => (only_cell(name, timings), false),
+                Found::Scaling(scaling) => (
+                    vec![(name.clone(), Measurement::Scaling(*scaling), Metrics::new())],
                     false,
                 ),
-                Found::Scaling(scaling) => {
-                    (vec![(name.clone(), Measurement::Scaling(*scaling))], false)
-                }
             };
             grouped
                 .entry(name.clone())
@@ -1311,6 +1393,36 @@ mod report_lookup {
         assert_eq!(names, ["sets@2", "sets@10", "sets@100"]);
     }
 
+    /// Metrics computed during a run reach the groups, and the printed table.
+    #[test]
+    fn a_runs_metrics_reach_the_groups_and_the_table() {
+        let cfg = Config::relative(0.05).with_max_time(Duration::from_millis(30));
+        let mut suite = cfg.suite();
+        suite.add_input_group(
+            "encoding",
+            cfg.input_group()
+                .add_input_metrics(
+                    "wide",
+                    |_: &mut ()| vec![0u8; 4096],
+                    |out| Metrics::new().bytes("size", out.len()),
+                )
+                .add_input_metrics(
+                    "narrow",
+                    |_: &mut ()| vec![0u8; 1024],
+                    |out| Metrics::new().bytes("size", out.len()),
+                ),
+        );
+        let report = suite.run();
+        let (_, group) = report.groups().next().expect("the group");
+        assert_eq!(group.candidates, ["wide", "narrow"]);
+        assert_eq!(group.metrics.len(), 1);
+        assert_eq!(group.metrics[0].name, "size");
+        assert_eq!(group.metrics[0].values, [[Some(4096.0)], [Some(1024.0)]]);
+        let table = report.to_string();
+        assert!(table.contains("4.00KiB"), "{table}");
+        assert!(table.contains("1.00KiB (-75%)"), "{table}");
+    }
+
     /// A group built by hand, which no lane knows about, keeps all of its
     /// alternatives rather than only the baseline.
     #[test]
@@ -1639,6 +1751,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_baseline,
+            metrics: None,
         }
     }
 
@@ -1652,6 +1765,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_unstable,
+            metrics: None,
         }
     }
 
@@ -1665,6 +1779,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_slow,
+            metrics: None,
         }
     }
 
@@ -1864,6 +1979,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        metrics: None,
     };
     static TWO_BASELINES_B: Candidate = Candidate {
         groups: &["two-baselines"],
@@ -1874,6 +1990,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        metrics: None,
     };
 
     /// Both problems are reported together, and nothing is added.
@@ -1985,6 +2102,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.9.0",
             add_alt: add_alt_new,
+            metrics: None,
         }
     }
 
@@ -1998,6 +2116,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.8.0",
             add_alt: add_alt_old,
+            metrics: None,
         }
     }
 
@@ -2012,6 +2131,7 @@ mod versions_and_rivals {
             crate_name: "theircrate",
             crate_version: "0.1.0",
             add_alt: add_alt_new,
+            metrics: None,
         }
     }
 
