@@ -60,6 +60,9 @@ struct Args {
     /// to. Empty means none - a plain standalone registration.
     groups: Vec<LitStr>,
     baseline: bool,
+    /// `allocation`: count the allocations of the candidate's run, for a
+    /// metrics function to show.
+    allocation: bool,
     input: Option<Expr>,
     make_input: Option<Expr>,
     nmin: Option<LitInt>,
@@ -78,6 +81,7 @@ impl syn::parse::Parse for Args {
             match key.to_string().as_str() {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
+                "allocation" => args.allocation = true,
                 "name" => {
                     input.parse::<syn::Token![=]>()?;
                     args.name = Some(input.parse()?);
@@ -155,7 +159,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, input, make_input, \
+                             name, group, baseline, allocation, input, make_input, \
                              nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -509,7 +513,19 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
+fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
+    if args.allocation {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`allocation` belongs to `#[scaling::metrics]`, which says it counts the \
+             allocations of the candidates it computes metrics for",
+        ));
+    }
+    Ok(())
+}
+
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
+    allocation_is_for_metrics(&args, &func)?;
     if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
         return Err(syn::Error::new(
             n.span(),
@@ -923,7 +939,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                         __name: &str,
                         __metrics: &'static ::scaling::registry::MetricsFn,
                     ) -> ::scaling::registry::InputGroup<::scaling::registry::ErasedInput> {
-                        if __metrics.input_type.is_some() {
+                        let __set = if __metrics.input_type.is_some() {
                             __set.add_input_metrics_with_input(
                                 __name,
                                 |__e: &mut ::scaling::registry::ErasedInput| #call,
@@ -945,6 +961,11 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                                     )
                                 },
                             )
+                        };
+                        if __metrics.allocation {
+                            __set.counting_allocations()
+                        } else {
+                            __set
                         }
                     }
                 });
@@ -1072,6 +1093,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     let groups = groups_array(&args.groups);
     let fname = &func.sig.ident;
     let name = name_or_bare(&args.name, fname);
+    let allocation = args.allocation;
     let shim = format_ident!("__scaling_metrics_{}", fname);
     let output_name = type_name(&output);
     let (input_type, input_name, call) = match &input {
@@ -1115,6 +1137,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 input_type_name: #input_name,
                 crate_name: ::core::env!("CARGO_PKG_NAME"),
                 crate_version: ::core::env!("CARGO_PKG_VERSION"),
+                allocation: #allocation,
                 eval: #shim,
             }
         }
@@ -1122,6 +1145,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 }
 
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    allocation_is_for_metrics(&args, &func)?;
     if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),

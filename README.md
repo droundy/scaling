@@ -268,6 +268,35 @@ generic parameter), is measured as usual and has no metrics. Build the numbers w
 `Metrics::bytes`, `count`, `ratio`, `percent` and `seconds`, or `value`
 followed by `unit` for anything else.
 
+### Counting allocations
+
+How much memory a candidate used is not in what it returned. Install the
+counting allocator, mark the metrics function `allocation`, and ask for the
+numbers you want to see:
+
+```rust,ignore
+#[global_allocator]
+static ALLOC: scaling::alloc::CountingAlloc = scaling::alloc::CountingAlloc::new();
+
+#[scaling::metrics(group = "encode", allocation)]
+fn sizes(out: Vec<u8>) -> scaling::Metrics {
+    scaling::Metrics::new()
+        .bytes("size", out.len())
+        .peak_bytes()      // the most it held at once: a `peak` column
+        .allocations()     // how many times it asked for memory: `allocs`
+        .allocated_bytes() // how much it asked for in all: `allocated`
+}
+```
+
+Only the candidate's own call is counted: not its input, which it was
+handed, and not what `sizes` does with the output. A program that asks for
+counts without installing the allocator is refused before anything runs,
+rather than shown zeros; asking for them without `allocation` in the attribute
+fails with a message saying so. The counters are per thread, so a candidate
+that hands its work to other threads is counted only for what it does itself,
+and since the allocator counts everything once it is installed, it slows
+allocation-heavy code a little - the baseline included.
+
 A group with metrics prints them beside the time, and under it when there
 are several inputs and one or two metrics:
 

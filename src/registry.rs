@@ -288,6 +288,10 @@ pub struct MetricsFn {
     pub input_type_name: &'static str,
     pub crate_name: &'static str,
     pub crate_version: &'static str,
+    /// Whether the candidate's run is counted for its allocations, which the
+    /// function can then ask to show. Needs [`crate::alloc::CountingAlloc`]
+    /// to be the global allocator.
+    pub allocation: bool,
     /// Calls the function. The input is given when [`MetricsFn::input_type`]
     /// is `Some`: as it was before the candidate ran.
     pub eval: fn(Option<&ErasedInput>, Box<dyn Any>) -> crate::Metrics,
@@ -302,6 +306,7 @@ impl fmt::Debug for MetricsFn {
             .field("input_type_name", &self.input_type_name)
             .field("crate_name", &self.crate_name)
             .field("crate_version", &self.crate_version)
+            .field("allocation", &self.allocation)
             .finish()
     }
 }

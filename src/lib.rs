@@ -557,6 +557,7 @@ them the way a quiesced run's would be trusted.
 
 /// Assembling registered benchmarks into a suite.
 #[doc(hidden)]
+pub mod alloc;
 pub mod assemble;
 mod bench;
 mod difference;

@@ -292,6 +292,9 @@ pub enum Diagnostic {
         groups: Vec<String>,
         type_name: &'static str,
     },
+    /// A metrics function counts allocations, but the program does not use
+    /// the allocator that counts them, so every number would be zero.
+    AllocatorNotInstalled { name: String },
 }
 
 impl Diagnostic {
@@ -372,6 +375,13 @@ impl Display for Diagnostic {
                 "in group `{group}`, more than one metrics function takes what `{candidate}` \
                  returns, so none can be chosen: {}",
                 list(functions),
+            ),
+            Diagnostic::AllocatorNotInstalled { name } => write!(
+                f,
+                "the metrics function `{name}` counts allocations, but \
+                 `scaling::alloc::CountingAlloc` is not the global allocator, so it would \
+                 count nothing - add `#[global_allocator] static ALLOC: \
+                 scaling::alloc::CountingAlloc = scaling::alloc::CountingAlloc::new();`",
             ),
             Diagnostic::OrphanMetrics {
                 name,
@@ -1613,6 +1623,7 @@ pub(crate) mod lane_tests {
             input_type_name: input.map_or("", |(_, name)| name),
             crate_name: "testcrate",
             crate_version,
+            allocation: false,
             eval: |_, _| crate::Metrics::new(),
         }
     }

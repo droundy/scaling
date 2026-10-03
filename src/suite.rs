@@ -418,7 +418,20 @@ impl Suite {
         // other error, not a field on the returned value that a caller
         // discarding the result never sees. An orphan is different: it means
         // something registered went unused, and everything else still ran.
-        let (fatal, warnings): (Vec<_>, Vec<_>) = problems.into_iter().partition(|p| p.is_fatal());
+        let (mut fatal, warnings): (Vec<_>, Vec<_>) =
+            problems.into_iter().partition(|p| p.is_fatal());
+        // Said once for each function, however many candidates it serves.
+        if !crate::alloc::installed() {
+            let mut named: Vec<&'static str> = Vec::new();
+            for m in plan.lanes.iter().flat_map(|l| l.metrics.iter().flatten()) {
+                if m.allocation && !named.contains(&m.name) {
+                    named.push(m.name);
+                    fatal.push(crate::assemble::Diagnostic::AllocatorNotInstalled {
+                        name: m.name.to_string(),
+                    });
+                }
+            }
+        }
         if !fatal.is_empty() {
             return Err(fatal);
         }

@@ -137,6 +137,17 @@ impl<T: IntoMetric> IntoMetric for Option<T> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metrics {
     metrics: Vec<Metric>,
+    /// Metrics whose values are not known until the run has been counted:
+    /// the index of each, in `metrics`, and which count it is.
+    counted: Vec<(usize, Counted)>,
+}
+
+/// Which of an alternative's [`AllocStats`] a metric shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Counted {
+    PeakBytes,
+    Allocations,
+    AllocatedBytes,
 }
 
 impl Metrics {
@@ -154,10 +165,27 @@ impl Metrics {
             value,
             unit,
         };
-        match self.metrics.iter_mut().find(|m| m.name == name) {
-            Some(existing) => *existing = metric,
+        match self.metrics.iter().position(|m| m.name == name) {
+            Some(at) => {
+                self.metrics[at] = metric;
+                // A value given outright replaces one that was to be counted.
+                self.counted.retain(|(i, _)| *i != at);
+            }
             None => self.metrics.push(metric),
         }
+        self
+    }
+
+    /// A metric to be filled in from the counted run, once there is one.
+    fn counted(mut self, name: &str, unit: Unit, which: Counted) -> Self {
+        self = self.push(name, f64::NAN, unit);
+        let at = self
+            .metrics
+            .iter()
+            .position(|m| m.name == name)
+            .expect("just added");
+        self.counted.retain(|(i, _)| *i != at);
+        self.counted.push((at, which));
         self
     }
 
@@ -190,6 +218,59 @@ impl Metrics {
     /// [`Metrics::unit`].
     pub fn value(self, name: &str, value: impl IntoMetric) -> Self {
         self.push(name, value, Unit::Custom(""))
+    }
+
+    /// The most memory the candidate held at once, as a `peak` metric.
+    ///
+    /// Needs `allocation` in the `#[scaling::metrics(..)]` of the function
+    /// that builds this, and [`CountingAlloc`](crate::alloc::CountingAlloc)
+    /// as the global allocator. Memory the candidate was handed, such as its
+    /// input, is not counted: only what it allocated itself.
+    pub fn peak_bytes(self) -> Self {
+        self.counted("peak", Unit::Bytes, Counted::PeakBytes)
+    }
+
+    /// How many times the candidate asked for memory, as an `allocs`
+    /// metric. See [`Metrics::peak_bytes`] for what that needs.
+    pub fn allocations(self) -> Self {
+        self.counted("allocs", Unit::Count, Counted::Allocations)
+    }
+
+    /// How much memory the candidate asked for in all, as an `allocated`
+    /// metric: what it asked for again each time it did, not what it held at
+    /// the most. See [`Metrics::peak_bytes`] for what that needs.
+    pub fn allocated_bytes(self) -> Self {
+        self.counted("allocated", Unit::Bytes, Counted::AllocatedBytes)
+    }
+
+    /// Whether any of the metrics wait on a counted run.
+    #[cfg(test)]
+    pub(crate) fn wants_allocation(&self) -> bool {
+        !self.counted.is_empty()
+    }
+
+    /// Fill in the metrics that wait on a counted run.
+    ///
+    /// # Panics
+    ///
+    /// If there are some, and `stats` is `None`: the run was not counted,
+    /// so what they would show is nothing at all.
+    pub(crate) fn resolve_allocation(&mut self, stats: Option<crate::alloc::AllocStats>) {
+        if self.counted.is_empty() {
+            return;
+        }
+        let stats = stats.expect(
+            "a metrics function asks for allocation numbers (`peak_bytes`, `allocations` or \
+             `allocated_bytes`), but the run was not counted - say `allocation` in its \
+             #[scaling::metrics(..)]",
+        );
+        for (at, which) in self.counted.drain(..) {
+            self.metrics[at].value = match which {
+                Counted::PeakBytes => stats.peak_bytes,
+                Counted::Allocations => stats.allocations,
+                Counted::AllocatedBytes => stats.allocated_bytes,
+            } as f64;
+        }
     }
 
     /// Changes the unit of the metric added last. Does nothing on an empty
@@ -297,5 +378,57 @@ mod tests {
         assert_eq!(m.get("rate").unwrap().unit, Unit::Custom("/s"));
         // On an empty record there is nothing to change.
         assert!(Metrics::new().unit(Unit::Bytes).is_empty());
+    }
+
+    #[test]
+    fn counted_metrics_wait_for_the_run_and_keep_their_place() {
+        let mut m = Metrics::new()
+            .bytes("size", 10usize)
+            .peak_bytes()
+            .count("items", 3u32)
+            .allocations()
+            .allocated_bytes();
+        assert!(m.wants_allocation());
+        m.resolve_allocation(Some(crate::alloc::AllocStats {
+            peak_bytes: 400,
+            allocations: 7,
+            allocated_bytes: 900,
+        }));
+        assert!(!m.wants_allocation());
+        let got: Vec<_> = m
+            .iter()
+            .map(|m| (m.name.as_str(), m.value, m.unit))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("size", 10.0, Unit::Bytes),
+                ("peak", 400.0, Unit::Bytes),
+                ("items", 3.0, Unit::Count),
+                ("allocs", 7.0, Unit::Count),
+                ("allocated", 900.0, Unit::Bytes),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_given_outright_replaces_a_counted_one() {
+        let mut m = Metrics::new().peak_bytes().bytes("peak", 5usize);
+        assert!(!m.wants_allocation());
+        m.resolve_allocation(None);
+        assert_eq!(m.get("peak").unwrap().value, 5.0);
+    }
+
+    #[test]
+    fn nothing_to_resolve_needs_no_counts() {
+        let mut m = Metrics::new().bytes("size", 1usize);
+        m.resolve_allocation(None);
+        assert_eq!(m.get("size").unwrap().value, 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "say `allocation`")]
+    fn asking_for_counts_from_an_uncounted_run_is_an_error() {
+        Metrics::new().peak_bytes().resolve_allocation(None);
     }
 }

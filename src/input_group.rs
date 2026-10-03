@@ -53,6 +53,11 @@ trait Alternative<I> {
         false
     }
 
+    /// Have [`Alternative::measure`] count the allocations of its run, so
+    /// that metrics can ask for them. A no-op for an alternative with no
+    /// metrics, which has no use for the count.
+    fn count_allocations(&mut self) {}
+
     /// Run once on `input`, outside the timing, and compute the metrics from
     /// what it returned. `pristine` is the input as it was before the run,
     /// when there is one to give.
@@ -81,6 +86,8 @@ where
 struct Measured<F, M, O> {
     f: F,
     metrics: M,
+    /// Whether the run is counted for its allocations.
+    count: bool,
     _output: std::marker::PhantomData<fn() -> O>,
 }
 
@@ -97,9 +104,23 @@ where
         true
     }
 
+    fn count_allocations(&mut self) {
+        self.count = true;
+    }
+
     fn measure(&mut self, input: &mut I, pristine: Option<&I>) -> Metrics {
-        let output = (self.f)(input);
-        (self.metrics)(pristine, output)
+        // Only the alternative's own call is counted, not the metrics
+        // function that follows: what it allocates to inspect the output is
+        // not the alternative's doing.
+        let (output, counted) = if self.count {
+            let (output, stats) = crate::alloc::measure(|| (self.f)(input));
+            (output, Some(stats))
+        } else {
+            ((self.f)(input), None)
+        };
+        let mut metrics = (self.metrics)(pristine, output);
+        metrics.resolve_allocation(counted);
+        metrics
     }
 }
 
@@ -225,6 +246,7 @@ impl<I: 'static> InputGroup<I> {
             alt: Box::new(Measured {
                 f,
                 metrics: move |_: Option<&I>, output| metrics(output),
+                count: false,
                 _output: std::marker::PhantomData,
             }),
         });
@@ -256,9 +278,21 @@ impl<I: 'static> InputGroup<I> {
                 metrics: move |pristine: Option<&I>, output| {
                     metrics(pristine.expect("a clone of the input was kept"), output)
                 },
+                count: false,
                 _output: std::marker::PhantomData,
             }),
         });
+        self
+    }
+
+    /// Count the allocations of the run that the alternative added last is
+    /// given for its metrics, so that they can ask for them.
+    ///
+    /// Does nothing for an alternative without metrics.
+    pub fn counting_allocations(mut self) -> Self {
+        if let Some(last) = self.entries.last_mut() {
+            last.alt.count_allocations();
+        }
         self
     }
 
@@ -1001,5 +1035,33 @@ mod tests {
         let _ = quick()
             .input_group_make_input_uncloned(|| NotClone)
             .add_input_metrics_with_input("x", |_: &mut NotClone| 0u8, |_, _| Metrics::new());
+    }
+
+    /// Counting the run is what lets metrics ask for the counts. (Without
+    /// the counting allocator installed they are all zero, which is why
+    /// assembly refuses a program that asks for them without it.)
+    #[test]
+    fn counting_the_run_lets_metrics_ask_for_allocations() {
+        let timings = quick()
+            .input_group()
+            .add_input_metrics(
+                "only",
+                |_: &mut ()| 1u8,
+                |_| Metrics::new().peak_bytes().allocations(),
+            )
+            .counting_allocations()
+            .run();
+        let m = &timings.metrics()[0];
+        assert_eq!(m.get("peak").unwrap().value, 0.0);
+        assert_eq!(m.get("allocs").unwrap().value, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "say `allocation`")]
+    fn asking_for_allocations_of_an_uncounted_run_is_an_error() {
+        quick()
+            .input_group()
+            .add_input_metrics("only", |_: &mut ()| 1u8, |_| Metrics::new().peak_bytes())
+            .run();
     }
 }
