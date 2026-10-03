@@ -82,6 +82,31 @@ fn growth(input: &String, out: Vec<u8>) -> Metrics {
     Metrics::new().ratio("growth", out.len() as f64 / input.len() as f64)
 }
 
+// ---- one function for several groups at once ----
+
+#[scaling::input(group("left", "right"))]
+fn shared_text() -> String {
+    "xyz".repeat(5)
+}
+
+#[scaling::bench(group("left", "right"), baseline)]
+fn first(s: &mut String) -> Vec<u8> {
+    s.clone().into_bytes()
+}
+
+#[scaling::bench(group("left", "right"))]
+fn second(s: &mut String) -> Vec<u8> {
+    let mut bytes = s.clone().into_bytes();
+    bytes.truncate(3);
+    bytes
+}
+
+// Names a group nothing else is in as well, which is not a mistake.
+#[scaling::metrics(group("left", "right", "unused"))]
+fn lengths(out: Vec<u8>) -> Metrics {
+    Metrics::new().count("length", out.len())
+}
+
 fn report() -> scaling::Report {
     let cfg = Config::relative(0.1).with_max_time(Duration::from_millis(50));
     scaling::runner::measure(&cfg).expect("the registrations compose")
@@ -134,4 +159,23 @@ fn a_function_that_reads_the_input_sees_it_as_it_began() {
     assert_eq!(group.candidates, ["same", "twice"]);
     assert_eq!(group.metrics[0].name, "growth");
     assert_eq!(group.metrics[0].values, [[Some(1.0)], [Some(2.0)]]);
+}
+
+#[test]
+fn one_function_can_serve_several_groups() {
+    let report = report();
+    for name in ["left", "right"] {
+        let (_, group) = report
+            .groups()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("the {name} group"));
+        assert_eq!(group.candidates, ["first", "second"], "{name}");
+        assert_eq!(group.metrics.len(), 1, "{name}");
+        assert_eq!(group.metrics[0].name, "length", "{name}");
+        assert_eq!(
+            group.metrics[0].values,
+            [[Some(15.0)], [Some(3.0)]],
+            "{name}"
+        );
+    }
 }
