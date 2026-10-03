@@ -629,13 +629,20 @@ async fn calibrate<I>(
     }
 }
 
-/// What running an input group measured: a [`Timing`] for every alternative,
-/// and every alternative's difference from the baseline when there is one.
+/// A comparison's results: a [`Timing`] for each candidate, baseline first.
+///
+/// [`Report::comparison`] gives one, and [`Report::all_comparisons`] gives each
+/// of them. [`names`](Timings::names), [`timings`](Timings::timings) and
+/// [`metrics`](Timings::metrics) agree on the order, so the *i*th of each
+/// belongs to the same candidate. Each candidate after the baseline carries its
+/// [`difference`](Timing::difference) from it, and
+/// [`against_baseline`](Timings::against_baseline) pairs those with their
+/// names. Printing one with `{}` shows just these candidates.
 #[derive(Debug, Clone)]
 pub struct Timings {
     names: Vec<String>,
     timings: Vec<Timing>,
-    /// What each alternative produced besides a time, in the same order as
+    /// What each candidate produced besides a time, in the same order as
     /// `timings`. Empty when nothing was computed, so a plain run carries
     /// nothing extra.
     metrics: Vec<Metrics>,
@@ -660,8 +667,8 @@ impl Timings {
         }
     }
 
-    /// Attaches what each alternative produced besides a time, one record per
-    /// alternative in the order they were added.
+    /// Attaches what each candidate produced besides a time, one record per
+    /// candidate in the order they were added.
     #[allow(dead_code)] // until a run computes any
     pub(crate) fn with_metrics(mut self, metrics: Vec<Metrics>) -> Self {
         assert_eq!(
@@ -673,29 +680,32 @@ impl Timings {
         self
     }
 
-    /// What each alternative produced besides a time, in the order they were
-    /// added. Empty when nothing was computed.
+    /// What each candidate produced besides a time, one record for each, in the
+    /// order of [`names`](Timings::names). The slice is empty, rather than full
+    /// of empty records, when no candidate computed anything.
+    ///
+    /// To read one candidate's record by its name, ask the report:
+    /// [`Report::metrics`].
     pub fn metrics(&self) -> &[Metrics] {
         &self.metrics
     }
 
-    /// The name of the baseline - the first alternative that was added.
+    /// The name of the baseline, the first candidate.
     pub fn baseline_name(&self) -> &str {
         &self.names[0]
     }
 
-    /// Every alternative's name, baseline first, in the order they were
-    /// added.
+    /// Every candidate's name, baseline first.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.names.iter().map(|s| s.as_str())
     }
 
-    /// What each alternative measured, in the order they were added.
+    /// What each candidate measured, in the order of [`names`](Timings::names).
     pub fn timings(&self) -> &[Timing] {
         &self.timings
     }
 
-    /// Every alternative's name and measurement, baseline first.
+    /// Every candidate's name and measurement, baseline first.
     pub(crate) fn measurements(&self) -> Vec<(String, crate::Measurement, Metrics)> {
         self.names()
             .enumerate()
@@ -709,13 +719,14 @@ impl Timings {
             .collect()
     }
 
-    /// Each alternative beyond the baseline, paired with its name, as a
-    /// [`Timing`] against the baseline.
+    /// Each candidate after the baseline, paired with its name. Each
+    /// [`Timing`] carries its [`difference`](Timing::difference) from the
+    /// baseline.
     pub fn against_baseline(&self) -> impl Iterator<Item = (&str, Timing)> {
         (1..self.timings.len()).map(move |i| (self.names[i].as_str(), self.timings[i]))
     }
 
-    /// Whether any alternative differed from the baseline.
+    /// Whether any candidate differed significantly from the baseline.
     pub fn any_changed(&self) -> bool {
         self.against_baseline().any(|(_, c)| c.is_changed())
     }
