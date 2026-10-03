@@ -1,6 +1,7 @@
 //! The small pieces of the quiesced-machine machinery that the library and the
-//! `quiet-bench` binary both need: where the reservation is recorded, reading
-//! and writing a Linux CPU list, and pinning a thread.
+//! `quiet-bench` binary both need: where the reservation is recorded and how to
+//! read it, taking its lock, reading and writing a Linux CPU list, and pinning
+//! a thread.
 //!
 //! Compiled into both rather than published: the binary is the only
 //! outsider that needs them, and making them public to reach it would make
@@ -105,5 +106,77 @@ pub(crate) fn pin_thread(_tid: i32, _cpus: &[usize]) -> Result<(), std::io::Erro
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "CPU pinning is only supported on Linux",
+    ))
+}
+
+/// Environment variable naming the reserved CPU list, e.g. `"2"` or
+/// `"2,5-7"`. Set by `quiet-bench run`; read by every benchmark in this
+/// crate.
+pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
+
+/// Set by `quiet-bench run` to say that it already holds the machine-wide
+/// lock on the reserved CPUs for the whole of the command it launched.
+///
+/// A benchmark that sees this takes the in-process mutex only. Taking the
+/// `flock` as well would be waiting on a lock its own parent is holding,
+/// which never comes free - so this exists to make "the lock is held" and
+/// "*we* hold the lock" different questions.
+///
+/// This assumes the launched command is one benchmark process tree, not a
+/// test runner that itself forks several *concurrent* benchmark processes
+/// (`cargo nextest`, say, or a script backgrounding more than one binary):
+/// every child inherits this variable and so every one of them skips the
+/// `flock`, which is correct only if they never actually run alongside each
+/// other. `quiet-bench run cargo test` is fine - the standard single-process
+/// test harness still serialises its own threads through the in-process
+/// mutex - but wrapping a genuinely parallel multi-process runner this way
+/// gives up the exclusivity the reservation is for.
+pub(crate) const LOCK_HELD_VAR: &str = "SCALING_BENCH_LOCKED";
+
+/// The reserved CPU list, if there is one.
+///
+/// Prefers `CPUS_VAR`, which `quiet-bench run` sets for its child, and
+/// falls back to the record `quiet-bench` leaves in `/run/quiet-bench.cpus`, so a benchmark launched some other way
+/// still notices a machine-wide reservation.
+pub(crate) fn reserved_cpus() -> Option<String> {
+    if let Ok(v) = std::env::var(CPUS_VAR) {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    std::fs::read_to_string(CPUS_PATH)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Claim the reserved CPUs for this process, waiting until they are free.
+///
+/// For `quiet-bench run`, which holds this across the command it launches
+/// and tells that command so with `LOCK_HELD_VAR`. Ordinary benchmarks do
+/// not need it - `quiet::exclusive` claims and releases around each measurement.
+///
+/// `Err` if there is no reservation record to lock, which is what a
+/// reservation *is*: without one there is nothing to claim.
+// Used by `quiet-bench` and by this crate's tests, not by a library build.
+#[allow(dead_code)]
+#[cfg(target_os = "linux")]
+pub(crate) fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(CPUS_PATH)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// Always fails on non-Linux platforms, which have no reservation to claim.
+#[allow(dead_code)]
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "CPU reservation is only supported on Linux",
     ))
 }

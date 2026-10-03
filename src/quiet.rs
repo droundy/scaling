@@ -37,36 +37,15 @@ match scaling::quiet::status() {
 ```
 */
 
-use crate::cpus::{format_cpu_list, parse_cpu_list, pin_thread, CPUS_PATH};
+pub use crate::cpus::CPUS_VAR;
+use crate::cpus::{
+    format_cpu_list, parse_cpu_list, pin_thread, reserved_cpus, CPUS_PATH, LOCK_HELD_VAR,
+};
 use std::fmt::{self, Display, Formatter};
-
-/// Environment variable naming the reserved CPU list, e.g. `"2"` or
-/// `"2,5-7"`. Set by `quiet-bench run`; read by every benchmark in this
-/// crate.
-pub const CPUS_VAR: &str = "SCALING_BENCH_CPUS";
 
 /// Set this to `1` to stop `scaling` pinning itself even when CPUs have
 /// been reserved.
 pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
-
-/// Set by `quiet-bench run` to say that it already holds the machine-wide
-/// lock on the reserved CPUs for the whole of the command it launched.
-///
-/// A benchmark that sees this takes the in-process mutex only. Taking the
-/// `flock` as well would be waiting on a lock its own parent is holding,
-/// which never comes free - so this exists to make "the lock is held" and
-/// "*we* hold the lock" different questions.
-///
-/// This assumes the launched command is one benchmark process tree, not a
-/// test runner that itself forks several *concurrent* benchmark processes
-/// (`cargo nextest`, say, or a script backgrounding more than one binary):
-/// every child inherits this variable and so every one of them skips the
-/// `flock`, which is correct only if they never actually run alongside each
-/// other. `quiet-bench run cargo test` is fine - the standard single-process
-/// test harness still serialises its own threads through the in-process
-/// mutex - but wrapping a genuinely parallel multi-process runner this way
-/// gives up the exclusivity the reservation is for.
-pub const LOCK_HELD_VAR: &str = "SCALING_BENCH_LOCKED";
 
 /// Is the machine-wide lock already held on our behalf by an ancestor?
 fn lock_held_by_ancestor() -> bool {
@@ -137,24 +116,6 @@ impl Display for Status {
     }
 }
 
-/// The reserved CPU list, if there is one.
-///
-/// Prefers [`CPUS_VAR`], which `quiet-bench run` sets for its child, and
-/// falls back to the record `quiet-bench` leaves in `/run/quiet-bench.cpus`, so a benchmark launched some other way
-/// still notices a machine-wide reservation.
-pub fn reserved_cpus() -> Option<String> {
-    if let Ok(v) = std::env::var(CPUS_VAR) {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    std::fs::read_to_string(CPUS_PATH)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 /// The CPUs this thread is currently allowed to run on, as a Linux CPU
 /// list (e.g. `"0-1,3-15"`).
 ///
@@ -189,7 +150,7 @@ pub(crate) fn current_affinity() -> Option<String> {
 ///
 /// Only the calling thread is affected; other threads, and the process as a
 /// whole, are left alone.
-pub fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
+pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
     pin_thread(0, cpus)
 }
 
@@ -311,33 +272,6 @@ thread_local! {
     static ALREADY_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Claim the reserved CPUs for this process, waiting until they are free.
-///
-/// For `quiet-bench run`, which holds this across the command it launches
-/// and tells that command so with [`LOCK_HELD_VAR`]. Ordinary benchmarks do
-/// not need it - [`exclusive`] claims and releases around each measurement.
-///
-/// `Err` if there is no reservation record to lock, which is what a
-/// reservation *is*: without one there is nothing to claim.
-#[cfg(target_os = "linux")]
-pub fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::File::open(CPUS_PATH)?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(file)
-}
-
-/// Always fails on non-Linux platforms, which have no reservation to claim.
-#[cfg(not(target_os = "linux"))]
-pub fn hold_reserved_cpus() -> Result<std::fs::File, std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "CPU reservation is only supported on Linux",
-    ))
-}
-
 /// The machine-wide half of a claim, or `None` if there is nothing to take.
 ///
 /// Only one process in a tree holds the file lock. If `quiet-bench run` took
@@ -412,6 +346,7 @@ fn lock_reservation() -> Option<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpus::hold_reserved_cpus;
 
     /// A benchmark nested inside another one's closure must not deadlock
     /// against itself, which a plain mutex would do.

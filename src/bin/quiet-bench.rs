@@ -20,7 +20,7 @@ short form, copy the binary somewhere root can see it, e.g.
 
 Benchmarks built against the `scaling` crate pin themselves to the reserved
 CPUs automatically when launched through `quiet-bench run`, which sets
-[`scaling::quiet::CPUS_VAR`] in the environment. `run` also sets the
+`SCALING_BENCH_CPUS` in the environment. `run` also sets the
 affinity of the command it launches, so programs that know nothing about
 `scaling` land on the reserved CPUs too.
 */
@@ -43,8 +43,11 @@ mod cpus;
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::cpus::{format_cpu_list, parse_cpu_list, pin_thread, CPUS_PATH};
-    use scaling::quiet::{status, Status, CPUS_VAR};
+    use super::cpus::{
+        format_cpu_list, hold_reserved_cpus, parse_cpu_list, pin_thread, reserved_cpus, CPUS_PATH,
+        CPUS_VAR, LOCK_HELD_VAR,
+    };
+    use scaling::quiet::{status, Status};
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
@@ -89,7 +92,7 @@ backticks; or copy it to /usr/local/bin to type the short form.
     // ---------------------------------------------------------------- run
 
     fn cmd_run(argv: &[String]) -> Result<i32, String> {
-        let cpus_str = scaling::quiet::reserved_cpus().ok_or_else(|| {
+        let cpus_str = reserved_cpus().ok_or_else(|| {
             "machine is not quiesced; run `sudo quiet-bench reserve <cpu-list>` first".to_string()
         })?;
         let cpus = parse_cpu_list(&cpus_str)?;
@@ -102,11 +105,10 @@ backticks; or copy it to /usr/local/bin to type the short form.
         // to the reserved CPUs without having claimed them. A second
         // `quiet-bench run` waits here rather than sharing the core: that is
         // the point of a reservation, and waiting is the honest outcome.
-        let held = scaling::quiet::hold_reserved_cpus()
+        let held = hold_reserved_cpus()
             .map_err(|e| format!("could not claim the reserved CPU(s) {cpus_str}: {e}"))?;
 
-        scaling::quiet::pin_current_thread(&cpus)
-            .map_err(|e| format!("could not pin to CPU(s) {cpus_str}: {e}"))?;
+        pin_thread(0, &cpus).map_err(|e| format!("could not pin to CPU(s) {cpus_str}: {e}"))?;
 
         // The child inherits the affinity, and is told the lock is already
         // held - so its benchmarks take the in-process mutex to keep their
@@ -114,7 +116,7 @@ backticks; or copy it to /usr/local/bin to type the short form.
         let status = Command::new(&argv[0])
             .args(&argv[1..])
             .env(CPUS_VAR, &cpus_str)
-            .env(scaling::quiet::LOCK_HELD_VAR, "1")
+            .env(LOCK_HELD_VAR, "1")
             .status()
             .map_err(|e| format!("could not run {:?}: {e}", argv[0]))?;
         drop(held);
