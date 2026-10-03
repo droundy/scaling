@@ -154,7 +154,7 @@ impl Display for Found {
 
 /// One cell of a [`Group`]: what a candidate measured on one input.
 #[derive(Debug, Clone, Copy)]
-pub enum Measurement {
+pub(crate) enum Measurement {
     /// A scaling law, from a benchmark that varied its own input size.
     Scaling(ScalingStats),
     /// A timing. In a comparison, every candidate but the baseline carries
@@ -444,7 +444,7 @@ impl Suite {
 
 /// One typed input axis entry in a [`Group`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TypedInput {
+pub(crate) struct TypedInput {
     /// The input's name. Empty for the implicit unit input of a group that
     /// declares none.
     pub name: String,
@@ -452,22 +452,28 @@ pub struct TypedInput {
     pub type_name: String,
 }
 
-/// Measurements for one logical group, arranged as a dense candidate-by-input table.
+/// The results of one logical group: its candidates measured on its inputs.
 ///
-/// Rows align with [`Group::candidates`] and columns with [`Group::inputs`].
-/// Unsupported candidate/input combinations are `None`.
+/// It prints itself as a table, laid out to fit: `println!("{group}")`. Reach
+/// the groups of a [`Report`] through [`Report::groups`], which gives them in
+/// name order; a caller that wants another order, or only some of them, can
+/// collect and sort. What is inside is not exposed, so how a group is laid out
+/// is free to change.
 #[derive(Debug, Clone)]
 pub struct Group {
+    /// What the group is called: the group name for a registered comparison,
+    /// or the benchmark's own name for one that stands alone.
+    pub(crate) name: String,
     /// The rows. A candidate that is the baseline of some column comes
     /// first; the rest follow in the order their lanes were declared.
-    pub candidates: Vec<String>,
+    pub(crate) candidates: Vec<String>,
     /// The columns, in the order of the lanes they came from: one type's
     /// inputs together, each lane's inputs as it ordered them - by name,
     /// except that sized inputs go by size.
-    pub inputs: Vec<TypedInput>,
+    pub(crate) inputs: Vec<TypedInput>,
     /// Candidate-major rectangular data: `measurements[candidate][input]`.
     /// `None` means that candidate does not support that typed input.
-    pub measurements: Vec<Vec<Option<Measurement>>>,
+    pub(crate) measurements: Vec<Vec<Option<Measurement>>>,
     /// For each column, the row its other cells were compared against, or
     /// `None` when that column compares nothing - a lone candidate has no
     /// baseline. The baseline's own cell is an absolute time; every other
@@ -476,7 +482,13 @@ pub struct Group {
     /// A baseline belongs to a column rather than the group because one
     /// group can span several input types, and each type is its own
     /// comparison with its own baseline.
-    pub baselines: Vec<Option<usize>>,
+    pub(crate) baselines: Vec<Option<usize>>,
+}
+
+impl Display for Group {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(&crate::formatting::render_group(&self.name, self))
+    }
 }
 
 /// Everything a suite measured, keyed by logical group name.
@@ -524,7 +536,7 @@ impl GroupBuilder {
         }
     }
 
-    fn build(mut self) -> Group {
+    fn build(mut self, name: String) -> Group {
         // Baselines first, so the row every percentage is measured against
         // is at the top. The sort is stable, so everything else keeps its
         // declaration order.
@@ -558,6 +570,7 @@ impl GroupBuilder {
             })
             .collect();
         Group {
+            name,
             candidates: self.candidates,
             inputs,
             measurements,
@@ -653,14 +666,18 @@ impl Report {
 
         let groups = grouped
             .into_iter()
-            .map(|(name, builder)| (name, builder.build()))
+            .map(|(name, builder)| {
+                let group = builder.build(name.clone());
+                (name, group)
+            })
             .collect();
         Report { entries, groups }
     }
 }
 
 impl Report {
-    /// The measured groups, in name order.
+    /// The measured groups, in name order. A [`Group`] prints itself as a
+    /// table; a caller that wants them in another order can collect and sort.
     pub fn groups(&self) -> impl Iterator<Item = (&str, &Group)> + '_ {
         self.groups
             .iter()
@@ -793,29 +810,14 @@ impl Report {
 }
 
 impl Display for Report {
+    /// Every group as its table, in name order, each followed by a blank line:
+    /// what a benchmark binary prints at the end of a run.
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let width = self
-            .entries
-            .iter()
-            .map(|(name, _)| name.len())
-            .max()
-            .unwrap_or(0);
-        for (i, (name, found)) in self.entries.iter().enumerate() {
-            if i > 0 {
-                writeln!(f)?;
-            }
-            let shown = found.to_string();
-            // Trimmed because a multi-line result brings its own trailing
-            // newline - `Timings` writes every line with `writeln!` - and
-            // this loop supplies the separators itself. Leaving it produced a
-            // blank line after any comparison that was not the last entry.
-            let shown = shown.trim_end();
-            // A comparison prints several lines, so it is given its own
-            // block rather than being crammed onto the name's line.
-            if shown.contains('\n') {
-                write!(f, "{name}:\n{shown}")?;
-            } else {
-                write!(f, "{name:<width$}  {shown}")?;
+        for (_, group) in self.groups() {
+            let shown = group.to_string();
+            // A group with nothing measured says nothing, not a blank line.
+            if !shown.is_empty() {
+                writeln!(f, "{shown}")?;
             }
         }
         Ok(())
@@ -912,10 +914,11 @@ mod tests {
         assert!(stats.ns_per_iter > 0.0);
     }
 
-    /// The table is in declaration order, not alphabetical and not whatever
-    /// order the benchmarks happened to finish in.
+    /// The names are in declaration order, not alphabetical and not whatever
+    /// order the benchmarks happened to finish in. The printed groups are in
+    /// name order, which is what a caller wanting another order starts from.
     #[test]
-    fn the_report_is_in_declaration_order() {
+    fn names_are_in_declaration_order_and_groups_print_in_name_order() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         // Declared in an order that is neither alphabetical nor the order
@@ -923,12 +926,20 @@ mod tests {
         suite.add("middle", || (0..200u64).sum::<u64>());
         suite.add("zebra", || 1u64 + 1);
         suite.add("apple", || (0..400u64).sum::<u64>());
-        let shown = format!("{}", suite.run());
-        let names: Vec<&str> = shown
+        let report = suite.run();
+        assert_eq!(
+            report.names().collect::<Vec<_>>(),
+            ["middle", "zebra", "apple"]
+        );
+        let shown = format!("{report}");
+        let printed: Vec<&str> = shown
             .lines()
+            .filter(|l| !l.trim().is_empty())
             .map(|l| l.split_whitespace().next().unwrap())
             .collect();
-        assert_eq!(names, ["middle", "zebra", "apple"], "{shown}");
+        assert_eq!(printed, ["apple", "middle", "zebra"], "{shown}");
+        let groups: Vec<&str> = report.groups().map(|(name, _)| name).collect();
+        assert_eq!(groups, ["apple", "middle", "zebra"]);
     }
 
     /// The suite counts its own comparisons and corrects for exactly that
@@ -1018,15 +1029,14 @@ mod tests {
         }
     }
 
-    /// A comparison that is not the last entry must not leave a blank line
-    /// behind it: `Timings` ends its own output with a newline, and this
-    /// loop supplies the separators.
+    /// Each group is followed by exactly one blank line, however many lines
+    /// its table has, and the report does not begin with one.
     ///
-    /// A blank line is not merely untidy - anything parsing the table a line
-    /// at a time meets an empty one, as this module's own declaration-order
-    /// test would.
+    /// Anything splitting the output into groups at blank lines relies on
+    /// that: a table that ended with its own newline plus the separator would
+    /// leave two.
     #[test]
-    fn a_comparison_before_another_entry_leaves_no_blank_line() {
+    fn groups_are_separated_by_exactly_one_blank_line() {
         let cfg = Config::default().with_max_time(Duration::from_millis(20));
         let mut suite = cfg.suite();
         suite.add_input_group(
@@ -1037,11 +1047,13 @@ mod tests {
         );
         suite.add("flat", || (0..20u64).sum::<u64>());
         let shown = format!("{}", suite.run());
-        assert!(
-            !shown.lines().any(|l| l.trim().is_empty()),
-            "blank line in report:\n{shown}"
-        );
-        assert!(shown.lines().last().unwrap().starts_with("flat"), "{shown}");
+        assert!(!shown.starts_with('\n'), "{shown}");
+        assert!(!shown.contains("\n\n\n"), "{shown}");
+        assert!(shown.ends_with("\n\n"), "{shown}");
+        let tables: Vec<&str> = shown.trim_end().split("\n\n").collect();
+        assert_eq!(tables.len(), 2, "{shown}");
+        assert!(tables[0].starts_with("flat"), "{shown}");
+        assert!(tables[1].starts_with("pair"), "{shown}");
     }
 
     /// A singleton group produces ordinary stats without a difference against
@@ -1684,7 +1696,9 @@ mod registered_by_hand {
 
         // Everything appears in the report, under the name it registered with.
         let shown = format!("{report}");
-        for name in ["e2e::flat", "e2e::scaling", "e2e-sort@data"] {
+        // A comparison registered as a group appears under the group's name,
+        // with its input as a column.
+        for name in ["e2e::flat", "e2e::scaling", "e2e-sort"] {
             assert!(shown.contains(name), "{name} missing from report:\n{shown}");
         }
     }
