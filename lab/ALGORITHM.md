@@ -185,8 +185,12 @@ nothing below depends on them:
 - **Not on the first fast probe either.** After a long idle, the dip can
   start several microseconds after the wake-up: up to about 10 us on the
   lab's machine after 60 ms or more. So keep probing for at least the
-  onset window, measured once at start-up by deliberately idling, waking
-  and probing. On a chip without the effect it comes out zero.
+  onset window, with a safety margin. Measure the onset by deliberately
+  idling for as long as the run's longest gap - its longest batch or input
+  generation, which calibration knows - then waking and probing. Do this
+  only when calibration finds such a gap, and re-measure, or mark the
+  results, if a gap turns out longer than the one measured. On a chip
+  without the effect the window comes out zero.
 
 The one threshold, "longer than a fast batch", comes from the harness's own
 batch ceiling, not from the chip. On the lab's machine the measured waits

@@ -866,10 +866,47 @@ gaps passed on the very first probe. Requiring probing to last at least
 25 us (`LAB_VPROBE_MIN_US=25`) cut slow canary batches from 20.4% to 1.5%,
 and no gap passed on the first probe.
 
-The window is this chip's onset, so it should not be a constant either. It
-can be measured once at start-up: spin integer-only for a long stretch,
-touch, probe, and see when the dip starts, if it does at all. On a chip
-with no dip, the window comes out zero.
+The window is this chip's onset, so it should not be a constant either,
+and neither should the idle used to measure it, since the onset grew with
+idle up to at least 120 ms here. Measure it after an integer-only spin as
+long as the longest gap the run will contain - the longest batch, or the
+longest input generation, both known from calibration - and size the
+window with a margin. Only do so when calibration finds such a gap, so a
+suite of fast functions never pays. If a gap during the run proves longer
+than the one measured, re-measure, or mark the results that follow it.
+
+**Long samples, against a known answer.** This was David's alternative:
+make every sample long enough to span several ticks, and let the two-size
+subtraction absorb the dip as a fixed cost per sample. The flexible-tables
+session ran it with `slow_cpu` and `slow_cpu2`, the same chain at 9-60 ms
+and 5.4-36 ms a call, whose true ratio is exactly 5/3. It used both the old
+`f64` harness and the integer harness with probing
+(`day/collect/long/long-{fp,int}-{9,15,30,60}ms`, `analysis/longan.py`,
+`analysis/longs.sh`). Ratios against exactly 5/3, trimmed:
+
+| `slow_cpu` call | FP harness, subtract | FP, one call | integer + probe, subtract | integer + probe, one call | bar |
+| --- | --- | --- | --- | --- | --- |
+| 9 ms | +0.004% | -0.220% | +0.018% | +0.005% | 0.006-0.021% |
+| 15 ms | -0.024% | -0.081% | +0.005% | +0.006% | 0.023-0.052% |
+| 30 ms | +0.289% | -0.063% | +0.012% | +0.009% | 0.053-0.16% |
+| 60 ms | -0.044% | +0.010% | +0.034% | +0.011% | 0.12-1.0% |
+
+- **At 9-15 ms the idea works.** In the FP harness the dip is a fixed
+  cost of 21-29 us per sample, equal for both functions, and the
+  subtraction removes it: within 0.025% of exact, with no probe.
+- **With probing, one call needs no subtraction**: within 0.035% at every
+  length, as the one-rung rule for slow functions says.
+- **The tick tax** is +0.33 to +0.37% per link trimmed, and +0.56 to
+  +0.72% plain, long samples against the 20 us canary. It cancels between
+  two long samples, so an all-long design needs a long canary too.
+- **Trimming is still needed.** Even on the reserved core there are rare
+  excursions of 8-20 ms on samples of 18-120 ms, which move a plain-mean
+  subtraction by up to 0.3%.
+- **At 30-60 ms the FP harness breaks down**, with unequal fixed costs and
+  bars of 0.16-1.0%. The late onset of the dip, above, accounts for it
+  (not checked separately).
+- **Not covered:** samples of 1-5 ms, fast functions batched up to long
+  samples, and turbo.
 
 **What this does not cover.** A function that uses floating point only
 after long integer work *inside its own call* pays the wake-up in its own
