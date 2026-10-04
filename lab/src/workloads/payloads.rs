@@ -279,6 +279,71 @@ impl Workload {
     }
 }
 
+/// A second copy of a payload, at different addresses: `f64_sin_b`,
+/// `btree_miss_b`, `parse_u64_b`.
+///
+/// For the null a comparison is judged against: A against A', two versions
+/// of nearly the same code. Each twin has its own functions, with a branch
+/// on `black_box` that is never taken, so the compiler cannot merge them
+/// with the original. `btree_miss_b` builds its own map, at its own
+/// addresses, from the same keys.
+pub fn twin(name: &str) -> Option<Workload> {
+    use std::hint::black_box;
+    match name {
+        "f64_sin_b" => {
+            fn gen_angle_b() -> f64 {
+                rand::random::<f64>() * std::f64::consts::TAU
+            }
+            fn run_sin_b(x: &mut f64) -> f64 {
+                if black_box(0u8) == 1 {
+                    return 0.0;
+                }
+                x.sin()
+            }
+            Some(Workload::new("f64_sin_b", Kind::Payload, gen_angle_b, run_sin_b))
+        }
+        "parse_u64_b" => {
+            fn gen_parse_b() -> String {
+                rand::random::<u64>().to_string()
+            }
+            fn run_parse_b(i: &mut String) -> u64 {
+                if black_box(0u8) == 1 {
+                    return 1;
+                }
+                i.parse::<u64>().unwrap_or(0)
+            }
+            Some(Workload::new("parse_u64_b", Kind::Payload, gen_parse_b, run_parse_b))
+        }
+        "btree_miss_b" => {
+            fn splitmix_b(state: &mut u64) -> u64 {
+                *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = *state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            }
+            let mut build = 0x243F_6A88_85A3_08D3u64;
+            let map: BTreeMap<u64, u64> = (0..1_000_000)
+                .map(|_| {
+                    let k = splitmix_b(&mut build);
+                    (k, k)
+                })
+                .collect();
+            let probe = Cell::new(0x853C_49E6_748F_EA9Bu64);
+            Some(Workload::simple("btree_miss_b", Kind::Payload, move || {
+                if black_box(0u8) == 1 {
+                    return None;
+                }
+                let mut s = probe.get();
+                let k = splitmix_b(&mut s);
+                probe.set(s);
+                map.get(&k).copied()
+            }))
+        }
+        _ => None,
+    }
+}
+
 /// Every payload, keyed by name, so a run can take any subset of them.
 ///
 /// Nothing here depends on the order - the caller sorts - so adding a payload

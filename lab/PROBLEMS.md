@@ -799,6 +799,51 @@ penalty. That one cause accounts for everything above:
    short calls. It costs 150 us per long batch, which is about 1.5% at
    10 ms, and nothing at all for a set of fast functions.
 
+**Two thresholds, and why an integer harness is not enough.** The dip
+curve (`dip/`, recorded with the old floating-point harness) shows the
+canary beside neighbours of each length:
+
+| neighbour | 0.05 ms | 0.1-1 ms | 2 ms | 5-10 ms |
+| --- | --- | --- | --- | --- |
+| canary, ns a link | 2.380 | 2.398-2.404 | 2.406 | 2.864-2.866 |
+
+That is a shallow stage of about 2% after roughly 0.1 ms without the
+vector unit, and a deep one of about 20% after 2-5 ms. The integer harness
+removes both in a plain set. But with 3 ms of untimed integer work before
+every batch, the integer harness dipped every function, integer-only ones
+too: canary 2.867, `f64_sin` 39.5, `slow_cpu` 2.863. Rust moves 16-byte
+values such as `Instant`, `Duration` and boxed closures through SSE
+registers, so the first such move after the gap wakes the unit, just
+before the batch.
+
+**The recovery is a step, at a moment that varies.** `vector_wake.rs`'s
+sibling `prof.rs` times back-to-back 1024-link probes after one `f64`
+operation that follows a 9.5 ms chain. Every probe sits at 2.896 ns a link,
+then drops to 2.384. The drop comes about 90 us after the wake-up in the
+fastest tenth of cases, 190 us at the median, and by 250 us in nine cases
+out of ten.
+
+**Rules compared**, with 3 ms integer gaps before every batch (reference,
+no gaps: canary 2.359, `f64_sin` 33.48, `slow_cpu` 2.371):
+
+| rule | canary | `f64_sin` | `slow_cpu` |
+| --- | --- | --- | --- |
+| integer harness only | 2.867 | 39.48 | 2.863 |
+| warm-up after batches over 0.5 ms | 2.862 | 37.90 | 2.691 |
+| touch before every batch, fixed 150 us after a gap | 2.735 | 36.82 | 2.383 |
+| the same, fixed 300 us | 2.358 | 33.73 | 2.359 |
+| touch before every batch, probe until recovered | 2.359 | 33.75 | 2.359 |
+
+Probing waited 125-275 us for nearly every gap, and hit its 2 ms cap once
+in 13,872. Beside 9.5 ms `slow_cpu` calls, it waited 0-325 us and gave a
+canary of 2.359 and `f64_sin` of 33.80, where the fixed 150 us warm-up gave
+34.08. A fixed wait is wrong in one case or the other, and is this chip's
+number in any case.
+
+Untested: turbo. With the clock free, the full-speed probe time drifts.
+The reference should then be a probe taken just before the gap, rather
+than the fastest ever seen.
+
 **What this does not cover.** A function that uses floating point only
 after long integer work *inside its own call* pays the wake-up in its own
 time. That is its real cost on this machine, and no harness can change it.

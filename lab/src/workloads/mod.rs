@@ -168,6 +168,7 @@ pub fn named(name: &str) -> Workload {
         "slow_cpu" => Workload::slow_cpu(),
         "slow_cpu2" => Workload::slow_cpu2(),
         "heavy_gen" => Workload::heavy_gen(),
+        n if payloads::twin(n).is_some() => payloads::twin(n).unwrap(),
         _ => {
             let mut pool = payloads::all();
             pool.remove(name).unwrap_or_else(|| {

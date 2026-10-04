@@ -158,19 +158,36 @@ to get. Under additive noise that made the claimed bar 80-200x too large.
 which is problem 3. A member that stops changes the composition for
 everyone still measuring, by percent-scale amounts unquiesced.
 
-**Two rules for the harness between batches.** Both come from one effect.
-On this machine, the first floating-point or vector instruction after a
-millisecond or so without one costs 80-150 us at a fifth less clock
-(section "Limits", and PROBLEMS.md, "Slow functions"):
+**Keeping the vector unit awake.** On the lab's machine, the first
+floating-point or vector instruction after a stretch without one runs the
+core at a lower clock for a while: about 2% after roughly 0.1 ms without
+one, and about 20% after a few milliseconds (PROBLEMS.md, "Slow
+functions"). Whatever runs next pays. The harness's own `f64` arithmetic
+and 16-byte moves were enough to trigger it, and so is a benchmark's own
+floating point. The thresholds and the recovery time are this chip's, and
+nothing below depends on them:
 
-- **No floating point between batches.** Timings are integer nanoseconds,
-  and so is all the bookkeeping in the round loop. A harness that converts
-  each time to `f64` puts the penalty on whichever short batch runs next.
-- **After any batch longer than 0.5 ms, wake the vector unit and wait.**
-  Execute one untimed `f64` operation, and wait 150 us before timing the
-  next batch. Otherwise a benchmarked function that uses floating point,
-  following a long integer-only one, takes the penalty itself and passes
-  it on to the batches after it.
+- **Touch before every timed batch.** Run one untimed `f64` operation
+  immediately before each batch. In a set of fast functions, batches are at
+  most tens of microseconds apart, so on any chip whose timeout is far
+  above that, the unit never powers down during fast work. No timeout needs
+  to be known.
+- **After a gap, measure the recovery.** When the previous touch was longer
+  ago than a fast batch takes - after a one-call slow batch, slow input
+  generation, or a long round - touch, then time short integer probes until
+  one is back to the full-speed probe time. On a chip without the effect the
+  first probe already is, and the cost is a few microseconds.
+- **Not "until the probes stop improving".** The recovery is a step, not a
+  ramp: probes sit flat at the slow time, then drop back, at a moment that
+  varies by more than 100 us. A test for no improvement would stop inside
+  the dip. Cap the wait, so that a clock that is slow for other reasons
+  cannot stall a run.
+
+The one threshold, "longer than a fast batch", comes from the harness's own
+batch ceiling, not from the chip. On the lab's machine the measured waits
+came out at 0-325 us. Every function beside 9.5 ms calls or 3 ms integer
+gaps then read within 0.8% of its value with no gaps. Probes of 1024 links
+(2.4 us) vary by about 0.2%, against a step of 18%.
 
 **Why the canary.** It is a dependent multiply-add chain held in registers.
 On the quiet machine it reads to 0.02%. On this machine it costs 4 core
@@ -644,21 +661,13 @@ factors for large ones: "twice as fast", not "50% less time".
   measured `str_find` 0.6-2.3% high throughout, against its own bar of
   about 0.2%. Running the benchmark again, as a new process, is the only
   way to see one.
-- **The vector unit's wake-up penalty, now removed by the harness.** On
-  this i5-1240P, the first floating-point or vector instruction after a
-  millisecond or more without one costs about 80-150 us at a fifth less
-  clock. The harness's own `f64` conversion after a long integer-only call
-  used to put that penalty on the next short batch, which looked like long
-  CPU-bound neighbours slowing short work by 20% (PROBLEMS.md, "Slow
-  functions"). Two rules remove it:
-  - the harness does no floating point between batches - integer
-    nanoseconds throughout;
-  - after any batch longer than 0.5 ms, it wakes the vector unit with one
-    untimed `f64` operation and waits 150 us before timing the next batch.
-
-  With both, short functions beside 9.5 ms calls read within 1.3% of their
-  values beside short ones. No two-phase split or duration-matched canary
-  is needed for this effect.
+- **The vector unit's wake-up penalty, removed by the harness** (section 2,
+  "Keeping the vector unit awake"). It made long CPU-bound neighbours look
+  as if they slowed short work by 20%. What the harness cannot remove is a
+  function that uses floating point only after long integer work inside
+  its own call: it pays the wake-up in its own time, which is its real cost
+  on such a chip. Untested: whether other chips show the effect, and with
+  what thresholds. The rule does not need to know.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.

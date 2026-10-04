@@ -418,6 +418,38 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
 }
 
+/// Untimed integer spin before every batch, in microseconds (`LAB_GAP_US`).
+fn gap_us() -> u64 {
+    static G: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *G.get_or_init(|| std::env::var("LAB_GAP_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// Measure the vector unit's recovery after a gap (`LAB_VPROBE`).
+fn vector_probe() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("LAB_VPROBE").is_ok())
+}
+
+/// One recovery probe: 1024 links of the canary's chain, a few microseconds.
+#[inline(never)]
+fn probe_chain(x: &mut u64) {
+    for _ in 0..1024 {
+        *x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407));
+    }
+}
+
+/// How long to wait after a touch that follows a gap (`LAB_VTOUCH_WAIT`, us).
+fn touch_wait_us() -> u64 {
+    static W: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| std::env::var("LAB_VTOUCH_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(150))
+}
+
+/// Touch the vector unit before every timed batch (`LAB_VTOUCH`).
+fn vector_touch() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("LAB_VTOUCH").is_ok())
+}
+
 /// Microseconds to wait after waking the vector unit, before timing a batch
 /// that follows a long one (`LAB_VWARM`, default 0: off).
 fn vector_warmup_us() -> u64 {
@@ -853,8 +885,15 @@ fn run(
         .iter()
         .map(|r| r.iter().map(|x| x.2.round().max(0.0) as u64).collect())
         .collect();
-    let cap_ns = CAP_PER_RUNG.as_nanos() as u64;
+    let cap_ns = std::env::var("LAB_CAP_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|s| s * 1_000_000_000)
+        .unwrap_or(CAP_PER_RUNG.as_nanos() as u64);
     let mut last_ns: u64 = 0;
+    let mut last_touch = Instant::now();
+    let mut probe_ref: u64 = 0;
+    let mut probe_waits = [0usize; 100];
     for r in 0..rounds {
         // The budget running out - *not* a convergence test. Nothing here
         // looks at the numbers it is collecting, and no workload ever
@@ -918,6 +957,59 @@ fn run(
                 ws[i].time_batch(warmup)();
             }
             let time_me = ws[i].time_batch(*count);
+            if gap_us() > 0 {
+                // Untimed integer work before every batch: stands in for a
+                // long input generation, or a long interleaved round with no
+                // floating point in it (`LAB_GAP_US`).
+                let g = Instant::now();
+                let d = Duration::from_micros(gap_us());
+                let mut x = seed;
+                while g.elapsed() < d {
+                    for _ in 0..64 {
+                        x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                    }
+                }
+            }
+            if vector_probe() {
+                // Keep the vector unit awake by touching it before every
+                // timed batch, and after a gap, measure the recovery rather
+                // than wait a fixed time: time short integer probes until one
+                // is back to the full-speed probe time (`LAB_VPROBE`). The
+                // dip is a step, not a ramp - probes sit flat at the slow
+                // time, then drop back at a moment that varies by 100us or
+                // more - so "no longer improving" would stop inside it. The
+                // only threshold is the gap that triggers probing.
+                std::hint::black_box(std::hint::black_box(1.5f64) * std::hint::black_box(2.5f64));
+                if last_touch.elapsed() > Duration::from_micros(50) {
+                    let w = Instant::now();
+                    loop {
+                        let t0 = Instant::now();
+                        probe_chain(&mut seed);
+                        let dt = t0.elapsed().as_nanos() as u64;
+                        if probe_ref == 0 || dt < probe_ref {
+                            probe_ref = dt.max(1);
+                        }
+                        if dt * 100 <= probe_ref * 103 || w.elapsed() > Duration::from_millis(2) {
+                            break;
+                        }
+                    }
+                    let waited = w.elapsed().as_micros() as usize;
+                    probe_waits[(waited / 25).min(probe_waits.len() - 1)] += 1;
+                }
+                last_touch = Instant::now();
+            }
+            if vector_touch() {
+                // Keep the vector unit awake: touch it before every timed
+                // batch, and if the last touch was long enough ago for it to
+                // have powered down, wait out the wake-up (`LAB_VTOUCH`).
+                std::hint::black_box(std::hint::black_box(1.5f64) * std::hint::black_box(2.5f64));
+                if last_touch.elapsed() > Duration::from_micros(500) {
+                    let w = Instant::now();
+                    let wait = Duration::from_micros(touch_wait_us());
+                    while w.elapsed() < wait {}
+                }
+                last_touch = Instant::now();
+            }
             if vector_warmup_us() > 0 && last_ns > 500_000 {
                 // The batch before this one ran long enough for the vector
                 // unit to power down if it used none. Wake it here, untimed,
@@ -945,6 +1037,16 @@ fn run(
     // What was actually run, not what was asked for: a deadline-driven run
     // is handed `usize::MAX` and would otherwise report it.
     eprintln!("{done} rounds in {:.2}s", start.elapsed().as_secs_f64());
+    if vector_probe() {
+        let n: usize = probe_waits.iter().sum();
+        let line: Vec<String> = probe_waits
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c > 0)
+            .map(|(i, c)| format!("{}us:{c}", i * 25))
+            .collect();
+        eprintln!("probe waits ({n}, by 25us bins, ref {probe_ref}ns): {}", line.join(" "));
+    }
     t.finish();
     eprintln!("wrote {out} ({} samples)", t.written);
 
