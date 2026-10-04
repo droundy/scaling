@@ -337,6 +337,41 @@ pub fn twin(name: &str) -> Option<Workload> {
     }
 }
 
+/// A warmer and its target, for a neighbour effect of the opposite sign: a
+/// workload that makes the one after it *faster*.
+///
+/// Both read one 1 MiB table, sized to sit in this machine's L2 (1.25 MiB a
+/// P-core), shared through a static so that the two lookups by name see the
+/// same memory. `warm_src` reads all of it in one call. `warm_dst` sums
+/// 8 KiB a call at a rolling offset, so it revisits each line only every 128
+/// calls, and anything else in the round can evict the table in between. A
+/// `warm_dst` batch that follows `warm_src` starts with the table warm.
+fn warm_table() -> &'static [u64] {
+    static T: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    T.get_or_init(|| (0..131_072u64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15)).collect())
+}
+
+pub fn warm_src() -> Workload {
+    Workload::simple("warm_src", Kind::Payload, || warm_table().iter().fold(0u64, |a, &x| a.wrapping_add(x)))
+}
+
+pub fn warm_dst() -> Workload {
+    let at = Cell::new(0usize);
+    Workload::simple("warm_dst", Kind::Payload, move || {
+        let t = warm_table();
+        let i = at.get();
+        at.set((i + 1024) % t.len());
+        t[i..i + 1024].iter().fold(0u64, |a, &x| a.wrapping_add(x))
+    })
+}
+
+/// A floating-point-heavy fast neighbour: 256 square roots a call, which the
+/// compiler vectorises.
+pub fn fp_heavy() -> Workload {
+    let v: Vec<f64> = (1..=256).map(|i| i as f64).collect();
+    Workload::simple("fp_heavy", Kind::Payload, move || v.iter().map(|x| x.sqrt()).sum::<f64>())
+}
+
 /// Every payload, keyed by name, so a run can take any subset of them.
 ///
 /// Nothing here depends on the order - the caller sorts - so adding a payload

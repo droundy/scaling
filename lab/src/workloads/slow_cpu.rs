@@ -51,6 +51,19 @@ impl Workload {
         Self::slow_cpu_named("slow_cpu2", n)
     }
 
+    /// More chains of their own lengths (`LAB_SLOW3_ITERS`, `LAB_SLOW4_ITERS`,
+    /// `LAB_SLOW5_ITERS`), so that a fast known-answer pair and a slow one
+    /// can share a suite.
+    pub fn slow_cpu_n(k: u8) -> Self {
+        let (name, var) = match k {
+            3 => ("slow_cpu3", "LAB_SLOW3_ITERS"),
+            4 => ("slow_cpu4", "LAB_SLOW4_ITERS"),
+            _ => ("slow_cpu5", "LAB_SLOW5_ITERS"),
+        };
+        let n = std::env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+        Self::slow_cpu_named(name, n)
+    }
+
     fn slow_cpu_named(name: &'static str, n: u64) -> Self {
         // Carried across calls like the canaries do, so the chain cannot be
         // constant-folded and each call genuinely depends on the last.

@@ -168,6 +168,12 @@ pub fn named(name: &str) -> Workload {
         "slow_cpu" => Workload::slow_cpu(),
         "slow_cpu2" => Workload::slow_cpu2(),
         "heavy_gen" => Workload::heavy_gen(),
+        "slow_cpu3" => Workload::slow_cpu_n(3),
+        "slow_cpu4" => Workload::slow_cpu_n(4),
+        "slow_cpu5" => Workload::slow_cpu_n(5),
+        "fp_heavy" => payloads::fp_heavy(),
+        "warm_src" => payloads::warm_src(),
+        "warm_dst" => payloads::warm_dst(),
         n if payloads::twin(n).is_some() => payloads::twin(n).unwrap(),
         _ => {
             let mut pool = payloads::all();

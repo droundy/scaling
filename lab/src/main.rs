@@ -418,6 +418,13 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
 }
 
+/// Convert each batch time to `f64` right after it, as the crate does
+/// (`LAB_FP_HARNESS`).
+fn fp_harness() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("LAB_FP_HARNESS").is_ok())
+}
+
 /// Untimed integer spin before every batch, in microseconds (`LAB_GAP_US`).
 fn gap_us() -> u64 {
     static G: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -712,13 +719,20 @@ fn top2_only() -> bool {
 /// the only rung inside reach, and for a fast one it is where a growth loop
 /// starts - so leaving it out would make calibration unreplayable and would
 /// throw away the cheapest, most informative point for the intercept.
+/// The batch ceiling: [`RUNG_MAX_NS`], or `LAB_RUNG_MAX_NS` for a run with
+/// long samples, where fast functions are batched up to milliseconds.
+fn rung_max_ns() -> f64 {
+    static M: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *M.get_or_init(|| std::env::var("LAB_RUNG_MAX_NS").ok().and_then(|v| v.parse().ok()).unwrap_or(RUNG_MAX_NS))
+}
+
 fn rungs_for(per_ns: f64) -> Vec<usize> {
     let mut out = vec![1usize];
     let mut n = 1usize;
     while n < (1usize << 40) {
         n *= 2;
         let d = n as f64 * per_ns;
-        if d > RUNG_MAX_NS {
+        if d > rung_max_ns() {
             break;
         }
         if d >= RUNG_MIN_NS {
@@ -1058,6 +1072,11 @@ fn run(
                 while w.elapsed() < wait {}
             }
             last_ns = t.time(ridx, time_me);
+            if fp_harness() {
+                // The crate's own harness converts each batch to `f64` as it
+                // finishes (`LAB_FP_HARNESS`).
+                std::hint::black_box(std::hint::black_box(last_ns) as f64 * 1e-9);
+            }
             held[i][pick[i]] += cost_ns[i][pick[i]];
         }
         done += 1;
