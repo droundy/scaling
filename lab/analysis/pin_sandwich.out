@@ -1,0 +1,72 @@
+
+plain-free p0: 306 rounds.  canary ns/link p5 0.917 p50 0.942 p95 2.367;  near top turbo (<0.93) 25%, near base clock (>2.2) 7.2%
+  slow_cpu  vs canary, adjacent                 n=  200 robust sd  2.031%  bar 0.157%  lag-1 +0.00  bm/se 1.01
+  slow_cpu  vs canary, either                   n=  306 robust sd  1.906%  bar 0.122%  lag-1 +0.01  bm/se 0.99
+  slow_cpu  vs canary, not adjacent             n=  106 robust sd  1.838%  bar 0.188%  lag-1 +0.00  bm/se 0.97
+  slow_cpu2 vs canary, adjacent                 n=  202 robust sd  1.796%  bar 0.136%  lag-1 +0.03  bm/se 0.89
+  slow_cpu2 vs canary, either                   n=  306 robust sd  2.013%  bar 0.126%  lag-1 +0.01  bm/se 0.99
+  slow_cpu2 vs canary, not adjacent             n=  104 robust sd  2.688%  bar 0.291%  lag-1 -0.03  bm/se 0.99
+  difference against the canary: +3.021% of 36 links
+
+plain-free p1: 371 rounds.  canary ns/link p5 0.913 p50 0.967 p95 2.387;  near top turbo (<0.93) 18%, near base clock (>2.2) 18.9%
+  slow_cpu  vs canary, adjacent                 n=  245 robust sd  1.483%  bar 0.100%  lag-1 +0.06  bm/se 1.23
+  slow_cpu  vs canary, either                   n=  371 robust sd  2.056%  bar 0.108%  lag-1 +0.03  bm/se 1.03
+  slow_cpu  vs canary, not adjacent             n=  126 robust sd  3.523%  bar 0.326%  lag-1 -0.03  bm/se 1.00
+  slow_cpu2 vs canary, adjacent                 n=  244 robust sd  2.137%  bar 0.170%  lag-1 +0.04  bm/se 0.95
+  slow_cpu2 vs canary, either                   n=  371 robust sd  2.539%  bar 0.139%  lag-1 +0.03  bm/se 1.05
+  slow_cpu2 vs canary, not adjacent             n=  127 robust sd  3.312%  bar 0.321%  lag-1 +0.05  bm/se 1.12
+  difference against the canary: +3.322% of 36 links
+
+plain-pin p0: 336 rounds.  canary ns/link p5 0.927 p50 0.950 p95 1.014;  near top turbo (<0.93) 7%, near base clock (>2.2) 0.0%
+  slow_cpu  vs canary, adjacent                 n=  220 robust sd  2.912%  bar 0.204%  lag-1 +0.07  bm/se 1.14
+  slow_cpu  vs canary, either                   n=  336 robust sd  3.115%  bar 0.181%  lag-1 +0.07  bm/se 1.05
+  slow_cpu  vs canary, not adjacent             n=  116 robust sd  3.560%  bar 0.367%  lag-1 -0.02  bm/se 0.70
+  slow_cpu2 vs canary, adjacent                 n=  222 robust sd  2.758%  bar 0.203%  lag-1 -0.08  bm/se 0.82
+  slow_cpu2 vs canary, either                   n=  336 robust sd  3.032%  bar 0.181%  lag-1 -0.06  bm/se 1.00
+  slow_cpu2 vs canary, not adjacent             n=  114 robust sd  3.666%  bar 0.379%  lag-1 +0.09  bm/se 1.09
+  difference against the canary: +2.387% of 36 links
+
+plain-pin p1: 317 rounds.  canary ns/link p5 0.916 p50 0.944 p95 0.997;  near top turbo (<0.93) 22%, near base clock (>2.2) 0.0%
+  slow_cpu  vs canary, adjacent                 n=  208 robust sd  2.014%  bar 0.148%  lag-1 -0.00  bm/se 0.84
+  slow_cpu  vs canary, either                   n=  317 robust sd  2.186%  bar 0.135%  lag-1 -0.03  bm/se 0.97
+  slow_cpu  vs canary, not adjacent             n=  109 robust sd  2.507%  bar 0.264%  lag-1 -0.00  bm/se 1.01
+  slow_cpu2 vs canary, adjacent                 n=  209 robust sd  2.448%  bar 0.199%  lag-1 -0.05  bm/se 1.02
+  slow_cpu2 vs canary, either                   n=  317 robust sd  2.336%  bar 0.149%  lag-1 -0.07  bm/se 0.96
+  slow_cpu2 vs canary, not adjacent             n=  108 robust sd  2.250%  bar 0.244%  lag-1 -0.10  bm/se 0.91
+  difference against the canary: +2.726% of 36 links
+
+sand-free p0: 225 rounds.  canary ns/link p5 0.910 p50 0.933 p95 2.386;  near top turbo (<0.93) 46%, near base clock (>2.2) 16.0%
+  slow_cpu  vs canary, mean of both neighbours  n=  225 robust sd  1.034%  bar 0.078%  lag-1 +0.12  bm/se 1.14
+  slow_cpu  vs canary, non-adjacent copy        n=  225 robust sd  1.208%  bar 0.087%  lag-1 -0.03  bm/se 0.96
+  slow_cpu  vs canary, one neighbour            n=  225 robust sd  1.210%  bar 0.095%  lag-1 -0.14  bm/se 0.95
+  slow_cpu2 vs canary, mean of both neighbours  n=  225 robust sd  1.062%  bar 0.077%  lag-1 -0.03  bm/se 1.01
+  slow_cpu2 vs canary, non-adjacent copy        n=  225 robust sd  1.195%  bar 0.091%  lag-1 -0.03  bm/se 0.99
+  slow_cpu2 vs canary, one neighbour            n=  225 robust sd  1.249%  bar 0.102%  lag-1 -0.05  bm/se 1.00
+  difference against the canary: +3.399% of 36 links
+
+sand-free p1: 224 rounds.  canary ns/link p5 0.912 p50 0.941 p95 2.390;  near top turbo (<0.93) 28%, near base clock (>2.2) 26.3%
+  slow_cpu  vs canary, mean of both neighbours  n=  224 robust sd  0.965%  bar 0.066%  lag-1 +0.06  bm/se 1.08
+  slow_cpu  vs canary, non-adjacent copy        n=  224 robust sd  1.135%  bar 0.084%  lag-1 -0.00  bm/se 1.00
+  slow_cpu  vs canary, one neighbour            n=  224 robust sd  1.284%  bar 0.081%  lag-1 -0.01  bm/se 1.04
+  slow_cpu2 vs canary, mean of both neighbours  n=  224 robust sd  1.013%  bar 0.074%  lag-1 -0.05  bm/se 0.99
+  slow_cpu2 vs canary, non-adjacent copy        n=  224 robust sd  1.338%  bar 0.101%  lag-1 -0.02  bm/se 1.02
+  slow_cpu2 vs canary, one neighbour            n=  224 robust sd  1.275%  bar 0.090%  lag-1 -0.04  bm/se 0.99
+  difference against the canary: +2.940% of 36 links
+
+sand-pin p0: 301 rounds.  canary ns/link p5 0.942 p50 0.980 p95 1.296;  near top turbo (<0.93) 1%, near base clock (>2.2) 0.0%
+  slow_cpu  vs canary, mean of both neighbours  n=  301 robust sd  1.996%  bar 0.132%  lag-1 +0.16  bm/se 1.24
+  slow_cpu  vs canary, non-adjacent copy        n=  301 robust sd  3.322%  bar 0.207%  lag-1 +0.00  bm/se 1.06
+  slow_cpu  vs canary, one neighbour            n=  301 robust sd  2.454%  bar 0.201%  lag-1 -0.01  bm/se 1.01
+  slow_cpu2 vs canary, mean of both neighbours  n=  301 robust sd  1.966%  bar 0.133%  lag-1 -0.01  bm/se 1.09
+  slow_cpu2 vs canary, non-adjacent copy        n=  301 robust sd  3.767%  bar 0.233%  lag-1 +0.18  bm/se 1.28
+  slow_cpu2 vs canary, one neighbour            n=  301 robust sd  2.434%  bar 0.185%  lag-1 -0.08  bm/se 0.91
+  difference against the canary: +2.036% of 36 links
+
+sand-pin p1: 278 rounds.  canary ns/link p5 0.942 p50 0.971 p95 1.297;  near top turbo (<0.93) 0%, near base clock (>2.2) 0.0%
+  slow_cpu  vs canary, mean of both neighbours  n=  278 robust sd  1.954%  bar 0.136%  lag-1 +0.05  bm/se 1.20
+  slow_cpu  vs canary, non-adjacent copy        n=  278 robust sd  3.091%  bar 0.209%  lag-1 +0.09  bm/se 1.10
+  slow_cpu  vs canary, one neighbour            n=  278 robust sd  2.483%  bar 0.167%  lag-1 +0.05  bm/se 1.17
+  slow_cpu2 vs canary, mean of both neighbours  n=  278 robust sd  1.870%  bar 0.123%  lag-1 +0.04  bm/se 1.02
+  slow_cpu2 vs canary, non-adjacent copy        n=  278 robust sd  3.349%  bar 0.218%  lag-1 +0.15  bm/se 1.17
+  slow_cpu2 vs canary, one neighbour            n=  278 robust sd  2.689%  bar 0.183%  lag-1 -0.03  bm/se 0.94
+  difference against the canary: +2.298% of 36 links
