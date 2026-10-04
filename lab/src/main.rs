@@ -430,6 +430,18 @@ fn vector_probe() -> bool {
     *T.get_or_init(|| std::env::var("LAB_VPROBE").is_ok())
 }
 
+/// Tolerance for "back to full speed", in parts per thousand, and how many
+/// probes to take the median of (`LAB_VPROBE_TOL`, default 30;
+/// `LAB_VPROBE_K`, default 1, at most 9).
+fn probe_tolerance() -> (u64, usize) {
+    static T: std::sync::OnceLock<(u64, usize)> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let tol = std::env::var("LAB_VPROBE_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        let k = std::env::var("LAB_VPROBE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize);
+        (tol, k.clamp(1, 9))
+    })
+}
+
 /// One recovery probe: 1024 links of the canary's chain, a few microseconds.
 #[inline(never)]
 fn probe_chain(x: &mut u64) {
@@ -894,6 +906,7 @@ fn run(
     let mut last_touch = Instant::now();
     let mut probe_ref: u64 = 0;
     let mut probe_waits = [0usize; 100];
+    let mut probe_capped = 0usize;
     for r in 0..rounds {
         // The budget running out - *not* a convergence test. Nothing here
         // looks at the numbers it is collecting, and no workload ever
@@ -982,14 +995,26 @@ fn run(
                 std::hint::black_box(std::hint::black_box(1.5f64) * std::hint::black_box(2.5f64));
                 if last_touch.elapsed() > Duration::from_micros(50) {
                     let w = Instant::now();
+                    let (tol, k) = probe_tolerance();
                     loop {
-                        let t0 = Instant::now();
-                        probe_chain(&mut seed);
-                        let dt = t0.elapsed().as_nanos() as u64;
+                        // The median of `k` probes, when one probe is too
+                        // noisy for the tolerance asked of it.
+                        let mut ts = [0u64; 9];
+                        for t in ts.iter_mut().take(k) {
+                            let t0 = Instant::now();
+                            probe_chain(&mut seed);
+                            *t = t0.elapsed().as_nanos() as u64;
+                        }
+                        ts[..k].sort_unstable();
+                        let dt = ts[k / 2];
                         if probe_ref == 0 || dt < probe_ref {
                             probe_ref = dt.max(1);
                         }
-                        if dt * 100 <= probe_ref * 103 || w.elapsed() > Duration::from_millis(2) {
+                        if dt * 1000 <= probe_ref * (1000 + tol) {
+                            break;
+                        }
+                        if w.elapsed() > Duration::from_millis(2) {
+                            probe_capped += 1;
                             break;
                         }
                     }
@@ -1045,7 +1070,10 @@ fn run(
             .filter(|(_, &c)| c > 0)
             .map(|(i, c)| format!("{}us:{c}", i * 25))
             .collect();
-        eprintln!("probe waits ({n}, by 25us bins, ref {probe_ref}ns): {}", line.join(" "));
+        eprintln!(
+            "probe waits ({n}, by 25us bins, ref {probe_ref}ns, capped {probe_capped}): {}",
+            line.join(" ")
+        );
     }
     t.finish();
     eprintln!("wrote {out} ({} samples)", t.written);

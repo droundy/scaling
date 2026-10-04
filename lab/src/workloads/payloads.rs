@@ -282,35 +282,31 @@ impl Workload {
 /// A second copy of a payload, at different addresses: `f64_sin_b`,
 /// `btree_miss_b`, `parse_u64_b`.
 ///
-/// For the null a comparison is judged against: A against A', two versions
-/// of nearly the same code. Each twin has its own functions, with a branch
-/// on `black_box` that is never taken, so the compiler cannot merge them
-/// with the original. `btree_miss_b` builds its own map, at its own
-/// addresses, from the same keys.
+/// For the null a comparison is judged against: A against A', the same code
+/// twice. As in the crate's `identical_alternatives_are_unchanged`, each
+/// twin is the same work behind a distinct type - a newtype input, or a
+/// distinct closure - so it gets its own instantiation of the timing loop
+/// at its own address, and nothing extra runs per call. `btree_miss_b`
+/// also builds its own map, at its own addresses, from the same keys.
 pub fn twin(name: &str) -> Option<Workload> {
-    use std::hint::black_box;
     match name {
         "f64_sin_b" => {
-            fn gen_angle_b() -> f64 {
-                rand::random::<f64>() * std::f64::consts::TAU
+            struct AngleB(f64);
+            fn gen_angle_b() -> AngleB {
+                AngleB(rand::random::<f64>() * std::f64::consts::TAU)
             }
-            fn run_sin_b(x: &mut f64) -> f64 {
-                if black_box(0u8) == 1 {
-                    return 0.0;
-                }
-                x.sin()
+            fn run_sin_b(x: &mut AngleB) -> f64 {
+                x.0.sin()
             }
             Some(Workload::new("f64_sin_b", Kind::Payload, gen_angle_b, run_sin_b))
         }
         "parse_u64_b" => {
-            fn gen_parse_b() -> String {
-                rand::random::<u64>().to_string()
+            struct TextB(String);
+            fn gen_parse_b() -> TextB {
+                TextB(rand::random::<u64>().to_string())
             }
-            fn run_parse_b(i: &mut String) -> u64 {
-                if black_box(0u8) == 1 {
-                    return 1;
-                }
-                i.parse::<u64>().unwrap_or(0)
+            fn run_parse_b(i: &mut TextB) -> u64 {
+                i.0.parse::<u64>().unwrap_or(0)
             }
             Some(Workload::new("parse_u64_b", Kind::Payload, gen_parse_b, run_parse_b))
         }
@@ -331,9 +327,6 @@ pub fn twin(name: &str) -> Option<Workload> {
                 .collect();
             let probe = Cell::new(0x853C_49E6_748F_EA9Bu64);
             Some(Workload::simple("btree_miss_b", Kind::Payload, move || {
-                if black_box(0u8) == 1 {
-                    return None;
-                }
                 let mut s = probe.get();
                 let k = splitmix_b(&mut s);
                 probe.set(s);
