@@ -1,0 +1,26 @@
+COST to the Bonferroni target (1% goal, 10 comparisons, t at the blocks): median set wall time per
+stopped trial, preparation included; median rounds; for exact answers, stopped trials whose error
+exceeds their own threshold (promise: 0.5%). Capped trials (ran off the recording) are excluded.
+
+  composition c0
+  fast pair             A:     342.0 ms   8137 r 11/113 +2cap    C:     262.5 ms   6259 r 2/159 +2cap   B1:    1510.3 ms    453 r 1/38 +2cap   B3:   30192.4 ms   2848 r 0/2 +2cap  B10:   34399.5 ms    996 r 0/1 +2cap
+  f64_sin/canary        A:      55.5 ms   1684 r          C:      43.0 ms   1295 r         B1:     424.9 ms    205 r +1cap   B3:    3789.0 ms    453 r +2cap  B10:   11583.6 ms    348 r +2cap
+  parse_u64/canary      A:      46.2 ms    996 r          C:      45.9 ms    996 r         B1:     808.4 ms    157 r         B3:   15657.0 ms    766 r +1cap  B10:   28554.8 ms    589 r +2cap
+  btree_miss/canary     A:    2970.0 ms 112193 r +2cap    C:    3858.1 ms 145851 r +2cap   B1:              (none stopped)   B3:              (none stopped)  B10:              (none stopped)
+  warm_dst/canary       A:     233.4 ms   8137 r +2cap    C:     300.2 ms  10579 r +2cap   B1:    1330.3 ms    766 r +2cap   B3:    4110.2 ms    589 r +2cap  B10:   12408.0 ms    453 r +2cap
+
+  composition c1
+  fast pair             A:              (none stopped)    C:              (none stopped)   B1:              (none stopped)   B3:              (none stopped)  B10:   44996.3 ms   1295 r 0/2 +2cap
+  slow pair             A:    9751.8 ms    453 r 0/12 +2cap    C:    7549.8 ms    348 r 0/14 +1cap   B1:    9873.4 ms    453 r 0/10 +2cap   B3:   12576.1 ms    589 r 0/7 +2cap  B10:   12784.4 ms    589 r 0/6 +1cap
+  f64_sin/canary        A:              (none stopped)    C:      73.5 ms   2190 r +2cap   B1:     945.9 ms    453 r +1cap   B3:    4360.9 ms    521 r +2cap  B10:   15065.3 ms    453 r +2cap
+  parse_u64/canary      A:              (none stopped)    C:     101.3 ms   2190 r +2cap   B1:    3013.9 ms    589 r +2cap   B3:   19306.9 ms    942 r        B10:   21864.9 ms    453 r +1cap
+  btree_miss/canary     A:              (none stopped)    C:              (none stopped)   B1:              (none stopped)   B3:              (none stopped)  B10:              (none stopped)
+  warm_dst/canary       A:              (none stopped)    C:              (none stopped)   B1:    2952.8 ms   1684 r +2cap   B3:    5191.1 ms    766 r +2cap  B10:    9525.6 ms    348 r
+
+  composition c5
+  fast pair             A:              (none stopped)    C:              (none stopped)   B1:    5691.3 ms   1684 r 0/1 +2cap   B3:              (none stopped)  B10:   32327.8 ms    942 r 0/2 +1cap
+  slow pair             A:   12808.0 ms    589 r 0/9 +1cap    C:    9872.8 ms    453 r 0/11 +2cap   B1:   12795.4 ms    589 r 0/8 +2cap   B3:   13322.4 ms    610 r 0/4 +2cap  B10:    9858.8 ms    453 r 0/5 +2cap
+  f64_sin/canary        A:              (none stopped)    C:      73.8 ms   2190 r +2cap   B1:    1226.9 ms    589 r +2cap   B3:    6414.2 ms    766 r +2cap  B10:   11872.9 ms    348 r +1cap
+  parse_u64/canary      A:              (none stopped)    C:     100.7 ms   2190 r +2cap   B1:    2971.3 ms    589 r +2cap   B3:   30373.3 ms   1490 r +1cap  B10:   16981.4 ms    348 r +2cap
+  btree_miss/canary     A:              (none stopped)    C:              (none stopped)   B1:              (none stopped)   B3:              (none stopped)  B10:              (none stopped)
+  warm_dst/canary       A:              (none stopped)    C:              (none stopped)   B1:              (none stopped)   B3:    7949.4 ms   1146 r +2cap  B10:   12558.4 ms    453 r +2cap
