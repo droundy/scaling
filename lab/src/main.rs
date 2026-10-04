@@ -442,6 +442,12 @@ fn probe_tolerance() -> (u64, usize) {
     })
 }
 
+/// Least time to keep probing after a wake-up (`LAB_VPROBE_MIN_US`, default 0).
+fn probe_min_us() -> u64 {
+    static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *M.get_or_init(|| std::env::var("LAB_VPROBE_MIN_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
 /// One recovery probe: 1024 links of the canary's chain, a few microseconds.
 #[inline(never)]
 fn probe_chain(x: &mut u64) {
@@ -1010,7 +1016,13 @@ fn run(
                         if probe_ref == 0 || dt < probe_ref {
                             probe_ref = dt.max(1);
                         }
-                        if dt * 1000 <= probe_ref * (1000 + tol) {
+                        // Not before a minimum window has passed
+                        // (`LAB_VPROBE_MIN_US`): after a long enough idle the
+                        // dip starts up to ~10us after the wake-up, so a first
+                        // probe can be fast and still be followed by the dip.
+                        if dt * 1000 <= probe_ref * (1000 + tol)
+                            && w.elapsed() >= Duration::from_micros(probe_min_us())
+                        {
                             break;
                         }
                         if w.elapsed() > Duration::from_millis(2) {

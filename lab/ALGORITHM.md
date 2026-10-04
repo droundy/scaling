@@ -182,6 +182,11 @@ nothing below depends on them:
   varies by more than 100 us. A test for no improvement would stop inside
   the dip. Cap the wait, so that a clock that is slow for other reasons
   cannot stall a run.
+- **Not on the first fast probe either.** After a long idle, the dip can
+  start several microseconds after the wake-up: up to about 10 us on the
+  lab's machine after 60 ms or more. So keep probing for at least the
+  onset window, measured once at start-up by deliberately idling, waking
+  and probing. On a chip without the effect it comes out zero.
 
 The one threshold, "longer than a fast batch", comes from the harness's own
 batch ceiling, not from the chip. On the lab's machine the measured waits

@@ -844,6 +844,33 @@ Untested: turbo. With the clock free, the full-speed probe time drifts.
 The reference should then be a probe taken just before the gap, rather
 than the fastest ever seen.
 
+**After a long idle, the dip starts late.** Long integer-only calls made
+the probe fail more often the longer they were. The flexible-tables
+session's runs counted canary batches slower than 2.6 ns a link, beside
+calls of 9, 15, 30 and 60 ms: 1.7%, 3.7%, 8.9% and 42.9%. In isolation,
+nothing deepens (`analysis/onset.rs`, with 256-link probes after one `f64`
+operation). After 4-240 ms of integer-only work the recovery is the same
+step at 80-250 us, and a dip was seen after every wake-up. What changes is
+when the dip *starts*:
+
+| idle | dip starts, median | dip starts, worst |
+| --- | --- | --- |
+| 4-30 ms | 1.7 us | 2 us |
+| 60 ms | 1.7 us | 10.6 us |
+| 120-240 ms | 9.7-9.8 us | 10.6 us |
+
+A 1024-link probe takes 2.4 us. After a long idle, the first probe can
+finish before the dip begins, look full speed, and end the wait; the next
+batch then runs into the dip. In the lab beside 60 ms calls, 172 of 733
+gaps passed on the very first probe. Requiring probing to last at least
+25 us (`LAB_VPROBE_MIN_US=25`) cut slow canary batches from 20.4% to 1.5%,
+and no gap passed on the first probe.
+
+The window is this chip's onset, so it should not be a constant either. It
+can be measured once at start-up: spin integer-only for a long stretch,
+touch, probe, and see when the dip starts, if it does at all. On a chip
+with no dip, the window comes out zero.
+
 **What this does not cover.** A function that uses floating point only
 after long integer work *inside its own call* pays the wake-up in its own
 time. That is its real cost on this machine, and no harness can change it.
