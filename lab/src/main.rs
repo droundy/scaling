@@ -418,6 +418,18 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
     }
 }
 
+/// Lap mode (`LAB_LAP=k`, 2 to 8 laps; `LAB_LAP_NS`, the length of a lap,
+/// default 10 ms): every sample is `k` laps of equal length timed back to
+/// back, and the first is warm-up.
+fn lap_mode() -> Option<(usize, f64)> {
+    static L: std::sync::OnceLock<Option<(usize, f64)>> = std::sync::OnceLock::new();
+    *L.get_or_init(|| {
+        let k: usize = std::env::var("LAB_LAP").ok()?.parse().ok()?;
+        let ns = std::env::var("LAB_LAP_NS").ok().and_then(|v| v.parse().ok()).unwrap_or(1e7);
+        Some((k.clamp(2, 8), ns))
+    })
+}
+
 /// Convert each batch time to `f64` right after it, as the crate does
 /// (`LAB_FP_HARNESS`).
 fn fp_harness() -> bool {
@@ -819,6 +831,21 @@ fn run(
             None => calibrate(w, &mut seed),
         };
         let mut this: Vec<(usize, String, f64, u8)> = Vec::with_capacity(8);
+        if let Some((k, lap_ns)) = lap_mode() {
+            // Lap mode: one batch of `k` laps of `n` iterations, each lap
+            // recorded as its own workload `name.lapj`, so the recording's
+            // one-sample-per-workload-per-round layout is kept.
+            let n = ((lap_ns / per).round() as usize).max(1);
+            for j in 0..k {
+                t.rungs.insert(format!("{}.lap{j}", w.name), crate::timing::RungMeta { n, overhead_ns: 0.0 });
+            }
+            if counts.is_none() {
+                eprintln!("  {:>16} {n:>12} iters a lap x {k}  ~{:>8.0} us a lap", w.name, n as f64 * per / 1e3);
+            }
+            this.push((n, format!("{}.lap0", w.name), k as f64 * n as f64 * per, 0));
+            rungs.push(this);
+            continue;
+        }
         for (k, &n) in recorded_rungs(per).iter().enumerate() {
             let name = rung_name(w.name, k);
             let dur = n as f64 * per;
@@ -852,6 +879,14 @@ fn run(
     // fixed and before any sample is taken. Resolving each rung's index now
     // keeps a hash lookup out of the measuring loop.
     let idx = t.open(&out);
+    // In lap mode, the recording index of each workload's laps, in order.
+    let lap_idx: Vec<Vec<u8>> = match lap_mode() {
+        Some((k, _)) => ws
+            .iter()
+            .map(|w| (0..k).map(|j| idx.get(&format!("{}.lap{j}", w.name)).copied().unwrap_or(0)).collect())
+            .collect(),
+        None => Vec::new(),
+    };
     for w in rungs.iter_mut() {
         for r in w.iter_mut() {
             r.3 = match idx.get(&r.1) {
@@ -986,6 +1021,15 @@ fn run(
             // set being pulled back after neighbours evicted it, so a prefix
             // pays it *outside* the timer and the timed batch comes out
             // warm. Sweep the prefix and whatever decays is the cold start.
+            if let Some((k, _)) = lap_mode() {
+                let job = ws[i].time_laps(*count, k);
+                let laps = job();
+                for (j, &li) in lap_idx[i].iter().enumerate() {
+                    t.time(li, || laps[j]);
+                }
+                held[i][pick[i]] += cost_ns[i][pick[i]];
+                continue;
+            }
             if warmup > 0 {
                 ws[i].time_batch(warmup)();
             }

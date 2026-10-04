@@ -64,6 +64,9 @@ pub struct Workload {
     pub kind: Kind,
     /// Prepare to time a batch of the workload with batch size `usize`.
     f: Box<dyn Fn(usize) -> Box<dyn FnOnce() -> u64>>,
+    /// Prepare to time `k` back-to-back laps of `n` iterations each, with a
+    /// clock read between laps: (n, k) -> per-lap nanoseconds, up to 8 laps.
+    laps: Box<dyn Fn(usize, usize) -> Box<dyn FnOnce() -> [u64; 8]>>,
 }
 
 impl Workload {
@@ -74,9 +77,33 @@ impl Workload {
         f: fn(&mut T) -> O,
     ) -> Workload {
         let data = Arc::new(Mutex::new(Vec::new()));
+        let lap_data: Arc<Mutex<Vec<T>>> = Arc::new(Mutex::new(Vec::new()));
         Workload {
             name,
             kind,
+            laps: Box::new(move |n, k| {
+                let k = k.min(8);
+                {
+                    let mut d = lap_data.lock().unwrap();
+                    d.clear();
+                    d.extend(std::iter::repeat_with(gen).take(n * k));
+                }
+                let d = lap_data.clone();
+                Box::new(move || {
+                    let mut d = d.lock().unwrap();
+                    let mut out = [0u64; 8];
+                    let mut t0 = Instant::now();
+                    for (j, chunk) in d.chunks_mut(n.max(1)).take(k).enumerate() {
+                        for x in chunk.iter_mut() {
+                            black_box(f(x));
+                        }
+                        let t1 = Instant::now();
+                        out[j] = (t1 - t0).as_nanos() as u64;
+                        t0 = t1;
+                    }
+                    out
+                })
+            }),
             f: Box::new(move |count| {
                 {
                     let mut data = data.lock().unwrap();
@@ -113,9 +140,26 @@ impl Workload {
         f: impl Fn() -> O + 'static,
     ) -> Workload {
         let f = Rc::new(f);
+        let g = Rc::clone(&f);
         Workload {
             name,
             kind,
+            laps: Box::new(move |n, k| {
+                let g = Rc::clone(&g);
+                Box::new(move || {
+                    let mut out = [0u64; 8];
+                    let mut t0 = Instant::now();
+                    for o in out.iter_mut().take(k.min(8)) {
+                        for _ in 0..n {
+                            black_box(g());
+                        }
+                        let t1 = Instant::now();
+                        *o = (t1 - t0).as_nanos() as u64;
+                        t0 = t1;
+                    }
+                    out
+                })
+            }),
             f: Box::new(move |count| {
                 let f = Rc::clone(&f);
                 Box::new(move || {
@@ -134,6 +178,11 @@ impl Workload {
 
     pub fn time_batch(&self, count: usize) -> Box<dyn FnOnce() -> u64> {
         (self.f)(count)
+    }
+
+    /// `k` laps of `n` iterations, timed back to back in one call.
+    pub fn time_laps(&self, n: usize, k: usize) -> Box<dyn FnOnce() -> [u64; 8]> {
+        (self.laps)(n, k)
     }
 }
 
