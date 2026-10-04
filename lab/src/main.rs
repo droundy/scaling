@@ -424,9 +424,29 @@ fn collect(ws: Vec<Arc<Workload>>, budget: Duration, dir: &str) {
 fn lap_mode() -> Option<(usize, f64)> {
     static L: std::sync::OnceLock<Option<(usize, f64)>> = std::sync::OnceLock::new();
     *L.get_or_init(|| {
-        let k: usize = std::env::var("LAB_LAP").ok()?.parse().ok()?;
+        let k: usize = match std::env::var("LAB_LAP_SHAPE") {
+            Ok(s) => s.split(',').count(),
+            Err(_) => std::env::var("LAB_LAP").ok()?.parse().ok()?,
+        };
         let ns = std::env::var("LAB_LAP_NS").ok().and_then(|v| v.parse().ok()).unwrap_or(1e7);
         Some((k.clamp(2, 8), ns))
+    })
+}
+
+/// Each lap's length in units of `LAB_LAP_NS` (`LAB_LAP_SHAPE=1,1,9`:
+/// warm-up, a short lap and a long one, so that (long - short) cancels any
+/// fixed cost per lap, the clock read's included). Equal laps by default.
+fn lap_shape(k: usize) -> [usize; 8] {
+    static S: std::sync::OnceLock<[usize; 8]> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        let mut out = [1usize; 8];
+        if let Ok(s) = std::env::var("LAB_LAP_SHAPE") {
+            for (j, v) in s.split(',').take(8).enumerate() {
+                out[j] = v.trim().parse().unwrap_or(1).max(1);
+            }
+        }
+        let _ = k;
+        out
     })
 }
 
@@ -836,13 +856,18 @@ fn run(
             // recorded as its own workload `name.lapj`, so the recording's
             // one-sample-per-workload-per-round layout is kept.
             let n = ((lap_ns / per).round() as usize).max(1);
+            let shape = lap_shape(k);
             for j in 0..k {
-                t.rungs.insert(format!("{}.lap{j}", w.name), crate::timing::RungMeta { n, overhead_ns: 0.0 });
+                t.rungs.insert(
+                    format!("{}.lap{j}", w.name),
+                    crate::timing::RungMeta { n: n * shape[j], overhead_ns: 0.0 },
+                );
             }
             if counts.is_none() {
-                eprintln!("  {:>16} {n:>12} iters a lap x {k}  ~{:>8.0} us a lap", w.name, n as f64 * per / 1e3);
+                eprintln!("  {:>16} {n:>12} iters a unit, shape {:?}  ~{:>8.0} us a unit", w.name, &shape[..k], n as f64 * per / 1e3);
             }
-            this.push((n, format!("{}.lap0", w.name), k as f64 * n as f64 * per, 0));
+            let units: usize = shape[..k].iter().sum();
+            this.push((n, format!("{}.lap0", w.name), units as f64 * n as f64 * per, 0));
             rungs.push(this);
             continue;
         }
@@ -1060,7 +1085,12 @@ fn run(
             // pays it *outside* the timer and the timed batch comes out
             // warm. Sweep the prefix and whatever decays is the cold start.
             if let Some((k, _)) = lap_mode() {
-                let job = ws[i].time_laps(*count, k);
+                let shape = lap_shape(k);
+                let mut lap_counts = [0usize; 8];
+                for j in 0..k {
+                    lap_counts[j] = *count * shape[j];
+                }
+                let job = ws[i].time_laps(lap_counts, k);
                 let laps = job();
                 for (j, &li) in lap_idx[i].iter().enumerate() {
                     t.time(li, || laps[j]);
