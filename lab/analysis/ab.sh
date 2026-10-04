@@ -1,7 +1,10 @@
 #!/bin/sh
 # Context (A) against long samples (B1/B3/B10) against keep-alive + probe (C), in six compositions,
 # two passes, shuffled within each pass. Run from lab/ with CPU 2 reserved. BIN is the build to use.
-# Known answers: slow_cpu/slow_cpu2 = 100/64 links (exact 1.5625), slow_cpu3/slow_cpu4 = 3810000/2286000 (exact 5/3).
+# Known answers: slow_cpu3/slow_cpu4 = 3810000/2286000 links, exactly 5/3, since the per-call overhead is
+# negligible at that length. slow_cpu/slow_cpu2 = 100/64 links is NOT exact: each call also pays a fixed
+# 2.8-3.8 ns (1.2-1.6 links), so the ratio is about 1.54. Score it as R(slow_cpu/canary) - R(slow_cpu2/canary)
+# = 36 links (good to 0.1-0.3%), or add slow_cpu5 at 136 links and use (t136 - t100)/(t100 - t64) = 1.
 BIN=${BIN:-target/release/lab}
 OUT=${OUT:-day/collect/ab}
 export LAB_RUNGS=top2 LAB_SUBSETS=full LAB_PASSES=1 LAB_CAP_S=100000
