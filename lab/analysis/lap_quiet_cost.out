@@ -1,0 +1,58 @@
+40 of 40 recordings present
+
+5. COST per stopped trial: median set wall time in seconds (preparation included) / median rounds;
+   for exact answers, trials whose error exceeds their own threshold. Pooled over passes; c0 (c1 for the slow pair).
+
+  strict 2.5%, family 500 (tinyset old vs new)
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.21s    20r  0/100     0.97s    27r   0/32     4.18s    36r   0/17     8.78s    27r   0/14    18.17s    15r   0/17
+  slow pair              0.46s     8r   0/99     0.46s     8r   0/79     0.64s     8r   0/58     2.62s    11r   0/36     8.67s    11r   0/20
+  f64_sin/canary         0.10s    11r            0.31s    11r            1.05s    11r            3.07s    11r            7.69s     8r
+  parse_u64/canary       0.29s    15r            0.74s    13r            2.10s    11r            6.50s    11r           15.71s     8r
+  btree_miss/canary      0.61s    81r            0.44s    20r            1.05s    15r            4.08s    20r           10.28s    15r
+  warm_dst/canary        0.09s    11r            0.26s    11r            0.88s    11r            2.60s    11r            6.34s     8r
+
+  strict 1%, family 10
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.29s    27r   0/68     2.09s    62r   1/15     9.39s    81r    0/7    16.14s    47r    0/8    23.94s    20r   1/10
+  slow pair              0.46s     8r  0/101     0.46s     8r   0/79     0.64s     8r   0/56     2.62s    11r   1/35     6.32s     8r   0/21
+  f64_sin/canary         0.10s    11r            0.28s    10r            0.76s     8r            2.28s     8r            7.69s     8r
+  parse_u64/canary       0.53s    27r            0.86s    15r            2.09s    11r            6.50s    11r           15.71s     8r
+  btree_miss/canary      1.66s   222r            0.59s    27r            1.89s    27r            5.52s    27r           10.31s    15r
+  warm_dst/canary        0.06s     8r            0.19s     8r            0.87s    11r            1.93s     8r            6.30s     8r
+
+  strict 1%, family 1500
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.66s    62r   0/31     3.83s   106r    0/7    18.93s   159r    0/2    29.34s    81r    0/3    50.29s    42r    0/4
+  slow pair              0.64s    11r   0/77     0.64s    11r   0/65     0.88s    11r   0/41     3.58s    15r   0/22    11.82s    15r   0/13
+  f64_sin/canary         0.19s    20r            0.43s    15r            1.05s    11r            4.28s    15r           10.57s    11r
+  parse_u64/canary       1.21s    62r            2.07s    36r            2.97s    15r           11.82s    20r           21.59s    11r
+  btree_miss/canary      5.85s   776r            1.03s    47r            4.34s    62r           16.54s    81r           32.05s    47r
+  warm_dst/canary        0.12s    15r            0.47s    20r            1.60s    20r            3.61s    15r            8.71s    11r
+
+  strict 5%, family 10
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.09s     8r  1/232     0.37s    11r   0/94     1.28s    11r   1/58     2.90s     8r   0/43     9.57s     8r   0/30
+  slow pair              0.46s     8r  0/113     0.46s     8r   0/84     0.64s     8r   0/61     1.91s     8r   1/42     6.31s     8r   0/25
+  f64_sin/canary         0.08s     8r            0.23s     8r            0.76s     8r            2.26s     8r            7.52s     8r
+  parse_u64/canary       0.16s     8r            0.46s     8r            1.53s     8r            4.74s     8r           15.37s     8r
+  btree_miss/canary      0.11s    15r            0.18s     8r            0.56s     8r            1.64s     8r            5.47s     8r
+  warm_dst/canary        0.06s     8r            0.19s     8r            0.64s     8r            1.92s     8r            6.29s     8r
+
+  rough 20%, one sigma (tinyset vs std)
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.09s     8r 121/281     0.28s     8r 55/126     0.94s     8r  38/75     2.75s     8r  24/50     9.57s     8r  17/30
+  slow pair              0.46s     8r 40/114     0.46s     8r  35/84     0.64s     8r  19/62     1.91s     8r  21/42     6.31s     8r   9/25
+  f64_sin/canary         0.08s     8r            0.23s     8r            0.76s     8r            2.26s     8r            7.52s     8r
+  parse_u64/canary       0.16s     8r            0.46s     8r            1.55s     8r            4.74s     8r           15.46s     8r
+  btree_miss/canary      0.06s     8r            0.17s     8r            0.56s     8r            1.64s     8r            5.48s     8r
+  warm_dst/canary        0.06s     8r            0.19s     8r            0.64s     8r            1.92s     8r            6.28s     8r
+
+  rough 5%, one sigma
+                                          l1                      l3                     l10                     l30                    l100
+  fast pair              0.09s     8r 121/281     0.28s     8r 55/126     0.94s     8r  38/75     2.75s     8r  24/50     9.57s     8r  17/30
+  slow pair              0.46s     8r 40/114     0.46s     8r  35/84     0.64s     8r  19/62     1.91s     8r  21/42     6.31s     8r   9/25
+  f64_sin/canary         0.08s     8r            0.23s     8r            0.76s     8r            2.26s     8r            7.52s     8r
+  parse_u64/canary       0.16s     8r            0.46s     8r            1.55s     8r            4.74s     8r           15.46s     8r
+  btree_miss/canary      0.06s     8r            0.17s     8r            0.56s     8r            1.64s     8r            5.48s     8r
+  warm_dst/canary        0.06s     8r            0.19s     8r            0.64s     8r            1.92s     8r            6.28s     8r
