@@ -1631,17 +1631,47 @@ fn ratio_independent(rs: &[PairRound]) -> f64 {
 fn ratio_paired(rs: &[PairRound]) -> f64 {
     use std::collections::BTreeMap;
     let mut cells: BTreeMap<(usize, usize), Vec<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<(usize, usize), (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for r in rs {
         cells.entry((r.na, r.nb)).or_default().push(r.ta.ln() - r.tb.ln());
+        let e = raw.entry((r.na, r.nb)).or_default();
+        e.0.push(r.ta);
+        e.1.push(r.tb);
     }
     let ns: Vec<usize> = cells.keys().map(|k| k.0).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let ms: Vec<usize> = cells.keys().map(|k| k.1).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     if ns.len() < 2 || ms.len() < 2 || cells.len() < 3 {
         return f64::NAN;
     }
+    // How each cell is summarised (`LAB_PAIR_EST`):
+    // - `log` (default): trimmed mean of the log ratios;
+    // - `rtm`: log of the ratio of each side's trimmed mean;
+    // - `logvar`: the log-ratio mean plus half its winsorised variance.
+    let est = pair_est();
     let d: BTreeMap<(usize, usize), (f64, f64)> = cells
         .iter()
-        .map(|(k, v)| (*k, (trimmed_mean(v, DEFAULT_TRIM), v.len() as f64)))
+        .map(|(k, v)| {
+            let m = match est {
+                1 => {
+                    let (a, b) = &raw[k];
+                    trimmed_mean(a, DEFAULT_TRIM).ln() - trimmed_mean(b, DEFAULT_TRIM).ln()
+                }
+                2 => {
+                    let m = trimmed_mean(v, DEFAULT_TRIM);
+                    let mut w = v.clone();
+                    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let c = ((w.len() as f64) * DEFAULT_TRIM).floor() as usize;
+                    let c = c.min((w.len().max(1) - 1) / 2);
+                    let (lo, hi) = (w[c], w[w.len() - 1 - c]);
+                    let x: Vec<f64> = v.iter().map(|&y| y.clamp(lo, hi)).collect();
+                    let mu = x.iter().sum::<f64>() / x.len() as f64;
+                    let var = x.iter().map(|y| (y - mu) * (y - mu)).sum::<f64>() / (x.len().max(2) - 1) as f64;
+                    m + var / 2.0
+                }
+                _ => trimmed_mean(v, pair_log_trim()),
+            };
+            (*k, (m, v.len() as f64))
+        })
         .collect();
     let mut al: BTreeMap<usize, f64> = ns.iter().map(|&x| (x, 0.0)).collect();
     let mut be: BTreeMap<usize, f64> = ms.iter().map(|&y| (y, 0.0)).collect();
@@ -1680,6 +1710,23 @@ fn ratio_paired(rs: &[PairRound]) -> f64 {
     } else {
         f64::NAN
     }
+}
+
+/// Which cell summary [`ratio_paired`] uses: 0 `log`, 1 `rtm`, 2 `logvar`
+/// (`LAB_PAIR_EST`).
+fn pair_est() -> u8 {
+    static E: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *E.get_or_init(|| match std::env::var("LAB_PAIR_EST").as_deref() {
+        Ok("rtm") => 1,
+        Ok("logvar") => 2,
+        _ => 0,
+    })
+}
+
+/// Trim for the log-ratio cells (`LAB_PAIR_LOGTRIM`, default [`DEFAULT_TRIM`]).
+fn pair_log_trim() -> f64 {
+    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("LAB_PAIR_LOGTRIM").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_TRIM))
 }
 
 /// Fewest rounds in a block of the ratio's error bar.
