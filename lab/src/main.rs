@@ -433,6 +433,39 @@ fn lap_mode() -> Option<(usize, f64)> {
     })
 }
 
+/// The baseline to sandwich between each other member of its group
+/// (`LAB_SANDWICH`).
+fn sandwich_name() -> Option<String> {
+    std::env::var("LAB_SANDWICH").ok().filter(|s| !s.is_empty())
+}
+
+/// How many samples a workload contributes per round: its group's size for
+/// the sandwiched baseline (one more than the candidates it sits between),
+/// otherwise one.
+fn sandwich_copies(name: &str, ws: &[Arc<Workload>]) -> usize {
+    if sandwich_name().as_deref() != Some(name) {
+        return 1;
+    }
+    let spec = std::env::var("LAB_GROUPS").unwrap_or_default();
+    spec.split(';')
+        .map(|g| g.split(',').map(str::trim).filter(|n| ws.iter().any(|w| w.name == *n)).collect::<Vec<_>>())
+        .find(|g| g.contains(&name))
+        .map(|g| g.len())
+        .unwrap_or(1)
+}
+
+/// The recording names for a workload's laps: `name.lapj`, or
+/// `name#c.lapj` for each copy of a sandwiched baseline.
+fn lap_names(name: &str, k: usize, copies: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(k * copies);
+    for c in 0..copies {
+        for j in 0..k {
+            out.push(if copies > 1 { format!("{name}#{c}.lap{j}") } else { format!("{name}.lap{j}") });
+        }
+    }
+    out
+}
+
 /// Each lap's length in units of `LAB_LAP_NS` (`LAB_LAP_SHAPE=1,1,9`:
 /// warm-up, a short lap and a long one, so that (long - short) cancels any
 /// fixed cost per lap, the clock read's included). Equal laps by default.
@@ -857,11 +890,9 @@ fn run(
             // one-sample-per-workload-per-round layout is kept.
             let n = ((lap_ns / per).round() as usize).max(1);
             let shape = lap_shape(k);
-            for j in 0..k {
-                t.rungs.insert(
-                    format!("{}.lap{j}", w.name),
-                    crate::timing::RungMeta { n: n * shape[j], overhead_ns: 0.0 },
-                );
+            for name in lap_names(w.name, k, sandwich_copies(w.name, &ws)) {
+                let j: usize = name.rsplit("lap").next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                t.rungs.insert(name, crate::timing::RungMeta { n: n * shape[j], overhead_ns: 0.0 });
             }
             if counts.is_none() {
                 eprintln!("  {:>16} {n:>12} iters a unit, shape {:?}  ~{:>8.0} us a unit", w.name, &shape[..k], n as f64 * per / 1e3);
@@ -905,10 +936,19 @@ fn run(
     // keeps a hash lookup out of the measuring loop.
     let idx = t.open(&out);
     // In lap mode, the recording index of each workload's laps, in order.
-    let lap_idx: Vec<Vec<u8>> = match lap_mode() {
+    // Per workload, per copy (a sandwiched baseline runs several times a
+    // round), per lap.
+    let lap_idx: Vec<Vec<Vec<u8>>> = match lap_mode() {
         Some((k, _)) => ws
             .iter()
-            .map(|w| (0..k).map(|j| idx.get(&format!("{}.lap{j}", w.name)).copied().unwrap_or(0)).collect())
+            .map(|w| {
+                let copies = sandwich_copies(w.name, &ws);
+                let names = lap_names(w.name, k, copies);
+                names
+                    .chunks(k)
+                    .map(|c| c.iter().map(|n| idx.get(n).copied().unwrap_or(0)).collect())
+                    .collect()
+            })
             .collect(),
         None => Vec::new(),
     };
@@ -1064,14 +1104,27 @@ fn run(
                 gs.swap(i, (perm >> 33) as usize % (i + 1));
             }
             order.clear();
+            let base = sandwich_name().and_then(|b| ws.iter().position(|w| w.name == b));
             for mut g in gs {
                 for i in (1..g.len()).rev() {
                     perm = step(perm);
                     g.swap(i, (perm >> 33) as usize % (i + 1));
                 }
-                order.extend(g);
+                match base {
+                    // B C1 B C2 ... B: every candidate between two samples
+                    // of the baseline (`LAB_SANDWICH`).
+                    Some(b) if g.contains(&b) && g.len() > 1 => {
+                        for &c in g.iter().filter(|&&c| c != b) {
+                            order.push(b);
+                            order.push(c);
+                        }
+                        order.push(b);
+                    }
+                    _ => order.extend(g),
+                }
             }
         }
+        let mut seen_in_round = vec![0usize; ws.len()];
         for &i in order.iter() {
             seed = step(seed);
             let (count, _, _, ridx) = &rungs[i][pick[i]];
@@ -1092,7 +1145,9 @@ fn run(
                 }
                 let job = ws[i].time_laps(lap_counts, k);
                 let laps = job();
-                for (j, &li) in lap_idx[i].iter().enumerate() {
+                let copy = seen_in_round[i].min(lap_idx[i].len() - 1);
+                seen_in_round[i] += 1;
+                for (j, &li) in lap_idx[i][copy].iter().enumerate() {
                     t.time(li, || laps[j]);
                 }
                 held[i][pick[i]] += cost_ns[i][pick[i]];
