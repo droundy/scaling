@@ -3,6 +3,9 @@
 # order, members likewise), so a pair shares a short group round with other groups' work between.
 # Suites c0, c5 x lap configurations (below) x two passes. Run from lab/ unquiesced, under the shared lock.
 BIN=${BIN:-target/release/lab}
+# The shared timing lock. /run/quiet-bench.cpus exists only while quiet-bench holds a reservation,
+# and only root can create it, so unquiet runs use a lock anyone can create.
+LOCK=${LOCK:-/tmp/scaling-timing.lock}
 OUT=${OUT:-day/collect/laps-groups}
 export LAB_FP_HARNESS=1 LAB_SUBSETS=full LAB_PASSES=1 LAB_CAP_S=100000
 export LAB_SLOW_ITERS=100 LAB_SLOW2_ITERS=64 LAB_SLOW3_ITERS=3810000 LAB_SLOW4_ITERS=2286000
@@ -29,7 +32,7 @@ for pass in 0 1; do
   while read c l; do
     set -- $(cfg $l); d=$1; shift
     echo "pass $pass comp $c lap $l start $(date +%T)"
-    env "$@" flock /run/quiet-bench.cpus $BIN collect $d $OUT/$l/c$c/p$pass $(comp $c) 2>&1 | grep -E "rounds in"
+    env "$@" flock $LOCK $BIN collect $d $OUT/$l/c$c/p$pass $(comp $c) 2>&1 | grep -E "rounds in"
   done < /tmp/lapg-order-$$-$pass
 done
 echo "all done $(date +%T)"
