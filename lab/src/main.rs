@@ -957,6 +957,26 @@ fn run(
         .and_then(|v| v.parse::<u64>().ok())
         .map(|s| s * 1_000_000_000)
         .unwrap_or(CAP_PER_RUNG.as_nanos() as u64);
+    // `LAB_GROUPS=a,b,c;d,e`: workloads that run contiguously within each
+    // round. Any workload not named is a group of its own.
+    let groups: Vec<Vec<usize>> = match std::env::var("LAB_GROUPS") {
+        Ok(spec) if !spec.trim().is_empty() => {
+            let mut seen = vec![false; ws.len()];
+            let mut gs: Vec<Vec<usize>> = spec
+                .split(';')
+                .map(|g| {
+                    g.split(',')
+                        .filter_map(|n| ws.iter().position(|w| w.name == n.trim()))
+                        .inspect(|&i| seen[i] = true)
+                        .collect::<Vec<usize>>()
+                })
+                .filter(|g| !g.is_empty())
+                .collect();
+            gs.extend((0..ws.len()).filter(|&i| !seen[i]).map(|i| vec![i]));
+            gs
+        }
+        _ => Vec::new(),
+    };
     let mut last_ns: u64 = 0;
     let mut last_touch = Instant::now();
     let mut probe_ref: u64 = 0;
@@ -1008,6 +1028,24 @@ fn run(
         for i in (1..ws.len()).rev() {
             perm = step(perm);
             order.swap(i, (perm >> 33) as usize % (i + 1));
+        }
+        if !groups.is_empty() {
+            // Groups run contiguously, as a crate group's round does: the
+            // groups in a fresh random order, and each group's members in a
+            // fresh random order (`LAB_GROUPS`).
+            let mut gs = groups.clone();
+            for i in (1..gs.len()).rev() {
+                perm = step(perm);
+                gs.swap(i, (perm >> 33) as usize % (i + 1));
+            }
+            order.clear();
+            for mut g in gs {
+                for i in (1..g.len()).rev() {
+                    perm = step(perm);
+                    g.swap(i, (perm >> 33) as usize % (i + 1));
+                }
+                order.extend(g);
+            }
         }
         for &i in order.iter() {
             seed = step(seed);
