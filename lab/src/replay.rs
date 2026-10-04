@@ -1628,8 +1628,89 @@ fn ratio_independent(rs: &[PairRound]) -> f64 {
 /// linear least squares on cell means, solved by backfitting, so nothing is
 /// extrapolated. `exp(alpha)` and `exp(beta)` are then each workload's batch
 /// times up to one shared constant, which cancels in the ratio of slopes.
+/// Rounds to keep after screening each side for contamination: a sample is
+/// flagged when it sits more than `k` robust sds (1.4826 MAD) from the
+/// median of its own rung, among the samples in the same window of rounds.
+/// A round is dropped if either side is flagged (`LAB_SCREEN_K`, default
+/// 3; `LAB_SCREEN_W`, rounds per window, default 64).
+fn screen(rs: &[PairRound]) -> Vec<PairRound> {
+    use std::collections::BTreeMap;
+    let k = std::env::var("LAB_SCREEN_K").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0f64);
+    let w = std::env::var("LAB_SCREEN_W").ok().and_then(|v| v.parse().ok()).unwrap_or(64usize).max(8);
+    let med = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let mut out = Vec::with_capacity(rs.len());
+    for chunk in rs.chunks(w) {
+        // Per side and rung: (median, robust sd) within this window.
+        let mut sa: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+        let mut sb: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+        for r in chunk {
+            sa.entry(r.na).or_default().push(r.ta);
+            sb.entry(r.nb).or_default().push(r.tb);
+        }
+        let centre = |m: BTreeMap<usize, Vec<f64>>| -> BTreeMap<usize, (f64, f64)> {
+            m.into_iter()
+                .map(|(n, mut v)| {
+                    let c = med(&mut v);
+                    let mut d: Vec<f64> = v.iter().map(|x| (x - c).abs()).collect();
+                    (n, (c, 1.4826 * med(&mut d)))
+                })
+                .collect()
+        };
+        let (ca, cb) = (centre(sa), centre(sb));
+        if let Some(q) = std::env::var("LAB_SCREEN_Q").ok().and_then(|v| v.parse::<f64>().ok()) {
+            // Quantile form: keep a round only if each side sits inside its
+            // own central [q, 1-q] band, per rung, within the window.
+            let mut qa: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            let mut qb: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for r in chunk {
+                qa.entry(r.na).or_default().push(r.ta);
+                qb.entry(r.nb).or_default().push(r.tb);
+            }
+            let band = |m: BTreeMap<usize, Vec<f64>>| -> BTreeMap<usize, (f64, f64)> {
+                m.into_iter()
+                    .map(|(n, mut v)| {
+                        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let lo = v[((v.len() as f64 - 1.0) * q) as usize];
+                        let hi = v[((v.len() as f64 - 1.0) * (1.0 - q)) as usize];
+                        (n, (lo, hi))
+                    })
+                    .collect()
+            };
+            let (ba, bb) = (band(qa), band(qb));
+            for r in chunk {
+                let (la, ha) = ba[&r.na];
+                let (lb, hb) = bb[&r.nb];
+                if r.ta >= la && r.ta <= ha && r.tb >= lb && r.tb <= hb {
+                    out.push(*r);
+                }
+            }
+            continue;
+        }
+        for r in chunk {
+            let (ma, sda) = ca[&r.na];
+            let (mb, sdb) = cb[&r.nb];
+            let ok_a = sda == 0.0 || (r.ta - ma).abs() <= k * sda;
+            let ok_b = sdb == 0.0 || (r.tb - mb).abs() <= k * sdb;
+            if ok_a && ok_b {
+                out.push(*r);
+            }
+        }
+    }
+    out
+}
+
 fn ratio_paired(rs: &[PairRound]) -> f64 {
     use std::collections::BTreeMap;
+    let screened;
+    let rs = if pair_est() == 3 {
+        screened = screen(rs);
+        &screened[..]
+    } else {
+        rs
+    };
     let mut cells: BTreeMap<(usize, usize), Vec<f64>> = BTreeMap::new();
     let mut raw: BTreeMap<(usize, usize), (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for r in rs {
@@ -1668,6 +1749,10 @@ fn ratio_paired(rs: &[PairRound]) -> f64 {
                     let var = x.iter().map(|y| (y - mu) * (y - mu)).sum::<f64>() / (x.len().max(2) - 1) as f64;
                     m + var / 2.0
                 }
+                3 => trimmed_mean(
+                    v,
+                    std::env::var("LAB_SCREEN_TRIM").ok().and_then(|x| x.parse().ok()).unwrap_or(0.0),
+                ),
                 _ => trimmed_mean(v, pair_log_trim()),
             };
             (*k, (m, v.len() as f64))
@@ -1719,6 +1804,7 @@ fn pair_est() -> u8 {
     *E.get_or_init(|| match std::env::var("LAB_PAIR_EST").as_deref() {
         Ok("rtm") => 1,
         Ok("logvar") => 2,
+        Ok("screen") => 3,
         _ => 0,
     })
 }
