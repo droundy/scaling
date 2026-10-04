@@ -677,6 +677,27 @@ factors for large ones: "twice as fast", not "50% less time".
   its own call: it pays the wake-up in its own time, which is its real cost
   on such a chip. Untested: whether other chips show the effect, and with
   what thresholds. The rule does not need to know.
+- **The log model is biased by 0.1-0.5% between two different fast
+  functions on a quiet machine.** It trims the per-round log differences,
+  and that keeps contamination, such as tick hits or the canary's minority
+  mode, which each side's own distribution would separate. Slopes from each
+  function's own trimmed means came within 0.03% of an exact answer where
+  the log model was off by +0.24-0.54%. The geometric mean is not the
+  cause: it predicts 0.005% at most.
+  - Per-side estimators remove the bias but cost honesty when the clock
+    moves. On the noisy pair recordings, the ratio of trimmed means takes
+    passing clock pairs from 51 to 43 of 54. Screening each side first
+    takes them to 46, and its quiet answer moves by ±0.2% with the
+    screening threshold.
+  - A switch on a test of clock movement was considered and not adopted.
+    Its power grows with run length, so it would pick differently for
+    short and long runs.
+  - **Between like functions the bias cancels.** For a function against
+    its twin (identical code at another address), the log model and the
+    per-side estimator agree to 0.006% or better. So the twins' measured
+    offsets of 0.08-0.15% are code layout, not estimator bias.
+    Before-and-after comparisons are this case.
+  (PROBLEMS.md and `analysis/`; `LAB_PAIR_EST` replays the variants.)
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.
