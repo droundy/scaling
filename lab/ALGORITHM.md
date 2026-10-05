@@ -698,6 +698,26 @@ factors for large ones: "twice as fast", not "50% less time".
     offsets of 0.08-0.15% are code layout, not estimator bias.
     Before-and-after comparisons are this case.
   (PROBLEMS.md and `analysis/`; `LAB_PAIR_EST` replays the variants.)
+- **Code layout differs between separately compiled copies of the same
+  code.** Measured by tinyset at c34310c on its controls: an old version
+  of a set type compared with itself, built as two crates, at a 5% goal.
+  "Flagged" is a cell the suite called changed.
+  - Default build: 105 cells flagged quiet (worst 99.4%), 120 noisy (worst
+    56%). These gaps repeat between runs of one binary, so they are
+    layout.
+  - With `-C llvm-args=-align-all-functions=6`: 9 flagged quiet (worst
+    7.8%), 6 noisy (worst 8.1%), for 7-10% more wall time. Identical code
+    within one crate flags 0 cells in either build.
+  - Adding `-align-all-nofallthru-blocks=5` made it worse: 12 flagged,
+    worst 16.8%.
+  - The residue under function alignment does not repeat. Of the cells
+    off by 3% or more, one appears in both a noisy and a quiet run of the
+    same binary. So it is not a fixed offset per binary. Like the
+    per-process offsets above, it varies between runs by several times the
+    ±1% bars. Not yet separated: machine state from run-to-run noise, which
+    needs one binary run twice in the same conditions.
+  - Padded copies of the timing loop at K offsets (a scratch prototype)
+    work, but gain nothing beyond the flag, so they are dropped.
 - **Quieting moves the operating point.** A pinned core at base clock drives
   memory more slowly, so `copy_64mb` costs 6.4 ms quiet and 4.5 ms not. A
   number measured quiet does not describe the machine people run on.
@@ -882,6 +902,11 @@ all - measure until the time limit and report whatever accuracy that buys.
   millisecond per call every measurement absorbs some timer interrupts, so
   the result includes a small, roughly constant overhead (about 0.5%) that
   no amount of measuring removes.
+- **Two builds of the same code can differ by far more than the `±`.**
+  Where the compiler places loops changes their speed, by up to tens of
+  percent. Build both sides of a comparison with
+  `RUSTFLAGS="-C llvm-args=-align-all-functions=6"` to remove most of
+  this. A few percent can remain between separately compiled crates.
 - **A quiesced machine is a different machine.** Pinning the clock makes
   results reproducible, but at base clock the memory system runs slower
   too, so the absolute numbers describe the quiet machine, not the one you
