@@ -711,10 +711,12 @@ factors for large ones: "twice as fast", not "50% less time".
   - Adding `-align-all-nofallthru-blocks=5` made it worse: 12 flagged,
     worst 16.8%.
   - The residue under function alignment is a fixed offset per binary,
-    which moves with machine state. Two noisy runs of one binary, 84
-    minutes apart, have 6 and 8 cells off by 3% or more. 4 are common,
-    with the same sign and similar size: `sum_dense_setu64` @0 at +6.3%
-    and +7.2%, and @100 at +8.1% and +6.0%. A quiet run of the same binary
+    which moves with machine state. Three noisy runs of one binary, over
+    two hours, have 6, 8 and 8 cells off by 3% or more. 3 are in all
+    three with the same sign, such as `sum_dense_setu64` @0 at +6.3%,
+    +7.2% and +6.8%. Every cell off in two or more runs keeps its sign
+    (6 of 6). 14 cells are off in at least one run, so some of the residue
+    is sporadic, on top of the fixed part. A quiet run of the same binary
     shares only a few cells with them, so turbo or SMT changes which cells
     are off. Most are tiny functions of about 4 ns, where 6% is about one
     cycle.
