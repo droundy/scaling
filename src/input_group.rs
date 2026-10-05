@@ -15,65 +15,127 @@ use std::time::{Duration, Instant};
 
 /// Never stop *voluntarily* on fewer rounds than this.
 ///
-/// A standard deviation estimated from `k` points is itself uncertain by
-/// roughly `1/sqrt(2(k-1))` - about 32% at `k = 6`, and over 70% at
-/// `k = 2`. Stopping the instant a noisy estimate happens to dip below the
-/// target would systematically favour the runs that got lucky, so we
-/// require a handful of rounds before believing the standard error at all.
-/// [`crate::MIN_SAMPLE_TIME`] does most of the work, and this is the floor
-/// beneath it.
+/// Each round gives one value per alternative, so this is the fewest values
+/// a standard error is ever judged from. The bar is itself an estimate, and
+/// from very few rounds it comes out small by luck often enough that a rule
+/// which keeps looking would stop on exactly those runs. Eight is where the
+/// lab found that stopped happening, and Student's t, which the comparisons
+/// use, charges for whatever uncertainty remains.
 ///
 /// Note the emphasis: this is a floor on *concluding we are done*, not on
-/// reporting. The selection effect it defends against exists only when the
-/// standard error is the thing that stops us. If instead
-/// [`max_time`](crate::Config::with_max_time) runs out first - which is what
-/// happens to a slow function on a short budget - nothing has been selected
-/// for, and the error bar from the three or four rounds we did manage is
-/// honest, wide, and a good deal more use than none at all. So a
-/// budget-forced stop reports whatever standard error it has (and sets
-/// [`Timing::hit_limit`]).
-///
-/// Not a knob: callers control accuracy with [`Config::relative`] and
-/// [`Config::absolute`], and cost with
-/// [`max_time`](crate::Config::with_max_time), and no useful benchmark wants
-/// a different answer here.
-pub(crate) const MIN_SAMPLES: usize = 6;
+/// reporting. If [`max_time`](crate::Config::with_max_time) runs out first,
+/// nothing has been selected for, and the error bar from the rounds we did
+/// manage is reported (with [`Timing::hit_limit`] set).
+pub(crate) const MIN_SAMPLES: usize = 8;
 
-/// How long one round - a batch of every alternative - should take.
-/// Calibration picks the batch size aiming for this.
+/// How much the round count grows between looks at the error bars.
 ///
-/// Long enough that the two `Instant::now()` calls bracketing a round - on
-/// the order of 100 ns together - stay a rounding error against it, at about
-/// 0.1%, which is far below any accuracy worth asking for.
+/// Looking after every round would give a noisy bar more chances to dip
+/// below the goal by luck; growing geometrically costs at most this much
+/// overshoot.
+const CHECK_GROWTH: f64 = 1.3;
+
+/// The fraction trimmed from each end of the per-round values.
 ///
-/// It was 1ms, and shortening it is nearly free. A benchmark stops when the
-/// standard error of the mean is small enough, and that error is set by the
-/// spread *between* samples, which for the benchmarks measured here is
-/// dominated by drift the batch size does not affect - so the same number
-/// of samples is needed either way, and each one costs a tenth as much:
+/// Something occasionally interrupts a sample - a scheduler tick, another
+/// process, the thread moving core - and it always makes the sample slower.
+/// A trimmed mean ignores those few without having to recognise them.
+const TRIM: f64 = 0.25;
+
+/// The base length of one lap, in nanoseconds.
 ///
-/// ```none
-///                    reported at 1ms / at 100us      wall at 1ms / at 100us
-///   empty closure         0.5921 / 0.5933 ns             8.9 / 1.5 ms
-///   ~3ns of arithmetic    2.6236 / 2.6594 ns            13.2 / 1.4 ms
-///   ~2.9us of arithmetic  2880.7 / 2883.6 ns            10.7 / 1.4 ms
-///   noisy 1.7us workload  1753.2 / 1766.1 ns            10.3 / 5.9 ms
-/// ```
+/// Every sample is timed as laps: a warm-up lap that is thrown away, then a
+/// short lap and a long one. The warm-up lap absorbs whatever the previous
+/// sample (or anything else) left behind - a cold cache, a sleeping vector
+/// unit, a clock that has not yet caught up - so the measured laps describe
+/// the function running steadily, whatever ran before it. A millisecond was
+/// enough, on the lab's machine, to make every function's result
+/// independent of its neighbours.
 ///
-/// The answers are unchanged and the run-to-run spread is no worse; only
-/// the cost moves. The exception is a benchmark taking an input,
-/// which report about 20% lower, because a smaller batch means a smaller
-/// input vector to index into - that lookup is harness overhead
-/// rather than the benchmark, so measuring less of it is a gain, but it is
-/// a visible change in what those two report.
-const SAMPLE_TIME: Duration = Duration::from_micros(100);
+/// `SCALING_LAP_UNIT_US` overrides it, for experiments with this prototype.
+fn lap_unit_ns() -> f64 {
+    static UNIT: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *UNIT.get_or_init(|| {
+        std::env::var("SCALING_LAP_UNIT_US")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|&us| us > 0.0)
+            .map_or(1e6, |us| us * 1e3)
+    })
+}
+
+/// A sample's laps, in units: warm-up, short, long.
+///
+/// The estimate is the long lap less the short one, divided by the
+/// difference in their calls. Reading the clock between laps costs something
+/// fixed, and may set off something else (waking a power-gated unit, say);
+/// whatever it is, each lap carries it once, so the subtraction removes it
+/// exactly. The long lap is nine times the short one because the subtraction
+/// costs precision: against simply adding the laps, the variance grows by
+/// (K+1)²/(K-1)², which is 9 at K=2 and 1.56 at K=9.
+const SHAPE: [usize; 3] = [1, 1, 9];
+
+/// A function whose single call lasts this many base units needs no warm-up
+/// call.
+///
+/// The warm-up lap exists to absorb what lingers from whatever ran before:
+/// something that settles within about a base unit. Against a call this long
+/// that is under one part in a hundred, so the warm-up would only double the
+/// cost of a function that is already slow.
+const NO_WARMUP_UNITS: f64 = 100.0;
+
+/// The most a sample's inputs may cost to prepare, in nanoseconds.
+///
+/// Preparing inputs is untimed, but not free: it comes out of the budget, and
+/// every input prepared is held until the sample has run. A function that is
+/// quick to call on an input that is slow to make - a cheap query on a
+/// freshly built vector - would otherwise need a million inputs to fill one
+/// lap. Bounding what a sample may spend making them bounds both the time
+/// and, without having to see inside the inputs, the memory; the lap is
+/// then as long as that allows, which for such a function is shorter than
+/// the base unit.
+const MAX_PREPARATION_NS: f64 = 5e6;
+
+/// The most inputs in the pool an alternative that reuses its input goes
+/// round.
+///
+/// Enough that the inputs a randomised benchmark draws are a fair sample of
+/// what it would see, and that a long enough run of them is not one the
+/// machine can learn the answers to.
+const MAX_POOL_INPUTS: usize = 1 << 16;
+
+/// The most memory such a pool may take: a few megabytes, whatever the
+/// inputs are.
+const MAX_POOL_BYTES: usize = 8 * 1024 * 1024;
+
+/// How many inputs of `input_bytes` each such a pool may hold: the most that
+/// [`MAX_POOL_INPUTS`] and [`MAX_POOL_BYTES`] allow, and always at least one.
+fn pool_limit(input_bytes: usize) -> usize {
+    match input_bytes {
+        0 => MAX_POOL_INPUTS,
+        bytes => MAX_POOL_INPUTS.min(MAX_POOL_BYTES / bytes),
+    }
+    .max(1)
+}
+
+/// The most such a pool may cost to make, in nanoseconds. It is made afresh
+/// every round, and is meant to be a small part of one.
+const MAX_POOL_PREPARATION_NS: f64 = 1e6;
+
+/// Laps at least this many base units long need no subtraction.
+///
+/// A group lap this long exists only because some member's single call is
+/// that long. Whatever reading the clock costs is then a negligible part of
+/// a lap, so the group uses one warm-up lap and one measured lap, which saves
+/// it nine calls of its slowest member every round.
+const LONG_LAP_UNITS: f64 = 10.0;
 
 /// A backstop on the round count, so the vector of samples cannot grow
 /// without bound.
 ///
 /// This is about memory, not about the measurement: `max_time` is the real
-/// budget, and at [`SAMPLE_TIME`] it allows ~100_000 rounds, ten times
-/// below this.
+/// budget, and a round of a few milliseconds at the very least allows fewer
+/// than a hundred thousand rounds in the default one.
 const MAX_SAMPLES: usize = 1_000_000;
 
 /// A generator of inputs, type-erased so that all the alternatives can share
@@ -96,9 +158,13 @@ type GenInput<I> = dyn FnMut() -> I + 'static;
 /// the difference between two alternatives would carry the difference between
 /// two draws as well, and no amount of averaging distinguishes the two.
 trait Alternative<I> {
-    /// Time a batch of iterations over `xs`, returning the total in
-    /// nanoseconds.
-    fn batch(&mut self, xs: &mut [I]) -> f64;
+    /// Time `n` calls over `xs`, returning the total in nanoseconds. With
+    /// fewer than `n` inputs the calls go round them again.
+    fn batch(&mut self, xs: &mut [I], n: usize) -> f64;
+
+    /// Time consecutive laps of `laps[j]` iterations over `xs`, returning
+    /// each lap's time in nanoseconds. See [`time_laps`].
+    fn laps(&mut self, xs: &mut [I], laps: [usize; 3]) -> [f64; 3];
 
     /// Whether [`Alternative::measure`] has anything to compute.
     fn has_metrics(&self) -> bool {
@@ -125,8 +191,12 @@ impl<I, F, O> Alternative<I> for Timed<F>
 where
     F: FnMut(&mut I) -> O,
 {
-    fn batch(&mut self, xs: &mut [I]) -> f64 {
-        time_loop(&mut self.0, xs)
+    fn batch(&mut self, xs: &mut [I], n: usize) -> f64 {
+        time_loop(&mut self.0, xs, n)
+    }
+
+    fn laps(&mut self, xs: &mut [I], laps: [usize; 3]) -> [f64; 3] {
+        time_laps(&mut self.0, xs, laps)
     }
 }
 
@@ -148,8 +218,12 @@ where
     F: FnMut(&mut I) -> O,
     M: FnMut(Option<&I>, O) -> Metrics,
 {
-    fn batch(&mut self, xs: &mut [I]) -> f64 {
-        time_loop(&mut self.f, xs)
+    fn batch(&mut self, xs: &mut [I], n: usize) -> f64 {
+        time_loop(&mut self.f, xs, n)
+    }
+
+    fn laps(&mut self, xs: &mut [I], laps: [usize; 3]) -> [f64; 3] {
+        time_laps(&mut self.f, xs, laps)
     }
 
     fn has_metrics(&self) -> bool {
@@ -191,6 +265,12 @@ pub struct InputGroup<I> {
 struct Entry<I> {
     name: String,
     alt: Box<dyn Alternative<I>>,
+    /// Whether the alternative leaves its input as it found it, so that one
+    /// input can serve many calls. See [`InputGroup::reusing_input`].
+    reuse: bool,
+    /// Whether anyone wants to know if it differs from the baseline, or only
+    /// roughly by how much. See [`InputGroup::uninteresting`].
+    interesting: bool,
 }
 
 impl Config {
@@ -277,6 +357,8 @@ impl<I: 'static> InputGroup<I> {
         self.entries.push(Entry {
             name: name.to_string(),
             alt: Box::new(Timed(f)),
+            reuse: false,
+            interesting: true,
         });
         self
     }
@@ -302,6 +384,8 @@ impl<I: 'static> InputGroup<I> {
                 count: false,
                 _output: std::marker::PhantomData,
             }),
+            reuse: false,
+            interesting: true,
         });
         self
     }
@@ -334,6 +418,8 @@ impl<I: 'static> InputGroup<I> {
                 count: false,
                 _output: std::marker::PhantomData,
             }),
+            reuse: false,
+            interesting: true,
         });
         self
     }
@@ -347,6 +433,57 @@ impl<I: 'static> InputGroup<I> {
             last.alt.count_allocations();
         }
         self
+    }
+
+    /// Say that the alternative added last leaves its input as it found it,
+    /// so that the same input can serve many of its calls.
+    ///
+    /// Without this every call is handed an input of its own, made and
+    /// cloned for it, and a lap of a quick function on an input that is slow
+    /// to make needs a great many of them. With it, the alternative is run on
+    /// a small pool of inputs and its calls go round the pool again and
+    /// again, so a lap costs a pool's worth of inputs however long it is.
+    ///
+    /// A function that takes its input by `&I` cannot change it, and so
+    /// always qualifies. One that takes `&mut I` is promising to put the
+    /// input back as it found it: if it does not, the later calls, and the
+    /// other alternatives which are handed copies of the same inputs, are
+    /// not measured on the input they were meant to be.
+    ///
+    /// What is measured then is the function on inputs that stay in cache,
+    /// with a pattern of inputs short enough for the machine to learn;
+    /// where that matters, leave it off.
+    pub fn reusing_input(mut self) -> Self {
+        if let Some(last) = self.entries.last_mut() {
+            last.reuse = true;
+        }
+        self
+    }
+
+    /// Say that nobody asked whether the alternative added last differs from
+    /// the baseline, only roughly by how much.
+    ///
+    /// It is then measured only until that ratio is known to within
+    /// [`Config::with_rough_error`], is never called a change, and is not
+    /// one of the comparisons the multiple-comparison correction counts. The
+    /// baseline is the one thing that cannot be uninteresting, and for it
+    /// this does nothing.
+    pub fn uninteresting(mut self) -> Self {
+        if let Some(last) = self.entries.last_mut() {
+            last.interesting = false;
+        }
+        self
+    }
+
+    /// How many comparisons with the baseline are tested for a change: the
+    /// alternatives after it that are of interest. This is what the
+    /// multiple-comparison correction counts.
+    pub(crate) fn comparisons(&self) -> u64 {
+        self.entries
+            .iter()
+            .skip(1)
+            .filter(|e| e.interesting)
+            .count() as u64
     }
 
     /// How many alternatives have been added.
@@ -368,24 +505,25 @@ impl<I: 'static> InputGroup<I> {
     ///
     /// # Algorithm
     ///
-    /// 1. **Calibrate.** Find the smallest batch size `unit` for which one
-    ///    batch of every alternative *together* reach `SAMPLE_TIME`,
-    ///    extrapolating multiplicatively from the last probe.
-    /// 2. **Sample.** Each round times a batch of `unit` iterations of every
-    ///    alternative, starting from a rotating position so that none of
-    ///    them keeps a fixed place in the order. Under a fixed order each
-    ///    alternative would sample a fixed and different phase of anything
-    ///    periodic in the machine, and a difference produced that way is
-    ///    indistinguishable from a real one.
-    /// 3. **Stop** once there are at least `MIN_SAMPLES` rounds, every
-    ///    alternative has had [`crate::MIN_SAMPLE_TIME`] of measuring, and
-    ///    *every* difference from the baseline is measured finely enough to
-    ///    detect a change the size of the accuracy goal. Running out of
-    ///    [`max_time`](crate::Config::with_max_time) stops it too, and marks the results.
-    ///
-    /// Each difference is accumulated per round rather than assembled from
-    /// two separately measured means - see [`Timing::std_error`] for why
-    /// that is much the better estimate.
+    /// 1. **Calibrate.** For each alternative, time batches of growing size
+    ///    until one lasts a lap's base unit, and note what one call costs.
+    ///    The group's lap length is the base unit, or the longest single call
+    ///    among its members if that is longer, so that every member's laps
+    ///    last about the same time.
+    /// 2. **Sample.** Each round times every alternative once, in a fresh
+    ///    random order, as laps over the same inputs: a warm-up lap, then a
+    ///    short and a long lap (see [`SHAPE`]). Each sample gives one
+    ///    per-iteration time, the long lap less the short one.
+    /// 3. **Compare** within each round: the log of each candidate's time
+    ///    over the baseline's in that round. A trimmed mean over rounds is
+    ///    the answer, and its standard error over rounds the bar.
+    /// 4. **Stop** at [`MIN_SAMPLES`] rounds or later, looking again each
+    ///    time the round count has grown by [`CHECK_GROWTH`], once *every*
+    ///    comparison would detect a change the size of the goal at the
+    ///    family's Bonferroni level, judged by Student's t. A lone
+    ///    alternative stops when its own time is known to the goal. Running
+    ///    out of [`max_time`](crate::Config::with_max_time) stops it too, and
+    ///    marks the results.
     ///
     /// # Panics
     ///
@@ -413,31 +551,31 @@ impl<I: 'static> InputGroup<I> {
         // A family of `k - 1`: one comparison is reported per alternative
         // beyond the baseline, and nothing outside this set shares the
         // threshold.
-        let z_alpha = Config::z_alpha_for(self.entries.len() as u64 - 1);
+        let family = self.comparisons();
         block_on(
             &clock,
-            self.run_async(&clock, z_alpha, Config::next_comparison_seed()),
+            self.run_async(&clock, family, Config::next_comparison_seed()),
         )
     }
 
     /// The input group sampling loop, which yields to the scheduler between rounds.
     ///
-    /// A round - every alternative once, from a rotated starting position -
-    /// is atomic for the same reason a two-way comparison's is: the
-    /// differences this reports cancel the machine's slow movement only
-    /// because every alternative met that movement within the same round.
+    /// A round - every alternative once - is atomic for the same reason a
+    /// two-way comparison's is: the ratios this reports cancel the machine's
+    /// movement only because every alternative met it within the same short
+    /// round.
     ///
     /// `clock` must be built with `k` times [`max_time`](crate::Config::with_max_time), as the
-    /// caller above does.
+    /// caller above does. `family` is how many comparisons share the
+    /// Bonferroni correction - this set's own `k - 1` when run alone, or the
+    /// whole suite's total when run in one - and `seed` distinguishes its
+    /// random stream from its siblings'.
     ///
     /// # Panics
     ///
     /// If no alternatives were added, or multiple alternatives were added
     /// without a way to clone their shared inputs.
-    /// `z_alpha` is the Bonferroni limit for the family this set belongs to -
-    /// its own `k - 1` when run alone, or the whole suite's total when run in
-    /// one - and `seed` distinguishes its random stream from its siblings'.
-    pub(crate) async fn run_async(self, clock: &Clock, z_alpha: f64, seed: u64) -> Timings {
+    pub(crate) async fn run_async(self, clock: &Clock, family: u64, seed: u64) -> Timings {
         let InputGroup {
             cfg,
             mut make_input,
@@ -458,7 +596,7 @@ impl<I: 'static> InputGroup<I> {
         // is actually handed, and may be left in any state.
         let mut master: Vec<I> = Vec::new();
         let mut xs: Vec<I> = Vec::new();
-        let (unit, probed) = calibrate(
+        let cal = calibrate(
             &mut make_input,
             &mut entries,
             &mut master,
@@ -467,76 +605,88 @@ impl<I: 'static> InputGroup<I> {
             clock,
         )
         .await;
+        release(&mut master);
+        release(&mut xs);
+        let mut iterations = cal.probed.clone();
 
-        let mut own = vec![Running::default(); k];
-        let mut diffs = vec![Running::default(); k];
-        let mut times = vec![0.0f64; k];
-        let mut measured_ns = 0.0;
+        // Laps matched in time across the group: a member whose single call
+        // outlasts the base unit sets the lap length for everyone, so that
+        // every member's laps meet the same stretch of the machine's
+        // behaviour. But not without limit: a quick function grouped with a
+        // slow one is not made to run for as long as the slow one's call, and
+        // beyond ten units the machine's moods are no longer something that
+        // matching could do anything about.
+        let base = lap_unit_ns();
+        let longest = cal.per_call.iter().copied().fold(base, f64::max);
+        let lap_ns = longest.min(LONG_LAP_UNITS * base);
+        let reuse: Vec<bool> = entries.iter().map(|e| e.reuse).collect();
+        let rough: Vec<bool> = entries.iter().map(|e| !e.interesting).collect();
+        let shape = if lap_ns >= LONG_LAP_UNITS * base || !cal.affords(SHAPE, &reuse) {
+            [1, 1, 0]
+        } else {
+            SHAPE
+        };
+        let plans = plan_samples(&cal, &reuse, lap_ns, shape, base);
+        let most_inputs = plans.iter().map(|p| p.inputs).max().unwrap_or(1);
+
+        let mut own: Vec<Vec<f64>> = vec![Vec::new(); k];
+        let mut order: Vec<usize> = (0..k).collect();
+        let mut rng: u64 = (0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1;
         let mut rounds = 0usize;
-        // `MIN_SAMPLE_TIME` is per alternative, and a round buys evidence
-        // about all of them, so the round-total floor is `k` times as large.
-        let floor_ns = k as f64 * MIN_SAMPLE_TIME.as_secs_f64() * 1e9;
-        let mut flip: u64 = 0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let mut next_look = MIN_SAMPLES;
 
         let precise_enough = loop {
-            flip ^= flip << 13;
-            flip ^= flip >> 7;
-            flip ^= flip << 17;
-            let offset = (flip % k as u64) as usize;
-            refill(&mut make_input, &mut master, unit);
-            for step in 0..k {
-                let i = (offset + step) % k;
-                let batch_inputs = if k == 1 {
-                    &mut master
+            refill(&mut make_input, &mut master, most_inputs);
+            shuffle(&mut order, &mut rng);
+            for &i in &order {
+                let plan = &plans[i];
+                // An alternative that leaves its input as it found it is run
+                // on the round's own inputs, and the others, which are handed
+                // a copy to do as they like with, still find them untouched.
+                let timed = if k == 1 || reuse[i] {
+                    entries[i].alt.laps(&mut master[..plan.inputs], plan.laps)
                 } else {
                     clone_into(
-                        &master,
+                        &master[..plan.inputs],
                         &mut xs,
                         clone_input.expect("multiple alternatives need clonable inputs"),
                     );
-                    &mut xs
+                    entries[i].alt.laps(&mut xs, plan.laps)
                 };
-                let t = entries[i].alt.batch(batch_inputs);
-                times[i] = t / unit as f64;
-                measured_ns += t;
-            }
-            for i in 0..k {
-                own[i].push(times[i]);
-                if i > 0 {
-                    diffs[i].push(times[i] - times[0]);
-                }
+                own[i].push(per_iteration(timed, plan.laps));
+                iterations[i] += plan.calls() as u64;
             }
             rounds += 1;
 
             let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
-            let (base_mean, base_std_error) = own[0].mean_and_stderr();
-            // Good enough only when every difference is, since the report
-            // stands behind all of them at once. A lone alternative has no
-            // differences, so it is good enough when its own time is.
-            let all_precise = if k == 1 {
-                cfg.accuracy_met(base_mean, base_std_error)
-            } else {
-                (1..k).all(|i| {
-                    let (_, std_error) = diffs[i].mean_and_stderr();
-                    cfg.comparison_accuracy_met(base_mean, std_error, z_alpha)
-                })
-            };
-            let precise_enough = rounds >= MIN_SAMPLES && measured_ns >= floor_ns && all_precise;
-            if precise_enough || out_of_budget {
-                break precise_enough;
+            if rounds >= next_look || out_of_budget {
+                next_look = ((next_look as f64 * CHECK_GROWTH).ceil() as usize).max(next_look + 1);
+                let precise = rounds >= MIN_SAMPLES && all_precise(&cfg, &own, family, &rough);
+                if precise || out_of_budget {
+                    break precise;
+                }
             }
-            // One whole round per poll, never part of one.
+            // One whole round per poll, never part of one. And nothing held
+            // across the yield: every group in a suite waits here between
+            // its rounds, so inputs kept would add up over all of them
+            // instead of being only the one group's that is running.
+            release(&mut master);
+            release(&mut xs);
             clock.yield_now().await;
         };
 
-        let iterations = probed + rounds as u64 * unit as u64;
+        // Nothing more is run on them, and what follows (the metrics) needs
+        // the memory more than they do.
+        release(&mut master);
+        release(&mut xs);
+
         let mut timings: Vec<Timing> = (0..k)
             .map(|i| {
-                let (ns_per_iter, std_error) = own[i].mean_and_stderr();
+                let (ns_per_iter, std_error, _) = trimmed(&own[i]);
                 Timing {
                     ns_per_iter,
                     std_error,
-                    iterations,
+                    iterations: iterations[i],
                     samples: rounds,
                     hit_limit: !precise_enough,
                     untrustworthy: rounds < MIN_SAMPLES,
@@ -545,13 +695,20 @@ impl<I: 'static> InputGroup<I> {
             })
             .collect();
         let baseline = timings[0];
-        for (timing, diff) in timings[1..].iter_mut().zip(diffs[1..].iter()) {
-            timing.difference = Some(Difference::from_parts(
-                &baseline,
-                timing,
-                z_alpha,
-                diff.mean_and_stderr().1,
-            ));
+        for i in 1..k {
+            timings[i].difference = Some(match paired(&own[i], &own[0]) {
+                Paired::Log(ln, se, df) => {
+                    let limit = if rough[i] {
+                        f64::NAN
+                    } else {
+                        limit(family, df)
+                    };
+                    Difference::from_log_ratio(&baseline, ln, se, limit, rough[i])
+                }
+                Paired::Linear(se, df) => {
+                    Difference::from_parts(&baseline, &timings[i], limit(family, df), se)
+                }
+            });
         }
         let metrics = measure_metrics(&mut entries, &mut make_input, clone_input);
         Timings {
@@ -601,6 +758,14 @@ fn measure_metrics<I>(
     }
 }
 
+/// Drop every input in `xs` and give its memory back.
+///
+/// `clear` alone would keep the allocation, which for a sample of hundreds
+/// of thousands of inputs is the part that matters.
+fn release<I>(xs: &mut Vec<I>) {
+    *xs = Vec::new();
+}
+
 /// Generate a fresh batch of `unit` inputs, reusing `xs`'s allocation.
 fn refill<I>(make_input: &mut GenInput<I>, xs: &mut Vec<I>, unit: usize) {
     xs.clear();
@@ -620,17 +785,203 @@ fn clone_into<I>(master: &[I], xs: &mut Vec<I>, clone_input: &dyn Fn(&I) -> I) {
     xs.extend(master.iter().map(clone_input));
 }
 
-/// Find a batch size whose measured duration, summed over every alternative,
-/// reaches [`SAMPLE_TIME`].
+/// One sample's per-iteration time, from its laps' times in nanoseconds.
 ///
-/// Returns the batch size and how many iterations of each alternative the
-/// probes ran, which count towards [`Timing::iterations`] even though their
-/// timings are discarded.
+/// With a long lap, the long lap less the short one: each lap carries the
+/// same fixed cost of being timed, and the difference has none of it. With
+/// only a short lap (see [`LONG_LAP_UNITS`]), that lap alone.
+fn per_iteration(timed: [f64; 3], laps: [usize; 3]) -> f64 {
+    if laps[2] > laps[1] {
+        (timed[2] - timed[1]) / (laps[2] - laps[1]) as f64
+    } else {
+        timed[1] / laps[1] as f64
+    }
+}
+
+/// Trimmed mean of `v`, the standard error of that trimmed mean, and its
+/// degrees of freedom.
 ///
-/// Calibration yields between probes, so that in a suite it is interleaved
-/// like everything else. Doing it eagerly instead would put every
-/// benchmark's choice of batch size at the very start of the session, in the
-/// one thermal state interleaving exists to stop trusting.
+/// The standard error comes from the winsorised spread (Tukey and
+/// McLaughlin): the values trimmed off each end are replaced by the nearest
+/// kept value, so they still count as being far out without being allowed to
+/// say how far. `NaN` for the error with fewer than two values.
+fn trimmed(v: &[f64]) -> (f64, f64, f64) {
+    let n = v.len();
+    if n == 0 {
+        return (f64::NAN, f64::NAN, 0.0);
+    }
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    let g = ((TRIM * n as f64) as usize).min((n - 1) / 2);
+    let kept = &s[g..n - g];
+    let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+    if n < 2 {
+        return (mean, f64::NAN, 0.0);
+    }
+    let (lo, hi) = (s[g], s[n - g - 1]);
+    let wmean = s.iter().map(|x| x.clamp(lo, hi)).sum::<f64>() / n as f64;
+    let wvar = s
+        .iter()
+        .map(|x| (x.clamp(lo, hi) - wmean).powi(2))
+        .sum::<f64>()
+        / (n - 1) as f64;
+    let h = kept.len();
+    let se = wvar.max(0.0).sqrt() / (h as f64 / n as f64 * (n as f64).sqrt());
+    (mean, se, (h - 1) as f64)
+}
+
+/// The log of `a`'s time over `b`'s, round by round, as [`trimmed`]: its
+/// trimmed mean, standard error and degrees of freedom. Rounds where either
+/// time is not positive (a benchmark the optimiser deleted) are skipped.
+fn log_ratio(a: &[f64], b: &[f64]) -> (f64, f64, f64) {
+    let v: Vec<f64> = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| **x > 0.0 && **y > 0.0)
+        .map(|(x, y)| (x / y).ln())
+        .collect();
+    trimmed(&v)
+}
+
+/// A candidate compared with the baseline, round by round.
+enum Paired {
+    /// The log of their ratio: trimmed mean, standard error, degrees of
+    /// freedom.
+    Log(f64, f64, f64),
+    /// Their difference in nanoseconds: its standard error and degrees of
+    /// freedom (the difference itself is the gap between the two times).
+    /// Only for times that hover around zero - a benchmark the optimiser
+    /// deleted - where a ratio means nothing.
+    Linear(f64, f64),
+}
+
+fn paired(cand: &[f64], base: &[f64]) -> Paired {
+    let (ln, se, df) = log_ratio(cand, base);
+    if df >= 1.0 && se.is_finite() {
+        Paired::Log(ln, se, df)
+    } else {
+        let d: Vec<f64> = cand.iter().zip(base).map(|(a, b)| a - b).collect();
+        let (_, se, df) = trimmed(&d);
+        Paired::Linear(se, df)
+    }
+}
+
+/// The Bonferroni limit for `family` comparisons at `df` degrees of
+/// freedom; the normal one when there is nothing to count freedom from.
+fn limit(family: u64, df: f64) -> f64 {
+    let t = significant::bonferroni_t_limit(family, significant::FWER, df);
+    if t.is_nan() {
+        significant::bonferroni_z_limit(family, significant::FWER)
+    } else {
+        t
+    }
+}
+
+/// Whether every number the report stands behind is known well enough.
+///
+/// A lone alternative: its own time, to the goal. Otherwise every comparison
+/// with the baseline. For one that is of interest: would a change the size of
+/// the goal be detected, at the family's Bonferroni level, by Student's t?
+/// That is the question [`Difference::is_changed`] asks of the change
+/// actually measured. For a `rough` one, which is not tested for a change:
+/// is the ratio known to within [`Config::with_rough_error`], one standard
+/// error either way?
+fn all_precise(cfg: &Config, own: &[Vec<f64>], family: u64, rough: &[bool]) -> bool {
+    let (base_mean, base_se, _) = trimmed(&own[0]);
+    if own.len() == 1 {
+        return cfg.accuracy_met(base_mean, base_se);
+    }
+    let goal_ln = if base_mean > 0.0 {
+        (cfg.comparison_goal_ns(base_mean) / base_mean).ln_1p()
+    } else {
+        cfg.target_rel_error.ln_1p()
+    };
+    let rough_ln = cfg.target_rough_error.ln_1p();
+    own[1..]
+        .iter()
+        .zip(&rough[1..])
+        .all(|(cand, &rough)| match (paired(cand, &own[0]), rough) {
+            (Paired::Log(_, se, _), true) => se <= rough_ln,
+            (Paired::Log(_, se, df), false) => se == 0.0 || limit(family, df) * se <= goal_ln,
+            (Paired::Linear(se, _), true) => se <= cfg.target_rough_error * base_mean.abs(),
+            (Paired::Linear(se, df), false) => {
+                cfg.comparison_accuracy_met(base_mean, se, limit(family, df))
+            }
+        })
+}
+
+/// Put `order` into a fresh uniformly random order, Fisher-Yates, drawing
+/// from the xorshift state `rng`.
+fn shuffle(order: &mut [usize], rng: &mut u64) {
+    for i in (1..order.len()).rev() {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        order.swap(i, (*rng % (i as u64 + 1)) as usize);
+    }
+}
+
+/// What calibration found out about a group.
+struct Calibration {
+    /// For each alternative, what one call costs in nanoseconds.
+    per_call: Vec<f64>,
+    /// For each alternative, what making one input and cloning it for the
+    /// alternative costs, in nanoseconds, beyond the call itself.
+    prep: Vec<f64>,
+    /// What one input takes in memory: itself, and what it owns.
+    input_bytes: usize,
+    /// How many inputs one sample may use, when each call is to have one of
+    /// its own.
+    input_cap: usize,
+    /// How many iterations each alternative's probes ran, which count
+    /// towards [`Timing::iterations`] even though their timings are
+    /// discarded.
+    probed: Vec<u64>,
+}
+
+/// What one input takes in memory.
+///
+/// Its own size, and what it owns on the heap. The heap is only visible when
+/// the counting allocator is installed, and then it is measured: a few
+/// inputs are made under it (as many as take ten milliseconds, up to eight)
+/// and the largest kept, since inputs need not all be the same size. Without it `size_of` sees an owning type such as `Vec`
+/// as its handle only, so an allowance stands in for the heap behind it:
+/// enough for the smallest allocation, not for what a large input really
+/// takes. Inputs that are large and cheap to run on are not caught then, which
+/// is what the bound on a sample's preparation time is for. An input with no
+/// size and nothing on the heap costs no memory at all.
+fn input_bytes<I>(make_input: &mut GenInput<I>) -> usize {
+    const HEAP_ALLOWANCE: usize = 32;
+    let inline = std::mem::size_of::<I>();
+    if !crate::alloc::installed() {
+        return if inline == 0 {
+            0
+        } else {
+            inline + HEAP_ALLOWANCE
+        };
+    }
+    let started = Instant::now();
+    let mut heap = 0;
+    for _ in 0..8 {
+        let (input, held) = crate::alloc::measure(&mut *make_input);
+        drop(input);
+        heap = heap.max(held.net_allocated_bytes.max(0) as usize);
+        // An input that is slow to make is not one to make eight of.
+        if started.elapsed() > Duration::from_millis(10) {
+            break;
+        }
+    }
+    inline + heap
+}
+
+/// For each alternative, what one call costs in nanoseconds, found by timing
+/// batches of growing size until one lasts a lap's base unit.
+///
+/// Each alternative's first call is run untimed: it is the coldest call
+/// there will be, and believing it would make a first-touch cost look like
+/// the function's own. Calibration yields between probes, so that in a suite
+/// it is interleaved like everything else - and holds no inputs across the
+/// yield, for the reason given at the round's own.
 async fn calibrate<I>(
     make_input: &mut GenInput<I>,
     entries: &mut [Entry<I>],
@@ -638,45 +989,60 @@ async fn calibrate<I>(
     xs: &mut Vec<I>,
     clone_input: Option<&dyn Fn(&I) -> I>,
     clock: &Clock,
-) -> (usize, u64) {
-    // A ceiling on the *total* cost of one probe, setup as well as timing.
-    // Ordinarily the extrapolation below is driven by the timed portion
-    // approaching `SAMPLE_TIME`, but when a benchmark's cost is optimised
-    // away that portion never grows however large `unit` gets - while untimed
-    // input construction does, unboundedly, and before the budget check can
-    // ever run, since the allocation is itself what takes the time. A
-    // hundredth of the budget rather than some large fraction of it, to bound
-    // memory as well: on fast hardware a looser ceiling buys proportionally
-    // more allocation before it fires.
+) -> Calibration {
+    // A ceiling on the *total* cost of one probe, setup as well as timing:
+    // when a benchmark's cost is optimised away its timed part never grows,
+    // while untimed input construction does, unboundedly. Then a ceiling on
+    // the batch that needs no timing at all, for a benchmark and input both
+    // trivial enough for the optimiser to delete the whole batch. Between
+    // them every `I` has some backstop, and none a hard guarantee.
     let probe_ceiling_ns = (clock.budget() / 100)
         .max(Duration::from_millis(5))
         .as_secs_f64()
         * 1e9;
-    // Two more ceilings on `unit`, needing no timing at all, whichever is
-    // smaller. `MAX_CALIBRATION_UNIT` covers what no clock can see: with the
-    // benchmark *and* the input both trivial (`|| {}`, an input of `()`) the
-    // optimiser can delete the whole batch, so the time reads as ~0 however
-    // large `unit` grows. `MAX_CALIBRATION_BYTES` covers an `I` whose
-    // per-clone cost is real but too small for `probe_ceiling_ns` to catch
-    // before millions of copies - an array, a plain struct - since `size_of`
-    // sees a `Vec` or `String` as its inline handle only. That last case is
-    // left to the wall-clock ceiling above, which bounds it only indirectly:
-    // between the three every `I` has some backstop and none has a hard
-    // guarantee, so keep inputs small.
     const MAX_CALIBRATION_UNIT: usize = 2_000_000;
-    const MAX_CALIBRATION_BYTES: usize = 64 * 1024 * 1024;
-    let unit_cap =
-        MAX_CALIBRATION_UNIT.min(MAX_CALIBRATION_BYTES / std::mem::size_of::<I>().max(1));
-    let target = SAMPLE_TIME.as_secs_f64() * 1e9;
-    let mut unit = 1usize;
-    let mut probed = 0u64;
-    loop {
-        let mut timed_ns = 0.0;
-        let probe_start = Instant::now();
-        refill(make_input, master, unit);
-        let singleton = entries.len() == 1;
-        for e in entries.iter_mut() {
-            let batch_inputs = if singleton {
+    // What one sample's inputs may take, per copy: a sample holds the round's
+    // inputs and then a clone of them for the alternative running.
+    const MAX_SAMPLE_BYTES: usize = 16 * 1024 * 1024;
+    // The most calls a probe of an alternative that reuses its inputs makes.
+    // It consumes none, so only this and the clock bound it.
+    const MAX_REUSED_CALLS: usize = 1 << 28;
+    let target = lap_unit_ns();
+    let singleton = entries.len() == 1;
+    let bytes = input_bytes(make_input);
+    let copies = if singleton { 1 } else { 2 };
+    let input_cap = match bytes {
+        0 => MAX_CALIBRATION_UNIT,
+        bytes => MAX_CALIBRATION_UNIT.min(MAX_SAMPLE_BYTES / (bytes * copies)),
+    }
+    .max(1);
+    let mut per_call = vec![0.0; entries.len()];
+    let mut prep = vec![0.0; entries.len()];
+    let mut probed = vec![0u64; entries.len()];
+    for (i, e) in entries.iter_mut().enumerate() {
+        let reuse = e.reuse;
+        let mut n = 1usize;
+        let mut warm = true;
+        // What making one input cost in the last probe, to hold the next to
+        // the same bounds a sample is: the heap behind an input is not
+        // always visible, and what it costs to make is.
+        let mut last_make = 0.0f64;
+        loop {
+            let probe_start = Instant::now();
+            // An alternative that reuses its inputs goes round a pool of
+            // them, so a probe of any length needs no more than the pool.
+            let made = if reuse {
+                let affordable = if last_make > 0.0 {
+                    (MAX_POOL_PREPARATION_NS / last_make) as usize
+                } else {
+                    usize::MAX
+                };
+                n.min(pool_limit(bytes)).min(affordable).max(1)
+            } else {
+                n
+            };
+            refill(make_input, master, made);
+            let batch_inputs = if singleton || reuse {
                 &mut *master
             } else {
                 clone_into(
@@ -686,41 +1052,155 @@ async fn calibrate<I>(
                 );
                 &mut *xs
             };
-            timed_ns += e.alt.batch(batch_inputs);
+            let timed_ns = e.alt.batch(batch_inputs, n);
+            let total_ns = probe_start.elapsed().as_secs_f64() * 1e9;
+            let made_ns = (total_ns - timed_ns).max(0.0);
+            last_make = made_ns / made as f64;
+            probed[i] += n as u64;
+            if std::mem::take(&mut warm) {
+                // The untimed first call: run, and not believed.
+                continue;
+            }
+            let at_limit = if reuse {
+                n >= MAX_REUSED_CALLS
+            } else {
+                n >= input_cap
+            };
+            // Inputs that are slow to make end the growth when making them
+            // has cost as much as a sample may spend on it. A pool is made
+            // once and gone round, so its probes are not bounded this way.
+            let too_dear = !reuse && made_ns >= MAX_PREPARATION_NS;
+            let mut finished = timed_ns >= target
+                || total_ns >= probe_ceiling_ns
+                || at_limit
+                || too_dear
+                || clock.exhausted();
+            if !finished {
+                release(master);
+                release(xs);
+                finished = !clock.yield_now().await;
+            }
+            if finished {
+                per_call[i] = timed_ns / n as f64;
+                prep[i] = last_make;
+                break;
+            }
+            // Grow towards the target, more gently as the timed part nears
+            // it, the whole probe nears its ceiling, or making the inputs
+            // nears what a sample may spend on that.
+            let factor_time = (target / timed_ns.max(1.0)).clamp(2.0, 100.0);
+            let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
+            let factor_make = if reuse {
+                f64::INFINITY
+            } else {
+                (MAX_PREPARATION_NS / made_ns.max(1.0)).max(1.0)
+            };
+            let growth = factor_time.min(factor_safety).min(factor_make);
+            n = ((n as f64 * growth).ceil() as usize)
+                .max(n + 1)
+                .min(if reuse { MAX_REUSED_CALLS } else { input_cap });
         }
-        // Everything the probe cost, generating and cloning included: what
-        // the ceiling below is protecting against is a probe that takes an
-        // age, and it does not matter which part of it was slow.
-        let total_ns = probe_start.elapsed().as_secs_f64() * 1e9;
-        probed += unit as u64;
-        // Accept immediately, without ever retrying at this size, as soon as
-        // *any* ceiling is reached: reaching the target is the ordinary case,
-        // `probe_ceiling_ns` is what saves us when construction dominates, and
-        // `unit_cap` is the timing-blind backstop above. Retrying here would
-        // just re-pay the same large cost for no benefit.
-        if timed_ns >= target
-            || total_ns >= probe_ceiling_ns
-            || unit >= unit_cap
-            || clock.exhausted()
-        {
-            return (unit, probed);
-        }
-        // Before the extrapolation, so `unit` and the probe agree.
-        if !clock.yield_now().await {
-            return (unit, probed);
-        }
-        // Extrapolate from whichever cost is closer to its own ceiling: the
-        // timed portion approaching the target, or the *total* probe cost
-        // approaching `probe_ceiling_ns`. Both factors are ceilings on how
-        // much bigger the *next* probe should be, so growth decelerates
-        // smoothly as either limit is approached instead of overshooting it by
-        // up to 100x.
-        let factor_time = (target / timed_ns.max(1.0)).clamp(2.0, 100.0);
-        let factor_safety = (probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
-        unit = ((unit as f64 * factor_time.min(factor_safety)).ceil() as usize)
-            .max(unit + 1)
-            .min(unit_cap);
     }
+    Calibration {
+        per_call,
+        prep,
+        input_bytes: bytes,
+        input_cap,
+        probed,
+    }
+}
+
+impl Calibration {
+    /// Whether samples laid out as `shape` can be afforded, one input to a
+    /// call, by every alternative that is not given a pool.
+    ///
+    /// Not when the inputs are so large, or so slow to make, that the units
+    /// of a sample would not fit in what a sample may use even at one call
+    /// to a unit. The sample is then the smaller one (see
+    /// [`LONG_LAP_UNITS`] for the other way it gets there): a warm-up and a
+    /// measured lap, which needs two inputs rather than eleven.
+    fn affords(&self, shape: [usize; 3], reuse: &[bool]) -> bool {
+        let units: usize = shape.iter().sum();
+        self.prep.iter().zip(reuse).all(|(&make, &pooled)| {
+            // An alternative given a pool needs one input however long its laps.
+            pooled || (self.input_cap >= units && make * units as f64 <= MAX_PREPARATION_NS)
+        })
+    }
+}
+
+/// How one alternative's sample is laid out.
+struct Plan {
+    /// Calls in each lap.
+    laps: [usize; 3],
+    /// Inputs it is run on: one for each call, or for an alternative that
+    /// reuses its input, the pool the calls go round.
+    inputs: usize,
+}
+
+impl Plan {
+    fn calls(&self) -> usize {
+        self.laps.iter().sum()
+    }
+}
+
+/// Each alternative's laps and inputs, from what calibration found.
+///
+/// A lap lasts `lap_ns` for everyone, which fixes how many calls it holds -
+/// as far as the inputs allow. An alternative that is given one of its own for
+/// every call is held to what `cal` says a sample's inputs may be: so many in
+/// all, and no more than [`MAX_PREPARATION_NS`] to make. One that reuses its
+/// input needs only a pool, and it is held to that pool being small: at most
+/// [`MAX_POOL_INPUTS`], taking at most [`MAX_POOL_BYTES`] and
+/// [`MAX_POOL_PREPARATION_NS`] to make. Its laps are not otherwise limited:
+/// calls on an input it hands back as it found it cost nothing to supply.
+fn plan_samples(
+    cal: &Calibration,
+    reuse: &[bool],
+    lap_ns: f64,
+    shape: [usize; 3],
+    base: f64,
+) -> Vec<Plan> {
+    cal.per_call
+        .iter()
+        .zip(&cal.prep)
+        .zip(reuse)
+        .map(|((&t, &make), &reuse)| {
+            // A call long enough to need no warm-up is not given one.
+            let shape = if t >= NO_WARMUP_UNITS * base {
+                [0, 1, 0]
+            } else {
+                shape
+            };
+            let units: usize = shape.iter().sum();
+            // Floored so that a call the optimiser has deleted cannot ask for
+            // an endless lap.
+            let wanted = (lap_ns / t.max(0.1)).round().max(1.0) as usize;
+            if reuse {
+                let calls = wanted.saturating_mul(units);
+                let by_time = if make > 0.0 {
+                    (MAX_POOL_PREPARATION_NS / make) as usize
+                } else {
+                    usize::MAX
+                };
+                let pool = calls.min(pool_limit(cal.input_bytes)).min(by_time).max(1);
+                Plan {
+                    laps: shape.map(|s| s * wanted),
+                    inputs: pool,
+                }
+            } else {
+                let by_time = if make > 0.0 {
+                    (MAX_PREPARATION_NS / (make * units as f64)) as usize
+                } else {
+                    usize::MAX
+                };
+                let unit = wanted.min(by_time).clamp(1, (cal.input_cap / units).max(1));
+                Plan {
+                    laps: shape.map(|s| s * unit),
+                    inputs: units * unit,
+                }
+            }
+        })
+        .collect()
 }
 
 /// A comparison's results: a [`Timing`] for each candidate, baseline first.

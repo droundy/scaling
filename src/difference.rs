@@ -13,6 +13,15 @@ pub struct Difference {
     pub baseline_ns_per_iter: f64,
     baseline_std_error: f64,
     z_alpha: f64,
+    /// The candidate's time over the baseline's as a natural log, and its
+    /// standard error, when the comparison was measured as a ratio within
+    /// each round. Significance is then judged on this scale, which is the
+    /// one the stopping rule used.
+    log_ratio: Option<(f64, f64)>,
+    /// Whether this comparison was only asked how big the difference is, not
+    /// whether there is one. It is then never called a change, and is shown
+    /// as a size.
+    rough: bool,
 }
 
 impl Difference {
@@ -27,8 +36,16 @@ impl Difference {
     }
 
     /// Whether the difference is large enough to count as a real change.
+    ///
+    /// Never for a comparison that was only asked for a rough size.
     pub fn is_changed(&self) -> bool {
-        crate::significant::is_significant(self.ns, self.std_error, self.z_alpha)
+        if self.rough {
+            return false;
+        }
+        match self.log_ratio {
+            Some((ln, se)) => crate::significant::is_significant(ln, se, self.z_alpha),
+            None => crate::significant::is_significant(self.ns, self.std_error, self.z_alpha),
+        }
     }
 
     /// The smallest difference this result could have called a change.
@@ -63,6 +80,32 @@ impl Difference {
             baseline_ns_per_iter: baseline.ns_per_iter,
             baseline_std_error: baseline.std_error,
             z_alpha,
+            log_ratio: None,
+            rough: false,
+        }
+    }
+
+    /// A difference measured as a ratio within each round: `ln_ratio` is the
+    /// log of the candidate's time over the baseline's and `ln_std_error` its
+    /// standard error. `limit` is the threshold `is_changed` applies to their
+    /// quotient, Student's t for the family at the estimate's degrees of
+    /// freedom. The nanosecond figures are derived from the baseline's time.
+    pub(crate) fn from_log_ratio(
+        baseline: &Timing,
+        ln_ratio: f64,
+        ln_std_error: f64,
+        limit: f64,
+        rough: bool,
+    ) -> Self {
+        let ratio = ln_ratio.exp();
+        Difference {
+            ns: baseline.ns_per_iter * (ratio - 1.0),
+            std_error: baseline.ns_per_iter * ratio * ln_std_error,
+            baseline_ns_per_iter: baseline.ns_per_iter,
+            baseline_std_error: baseline.std_error,
+            z_alpha: limit,
+            log_ratio: Some((ln_ratio, ln_std_error)),
+            rough,
         }
     }
 }
@@ -78,7 +121,9 @@ impl Display for Timing {
             (false, true) => " (untrusted)",
             (false, false) => "",
         };
-        if difference.is_changed() {
+        // A rough comparison says how big, whether or not it is also a change:
+        // it was never asked that.
+        if difference.is_changed() || difference.rough {
             let percent_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
             let (value, error) =
                 value_and_error(difference.percent(), percent_error, f.precision());

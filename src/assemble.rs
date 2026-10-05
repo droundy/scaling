@@ -1469,51 +1469,68 @@ mod pairing {
     /// separately, where it can be.
     #[test]
     fn erasing_the_input_hands_both_alternatives_the_same_value() {
-        // What each alternative was given, round by round.
-        let seen_a: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
-        let seen_b: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
+        // What each alternative was given, keyed by the order the input was
+        // generated in. Alternatives can run different numbers of calls a
+        // round - each runs laps of about the same *time*, so a faster one
+        // runs more - but every round they all start from the same batch, so
+        // whatever two of them both ran on must be one value.
+        type Seen = Rc<RefCell<Vec<(u64, Vec<u64>)>>>;
+        let seen_a: Seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_b: Seen = Rc::new(RefCell::new(Vec::new()));
         let (rec_a, rec_b) = (seen_a.clone(), seen_b.clone());
 
         let cfg = Config::relative(0.5).with_max_time(Duration::from_millis(50));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        let mut generated = 0u64;
         let _ = cfg
             .input_group_make_input(move || {
+                generated += 1;
                 // Varying, so that "they saw the same thing" is a real
                 // claim rather than one a constant would satisfy.
                 let n = 4 + (rng.next() % 16) as usize;
-                ErasedInput::new(
+                ErasedInput::new((
+                    generated,
                     (0..n as u64)
                         .map(|x| x * 7 + n as u64)
                         .collect::<Vec<u64>>(),
-                )
+                ))
             })
             .add_input("a", move |e: &mut ErasedInput| {
-                let v = e.get_mut::<Vec<u64>>();
-                rec_a.borrow_mut().push(v.clone());
+                let (tag, v) = e.get_mut::<(u64, Vec<u64>)>();
+                rec_a.borrow_mut().push((*tag, v.clone()));
                 sum(v)
             })
             .add_input("b", move |e: &mut ErasedInput| {
-                let v = e.get_mut::<Vec<u64>>();
-                rec_b.borrow_mut().push(v.clone());
+                let (tag, v) = e.get_mut::<(u64, Vec<u64>)>();
+                rec_b.borrow_mut().push((*tag, v.clone()));
                 sum(v)
             })
             .run();
 
-        let a = seen_a.borrow();
-        let b = seen_b.borrow();
-        assert!(!a.is_empty(), "the comparison ran at all");
-        assert_eq!(a.len(), b.len(), "both alternatives ran equally often");
+        let a: std::collections::HashMap<u64, Vec<u64>> = seen_a.borrow().iter().cloned().collect();
+        let b: std::collections::HashMap<u64, Vec<u64>> = seen_b.borrow().iter().cloned().collect();
+        assert!(!a.is_empty() && !b.is_empty(), "the comparison ran at all");
         assert!(
-            a.iter().any(|v| v.len() != a[0].len()),
+            a.values()
+                .any(|v| v.len() != a.values().next().unwrap().len()),
             "the generator must actually vary, or this asserts nothing",
         );
-        // The alternatives run in a rotating order, so the *i*th value each
-        // saw is the *i*th one generated for both of them.
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        let shared: Vec<u64> = a.keys().filter(|t| b.contains_key(t)).copied().collect();
+        // Calibration probes each alternative on batches of its own; every
+        // round after that hands the one with fewer calls nothing but inputs
+        // the other also ran on. Rounds far outnumber probes.
+        assert!(
+            2 * shared.len() >= a.len().min(b.len()),
+            "only {} of {} inputs were shared, so the alternatives were \
+             mostly handed different draws",
+            shared.len(),
+            a.len().min(b.len()),
+        );
+        for tag in shared {
             assert_eq!(
-                x, y,
-                "on round {i} the two alternatives were handed different \
-                 inputs, so their difference carries the gap between two \
+                a[&tag], b[&tag],
+                "input {tag} reached the two alternatives as different \
+                 values, so their difference carries the gap between two \
                  draws as well as the one it meant to measure",
             );
         }

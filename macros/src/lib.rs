@@ -61,6 +61,13 @@ struct Args {
     /// to. Empty means none - a plain standalone registration.
     groups: Vec<LitStr>,
     baseline: bool,
+    /// `reuse_input`: one input serves many of the candidate's calls. A
+    /// function that takes `&I` is given that anyway; for one that takes
+    /// `&mut I` it is a promise to put the input back as it found it.
+    reuse_input: bool,
+    /// `uninteresting`: nobody asked whether this candidate differs from the
+    /// baseline, only roughly by how much.
+    uninteresting: bool,
     /// `allocation`: count the allocations of the candidate's run, for a
     /// metrics function to show.
     allocation: bool,
@@ -82,6 +89,8 @@ impl syn::parse::Parse for Args {
             match key.to_string().as_str() {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
+                "reuse_input" => args.reuse_input = true,
+                "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
                 "name" => {
                     input.parse::<syn::Token![=]>()?;
@@ -160,8 +169,8 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, allocation, input, make_input, \
-                             nmin, types(..), sizes(..)",
+                             name, group, baseline, reuse_input, uninteresting, allocation, \
+                             input, make_input, nmin, types(..), sizes(..)",
                         ),
                     ))
                 }
@@ -189,8 +198,10 @@ enum Input {
     /// value to satisfy some generic bound elsewhere, so an ordinary
     /// reborrow at that call site turns the `&mut I` into `&I` when that is
     /// what the signature asks for. Nothing downstream needs to know which
-    /// was written.
-    Ref(Type),
+    /// was written. The flag is whether it was `&mut`: a function that
+    /// takes `&I` cannot change its input, which is what lets one input
+    /// serve many calls.
+    Ref(Type, bool),
     /// `I`, by value: the function consumes its input. Only meaningful
     /// where the caller checks for it - see [`Input::owned_rejected`].
     Owned(Type),
@@ -203,7 +214,7 @@ impl Input {
     fn ty(&self) -> Option<&Type> {
         match self {
             Input::None => None,
-            Input::Ref(ty) | Input::Owned(ty) => Some(ty),
+            Input::Ref(ty, _) | Input::Owned(ty) => Some(ty),
         }
     }
 
@@ -243,7 +254,7 @@ fn input_kind(func: &ItemFn) -> syn::Result<Input> {
         FnArg::Typed(t) => t,
     };
     match &*pat.ty {
-        Type::Reference(r) => Ok(Input::Ref((*r.elem).clone())),
+        Type::Reference(r) => Ok(Input::Ref((*r.elem).clone(), r.mutability.is_some())),
         other => Ok(Input::Owned(other.clone())),
     }
 }
@@ -514,6 +525,17 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
+/// The error for `reuse_input` on a function that does not take its input by
+/// reference.
+fn reuse_input_needs_a_reference(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "`reuse_input` has one input serve many calls, so it needs a function that \
+         takes it by reference: `&I`, which cannot change it, or `&mut I`, which \
+         promises to put it back as it found it",
+    )
+}
+
 fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
     if args.allocation {
         return Err(syn::Error::new(
@@ -574,6 +596,20 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
              input and break the pairing a comparison's accuracy depends on",
         ));
     }
+    if args.uninteresting && args.groups.is_empty() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` is about how a candidate is compared with the baseline of its \
+             group, so it needs a `group` to be a candidate of",
+        ));
+    }
+    if args.reuse_input && matches!(flavour, Flavour::Scaling) {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`reuse_input` is about a benchmark being handed the same input again, and a \
+             scaling benchmark is given a new one at each size",
+        ));
+    }
     if args.baseline && args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -597,7 +633,15 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
         Flavour::Flat => {
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
+            if args.reuse_input && !matches!(kind, Input::Ref(..)) {
+                return Err(reuse_input_needs_a_reference(func.sig.inputs.span()));
+            }
             let repeatable_kind = returns_repeatable_closure(&func.sig);
+            // One input serves many calls when the function cannot change it,
+            // or is told to reuse it. A setup function is handed its input
+            // once, so has nothing to reuse.
+            let reuse = (matches!(kind, Input::Ref(_, false)) || args.reuse_input)
+                && repeatable_kind == Repeatable::No;
             let repeatable = repeatable_kind == Repeatable::NoArg;
             if repeatable && args.make_input.is_some() {
                 return Err(syn::Error::new(
@@ -658,8 +702,14 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 // because Rust would reborrow `&mut I` as `&I` at an
                 // ordinary call site - that coercion only applies to an
                 // actual call expression, which this closure body gives it.
+                (Some(input), None) if !owned && reuse => {
+                    quote!(__adder.add_input_reusing(__name, #input, |__v| #fname(__v)))
+                }
                 (Some(input), None) if !owned => {
                     quote!(__adder.add_input(__name, #input, |__v| #fname(__v)))
+                }
+                (None, Some(gen)) if !owned && reuse => {
+                    quote!(__adder.add_make_input_reusing(__name, #gen, |__v| #fname(__v)))
                 }
                 (None, Some(gen)) if !owned => {
                     quote!(__adder.add_make_input(__name, #gen, |__v| #fname(__v)))
@@ -859,6 +909,40 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
         return Err(e);
     }
+    if args.reuse_input && !matches!(kind, Input::Ref(..)) {
+        return Err(reuse_input_needs_a_reference(func.sig.inputs.span()));
+    }
+    if args.uninteresting && args.baseline {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` says nobody asked whether this candidate differs from the \
+             baseline, and a baseline is the thing the others are compared with, so it \
+             cannot be both",
+        ));
+    }
+    if args.reuse_input && returns_repeatable_closure(&func.sig) != Repeatable::No {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`reuse_input` is about the input a candidate is handed on every call, \
+             and a setup function that returns `impl Fn()/FnMut() -> O` is only ever \
+             handed one",
+        ));
+    }
+    // One input serves many calls when the function cannot change it, or is
+    // told to reuse it. A setup function (`-> impl FnMut() -> O`) is handed its
+    // input once, to build what it returns, and so has nothing to reuse.
+    let reuse = (matches!(kind, Input::Ref(_, false)) || args.reuse_input)
+        && returns_repeatable_closure(&func.sig) == Repeatable::No;
+    let reusing = if reuse {
+        quote!(.reusing_input())
+    } else {
+        quote!()
+    };
+    let reusing = if args.uninteresting {
+        quote!(#reusing .uninteresting())
+    } else {
+        reusing
+    };
     let declared = kind.ty().cloned();
     let output = handed_on_output(&func);
 
@@ -920,10 +1004,10 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             let repeatable = repeatable_call(call.clone());
             quote! {
                 let mut __action = ::core::option::Option::None;
-                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
+                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable) #reusing
             }
         } else {
-            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call))
+            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call) #reusing)
         };
         // The same alternative, in the form that is run once more for the
         // metrics function assembly pairs it with. Which function that is
@@ -961,6 +1045,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                                 },
                             )
                         };
+                        let __set = __set #reusing;
                         if __metrics.counts_allocations() {
                             __set.counting_allocations()
                         } else {
@@ -1021,6 +1106,8 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         ));
     }
     if args.baseline
+        || args.reuse_input
+        || args.uninteresting
         || args.input.is_some()
         || args.make_input.is_some()
         || args.nmin.is_some()
@@ -1131,6 +1218,20 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     allocation_is_for_metrics(&args, &func)?;
+    if args.reuse_input {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`reuse_input` belongs to the `#[scaling::bench]` that takes the input, which \
+             is what reuses it, not to the function that makes it",
+        ));
+    }
+    if args.uninteresting {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` belongs to a `#[scaling::bench]` candidate: it says nobody asked \
+             whether that candidate differs from the baseline",
+        ));
+    }
     if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),

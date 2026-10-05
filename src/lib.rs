@@ -510,7 +510,7 @@ pub mod registry;
 mod run;
 mod scaling;
 mod suite;
-pub(crate) use bench::time_loop;
+pub(crate) use bench::{time_laps, time_loop};
 pub(crate) use suite::Clock;
 #[cfg(test)]
 pub(crate) use suite::{block_on, Machine};
@@ -575,10 +575,33 @@ pub use inventory;
 /// | `make_input = <closure>` | Each iteration is given a value this builds. Not with `input`, and not with `group`. |
 /// | `group = "name"` or `group("a", "b")` | Makes it one candidate of a comparison, in one group or several at once. It is measured on every [`input`](macro@input) of its group that has its input type. |
 /// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
+/// | `uninteresting` | Needs `group`. Nobody asked whether this candidate differs from the baseline, only roughly by how much. It is shown as a size with no verdict, measured only to [`Config::with_rough_error`], and left out of the multiple-comparison count, so the comparisons that are of interest are judged less strictly for it. Not the baseline. |
+/// | `reuse_input` | Needs a function that takes `&I` or `&mut I`, with `input`, `make_input` or `group`. One input serves many of its calls; for `&mut I`, it promises to put the input back as it found it. See below. |
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
 ///
 /// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
-/// standalone benchmark, where the function consumes it. A function returning
+/// standalone benchmark, where the function consumes it.
+///
+/// # Reusing the input
+///
+/// Every call is ordinarily handed an input of its own, made and cloned
+/// before the timing starts. For a quick function on an input that is slow
+/// to make, that is most of the work and most of the memory: a lap of a
+/// millisecond may need hundreds of thousands of inputs held at once. So a
+/// benchmark that takes `&I`, which cannot change its input, is given a small
+/// pool of inputs and its calls go round the pool. So is one marked
+/// `reuse_input`: for a function that takes `&mut I` that is a promise to
+/// leave the input as it found it (a benchmark that reverses a vector twice,
+/// or inserts a key and removes it again). If it does not keep that promise
+/// the calls after the first are not measured on the input they were meant
+/// to be, and neither are the other candidates of its group, which see the
+/// same inputs.
+///
+/// What is measured then is a function on inputs that stay in cache, and a
+/// pool of a few thousand inputs, whose pattern a processor can start to
+/// learn. For a function whose speed depends on the input being new that is
+/// not what you want to know, and taking `&mut I` without `reuse_input`
+/// measures it the other way. A function returning
 /// `impl Fn() -> O` or `impl FnMut() -> O` is a setup-once benchmark: the
 /// function runs once and the closure it returns is what is timed.
 ///
@@ -862,6 +885,7 @@ pub struct Config {
     // which document them.
     pub(crate) target_rel_error: f64,
     pub(crate) target_abs_error: Duration,
+    pub(crate) target_rough_error: f64,
     pub(crate) max_time: Duration,
 }
 
@@ -870,6 +894,7 @@ impl Default for Config {
         Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
+            target_rough_error: 0.1,
             max_time: MAX_BENCH_TIME,
         }
     }
@@ -930,6 +955,21 @@ impl Config {
         self
     }
 
+    /// How well to measure a candidate marked `uninteresting`: stop once the
+    /// ratio of its time to the baseline's is known to within `fraction`
+    /// (`0.1` = 10%), one standard error either way.
+    ///
+    /// Such a candidate is not tested for a change, and so is not part of the
+    /// family the multiple-comparison correction counts; all it is asked for
+    /// is how big the difference is, roughly. A looser goal costs less, and
+    /// a measurement is only as quick as its strictest comparison.
+    ///
+    /// The default is `0.1`, 10%.
+    pub fn with_rough_error(mut self, fraction: f64) -> Self {
+        self.target_rough_error = fraction;
+        self
+    }
+
     /// Give up after roughly `max_time` of wall-clock time even if neither
     /// accuracy goal was reached, setting [`Timing::hit_limit`], keeping every
     /// other setting.
@@ -982,7 +1022,7 @@ impl Config {
     /// Bonferroni correction exists to remove.
     /// `z_alpha` is passed in rather than read from a field: it belongs to
     /// the *family* of comparisons being run, which is a property of the call
-    /// that started them and not of the `Config`. See [`Config::z_alpha_for`].
+    /// that started them and not of the `Config`. See `Config::z_alpha_for`.
     fn comparison_accuracy_met(&self, baseline_ns: f64, std_error: f64, z_alpha: f64) -> bool {
         // Every sample agreed to the limit of the timer's resolution; no
         // further sampling can improve on that. Also keeps the zero-mean
@@ -1011,6 +1051,7 @@ impl Config {
     /// total; removing that machinery removed the guarantee with it. A
     /// [`Suite`] is the path that still has it, by collecting everything
     /// before measuring anything.
+    #[cfg(test)]
     pub(crate) fn z_alpha_for(comparisons: u64) -> f64 {
         significant::bonferroni_z_limit(comparisons, significant::FWER)
     }

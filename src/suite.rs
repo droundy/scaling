@@ -180,7 +180,7 @@ pub struct Suite {
     names: Vec<String>,
     lanes: Vec<crate::assemble::Lane>,
     comparisons: u64,
-    z_alpha: Rc<Cell<f64>>,
+    family: Rc<Cell<u64>>,
 }
 
 impl Config {
@@ -196,9 +196,9 @@ impl Config {
             names: Vec::new(),
             lanes: Vec::new(),
             comparisons: 0,
-            // `NaN` until `run` sets it. Nothing reads it before then, and a
+            // Zero until `run` sets it. Nothing reads it before then, and a
             // suite holding no comparisons never reads it at all.
-            z_alpha: Rc::new(Cell::new(f64::NAN)),
+            family: Rc::new(Cell::new(0)),
         }
     }
 }
@@ -260,6 +260,35 @@ impl Suite {
         self.add_input_group(name, group);
     }
 
+    /// Like [`Suite::add_input`], for a function that leaves its input as it
+    /// found it, so that one clone can serve many calls. See
+    /// [`InputGroup::reusing_input`].
+    #[doc(hidden)]
+    pub fn add_input_reusing<F, I, O>(&mut self, name: &str, input: I, f: F)
+    where
+        F: FnMut(&mut I) -> O + 'static,
+        I: Clone + 'static,
+    {
+        self.add_make_input_reusing(name, move || input.clone(), f)
+    }
+
+    /// Like [`Suite::add_make_input`], for a function that leaves its input
+    /// as it found it. See [`InputGroup::reusing_input`].
+    #[doc(hidden)]
+    pub fn add_make_input_reusing<G, F, I, O>(&mut self, name: &str, make_input: G, f: F)
+    where
+        G: FnMut() -> I + 'static,
+        F: FnMut(&mut I) -> O + 'static,
+        I: 'static,
+    {
+        let group = self
+            .cfg
+            .input_group_make_input_uncloned(make_input)
+            .add_input(name, f)
+            .reusing_input();
+        self.add_input_group(name, group);
+    }
+
     /// Add a scaling benchmark.
     pub fn add_scaling<F, O>(&mut self, name: &str, f: F, nmin: usize)
     where
@@ -303,13 +332,14 @@ impl Suite {
         );
         // After the assertion and before the count, so the Bonferroni limit
         // is taken over what is really going to be measured.
-        // Every alternative beyond the baseline is a chance at a false
-        // positive, and so counts against the plan `run` will set.
-        self.comparisons += k as u64 - 1;
+        // Every alternative beyond the baseline that anyone wants to know
+        // about is a chance at a false positive, and so counts against the
+        // plan `run` will set. One that is uninteresting is not tested.
+        self.comparisons += set.comparisons();
         // Each comparison gets a different seed, so two sitting in one suite
         // do not draw the same order of alternatives round after round.
         let seed = self.comparisons;
-        let z_alpha = self.z_alpha.clone();
+        let family = self.family.clone();
         // The set's own `Config`, not the suite's: it is what `run_async`
         // consults for the accuracy goal, so it must also be what the budget
         // comes from. A set built from a different `Config` than the suite
@@ -330,7 +360,7 @@ impl Suite {
             name,
             clock,
             Box::pin(async move {
-                let results = set.run_async(&mine, z_alpha.get(), seed).await;
+                let results = set.run_async(&mine, family.get(), seed).await;
                 Found::Timing(results)
             }),
         );
@@ -338,10 +368,11 @@ impl Suite {
 
     /// Measure every benchmark, interleaved, and report them together.
     ///
-    /// The Bonferroni limit is worked out here from the count. It can only
-    /// be done at this point after we know how many comparisons will be made.
+    /// The family the Bonferroni correction covers is counted here. It can
+    /// only be done at this point, once we know how many comparisons will be
+    /// made.
     pub(crate) fn run(self) -> Report {
-        self.z_alpha.set(Config::z_alpha_for(self.comparisons));
+        self.family.set(self.comparisons);
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
@@ -1294,9 +1325,9 @@ mod tests {
         );
         assert_eq!(suite.comparisons, 3);
         // The cell every comparison in this suite reads from.
-        let z = suite.z_alpha.clone();
+        let family = suite.family.clone();
         suite.run();
-        assert_eq!(z.get(), Config::z_alpha_for(3));
+        assert_eq!(family.get(), 3);
     }
 
     /// Two suites off one `Config` each correct for themselves alone.
@@ -1315,10 +1346,10 @@ mod tests {
                     .add("a", || 1u64 + 1)
                     .add("b", || 1u64 + 1),
             );
-            let z = suite.z_alpha.clone();
+            let family = suite.family.clone();
             suite.run();
             // One comparison each time, not two accumulating across suites.
-            assert_eq!(z.get(), Config::z_alpha_for(1));
+            assert_eq!(family.get(), 1);
         }
     }
 
@@ -1333,7 +1364,7 @@ mod tests {
     /// results. Nothing else in this file would fail, so check it here.
     #[test]
     fn the_threshold_reaches_every_comparison() {
-        let cfg = Config::default().with_max_time(Duration::from_millis(20));
+        let cfg = Config::default().with_max_time(Duration::from_millis(200));
         let mut suite = cfg.suite();
         suite.add_input_group(
             "pair",
@@ -1886,11 +1917,11 @@ mod comparison_config {
                 .add("a", || (0..32u64).sum::<u64>())
                 .add("b", || (0..32u64).sum::<u64>()),
         );
-        let z = suite.z_alpha.clone();
+        let family = suite.family.clone();
         suite.run();
         assert_eq!(
-            z.get(),
-            Config::z_alpha_for(2),
+            family.get(),
+            2,
             "the limit counts the suite's comparisons, whatever config each \
              comparison group uses",
         );
