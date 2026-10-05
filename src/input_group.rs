@@ -639,7 +639,6 @@ impl<I: 'static> InputGroup<I> {
         };
         let plans = plan_samples(&cal, &reuse, lap_ns, shape, base);
         let most_inputs = plans.iter().map(|p| p.inputs).max().unwrap_or(1);
-
         let mut own: Vec<Vec<f64>> = vec![Vec::new(); k];
         let mut order: Vec<usize> = (0..k).collect();
         let mut rng: u64 = (0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1;
@@ -1132,10 +1131,31 @@ impl Calibration {
     /// measured lap, which needs two inputs rather than eleven.
     fn affords(&self, shape: [usize; 3], reuse: &[bool]) -> bool {
         let units: usize = shape.iter().sum();
-        self.prep.iter().zip(reuse).all(|(&make, &pooled)| {
-            // An alternative given a pool needs one input however long its laps.
-            pooled || (self.input_cap >= units && make * units as f64 <= MAX_PREPARATION_NS)
-        })
+        let make = self.group_prep(reuse);
+        // An alternative given a pool needs one input however long its laps.
+        reuse.iter().all(|&pooled| pooled)
+            || (self.input_cap >= units && make * units as f64 <= MAX_PREPARATION_NS)
+    }
+
+    /// What making an input, and cloning it for an alternative, costs, taken
+    /// once for the whole group.
+    ///
+    /// It is a property of the input, not of any alternative, so every
+    /// alternative that is given a fresh input to a call is held to the same
+    /// figure. Measured separately it would differ from one alternative to
+    /// the next by nothing but noise - the first to be calibrated is the
+    /// coldest and measures the dearest - and the laps it allowed would
+    /// differ with it. Identical code on laps of different lengths does not
+    /// measure alike, and the baseline is calibrated first.
+    ///
+    /// The smallest is used, since what noise and a cold start do is add.
+    fn group_prep(&self, reuse: &[bool]) -> f64 {
+        self.prep
+            .iter()
+            .zip(reuse)
+            .filter(|(_, &pooled)| !pooled)
+            .map(|(&make, _)| make)
+            .fold(f64::INFINITY, f64::min)
     }
 }
 
@@ -1171,11 +1191,12 @@ fn plan_samples(
     shape: [usize; 3],
     base: f64,
 ) -> Vec<Plan> {
+    let group_make = cal.group_prep(reuse);
     cal.per_call
         .iter()
         .zip(&cal.prep)
         .zip(reuse)
-        .map(|((&t, &make), &reuse)| {
+        .map(|((&t, &own_make), &reuse)| {
             // A call long enough to need no warm-up is not given one.
             let shape = if t >= NO_WARMUP_UNITS * base {
                 [0, 1, 0]
@@ -1187,6 +1208,7 @@ fn plan_samples(
             // an endless lap.
             let wanted = (lap_ns / t.max(0.1)).round().max(1.0) as usize;
             if reuse {
+                let make = own_make;
                 let calls = wanted.saturating_mul(units);
                 let by_time = if make > 0.0 {
                     (MAX_POOL_PREPARATION_NS / make) as usize
@@ -1199,6 +1221,7 @@ fn plan_samples(
                     inputs: pool,
                 }
             } else {
+                let make = group_make;
                 let by_time = if make > 0.0 {
                     (MAX_PREPARATION_NS / (make * units as f64)) as usize
                 } else {
