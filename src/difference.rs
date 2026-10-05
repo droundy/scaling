@@ -282,16 +282,19 @@ mod tests {
     }
 
     /// A workload whose cost is drawn at random, so the spread is real
-    /// rather than machine noise.
-    fn variable_cost(seed: u64, iterations: usize) -> impl FnMut() -> u64 {
+    /// rather than machine noise: it waits for a time drawn uniformly from
+    /// nothing to twice `mean_ns`, so that its mean is `mean_ns` and it varies
+    /// as much as its mean. Time, not work, so that a debug build and a
+    /// release build cost the same.
+    fn variable_cost(seed: u64, mean_ns: u64) -> impl FnMut() -> u64 {
         let mut rng = XorShift(seed | 1);
         move || {
-            let n = 1 + (rng.next() as usize % iterations);
-            let mut acc = 0u64;
-            for i in 0..n {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            let wait = Duration::from_nanos(rng.next() % (2 * mean_ns));
+            let start = std::time::Instant::now();
+            while start.elapsed() < wait {
+                std::hint::spin_loop();
             }
-            acc
+            wait.as_nanos() as u64
         }
     }
 
@@ -315,14 +318,19 @@ mod tests {
             let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(4));
             let mut changed = 0u64;
             for r in 0..REPEATS {
-                // `candidate` does `multiple * 5%` more work than `baseline`.
-                let base_iters = 2000;
-                let cand_iters = (base_iters as f64 * (1.0 + 0.05 * multiple)) as usize;
+                // `candidate` takes `multiple * 5%` longer than `baseline`.
+                // Calls of half a millisecond, each varying as much as its
+                // mean: a round averages only a few dozen of them, so a 5%
+                // goal takes tens of rounds to reach and not the floor of
+                // eight. Where the floor decides, a difference the size of
+                // the goal is found far more often than half the time.
+                let base_ns = 500_000;
+                let cand_ns = (base_ns as f64 * (1.0 + 0.05 * multiple)) as u64;
                 let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
                 let c = cfg
                     .input_group()
-                    .add("baseline", variable_cost(seed, base_iters))
-                    .add("candidate", variable_cost(seed, cand_iters))
+                    .add("baseline", variable_cost(seed, base_ns))
+                    .add("candidate", variable_cost(seed, cand_ns))
                     .run();
                 if c.any_changed() {
                     changed += 1;
