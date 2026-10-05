@@ -496,6 +496,9 @@ impl Suite {
                         _ => (c.reg.add_alt)(group, &c.name),
                     };
                 }
+                if input.reg.reuse {
+                    group = group.all_reusing_input();
+                }
                 let name = lane.entry_name(input);
                 self.add_input_group(&name, group);
             }
@@ -1999,6 +2002,7 @@ mod registered_by_hand {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_input,
+            reuse: false,
         }
     }
 
@@ -2434,6 +2438,7 @@ mod versions_and_rivals {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_data,
+            reuse: false,
         }
     }
 
@@ -2446,6 +2451,7 @@ mod versions_and_rivals {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_data,
+            reuse: false,
         }
     }
 

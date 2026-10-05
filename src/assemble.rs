@@ -543,6 +543,7 @@ fn unit_input() -> Named<Input> {
         type_id: TypeId::of::<()>,
         type_name: "()",
         make: || ErasedInput::new(()),
+        reuse: false,
     };
     Named {
         name: String::new(),
@@ -1710,6 +1711,7 @@ pub(crate) mod lane_tests {
             type_id: TypeId::of::<I>,
             type_name: ty,
             make: || ErasedInput::new(()),
+            reuse: false,
         }
     }
 

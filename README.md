@@ -209,11 +209,11 @@ as long as its strictest comparison.
 That makes a quick candidate on a large input expensive: a timed stretch of a
 millisecond may need hundreds of thousands of inputs. A candidate that takes
 `&I` cannot change its input, so it is given a small pool of inputs instead,
-and its calls go round the pool. So is one marked `reuse_input`, which for a
-function that takes `&mut I` is a promise to leave it as it found it. The pool
-is small enough to stay in cache, so such a candidate is timed on warm data; a
-candidate that takes `&mut I` without the promise is timed on a new input every
-call, cold.
+and its calls go round the pool. So is every candidate of an input declared
+`reuse_input`, where those that take `&mut I` promise to leave it as they found
+it. The pool is small enough to stay in cache, so such a candidate is timed on
+warm data; a candidate that takes `&mut I` from any other input is timed on a
+new one every call, cold.
 When the input is large, and the pool and everything else would take too
 much memory, the timed stretch is made shorter instead; installing
 [`Allocator`] lets `scaling` see how much the inputs really take, and

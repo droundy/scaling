@@ -576,7 +576,6 @@ pub use inventory;
 /// | `group = "name"` or `group("a", "b")` | Makes it one candidate of a comparison, in one group or several at once. It is measured on every [`input`](macro@input) of its group that has its input type. |
 /// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
 /// | `uninteresting` | Needs `group`. Nobody asked whether this candidate differs from the baseline, only roughly by how much. It is shown as a size with no verdict, measured only to [`Config::with_rough_error`], and left out of the multiple-comparison count, so the comparisons that are of interest are judged less strictly for it. Not the baseline. |
-/// | `reuse_input` | Needs a function that takes `&I` or `&mut I`, with `input`, `make_input` or `group`. One input serves many of its calls; for `&mut I`, it promises to put the input back as it found it. See below. |
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
 ///
 /// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
@@ -589,21 +588,21 @@ pub use inventory;
 /// to make, that is most of the work and most of the memory: a lap of a
 /// millisecond may need hundreds of thousands of inputs held at once. So a
 /// benchmark that takes `&I`, which cannot change its input, is given a small
-/// pool of inputs and its calls go round the pool. So is one marked
-/// `reuse_input`: for a function that takes `&mut I` that is a promise to
-/// leave the input as it found it (a benchmark that reverses a vector twice,
-/// or inserts a key and removes it again). If it does not keep that promise
-/// the calls after the first are not measured on the input they were meant
-/// to be, and neither are the other candidates of its group, which see the
-/// same inputs.
+/// pool of inputs and its calls go round the pool. So is every candidate of
+/// an input declared `reuse_input` (see [`input`](macro@input)), which lets
+/// candidates that take `&mut I` join in by promising to leave the input as
+/// they found it: a benchmark that reverses a vector twice, or inserts a key
+/// and removes it again.
 ///
 /// What is measured then is a function on inputs that stay in cache, and a
 /// pool of a few thousand inputs, whose pattern a processor can start to
 /// learn. For a function whose speed depends on the input being new that is
-/// not what you want to know, and taking `&mut I` without `reuse_input`
-/// measures it the other way. A function returning
-/// `impl Fn() -> O` or `impl FnMut() -> O` is a setup-once benchmark: the
-/// function runs once and the closure it returns is what is timed.
+/// not what you want to know, and taking `&mut I` from an input that is not
+/// declared `reuse_input` measures it the other way.
+///
+/// A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
+/// setup-once benchmark: the function runs once and the closure it returns is
+/// what is timed.
 ///
 /// The output of a candidate can also be given to a [`metrics`](macro@metrics)
 /// function, to report more than a time.
@@ -656,6 +655,7 @@ pub use scaling_macros::bench_scaling;
 /// | `name = "text"` | What the input is called in the report, in place of the function's name. |
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
+/// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
 /// type must be `Clone`: it is generated for each iteration and cloned for each

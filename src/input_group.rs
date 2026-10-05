@@ -475,6 +475,17 @@ impl<I: 'static> InputGroup<I> {
         self
     }
 
+    /// Say that every alternative added so far leaves its input as it found
+    /// it, as [`InputGroup::reusing_input`] says of one. For a group whose
+    /// input is declared to be reused, which is a promise every candidate
+    /// sharing it makes.
+    pub fn all_reusing_input(mut self) -> Self {
+        for e in &mut self.entries {
+            e.reuse = true;
+        }
+        self
+    }
+
     /// How many comparisons with the baseline are tested for a change: the
     /// alternatives after it that are of interest. This is what the
     /// multiple-comparison correction counts.
