@@ -710,12 +710,14 @@ factors for large ones: "twice as fast", not "50% less time".
     within one crate flags 0 cells in either build.
   - Adding `-align-all-nofallthru-blocks=5` made it worse: 12 flagged,
     worst 16.8%.
-  - The residue under function alignment does not repeat. Of the cells
-    off by 3% or more, one appears in both a noisy and a quiet run of the
-    same binary. So it is not a fixed offset per binary. Like the
-    per-process offsets above, it varies between runs by several times the
-    ±1% bars. Not yet separated: machine state from run-to-run noise, which
-    needs one binary run twice in the same conditions.
+  - The residue under function alignment is a fixed offset per binary,
+    which moves with machine state. Two noisy runs of one binary, 84
+    minutes apart, have 6 and 8 cells off by 3% or more. 4 are common,
+    with the same sign and similar size: `sum_dense_setu64` @0 at +6.3%
+    and +7.2%, and @100 at +8.1% and +6.0%. A quiet run of the same binary
+    shares only a few cells with them, so turbo or SMT changes which cells
+    are off. Most are tiny functions of about 4 ns, where 6% is about one
+    cycle.
   - Padded copies of the timing loop at K offsets (a scratch prototype)
     work, but gain nothing beyond the flag, so they are dropped.
 - **Quieting moves the operating point.** A pinned core at base clock drives
