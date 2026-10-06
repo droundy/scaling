@@ -410,6 +410,40 @@ That budget is wall-clock time, and building inputs counts against it:
 An input that is expensive next to the function it feeds leaves fewer
 samples, and so a wider `±`. If that happens, raise `max_time`.
 
+## Very fast functions, and where the code sits
+
+For a function that takes a few nanoseconds, where its code lands in memory is
+part of what is measured. The same source compiled into two places can run
+tens of percent apart, and `scaling` reports that faithfully, with a small
+`±`, because it is real in that binary. It is not noise that more sampling
+averages away, and it is not a difference in your code: it stays put for a
+given build and changes when the program is rebuilt. It matters most when
+comparing two versions of one function, such as a release against the next,
+where a gap of tens of percent can come from placement alone.
+
+Aligning every function to a cache line removes most of it. Put this in
+`.cargo/config.toml`:
+
+```toml
+[build]
+rustflags = ["-C", "llvm-args=-align-all-functions=6"]
+```
+
+In one test, on a quiet machine, 432 comparisons of a function against a copy
+of itself built from identical source as a separate crate (functions from 5ns
+to several microseconds, in a real benchmark suite), 105 were reported as
+changed, 48 of them by 10% or more and the largest by 99%; with this setting 9
+were, none by 10% or more and the largest by 8%. Two candidates calling the
+same function in one crate were not told apart in either build.
+
+It applies to everything the build compiles, and makes the code a little
+larger. It is an LLVM option, not part of Rust's stable interface, so its name
+could change, and it leaves a few percent of placement effects behind, about
+8% between separately built copies in that test. Before trusting a small
+difference between two versions, measure the old one against a second copy of
+itself, built the same way: if that shows a gap as large as the one you are
+looking at, the code did not change.
+
 ## Quiescing the machine (Linux)
 
 The `±` figure covers noise `scaling` can see while sampling. It cannot see
