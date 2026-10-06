@@ -150,11 +150,13 @@ pub(crate) fn per_iteration(timed: [f64; 3], laps: [usize; 3]) -> f64 {
 /// `times`, each alternative's time per iteration in every round so far.
 ///
 /// A lone alternative: its own time, to the goal. Otherwise every comparison
-/// with the baseline (`times[0]`): would a change the size of the goal be
-/// detected, at the family's Bonferroni level, by Student's t? That is the
-/// question [`Difference::is_changed`] asks of the change actually measured,
-/// put before it is known.
-pub(crate) fn all_precise(cfg: &Config, times: &[Vec<f64>], family: u64) -> bool {
+/// with the baseline (`times[0]`). For one that is of interest: would a
+/// change the size of the goal be detected, at the family's Bonferroni level,
+/// by Student's t? That is the question [`Difference::is_changed`] asks of
+/// the change actually measured, put before it is known. For one that is
+/// `rough`, which is not tested for a change: is the ratio known to within
+/// [`Config::with_rough_error`], one standard error either way?
+pub(crate) fn all_precise(cfg: &Config, times: &[Vec<f64>], family: u64, rough: &[bool]) -> bool {
     let baseline = trimmed(&times[0]);
     if times.len() == 1 {
         return cfg.accuracy_met(baseline.mean, baseline.std_error);
@@ -164,12 +166,22 @@ pub(crate) fn all_precise(cfg: &Config, times: &[Vec<f64>], family: u64) -> bool
     } else {
         cfg.target_rel_error.ln_1p()
     };
+    let rough_goal = cfg.target_rough_error.ln_1p();
     times[1..]
         .iter()
-        .all(|candidate| match paired(candidate, &times[0]) {
-            Paired::Log(e) => e.std_error == 0.0 || limit(family, e.df) * e.std_error <= goal,
-            Paired::Linear(e) => {
-                cfg.comparison_accuracy_met(baseline.mean, e.std_error, limit(family, e.df))
-            }
-        })
+        .zip(&rough[1..])
+        .all(
+            |(candidate, &rough)| match (paired(candidate, &times[0]), rough) {
+                (Paired::Log(e), true) => e.std_error <= rough_goal,
+                (Paired::Log(e), false) => {
+                    e.std_error == 0.0 || limit(family, e.df) * e.std_error <= goal
+                }
+                (Paired::Linear(e), true) => {
+                    e.std_error <= cfg.target_rough_error * baseline.mean.abs()
+                }
+                (Paired::Linear(e), false) => {
+                    cfg.comparison_accuracy_met(baseline.mean, e.std_error, limit(family, e.df))
+                }
+            },
+        )
 }

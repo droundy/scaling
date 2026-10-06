@@ -332,8 +332,9 @@ impl Suite {
         );
         // After the assertion and before the count, so the Bonferroni limit
         // is taken over what is really going to be measured.
-        // Every alternative beyond the baseline is a chance at a false
-        // positive, and so counts against the family `run` will set.
+        // Every alternative beyond the baseline that anyone wants to know
+        // about is a chance at a false positive, and so counts against the
+        // family `run` will set. One that is uninteresting is not tested.
         self.comparisons += set.comparisons();
         // Each group gets a different seed, so two sitting in one suite do
         // not draw the same order of alternatives round after round.

@@ -197,17 +197,27 @@ To give every candidate the same values the input is generated for each
 iteration and cloned for each candidate, so its type must be `Clone`; the
 generating and cloning are not timed, but they are paid for out of `max_time`.
 
-Giving every call an input of its own makes a quick candidate on a large input
-expensive: a timed stretch of a millisecond may need hundreds of thousands of
-inputs. A candidate that takes `&I` cannot change its input, so it is given a
-small pool of inputs instead, and its calls go round the pool. So is every
-candidate of an input declared `reuse_input`, where those that take `&mut I`
-promise to leave it as they found it. The pool is small enough to stay in
-cache, so such a candidate is timed on warm data; a candidate that takes
-`&mut I` from any other input is timed on a new one every call, cold. When the
-input is large, and the pool and everything else would take too much memory,
-the timed stretch is made shorter instead; installing [`Allocator`] lets
-`scaling` see how much the inputs really take, and otherwise it estimates.
+Most of a comparison's candidates are not always of interest. When what is
+wanted is whether this release differs from the last, comparing it with
+`HashSet` too only needs to say roughly how much faster it is. Mark such a
+candidate `uninteresting`: it is shown as a size, with no verdict, is measured
+only to [`Config::with_rough_error`] (10% by default), and is left out of the
+count the multiple-comparison correction is made over. Every candidate that
+is counted makes the others harder to call a change, and a measurement lasts
+as long as its strictest comparison.
+
+That makes a quick candidate on a large input expensive: a timed stretch of a
+millisecond may need hundreds of thousands of inputs. A candidate that takes
+`&I` cannot change its input, so it is given a small pool of inputs instead,
+and its calls go round the pool. So is every candidate of an input declared
+`reuse_input`, where those that take `&mut I` promise to leave it as they found
+it. The pool is small enough to stay in cache, so such a candidate is timed on
+warm data; a candidate that takes `&mut I` from any other input is timed on a
+new one every call, cold.
+When the input is large, and the pool and everything else would take too
+much memory, the timed stretch is made shorter instead; installing
+[`Allocator`] lets `scaling` see how much the inputs really take, and
+otherwise it estimates.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it

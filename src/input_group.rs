@@ -267,6 +267,9 @@ pub(crate) struct Entry<I> {
     /// Whether the alternative leaves its input as it found it, so that one
     /// input can serve many calls. See [`InputGroup::reusing_input`].
     pub(crate) reuse: bool,
+    /// Whether anyone wants to know if it differs from the baseline, or only
+    /// roughly by how much. See [`InputGroup::uninteresting`].
+    pub(crate) interesting: bool,
 }
 
 impl<I: 'static> Entry<I> {
@@ -277,6 +280,7 @@ impl<I: 'static> Entry<I> {
             name: name.to_string(),
             alt: Box::new(alt),
             reuse: false,
+            interesting: true,
         }
     }
 }
@@ -456,6 +460,21 @@ impl<I: 'static> InputGroup<I> {
         self
     }
 
+    /// Say that nobody asked whether the alternative added last differs from
+    /// the baseline, only roughly by how much.
+    ///
+    /// It is then measured only until that ratio is known to within
+    /// [`Config::with_rough_error`], is never called a change, and is not
+    /// one of the comparisons the multiple-comparison correction counts. The
+    /// baseline is the one thing that cannot be uninteresting, and for it
+    /// this does nothing.
+    pub fn uninteresting(mut self) -> Self {
+        if let Some(last) = self.entries.last_mut() {
+            last.interesting = false;
+        }
+        self
+    }
+
     /// Say that every alternative added so far leaves its input as it found
     /// it, as [`InputGroup::reusing_input`] says of one. For a group whose
     /// input is declared to be reused, which is a promise every candidate
@@ -467,11 +486,15 @@ impl<I: 'static> InputGroup<I> {
         self
     }
 
-    /// How many comparisons with the baseline are tested for a change: every
-    /// alternative after it. This is what the multiple-comparison correction
-    /// counts.
+    /// How many comparisons with the baseline are tested for a change: the
+    /// alternatives after it that are of interest. This is what the
+    /// multiple-comparison correction counts.
     pub(crate) fn comparisons(&self) -> u64 {
-        self.entries.len().saturating_sub(1) as u64
+        self.entries
+            .iter()
+            .skip(1)
+            .filter(|e| e.interesting)
+            .count() as u64
     }
 
     /// How many alternatives have been added.
@@ -583,6 +606,7 @@ impl<I: 'static> InputGroup<I> {
         let mut iterations = cal.probed.clone();
 
         let reuse: Vec<bool> = entries.iter().map(|e| e.reuse).collect();
+        let rough: Vec<bool> = entries.iter().map(|e| !e.interesting).collect();
         let plans = laps::plan(&cal, &reuse);
         let most_inputs = plans.iter().map(|p| p.inputs).max().unwrap_or(1);
         // Each alternative's time per iteration, in every round so far.
@@ -610,7 +634,8 @@ impl<I: 'static> InputGroup<I> {
             let out_of_budget = rounds >= MAX_SAMPLES || clock.exhausted();
             if rounds >= next_look || out_of_budget {
                 next_look = ((next_look as f64 * CHECK_GROWTH).ceil() as usize).max(next_look + 1);
-                let precise = rounds >= MIN_SAMPLES && estimate::all_precise(&cfg, &times, family);
+                let precise =
+                    rounds >= MIN_SAMPLES && estimate::all_precise(&cfg, &times, family, &rough);
                 if precise || out_of_budget {
                     break precise;
                 }
@@ -644,12 +669,22 @@ impl<I: 'static> InputGroup<I> {
         let baseline = timings[0];
         for i in 1..k {
             timings[i].difference = Some(match estimate::paired(&times[i], &times[0]) {
-                Paired::Log(ratio) => Difference::from_log_ratio(
-                    &baseline,
-                    ratio.mean,
-                    ratio.std_error,
-                    estimate::limit(family, ratio.df),
-                ),
+                Paired::Log(ratio) => {
+                    // A rough comparison is not tested for a change, so there
+                    // is no limit for it to exceed.
+                    let limit = if rough[i] {
+                        f64::NAN
+                    } else {
+                        estimate::limit(family, ratio.df)
+                    };
+                    Difference::from_log_ratio(
+                        &baseline,
+                        ratio.mean,
+                        ratio.std_error,
+                        limit,
+                        rough[i],
+                    )
+                }
                 Paired::Linear(difference) => Difference::from_parts(
                     &baseline,
                     &timings[i],

@@ -65,6 +65,9 @@ struct Args {
     /// candidate measured on it. A candidate that takes `&I` cannot tell; one
     /// that takes `&mut I` is promising to put the input back as it found it.
     reuse_input: bool,
+    /// `uninteresting`: nobody asked whether this candidate differs from the
+    /// baseline, only roughly by how much.
+    uninteresting: bool,
     /// `allocation`: count the allocations of the candidate's run, for a
     /// metrics function to show.
     allocation: bool,
@@ -87,6 +90,7 @@ impl syn::parse::Parse for Args {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
                 "reuse_input" => args.reuse_input = true,
+                "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
                 "name" => {
                     input.parse::<syn::Token![=]>()?;
@@ -165,8 +169,8 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, reuse_input, allocation, input, make_input, \
-                             nmin, types(..), sizes(..)",
+                             name, group, baseline, reuse_input, uninteresting, allocation, \
+                             input, make_input, nmin, types(..), sizes(..)",
                         ),
                     ))
                 }
@@ -607,6 +611,13 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
              input and break the pairing a comparison's accuracy depends on",
         ));
     }
+    if args.uninteresting && args.groups.is_empty() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` is about how a candidate is compared with the baseline of its \
+             group, so it needs a `group` to be a candidate of",
+        ));
+    }
     if args.baseline && args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -899,11 +910,24 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
         return Err(e);
     }
+    if args.uninteresting && args.baseline {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` says nobody asked whether this candidate differs from the \
+             baseline, and a baseline is the thing the others are compared with, so it \
+             cannot be both",
+        ));
+    }
     // What is said of the candidate once it is added to the group.
     let reusing = if reuses_input(&kind, &func.sig) {
         quote!(.reusing_input())
     } else {
         quote!()
+    };
+    let marks = if args.uninteresting {
+        quote!(#reusing .uninteresting())
+    } else {
+        reusing
     };
     let declared = kind.ty().cloned();
     let output = handed_on_output(&func);
@@ -966,10 +990,10 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             let repeatable = repeatable_call(call.clone());
             quote! {
                 let mut __action = ::core::option::Option::None;
-                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable) #reusing
+                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable) #marks
             }
         } else {
-            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call) #reusing)
+            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call) #marks)
         };
         // The same alternative, in the form that is run once more for the
         // metrics function assembly pairs it with. Which function that is
@@ -1007,7 +1031,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                                 },
                             )
                         };
-                        let __set = __set #reusing;
+                        let __set = __set #marks;
                         if __metrics.counts_allocations() {
                             __set.counting_allocations()
                         } else {
@@ -1069,6 +1093,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     if args.baseline
         || args.reuse_input
+        || args.uninteresting
         || args.input.is_some()
         || args.make_input.is_some()
         || args.nmin.is_some()
@@ -1179,6 +1204,13 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     allocation_is_for_metrics(&args, &func)?;
+    if args.uninteresting {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`uninteresting` belongs to a `#[scaling::bench]` candidate: it says nobody asked \
+             whether that candidate differs from the baseline",
+        ));
+    }
     if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),

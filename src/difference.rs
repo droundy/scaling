@@ -13,13 +13,18 @@ pub struct Difference {
     pub baseline_ns_per_iter: f64,
     baseline_std_error: f64,
     /// How many standard errors the difference must exceed to count as a
-    /// change: the limit for the comparison's family.
+    /// change: the limit for the comparison's family. `NaN` for a rough one,
+    /// which is not tested.
     limit: f64,
     /// The candidate's time over the baseline's as a natural log, and its
     /// standard error, when the comparison was measured as a ratio within
     /// each round. Significance is then judged on this scale, which is the
     /// one the stopping rule used.
     log_ratio: Option<(f64, f64)>,
+    /// Whether this comparison was only asked how big the difference is, not
+    /// whether there is one. It is then never called a change, and is shown
+    /// as a size.
+    rough: bool,
 }
 
 impl Difference {
@@ -34,14 +39,28 @@ impl Difference {
     }
 
     /// Whether the difference is large enough to count as a real change.
+    ///
+    /// Never for a comparison that was only asked for a rough size.
     pub fn is_changed(&self) -> bool {
+        if self.rough {
+            return false;
+        }
         match self.log_ratio {
             Some((ln, se)) => crate::significant::is_significant(ln, se, self.limit),
             None => crate::significant::is_significant(self.ns, self.std_error, self.limit),
         }
     }
 
+    /// Whether this comparison was asked only how big the difference is, and
+    /// not whether there is one. See `uninteresting` in [`bench`](macro@bench).
+    pub fn is_rough(&self) -> bool {
+        self.rough
+    }
+
     /// The smallest difference this result could have called a change.
+    ///
+    /// `NaN` for a rough comparison (see [`Difference::is_rough`]), which
+    /// could have called nothing a change.
     pub fn min_detectable_difference(&self) -> f64 {
         self.limit * self.std_error
     }
@@ -74,6 +93,7 @@ impl Difference {
             baseline_std_error: baseline.std_error,
             limit,
             log_ratio: None,
+            rough: false,
         }
     }
 
@@ -87,6 +107,7 @@ impl Difference {
         ln_ratio: f64,
         ln_std_error: f64,
         limit: f64,
+        rough: bool,
     ) -> Self {
         let ratio = ln_ratio.exp();
         Difference {
@@ -96,6 +117,7 @@ impl Difference {
             baseline_std_error: baseline.std_error,
             limit,
             log_ratio: Some((ln_ratio, ln_std_error)),
+            rough,
         }
     }
 }
@@ -111,7 +133,9 @@ impl Display for Timing {
             (false, true) => " (untrusted)",
             (false, false) => "",
         };
-        if difference.is_changed() {
+        // A rough comparison says how big, whether or not it is also a change:
+        // it was never asked that.
+        if difference.is_changed() || difference.rough {
             let percent_error = difference.std_error / difference.baseline_ns_per_iter * 100.0;
             let (value, error) =
                 value_and_error(difference.percent(), percent_error, f.precision());

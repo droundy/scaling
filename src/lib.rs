@@ -589,6 +589,7 @@ pub use inventory;
 /// | `make_input = <closure>` | Each iteration is given a value this builds. Not with `input`, and not with `group`. |
 /// | `group = "name"` or `group("a", "b")` | Makes it one candidate of a comparison, in one group or several at once. It is measured on every [`input`](macro@input) of its group that has its input type. |
 /// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
+/// | `uninteresting` | Needs `group`. Nobody asked whether this candidate differs from the baseline, only roughly by how much. It is shown as a size with no verdict, measured only to [`Config::with_rough_error`], and left out of the multiple-comparison count, so the comparisons that are of interest are judged less strictly for it. Not the baseline. |
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
 ///
 /// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
@@ -898,6 +899,7 @@ pub struct Config {
     // which document them.
     pub(crate) target_rel_error: f64,
     pub(crate) target_abs_error: Duration,
+    pub(crate) target_rough_error: f64,
     pub(crate) max_time: Duration,
 }
 
@@ -906,6 +908,7 @@ impl Default for Config {
         Config {
             target_rel_error: 0.01,
             target_abs_error: Duration::ZERO,
+            target_rough_error: 0.1,
             max_time: MAX_BENCH_TIME,
         }
     }
@@ -963,6 +966,21 @@ impl Config {
     /// difference worth detecting rather than as a precision.
     pub fn with_absolute_error(mut self, error: Duration) -> Self {
         self.target_abs_error = error;
+        self
+    }
+
+    /// How well to measure a candidate marked `uninteresting`: stop once the
+    /// ratio of its time to the baseline's is known to within `fraction`
+    /// (`0.1` = 10%), one standard error either way.
+    ///
+    /// Such a candidate is not tested for a change, and so is not part of the
+    /// family the multiple-comparison correction counts; all it is asked for
+    /// is how big the difference is, roughly. A looser goal costs less, and
+    /// a measurement is only as quick as its strictest comparison.
+    ///
+    /// The default is `0.1`, 10%.
+    pub fn with_rough_error(mut self, fraction: f64) -> Self {
+        self.target_rough_error = fraction;
         self
     }
 
