@@ -61,6 +61,10 @@ struct Args {
     /// to. Empty means none - a plain standalone registration.
     groups: Vec<LitStr>,
     baseline: bool,
+    /// `reuse_input`, on an input: one input serves many calls of every
+    /// candidate measured on it. A candidate that takes `&I` cannot tell; one
+    /// that takes `&mut I` is promising to put the input back as it found it.
+    reuse_input: bool,
     /// `allocation`: count the allocations of the candidate's run, for a
     /// metrics function to show.
     allocation: bool,
@@ -82,6 +86,7 @@ impl syn::parse::Parse for Args {
             match key.to_string().as_str() {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
+                "reuse_input" => args.reuse_input = true,
                 "allocation" => args.allocation = true,
                 "name" => {
                     input.parse::<syn::Token![=]>()?;
@@ -160,7 +165,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, allocation, input, make_input, \
+                             name, group, baseline, reuse_input, allocation, input, make_input, \
                              nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -189,8 +194,10 @@ enum Input {
     /// value to satisfy some generic bound elsewhere, so an ordinary
     /// reborrow at that call site turns the `&mut I` into `&I` when that is
     /// what the signature asks for. Nothing downstream needs to know which
-    /// was written.
-    Ref(Type),
+    /// was written. The flag is whether it was `&mut`: a function that
+    /// takes `&I` cannot change its input, which is what lets one input
+    /// serve many calls.
+    Ref(Type, bool),
     /// `I`, by value: the function consumes its input. Only meaningful
     /// where the caller checks for it - see [`Input::owned_rejected`].
     Owned(Type),
@@ -203,7 +210,7 @@ impl Input {
     fn ty(&self) -> Option<&Type> {
         match self {
             Input::None => None,
-            Input::Ref(ty) | Input::Owned(ty) => Some(ty),
+            Input::Ref(ty, _) | Input::Owned(ty) => Some(ty),
         }
     }
 
@@ -243,7 +250,7 @@ fn input_kind(func: &ItemFn) -> syn::Result<Input> {
         FnArg::Typed(t) => t,
     };
     match &*pat.ty {
-        Type::Reference(r) => Ok(Input::Ref((*r.elem).clone())),
+        Type::Reference(r) => Ok(Input::Ref((*r.elem).clone(), r.mutability.is_some())),
         other => Ok(Input::Owned(other.clone())),
     }
 }
@@ -300,6 +307,17 @@ fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
         };
     }
     Repeatable::No
+}
+
+/// Whether one input can serve many calls of a function: it takes the input
+/// by `&I`, so cannot change it, and is not a setup function (`-> impl
+/// FnMut() -> O`), which is handed its input once, to build what it
+/// returns, and so has nothing to reuse.
+///
+/// (An input declared `reuse_input` is reused by all its candidates, which
+/// is settled where they are assembled.)
+fn reuses_input(kind: &Input, sig: &syn::Signature) -> bool {
+    matches!(kind, Input::Ref(_, false)) && returns_repeatable_closure(sig) == Repeatable::No
 }
 
 /// If `sig` is the `NoArg` setup-once shape - `impl Fn() -> O` or `impl
@@ -514,6 +532,18 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
+/// The error for `reuse_input` on a benchmark: it is a property of the input
+/// that every candidate sharing it has to agree to.
+fn reuse_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "`reuse_input` belongs to `#[scaling::input(..)]`, since it is every candidate \
+         sharing the input that has to agree to it: a candidate that takes `&mut I` is \
+         promising to put the input back as it found it. A candidate that takes `&I` \
+         reuses its input anyway, and needs nothing said",
+    )
+}
+
 fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
     if args.allocation {
         return Err(syn::Error::new(
@@ -527,6 +557,9 @@ fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
 
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
     allocation_is_for_metrics(&args, &func)?;
+    if args.reuse_input {
+        return Err(reuse_input_is_for_the_input(func.sig.span()));
+    }
     if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
         return Err(syn::Error::new(
             n.span(),
@@ -598,6 +631,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
             let repeatable_kind = returns_repeatable_closure(&func.sig);
+            let reuse = reuses_input(&kind, &func.sig);
             let repeatable = repeatable_kind == Repeatable::NoArg;
             if repeatable && args.make_input.is_some() {
                 return Err(syn::Error::new(
@@ -658,8 +692,14 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 // because Rust would reborrow `&mut I` as `&I` at an
                 // ordinary call site - that coercion only applies to an
                 // actual call expression, which this closure body gives it.
+                (Some(input), None) if !owned && reuse => {
+                    quote!(__adder.add_input_reusing(__name, #input, |__v| #fname(__v)))
+                }
                 (Some(input), None) if !owned => {
                     quote!(__adder.add_input(__name, #input, |__v| #fname(__v)))
+                }
+                (None, Some(gen)) if !owned && reuse => {
+                    quote!(__adder.add_make_input_reusing(__name, #gen, |__v| #fname(__v)))
                 }
                 (None, Some(gen)) if !owned => {
                     quote!(__adder.add_make_input(__name, #gen, |__v| #fname(__v)))
@@ -859,6 +899,12 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if let Some(e) = kind.owned_rejected(func.sig.inputs.span()) {
         return Err(e);
     }
+    // What is said of the candidate once it is added to the group.
+    let reusing = if reuses_input(&kind, &func.sig) {
+        quote!(.reusing_input())
+    } else {
+        quote!()
+    };
     let declared = kind.ty().cloned();
     let output = handed_on_output(&func);
 
@@ -920,10 +966,10 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             let repeatable = repeatable_call(call.clone());
             quote! {
                 let mut __action = ::core::option::Option::None;
-                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable)
+                __set.add_input(__name, move |__e: &mut ::scaling::registry::ErasedInput| #repeatable) #reusing
             }
         } else {
-            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call))
+            quote!(__set.add_input(__name, |__e: &mut ::scaling::registry::ErasedInput| #call) #reusing)
         };
         // The same alternative, in the form that is run once more for the
         // metrics function assembly pairs it with. Which function that is
@@ -961,6 +1007,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                                 },
                             )
                         };
+                        let __set = __set #reusing;
                         if __metrics.counts_allocations() {
                             __set.counting_allocations()
                         } else {
@@ -1021,6 +1068,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         ));
     }
     if args.baseline
+        || args.reuse_input
         || args.input.is_some()
         || args.make_input.is_some()
         || args.nmin.is_some()
@@ -1246,6 +1294,11 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         }]
     };
 
+    let reusing = if args.reuse_input {
+        quote!(.reusing())
+    } else {
+        quote!()
+    };
     let mut out = quote! { #func };
     for (n, Instantiation { name, ty, call }) in instantiations.into_iter().enumerate() {
         let shim = format_ident!("__scaling_input_{}_{}", fname, n);
@@ -1294,7 +1347,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     ::core::any::TypeId::of::<#ty>,
                     #ty_name,
                     #shim,
-                )
+                ) #reusing
             }
         });
     }

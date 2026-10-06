@@ -12,7 +12,14 @@ pub struct Difference {
     /// The baseline's nanoseconds per iteration, used for relative changes.
     pub baseline_ns_per_iter: f64,
     baseline_std_error: f64,
-    z_alpha: f64,
+    /// How many standard errors the difference must exceed to count as a
+    /// change: the limit for the comparison's family.
+    limit: f64,
+    /// The candidate's time over the baseline's as a natural log, and its
+    /// standard error, when the comparison was measured as a ratio within
+    /// each round. Significance is then judged on this scale, which is the
+    /// one the stopping rule used.
+    log_ratio: Option<(f64, f64)>,
 }
 
 impl Difference {
@@ -28,12 +35,15 @@ impl Difference {
 
     /// Whether the difference is large enough to count as a real change.
     pub fn is_changed(&self) -> bool {
-        crate::significant::is_significant(self.ns, self.std_error, self.z_alpha)
+        match self.log_ratio {
+            Some((ln, se)) => crate::significant::is_significant(ln, se, self.limit),
+            None => crate::significant::is_significant(self.ns, self.std_error, self.limit),
+        }
     }
 
     /// The smallest difference this result could have called a change.
     pub fn min_detectable_difference(&self) -> f64 {
-        self.z_alpha * self.std_error
+        self.limit * self.std_error
     }
 
     /// The smallest detectable difference as a fraction of the baseline.
@@ -49,7 +59,7 @@ impl Difference {
     pub(crate) fn from_parts(
         baseline: &Timing,
         candidate: &Timing,
-        z_alpha: f64,
+        limit: f64,
         paired_std_error: f64,
     ) -> Self {
         let std_error = if paired_std_error.is_nan() {
@@ -62,7 +72,30 @@ impl Difference {
             std_error,
             baseline_ns_per_iter: baseline.ns_per_iter,
             baseline_std_error: baseline.std_error,
-            z_alpha,
+            limit,
+            log_ratio: None,
+        }
+    }
+
+    /// A difference measured as a ratio within each round: `ln_ratio` is the
+    /// log of the candidate's time over the baseline's and `ln_std_error` its
+    /// standard error. `limit` is the threshold `is_changed` applies to their
+    /// quotient, Student's t for the family at the estimate's degrees of
+    /// freedom. The nanosecond figures are derived from the baseline's time.
+    pub(crate) fn from_log_ratio(
+        baseline: &Timing,
+        ln_ratio: f64,
+        ln_std_error: f64,
+        limit: f64,
+    ) -> Self {
+        let ratio = ln_ratio.exp();
+        Difference {
+            ns: baseline.ns_per_iter * (ratio - 1.0),
+            std_error: baseline.ns_per_iter * ratio * ln_std_error,
+            baseline_ns_per_iter: baseline.ns_per_iter,
+            baseline_std_error: baseline.std_error,
+            limit,
+            log_ratio: Some((ln_ratio, ln_std_error)),
         }
     }
 }
@@ -237,16 +270,19 @@ mod tests {
     }
 
     /// A workload whose cost is drawn at random, so the spread is real
-    /// rather than machine noise.
-    fn variable_cost(seed: u64, iterations: usize) -> impl FnMut() -> u64 {
+    /// rather than machine noise: it waits for a time drawn uniformly from
+    /// nothing to twice `mean_ns`, so that its mean is `mean_ns` and it varies
+    /// as much as its mean. Time, not work, so that a debug build and a
+    /// release build cost the same.
+    fn variable_cost(seed: u64, mean_ns: u64) -> impl FnMut() -> u64 {
         let mut rng = XorShift(seed | 1);
         move || {
-            let n = 1 + (rng.next() as usize % iterations);
-            let mut acc = 0u64;
-            for i in 0..n {
-                acc = acc.wrapping_mul(31).wrapping_add(i as u64);
+            let wait = Duration::from_nanos(rng.next() % (2 * mean_ns));
+            let start = std::time::Instant::now();
+            while start.elapsed() < wait {
+                std::hint::spin_loop();
             }
-            acc
+            wait.as_nanos() as u64
         }
     }
 
@@ -270,14 +306,19 @@ mod tests {
             let cfg = Config::relative(0.05).with_max_time(Duration::from_secs(4));
             let mut changed = 0u64;
             for r in 0..REPEATS {
-                // `candidate` does `multiple * 5%` more work than `baseline`.
-                let base_iters = 2000;
-                let cand_iters = (base_iters as f64 * (1.0 + 0.05 * multiple)) as usize;
+                // `candidate` takes `multiple * 5%` longer than `baseline`.
+                // Calls of half a millisecond, each varying as much as its
+                // mean: a round averages only a few dozen of them, so a 5%
+                // goal takes tens of rounds to reach and not the floor of
+                // eight. Where the floor decides, a difference the size of
+                // the goal is found far more often than half the time.
+                let base_ns = 500_000;
+                let cand_ns = (base_ns as f64 * (1.0 + 0.05 * multiple)) as u64;
                 let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(r + 1);
                 let c = cfg
                     .input_group()
-                    .add("baseline", variable_cost(seed, base_iters))
-                    .add("candidate", variable_cost(seed, cand_iters))
+                    .add("baseline", variable_cost(seed, base_ns))
+                    .add("candidate", variable_cost(seed, cand_ns))
                     .run();
                 if c.any_changed() {
                     changed += 1;

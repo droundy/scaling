@@ -473,6 +473,10 @@ pub struct Input {
     /// them meet the same input; a singleton uses it directly. See
     /// [`ErasedInput`].
     pub(crate) make: fn() -> ErasedInput,
+    /// Whether every candidate measured on this input is handed one input for
+    /// many calls, which those that can change it promise to put back as they
+    /// found it. See [`InputGroup::reusing_input`].
+    pub(crate) reuse: bool,
 }
 
 impl Input {
@@ -496,7 +500,17 @@ impl Input {
             type_id,
             type_name,
             make,
+            reuse: false,
         }
+    }
+
+    /// Say that every candidate measured on this input is handed one input
+    /// for many calls: a function that takes `&I` cannot tell, and one that
+    /// takes `&mut I` is promising to put it back.
+    #[doc(hidden)]
+    pub const fn reusing(mut self) -> Self {
+        self.reuse = true;
+        self
     }
 }
 

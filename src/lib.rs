@@ -18,10 +18,12 @@ fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
 ```
 
 For comparisons, candidates use the group's shared `#[scaling::input]`
-instead of `input =` or `make_input =` on the candidate. Every timed iteration
-is given an input of its own. The shared input is generated for each
-iteration, a batch of them to a round, and cloned for each candidate, so every
-candidate in a round is measured on the same values. That is why the input
+instead of `input =` or `make_input =` on the candidate. Ordinarily every
+timed iteration is given an input of its own (a function that cannot change
+its input may share a few instead: see [`bench`](macro@bench)). The shared
+input is generated for each iteration, a batch of them to a round, and cloned
+for each candidate, so every candidate in a round is measured on the same
+values. That is why the input
 type must be `Clone` when a group has more than one candidate, and the
 generating and cloning are paid for out of [`max_time`](crate::Config::with_max_time), though they
 are not timed. A setup-once candidate uses the shared input only
@@ -265,11 +267,20 @@ than erroring.
 An *iteration* is a single execution of your code. A *sample* is a
 measurement, during which your code may be run many times.
 
-We first calibrate a batch size: the number of iterations per sample, chosen
-so that the two clock reads bracketing a sample are a rounding error against
-it. We then take equal-sized batches, and stop once the *standard error* of
-their mean is small enough. This directly answers "how precisely do I know
-`ns_per_iter`", which is what you actually want.
+A sample is timed in *laps* of calls, a millisecond or so each: a warm-up lap
+whose time is thrown away, then a short lap and a long one nine times as
+long. The warm-up absorbs whatever the sample before it left behind - a cold
+cache, a vector unit that had gone to sleep - so that what is measured is
+your code running steadily, whatever ran before it. Reading the clock costs
+something, and may set off something else; each lap carries it once, so the
+long lap less the short one, over the difference in their calls, has none of
+it. A first pass finds how many calls make a lap.
+
+We then take one sample per round, and stop once the *standard error* of
+their trimmed mean (a quarter cut from each end, which sheds the occasional
+interruption) is small enough, and never on fewer than eight. This directly
+answers "how precisely do I know `ns_per_iter`", which is what you actually
+want.
 
 You may choose how accurate you want your benchmarks to be (see [`Config`])
 or you may accept a reasonable default. Both a relative and an absolute goal
@@ -292,7 +303,8 @@ few samples were collected for the error bar itself to mean anything.
 Those are marked `(limit)` and `(untrusted)` in the output.
 
 If a benchmark requires some state to run, one copy of the initial state is
-prepared per iteration.
+prepared per iteration, unless the benchmark cannot change it and shares a few
+instead (see [`bench`](macro@bench)).
 
 ### Scaling benchmarks: `#[bench_scaling]`
 
@@ -496,8 +508,10 @@ mod assemble;
 mod bench;
 mod cpus;
 mod difference;
+mod estimate;
 mod formatting;
 mod input_group;
+mod laps;
 mod metrics;
 mod names;
 pub mod quiet;
@@ -510,7 +524,7 @@ pub mod registry;
 mod run;
 mod scaling;
 mod suite;
-pub(crate) use bench::time_loop;
+pub(crate) use bench::{time_laps, time_loop};
 pub(crate) use suite::Clock;
 #[cfg(test)]
 pub(crate) use suite::{block_on, Machine};
@@ -578,9 +592,30 @@ pub use inventory;
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
 ///
 /// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
-/// standalone benchmark, where the function consumes it. A function returning
-/// `impl Fn() -> O` or `impl FnMut() -> O` is a setup-once benchmark: the
-/// function runs once and the closure it returns is what is timed.
+/// standalone benchmark, where the function consumes it.
+///
+/// # Reusing the input
+///
+/// Every call is ordinarily handed an input of its own, made and cloned
+/// before the timing starts. For a quick function on an input that is slow
+/// to make, that is most of the work and most of the memory: a lap of a
+/// millisecond may need hundreds of thousands of inputs held at once. So a
+/// benchmark that takes `&I`, which cannot change its input, is given a small
+/// pool of inputs and its calls go round the pool. So is every candidate of
+/// an input declared `reuse_input` (see [`input`](macro@input)), which lets
+/// candidates that take `&mut I` join in by promising to leave the input as
+/// they found it: a benchmark that reverses a vector twice, or inserts a key
+/// and removes it again.
+///
+/// What is measured then is a function on inputs that stay in cache, and a
+/// pool of a few thousand inputs, whose pattern a processor can start to
+/// learn. For a function whose speed depends on the input being new that is
+/// not what you want to know, and taking `&mut I` from an input that is not
+/// declared `reuse_input` measures it the other way.
+///
+/// A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
+/// setup-once benchmark: the function runs once and the closure it returns is
+/// what is timed.
 ///
 /// The output of a candidate can also be given to a [`metrics`](macro@metrics)
 /// function, to report more than a time.
@@ -633,6 +668,7 @@ pub use scaling_macros::bench_scaling;
 /// | `name = "text"` | What the input is called in the report, in place of the function's name. |
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
+/// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
 /// type must be `Clone`: it is generated for each iteration and cloned for each
@@ -801,8 +837,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::*;
 
-/// Spend at least this long *running the benchmark* before believing any
-/// accuracy target.
+/// Spend at least this long *running a scaling benchmark* before believing
+/// any accuracy target.
 ///
 /// Measured time, not wall-clock time: an input that is slow to build would
 /// otherwise satisfy the floor by being built, and construction is not
@@ -810,11 +846,11 @@ use std::time::*;
 /// wall-clock cap, because that is a promise about how long the caller waits -
 /// so the two clocks are deliberately different.
 ///
-/// A comparison gets twice this, since a round there buys evidence about two
-/// functions and is only as good as its weaker half. A time floor is scale-free
-/// where a sample-count floor is not: it costs a slow function nothing while
-/// a fast one still gets enough time to reduce variance before the target is
-/// treated as met.
+/// A time floor is scale-free where a sample-count floor is not: it costs a
+/// slow function nothing while a fast one still gets enough time to reduce
+/// variance before the target is treated as met. (Flat benchmarks and
+/// comparisons have a floor in rounds instead: see
+/// [`MIN_SAMPLES`](crate::input_group::MIN_SAMPLES).)
 ///
 /// ```none
 ///   time floor   spread   worst error bar   cost
@@ -982,7 +1018,7 @@ impl Config {
     /// Bonferroni correction exists to remove.
     /// `z_alpha` is passed in rather than read from a field: it belongs to
     /// the *family* of comparisons being run, which is a property of the call
-    /// that started them and not of the `Config`. See [`Config::z_alpha_for`].
+    /// that started them and not of the `Config`. See `Config::z_alpha_for`.
     fn comparison_accuracy_met(&self, baseline_ns: f64, std_error: f64, z_alpha: f64) -> bool {
         // Every sample agreed to the limit of the timer's resolution; no
         // further sampling can improve on that. Also keeps the zero-mean
@@ -1011,6 +1047,7 @@ impl Config {
     /// total; removing that machinery removed the guarantee with it. A
     /// [`Suite`] is the path that still has it, by collecting everything
     /// before measuring anything.
+    #[cfg(test)]
     pub(crate) fn z_alpha_for(comparisons: u64) -> f64 {
         significant::bonferroni_z_limit(comparisons, significant::FWER)
     }

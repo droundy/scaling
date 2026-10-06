@@ -197,6 +197,18 @@ To give every candidate the same values the input is generated for each
 iteration and cloned for each candidate, so its type must be `Clone`; the
 generating and cloning are not timed, but they are paid for out of `max_time`.
 
+Giving every call an input of its own makes a quick candidate on a large input
+expensive: a timed stretch of a millisecond may need hundreds of thousands of
+inputs. A candidate that takes `&I` cannot change its input, so it is given a
+small pool of inputs instead, and its calls go round the pool. So is every
+candidate of an input declared `reuse_input`, where those that take `&mut I`
+promise to leave it as they found it. The pool is small enough to stay in
+cache, so such a candidate is timed on warm data; a candidate that takes
+`&mut I` from any other input is timed on a new one every call, cold. When the
+input is large, and the pool and everything else would take too much memory,
+the timed stretch is made shorter instead; installing [`Allocator`] lets
+`scaling` see how much the inputs really take, and otherwise it estimates.
+
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
 makes, and every pairing sharing a group and a type is measured, with no
@@ -348,7 +360,7 @@ Benchmarks run one after another are measured in different machines: the
 first on a cold package, the fiftieth on a warm one. Their numbers are not
 comparable with each other, nor with the same suite run tomorrow.
 
-A suite measures them interleaved instead — one sample each, in rotation —
+A suite measures them interleaved instead — one round each, in rotation —
 so every benchmark's samples spread across the whole session and all of them
 average the same drift.
 
@@ -365,7 +377,9 @@ order of eight identical workloads moves an interleaved benchmark by
 same workloads move by anywhere from 0.10% to 1.19% depending on nothing but
 how much the machine happened to be drifting at the time. The typical case is
 a wash — the medians are 0.28% and 0.26%. The worst case is four times
-better.
+better. (Those figures were measured before samples were timed in laps, whose
+warm-up absorbs much of what the rest of the suite leaves behind; they have
+not been measured again.)
 
 That is the trade the mechanism predicts: interleaving pays a floor it never
 gets back, because every sample starts on a cache the rest of the suite has
