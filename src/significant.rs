@@ -36,12 +36,14 @@ pub(super) const FWER: f64 = 0.05;
 /// judged by Student's t with `df` degrees of freedom.
 ///
 /// The normal limit, [`bonferroni_z_limit`], assumes the standard error is
-/// known exactly. A standard error estimated from a handful of rounds is not,
+/// known exactly. A standard error estimated from a handful of values is not,
 /// and at the tail probabilities a large family needs the difference is
-/// large: for 1,500 comparisons the normal limit is 4.17, but from 8 rounds
-/// (7 degrees of freedom) it is 9.36. Using the normal limit there would
-/// make false positives several times likelier than the family-wise rate
-/// promises.
+/// large: for 1,500 comparisons the normal limit is 4.17, but at 7 degrees of
+/// freedom it is 9.35, and at 3 it is 40. (A quarter trimmed from each end of
+/// the rounds leaves half of them, less one, for the degrees of freedom: 16
+/// rounds give 7, and the floor of 8 rounds gives 3.) Using the normal limit
+/// there would make false positives several times likelier than the
+/// family-wise rate promises.
 pub(super) fn bonferroni_t_limit(n: u64, fwer: f64, df: f64) -> f64 {
     // `df` is NaN when there was nothing to estimate from, which this also
     // refuses.
@@ -49,9 +51,15 @@ pub(super) fn bonferroni_t_limit(n: u64, fwer: f64, df: f64) -> f64 {
         return f64::NAN;
     }
     let alpha = fwer / n as f64;
-    // P(|T| > t) falls as t grows; bisect for the t where it equals alpha.
-    let (mut lo, mut hi) = (0.0f64, 1e4f64);
-    for _ in 0..200 {
+    // P(|T| > t) falls as t grows. Find a t it has fallen below alpha at - for
+    // one degree of freedom and a large family that is in the tens of
+    // thousands - then bisect for the t where it equals alpha.
+    let mut hi = 1.0f64;
+    while two_sided_t_tail(hi, df) > alpha && hi < 1e300 {
+        hi *= 2.0;
+    }
+    let mut lo = 0.0f64;
+    while hi - lo > 1e-12 * hi {
         let mid = 0.5 * (lo + hi);
         if two_sided_t_tail(mid, df) > alpha {
             lo = mid;

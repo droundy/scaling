@@ -107,7 +107,6 @@ impl Difference {
         ln_ratio: f64,
         ln_std_error: f64,
         limit: f64,
-        rough: bool,
     ) -> Self {
         let ratio = ln_ratio.exp();
         Difference {
@@ -117,7 +116,17 @@ impl Difference {
             baseline_std_error: baseline.std_error,
             limit,
             log_ratio: Some((ln_ratio, ln_std_error)),
-            rough,
+            rough: false,
+        }
+    }
+
+    /// The same difference, for a comparison that is only asked how big it is:
+    /// it has no limit to exceed, and is never called a change.
+    pub(crate) fn rough(self) -> Self {
+        Difference {
+            limit: f64::NAN,
+            rough: true,
+            ..self
         }
     }
 }

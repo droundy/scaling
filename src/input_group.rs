@@ -668,29 +668,24 @@ impl<I: 'static> InputGroup<I> {
             .collect();
         let baseline = timings[0];
         for i in 1..k {
-            timings[i].difference = Some(match estimate::paired(&times[i], &times[0]) {
-                Paired::Log(ratio) => {
-                    // A rough comparison is not tested for a change, so there
-                    // is no limit for it to exceed.
-                    let limit = if rough[i] {
-                        f64::NAN
-                    } else {
-                        estimate::limit(family, ratio.df)
-                    };
-                    Difference::from_log_ratio(
-                        &baseline,
-                        ratio.mean,
-                        ratio.std_error,
-                        limit,
-                        rough[i],
-                    )
-                }
+            let difference = match estimate::paired(&times[i], &times[0]) {
+                Paired::Log(ratio) => Difference::from_log_ratio(
+                    &baseline,
+                    ratio.mean,
+                    ratio.std_error,
+                    estimate::limit(family, ratio.df),
+                ),
                 Paired::Linear(difference) => Difference::from_parts(
                     &baseline,
                     &timings[i],
                     estimate::limit(family, difference.df),
                     difference.std_error,
                 ),
+            };
+            timings[i].difference = Some(if rough[i] {
+                difference.rough()
+            } else {
+                difference
             });
         }
         let metrics = measure_metrics(&mut entries, &mut inputs);

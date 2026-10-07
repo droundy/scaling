@@ -88,15 +88,9 @@ pub(crate) fn trimmed(v: &[f64]) -> Estimate {
 }
 
 /// The log of `a`'s time over `b`'s, round by round, estimated as by
-/// [`trimmed`]. Rounds in which either time is not positive (a benchmark the
-/// optimiser deleted) are left out.
+/// [`trimmed`]. Only for times that are all positive.
 fn log_ratio(a: &[f64], b: &[f64]) -> Estimate {
-    let v: Vec<f64> = a
-        .iter()
-        .zip(b)
-        .filter(|(x, y)| **x > 0.0 && **y > 0.0)
-        .map(|(x, y)| (x / y).ln())
-        .collect();
+    let v: Vec<f64> = a.iter().zip(b).map(|(x, y)| (x / y).ln()).collect();
     trimmed(&v)
 }
 
@@ -110,14 +104,24 @@ pub(crate) enum Paired {
     Linear(Estimate),
 }
 
+/// Compare `candidate` with `baseline`, which are each one time per round.
+///
+/// By the ratio of their times, unless a time from either is not positive: a
+/// round's time is the long lap less the short one, so it is not positive
+/// only for a benchmark whose work the optimiser deleted, whose times hover
+/// around zero, and a ratio of those means nothing. Leaving out just the
+/// rounds it is undefined for would leave out the ones where one side came
+/// out low, and bias what is left, so the whole comparison is by difference
+/// instead.
 pub(crate) fn paired(candidate: &[f64], baseline: &[f64]) -> Paired {
-    let ratio = log_ratio(candidate, baseline);
-    if ratio.df >= 1.0 && ratio.std_error.is_finite() {
-        Paired::Log(ratio)
-    } else {
-        let difference: Vec<f64> = candidate.iter().zip(baseline).map(|(a, b)| a - b).collect();
-        Paired::Linear(trimmed(&difference))
+    if candidate.iter().chain(baseline).all(|&t| t > 0.0) {
+        let ratio = log_ratio(candidate, baseline);
+        if ratio.df >= 1.0 && ratio.std_error.is_finite() {
+            return Paired::Log(ratio);
+        }
     }
+    let difference: Vec<f64> = candidate.iter().zip(baseline).map(|(a, b)| a - b).collect();
+    Paired::Linear(trimmed(&difference))
 }
 
 /// The limit a change must exceed, in standard errors, to be called one in a
