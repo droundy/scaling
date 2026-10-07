@@ -87,14 +87,25 @@ const MAX_INPUTS: usize = 2_000_000;
 /// The most memory one copy of a sample's inputs may take. A sample holds
 /// the round's inputs and, for an alternative that may change its input, a
 /// clone of them.
+///
+/// It limits how many inputs a sample takes, and cannot make one input
+/// smaller: a sample takes at least a warm-up's and a lap's, which is two
+/// inputs (one, for a call so slow that it has no warm-up). Where a single
+/// input is over this, a sample takes two of it, and a clone of each,
+/// whatever this says.
 const MAX_SAMPLE_BYTES: usize = 16 * 1024 * 1024;
 
 /// What stands in for the heap behind an input, in bytes, where the counting
 /// allocator is not installed to say. `size_of` sees an owning type such as
 /// `Vec` as its handle only, so this is enough for the smallest allocation
-/// and not for what a large input really takes. Inputs that are large and
-/// cheap to run on are not caught that way, which is what
-/// [`MAX_PREPARATION_NS`] is for.
+/// and not for what a large input really takes. Inputs that are large are
+/// held to what can be done with them in a sample's time instead: how long
+/// they take to make and clone ([`MAX_PREPARATION_NS`]), and how long a call
+/// takes to touch them, which together bound how much of them a sample
+/// touches to what the machine can move in that time. What this does not see
+/// is memory reserved and not touched, such as a large zeroed buffer of which
+/// a call writes a page: a megabyte of those, held for each of thousands of
+/// calls, is address space and little else.
 const HEAP_ALLOWANCE: usize = 32;
 
 /// The most inputs in the pool an alternative that reuses its input goes

@@ -220,7 +220,9 @@ that is not declared `reuse_input`, every candidate is timed on new inputs.
 When the input is large, and the pool and everything else would take too much
 memory, the timed stretch is made shorter instead; installing [`Allocator`]
 lets `scaling` see how much the inputs really take, and otherwise it
-estimates.
+estimates. Without it, what a sample touches is still limited, by what its
+calls and its preparation can touch in their time, and what is not seen is
+memory reserved and never touched.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
