@@ -606,7 +606,11 @@ pub use inventory;
 /// an input declared `reuse_input` (see [`input`](macro@input)), which lets
 /// candidates that take `&mut I` join in by promising to leave the input as
 /// they found it: a benchmark that reverses a vector twice, or inserts a key
-/// and removes it again.
+/// and removes it again. Within a comparison it is all or none: a candidate
+/// timed on a pool is timed on warm inputs, and compared with one timed on
+/// new ones it would measure that difference, not the functions'. So a group
+/// in which any candidate takes `&mut I` from an input not declared
+/// `reuse_input` is timed on new inputs throughout.
 ///
 /// What is measured then is a function on inputs that stay in cache, and a
 /// pool of a few thousand inputs, whose pattern a processor can start to

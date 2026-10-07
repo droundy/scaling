@@ -453,6 +453,12 @@ impl<I: 'static> InputGroup<I> {
     /// What is measured then is the function on inputs that stay in cache,
     /// with a pattern of inputs short enough for the machine to learn;
     /// where that matters, leave it off.
+    ///
+    /// It takes effect only when every alternative of the group says it: an
+    /// alternative run on a pool is timed on warm inputs and laps of its own
+    /// length, and compared with one that is not it would measure the
+    /// difference between the two ways of being run, not between the
+    /// functions. In a group where one alternative cannot be pooled, none is.
     pub fn reusing_input(mut self) -> Self {
         if let Some(last) = self.entries.last_mut() {
             last.reuse = true;
@@ -601,6 +607,11 @@ impl<I: 'static> InputGroup<I> {
             k == 1 || inputs.can_clone(),
             "multiple alternatives need clonable shared inputs"
         );
+        // Pooling changes what is measured, so it is all or none in a group.
+        let pooled = entries.iter().all(|e| e.reuse);
+        for e in &mut entries {
+            e.reuse = pooled;
+        }
         let cal = laps::calibrate(&mut inputs, &mut entries, clock).await;
         inputs.release();
         let mut iterations = cal.probed.clone();

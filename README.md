@@ -213,11 +213,14 @@ and its calls go round the pool. So is every candidate of an input declared
 `reuse_input`, where those that take `&mut I` promise to leave it as they found
 it. The pool is small enough to stay in cache, so such a candidate is timed on
 warm data; a candidate that takes `&mut I` from any other input is timed on a
-new one every call, cold.
-When the input is large, and the pool and everything else would take too
-much memory, the timed stretch is made shorter instead; installing
-[`Allocator`] lets `scaling` see how much the inputs really take, and
-otherwise it estimates.
+new one every call, cold. A comparison is one or the other throughout, since a
+candidate timed warm against one timed cold would measure that difference and
+not the functions': if any candidate of a group takes `&mut I` from an input
+that is not declared `reuse_input`, every candidate is timed on new inputs.
+When the input is large, and the pool and everything else would take too much
+memory, the timed stretch is made shorter instead; installing [`Allocator`]
+lets `scaling` see how much the inputs really take, and otherwise it
+estimates.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
