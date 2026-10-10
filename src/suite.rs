@@ -59,6 +59,7 @@ mod scheduler;
 #[cfg(test)]
 pub(crate) use scheduler::block_on;
 use scheduler::Scheduler;
+pub(crate) use scheduler::Sweep;
 
 struct YieldOnce {
     yielded: bool,
@@ -81,6 +82,7 @@ pub(crate) struct Clock {
     poll_started: Cell<Option<Instant>>,
     spent: Cell<Duration>,
     max: Duration,
+    expired: Cell<bool>,
 }
 
 impl Clock {
@@ -89,6 +91,26 @@ impl Clock {
             poll_started: Cell::new(None),
             spent: Cell::new(Duration::ZERO),
             max,
+            expired: Cell::new(false),
+        }
+    }
+
+    /// Say that the time is up, whatever is left of it: the task wraps up
+    /// with what it has, as it does when it spends its whole budget.
+    pub(crate) fn expire(&self) {
+        self.expired.set(true);
+    }
+
+    pub(crate) fn expired(&self) -> bool {
+        self.expired.get()
+    }
+
+    /// At most how much more this task will spend. Less if it finishes early.
+    pub(crate) fn remaining(&self) -> Duration {
+        if self.expired() {
+            Duration::ZERO
+        } else {
+            self.max.saturating_sub(self.spent())
         }
     }
 
@@ -103,7 +125,7 @@ impl Clock {
     }
 
     pub(crate) fn exhausted(&self) -> bool {
-        self.spent() >= self.max
+        self.expired() || self.spent() >= self.max
     }
 
     pub(crate) fn budget(&self) -> Duration {
@@ -372,14 +394,27 @@ impl Suite {
     /// only be done at this point, once we know how many comparisons will be
     /// made.
     pub(crate) fn run(self) -> Report {
+        self.run_with(|| false, |_, _| {}).0
+    }
+
+    /// [`Suite::run`], stopping early once `stop` says to, and telling
+    /// `observe` how it is going: at the start of each round, with the names
+    /// of what was added, in the order they were added. Also says how many
+    /// benchmarks were stopped before they were done.
+    pub(crate) fn run_with(
+        self,
+        stop: impl Fn() -> bool,
+        mut observe: impl FnMut(&Sweep<'_>, &[String]),
+    ) -> (Report, usize) {
         self.family.set(self.comparisons);
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
-        let results = self.scheduler.run();
-        let entries: Vec<(String, Found)> = self.names.into_iter().zip(results).collect();
-        Report::new(entries, &self.lanes)
+        let names = &self.names;
+        let finished = self.scheduler.run(stop, |sweep| observe(sweep, names));
+        let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
+        (Report::new(entries, &self.lanes), finished.stopped)
     }
 }
 
@@ -1479,7 +1514,7 @@ mod tests {
                 }),
             );
         }
-        s.run();
+        s.run(|| false, |_| {});
         assert!(
             busy.spent() >= Duration::from_millis(20),
             "busy spent {:?}",

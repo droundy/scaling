@@ -514,9 +514,11 @@ mod estimate;
 mod filter;
 mod formatting;
 mod input_group;
+mod interrupt;
 mod laps;
 mod metrics;
 mod names;
+mod progress;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///

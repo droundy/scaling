@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::Duration;
 
 /// A `Waker` whose every operation is a no-op.
 fn noop_waker() -> Waker {
@@ -84,13 +85,37 @@ impl Scheduler {
     }
 
     /// Poll every benchmark once per round until all of them finish.
-    pub(crate) fn run(mut self) -> Vec<Found> {
+    ///
+    /// `observe` is told how things stand at the start of each round. Once
+    /// `stop` says yes, every benchmark still running is told its time is up
+    /// ([`Clock::expire`]), and wraps up with what it has.
+    pub(crate) fn run(
+        mut self,
+        stop: impl Fn() -> bool,
+        mut observe: impl FnMut(&Sweep<'_>),
+    ) -> Finished {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut live: Vec<usize> = (0..self.tasks.len()).collect();
+        let total = self.tasks.len();
+        let mut live: Vec<usize> = (0..total).collect();
+        let mut stopped = 0;
         while !live.is_empty() {
             self.shuffle(&mut live);
+            observe(&Sweep {
+                total,
+                at_most: live
+                    .iter()
+                    .map(|&i| self.tasks[i].clock.remaining())
+                    .fold(Duration::ZERO, Duration::saturating_add),
+                live: &live,
+            });
             for &i in &live {
+                if stopped == 0 && stop() {
+                    for task in self.tasks.iter().filter(|t| t.result.is_none()) {
+                        task.clock.expire();
+                        stopped += 1;
+                    }
+                }
                 let task = &mut self.tasks[i];
                 task.clock.begin_poll();
                 if let Poll::Ready(value) = task.future.as_mut().poll(&mut cx) {
@@ -100,11 +125,33 @@ impl Scheduler {
             }
             live.retain(|&i| self.tasks[i].result.is_none());
         }
-        self.tasks
-            .into_iter()
-            .map(|t| t.result.expect("every task finished"))
-            .collect()
+        Finished {
+            found: self
+                .tasks
+                .into_iter()
+                .map(|t| t.result.expect("every task finished"))
+                .collect(),
+            stopped,
+        }
     }
+}
+
+/// How a run stands, at the start of a round.
+pub(crate) struct Sweep<'a> {
+    pub(crate) total: usize,
+    /// The benchmarks still running, by the order they were added in.
+    pub(crate) live: &'a [usize],
+    /// At most how much longer they will take, if each uses its whole budget.
+    /// Less if they reach their accuracy goals first, as they may.
+    pub(crate) at_most: Duration,
+}
+
+/// What a run came to.
+pub(crate) struct Finished {
+    /// Each benchmark's result, in the order they were added.
+    pub(crate) found: Vec<Found>,
+    /// How many were still running when told to stop: zero if nobody was.
+    pub(crate) stopped: usize,
 }
 
 #[cfg(test)]
@@ -157,7 +204,7 @@ mod tests {
         const N: usize = 5;
         const ROUNDS: usize = 4;
         let (scheduler, log) = scheduler_of(&[ROUNDS; N], 0x243f_6a88_85a3_08d3);
-        scheduler.run();
+        scheduler.run(|| false, |_| {});
         let log = log.borrow();
         assert_eq!(log.len(), N * (ROUNDS + 1));
         for round in log.chunks(N) {
@@ -171,7 +218,7 @@ mod tests {
     #[test]
     fn the_starting_position_moves_between_rounds() {
         let (scheduler, log) = scheduler_of(&[20; 4], 0x9e37_79b9_7f4a_7c15);
-        scheduler.run();
+        scheduler.run(|| false, |_| {});
         let log = log.borrow();
         let firsts: Vec<usize> = log.chunks(4).map(|round| round[0]).collect();
         let distinct = {
@@ -187,7 +234,7 @@ mod tests {
     fn the_neighbour_order_varies_too() {
         const N: usize = 3;
         let (scheduler, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
-        scheduler.run();
+        scheduler.run(|| false, |_| {});
         let log = log.borrow();
         let mut predecessors: Vec<usize> = log
             .windows(2)
@@ -202,7 +249,7 @@ mod tests {
     #[test]
     fn retiring_early_does_not_skip_a_neighbour() {
         let (scheduler, log) = scheduler_of(&[0, 3, 7], 0x2545_f491_4f6c_dd1d);
-        scheduler.run();
+        scheduler.run(|| false, |_| {});
         let log = log.borrow();
         let polls = |id: usize| log.iter().filter(|&&value| value == id).count();
         assert_eq!(polls(0), 1);
@@ -213,7 +260,7 @@ mod tests {
     #[test]
     fn an_empty_scheduler_finishes() {
         let (scheduler, log) = scheduler_of(&[], 1);
-        scheduler.run();
+        scheduler.run(|| false, |_| {});
         assert!(log.borrow().is_empty());
     }
 

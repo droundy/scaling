@@ -2,6 +2,8 @@
 //! [`Config::run`].
 
 use crate::assemble::Diagnostic;
+use crate::interrupt;
+use crate::progress::Progress;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
 
@@ -76,9 +78,28 @@ impl Config {
     /// # What it prints where
     ///
     /// Results go to stdout, everything else to stderr: how many benchmarks
-    /// are about to run, and warnings about registrations that went unused. So
-    /// redirecting only stdout captures the results and nothing else, without
-    /// anybody having to remember to silence the rest.
+    /// are about to run, warnings about registrations that went unused, and,
+    /// once a run has gone on for a few seconds, a line now and then saying
+    /// how many are done and at most how long the rest can take (less, if
+    /// they reach their accuracy goals sooner). So redirecting only stdout
+    /// captures the results and nothing else, without anybody having to
+    /// remember to silence the rest.
+    ///
+    /// # Stopping early
+    ///
+    /// Ctrl-C, or `SIGTERM` on Unix, ends a run with what it has. Every
+    /// benchmark still being measured stops where it is, and is printed with
+    /// the answer so far, marked `(limit)` if that is less precise than asked
+    /// for. Then the process exits with status 130, as it would have without
+    /// this, so that `cargo bench && next-step` does not go on after a partial
+    /// run. A second Ctrl-C ends it at once. A benchmark call that is already
+    /// running finishes first.
+    ///
+    /// A program that has its own handler for these signals keeps it, and the
+    /// run is never stopped early. Because the signal handler of the `ctrlc`
+    /// crate can be set only once in a process, the first call of this
+    /// function sets it, and a later `ctrlc::set_handler` of the program's own
+    /// fails.
     ///
     /// # Errors
     ///
@@ -94,15 +115,27 @@ impl Config {
             eprintln!("There are no benchmarks to run!");
             return Ok(());
         }
+        let count = suite.len();
         eprintln!(
-            "measuring {} benchmark{}",
-            suite.len(),
-            if suite.len() == 1 { "" } else { "s" }
+            "measuring {count} benchmark{}",
+            if count == 1 { "" } else { "s" }
         );
 
-        let report = suite.run();
+        let _listening = interrupt::Listen::start();
+        let mut progress = Progress::new();
+        let (report, stopped) = suite.run_with(interrupt::asked, |sweep, names| {
+            progress.show(sweep, names);
+        });
 
         print!("{report}");
+        if stopped > 0 {
+            eprintln!(
+                "interrupted: {} of {count} benchmarks had finished, and {stopped} were \
+                 stopped early; those not yet as precise as asked for are marked `(limit)`",
+                count - stopped
+            );
+        }
+        interrupt::exit_if_asked();
 
         Ok(())
     }
@@ -127,6 +160,10 @@ impl Config {
     /// Registrations that are merely unused, such as an input no candidate takes,
     /// are not errors. A warning for each goes to stderr, as in
     /// [`run_and_print`], and the run goes ahead.
+    ///
+    /// Unlike [`run_and_print`], this says nothing about how the run is going
+    /// and does not listen for Ctrl-C: that is for a program that owns the
+    /// process, and a script that calls this may have its own ideas.
     ///
     /// ```no_run
     /// use scaling::Config;

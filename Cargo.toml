@@ -18,6 +18,10 @@ libc = "0.2"
 
 [dependencies]
 inventory = "0.3.21"
+# Listens for Ctrl-C (and, with `termination`, for SIGTERM) while
+# `Config::run_and_print` measures, so that a run stopped early still prints
+# what it has.
+ctrlc = { version = "3.5", features = ["termination"] }
 # Pinned exactly: the macros write struct literals of this crate's registration
 # types into the user's crate, so a macros release that is not this crate's
 # own would not compile against it. Bump the two versions together.
