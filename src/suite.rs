@@ -1028,8 +1028,8 @@ fn own_addresses(name: &str, found: &Found, entry: usize) -> Vec<Address> {
 }
 
 impl Report {
-    /// Whether the run was stopped by Ctrl-C or `SIGTERM` before every
-    /// benchmark in it was done; see [`Config::run`](crate::Config::run).
+    /// Whether the run was stopped by Ctrl-C before every benchmark in it was
+    /// done; see [`Config::run`](crate::Config::run).
     ///
     /// What is here is still what was measured, and an answer less precise
     /// than asked for is marked `(limit)`, but the report is partial. A check

@@ -84,8 +84,7 @@ impl Config {
     ///
     /// # Stopping early
     ///
-    /// Ctrl-C, or `SIGTERM`, stops a run where it is, as [`Config::run`]
-    /// describes. This prints what the run has, says how many benchmarks were
+    /// Ctrl-C stops a run where it is, as [`Config::run`] describes. This prints what the run has, says how many benchmarks were
     /// stopped, and exits with status 130, as the process would have ended
     /// without all this, so that `cargo bench && next-step` does not go on
     /// after a partial run.
@@ -154,8 +153,7 @@ impl Config {
     /// long the rest can take (less, if they reach their accuracy goals
     /// sooner). Shorter runs say nothing.
     ///
-    /// Ctrl-C, or `SIGTERM`, stops the run where it is, and this returns what
-    /// it has. Every benchmark still being measured stops with the answer so
+    /// Ctrl-C stops the run where it is, and this returns what it has. Every benchmark still being measured stops with the answer so
     /// far, marked `(limit)` if that is less precise than asked for, and
     /// [`Report::was_interrupted`] says it happened, for a check that should
     /// not judge numbers half-measured. This does not end the process; that is
@@ -166,8 +164,9 @@ impl Config {
     /// the request to stop stands.
     ///
     /// The handler is set when the first run begins, through the `ctrlc`
-    /// crate, and stays. A program that already has a handler for these
-    /// signals keeps it, and its runs are never stopped early. A
+    /// crate, and stays. A program that already handles Ctrl-C, or ignores it
+    /// as the background jobs of a script do, keeps things as they are, and
+    /// its runs are never stopped early. A
     /// `ctrlc::set_handler` of the program's own after a run has begun fails,
     /// since there can be only one in a process. One Ctrl-C stops every run in
     /// flight, as when tests call this from several threads.
