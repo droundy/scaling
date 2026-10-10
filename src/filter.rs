@@ -21,49 +21,47 @@ use std::sync::Arc;
 /// A question about a name: whether to keep what it names.
 type Keep = Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>;
 
-/// What a [`Config`] has been told to leave out.
+/// What a [`Config`] has been told to leave out: for each kind of thing, one
+/// question about its name, or none when everything of that kind is kept.
 ///
-/// Each kind of filter is a list, since asking twice is asking for both: a
-/// name is kept when every filter of its kind keeps it. With none of a kind,
-/// everything of that kind is kept.
+/// Asking twice is asking for both, so a second question is joined to the
+/// first by `and`, and a name is kept when every question asked of its kind
+/// keeps it.
 #[derive(Clone, Default)]
 pub(crate) struct Filters {
-    groups: Vec<Keep>,
-    candidates: Vec<Keep>,
-    inputs: Vec<Keep>,
+    groups: Option<Keep>,
+    candidates: Option<Keep>,
+    inputs: Option<Keep>,
 }
 
 impl fmt::Debug for Filters {
-    /// How many there are of each, since a closure shows nothing of itself.
+    /// Which are set, since a closure shows nothing of itself.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Filters")
-            .field("groups", &self.groups.len())
-            .field("candidates", &self.candidates.len())
-            .field("inputs", &self.inputs.len())
+            .field("groups", &self.groups.is_some())
+            .field("candidates", &self.candidates.is_some())
+            .field("inputs", &self.inputs.is_some())
             .finish()
     }
 }
 
-fn keeps(filters: &[Keep], name: &str) -> bool {
-    filters.iter().all(|keep| keep(name))
+/// Whether `filter` keeps `name`: it does when there is no filter.
+fn keeps(filter: &Option<Keep>, name: &str) -> bool {
+    filter.as_ref().map_or(true, |keep| keep(name))
+}
+
+/// Ask `keep` as well as whatever `filter` already asks.
+fn and(filter: &mut Option<Keep>, keep: Keep) {
+    *filter = Some(match filter.take() {
+        None => keep,
+        Some(before) => Arc::new(move |name| before(name) && keep(name)),
+    });
 }
 
 impl Filters {
-    pub(crate) fn add_group_filter(&mut self, keep: Keep) {
-        self.groups.push(keep);
-    }
-
-    pub(crate) fn add_candidate_filter(&mut self, keep: Keep) {
-        self.candidates.push(keep);
-    }
-
-    pub(crate) fn add_input_filter(&mut self, keep: Keep) {
-        self.inputs.push(keep);
-    }
-
     /// Whether nothing has been filtered.
     pub(crate) fn is_empty(&self) -> bool {
-        self.groups.is_empty() && self.candidates.is_empty() && self.inputs.is_empty()
+        self.groups.is_none() && self.candidates.is_none() && self.inputs.is_none()
     }
 
     /// Take out of `plan` what these filters do not keep.
@@ -168,7 +166,7 @@ impl Config {
     where
         F: Fn(&str) -> bool + Send + Sync + 'static,
     {
-        self.filters.add_group_filter(Arc::new(keep));
+        and(&mut self.filters.groups, Arc::new(keep));
         self
     }
 
@@ -194,7 +192,7 @@ impl Config {
     where
         F: Fn(&str) -> bool + Send + Sync + 'static,
     {
-        self.filters.add_candidate_filter(Arc::new(keep));
+        and(&mut self.filters.candidates, Arc::new(keep));
         self
     }
 
@@ -214,7 +212,7 @@ impl Config {
     where
         F: Fn(&str) -> bool + Send + Sync + 'static,
     {
-        self.filters.add_input_filter(Arc::new(keep));
+        and(&mut self.filters.inputs, Arc::new(keep));
         self
     }
 }
