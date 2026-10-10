@@ -132,6 +132,31 @@ fn main() -> Result<(), scaling::RegistrationError> {
 }
 ```
 
+To measure only part of what is registered, give the `Config` filters. Each
+takes a function from a name to whether to keep what it names:
+`filter_groups` is asked of a group, `filter_candidates` of a candidate and
+`filter_inputs` of an input, and asking twice narrows further.
+
+```rust,no_run
+use scaling::Config;
+
+fn main() -> Result<(), scaling::RegistrationError> {
+    Config::default()
+        .filter_groups(|group| group.contains("sort"))
+        .filter_inputs(|input| input != "huge")
+        .run_and_print()
+}
+```
+
+What is left is measured, and named, as it would have been in a full run. A
+benchmark that stands alone is a group of its own, with one candidate named
+the same, and the implicit input every group has when it declares none, whose
+name is empty: so the three filters are all asked of it. A group's baseline is what the others are
+compared with, so it is kept whenever any other candidate of its group is,
+whatever the candidate filter says of it. The multiple-comparison correction
+is for the comparisons the run holds, so a comparison filtered down to on its
+own is judged more leniently than among the others.
+
 `config.run()` hands back a [`Report`] instead of printing, for a script that
 wants to look at the numbers rather than show them. Nobody wrote the names down:
 a standalone benchmark is named for its module and function, and a candidate of

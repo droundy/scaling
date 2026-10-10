@@ -450,7 +450,7 @@ impl Suite {
         inputs: &[&'static Input],
         metrics: &[&'static MetricsFn],
     ) -> Result<Assembled, Vec<crate::assemble::Diagnostic>> {
-        let (plan, problems) = crate::assemble::plan_with_metrics(regs, cands, inputs, metrics);
+        let (mut plan, problems) = crate::assemble::plan_with_metrics(regs, cands, inputs, metrics);
         // A contradiction inside a lane discards that lane, so benchmarks
         // that were written measure nothing - that has to be as loud as any
         // other error, not a field on the returned value that a caller
@@ -458,6 +458,10 @@ impl Suite {
         // something registered went unused, and everything else still ran.
         let (mut fatal, warnings): (Vec<_>, Vec<_>) =
             problems.into_iter().partition(|p| p.is_fatal());
+        // After the errors were found, which are about what is registered and
+        // not about what this run measures, and before the allocator is asked
+        // for, which only what is measured needs.
+        self.cfg.filters.apply(&mut plan);
         // Said once for each function, however many candidates it serves.
         if !crate::alloc::installed() {
             let mut named: Vec<&'static str> = Vec::new();

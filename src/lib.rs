@@ -100,9 +100,11 @@ what order (see [`Report::groups`]).
 
 A run prints nothing but how many benchmarks it is about to measure (on
 stderr) until all of them have finished. The suite is measured interleaved, so
-there are no partial results, and there is no way to filter a run: leave out
-benchmarks you do not want measured by not registering them, which is what a
-feature gate is for (see below). Results are not saved: [`Report`], [`Timing`]
+there are no partial results. To measure only some of what is registered, ask
+the [`Config`]: [`Config::filter_groups`], [`Config::filter_candidates`] and
+[`Config::filter_inputs`] each take a function from a name to whether to keep
+it. Leaving a benchmark out of the build altogether is what a feature gate is
+for (see below). Results are not saved: [`Report`], [`Timing`]
 and [`Difference`] deliberately have no serialization, because two runs a day
 apart were not measured on the same machine. To compare with the past, measure
 the past in the same run, as below.
@@ -509,6 +511,7 @@ mod bench;
 mod cpus;
 mod difference;
 mod estimate;
+mod filter;
 mod formatting;
 mod input_group;
 mod laps;
@@ -905,6 +908,8 @@ pub struct Config {
     pub(crate) target_abs_error: Duration,
     pub(crate) target_rough_error: f64,
     pub(crate) max_time: Duration,
+    // Set by `filter_groups`, `filter_candidates` and `filter_inputs`.
+    pub(crate) filters: filter::Filters,
 }
 
 impl Default for Config {
@@ -914,6 +919,7 @@ impl Default for Config {
             target_abs_error: Duration::ZERO,
             target_rough_error: 0.1,
             max_time: MAX_BENCH_TIME,
+            filters: filter::Filters::default(),
         }
     }
 }
