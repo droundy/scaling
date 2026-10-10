@@ -1,5 +1,6 @@
 //! Saying how a long run is going.
 
+use crate::MetricValue;
 use std::time::{Duration, Instant};
 
 /// How long a run goes before it first says anything, and then waits before
@@ -35,22 +36,11 @@ impl Progress {
         self.wait = (self.wait * 2).min(LONGEST);
         self.next = elapsed + self.wait;
         eprintln!(
-            "[{}] {}/{} done, at most {} to go",
-            duration_text(elapsed),
+            "[{:.2}] {}/{} done, at most {:.2} to go",
+            MetricValue::time(elapsed),
             self.total - live,
             self.total,
-            duration_text(at_most)
+            MetricValue::time(at_most)
         );
-    }
-}
-
-/// `400ms`, `45s`, `2m05s`, `1h02m05s`: the units a timing is printed in
-/// below a minute, and above it the minutes and hours those do not have.
-fn duration_text(time: Duration) -> String {
-    let secs = time.as_secs_f64().round() as u64;
-    match (secs / 3600, secs / 60 % 60) {
-        _ if secs < 60 => format!("{time:.0?}"),
-        (0, minutes) => format!("{minutes}m{:02}s", secs % 60),
-        (hours, minutes) => format!("{hours}h{minutes:02}m{:02}s", secs % 60),
     }
 }

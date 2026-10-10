@@ -1121,7 +1121,8 @@ impl Config {
 }
 
 /// Pick a human-readable unit from a magnitude in nanoseconds, returning
-/// the divisor and its suffix.
+/// the divisor and its suffix. Minutes and hours only from two of them, so
+/// that a minute and a half is `90s` and not `1.5min`.
 fn unit_for(ns: f64) -> (f64, &'static str) {
     let magnitude = ns.abs();
     if magnitude < 1e3 {
@@ -1130,8 +1131,12 @@ fn unit_for(ns: f64) -> (f64, &'static str) {
         (1e3, "µs")
     } else if magnitude < 1e9 {
         (1e6, "ms")
-    } else {
+    } else if magnitude < 120e9 {
         (1e9, "s")
+    } else if magnitude < 7200e9 {
+        (60e9, "min")
+    } else {
+        (3600e9, "h")
     }
 }
 
