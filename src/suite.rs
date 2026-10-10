@@ -47,7 +47,6 @@ use super::*;
 use crate::interrupt;
 use crate::metrics::NO_METRICS;
 use crate::names::{self, Address, Kind, NameError};
-use crate::progress::Progress;
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -405,10 +404,7 @@ impl Suite {
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
         let _listening = (!self.is_empty()).then(interrupt::Listen::start);
-        let mut progress = Progress::new(self.names.len());
-        let finished = self.scheduler.run(interrupt::asked, |live, at_most| {
-            progress.show(live, at_most)
-        });
+        let finished = self.scheduler.run();
         let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
         let mut report = Report::new(entries, &self.lanes);
         report.stopped = finished.stopped;
@@ -1542,7 +1538,7 @@ mod tests {
                 }),
             );
         }
-        s.run(|| false, |_, _| {});
+        s.run();
         assert!(
             busy.spent() >= Duration::from_millis(20),
             "busy spent {:?}",

@@ -1,4 +1,6 @@
 use super::{Clock, Found};
+use crate::interrupt;
+use crate::progress::Progress;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -86,19 +88,17 @@ impl Scheduler {
 
     /// Poll every benchmark once per round until all of them finish.
     ///
-    /// At the start of each round `observe` is given how many benchmarks are
-    /// still running, and at most how much longer they will take, if each uses
-    /// its whole budget. Less if they reach their accuracy goals first, as
-    /// they may. Once `stop` says yes, every benchmark still running is told
-    /// its time is up ([`Clock::expire`]), and wraps up with what it has.
-    pub(crate) fn run(
-        mut self,
-        stop: impl Fn() -> bool,
-        mut observe: impl FnMut(usize, Duration),
-    ) -> Finished {
+    /// At the start of each round, says how it is going if it has been long
+    /// enough: how many benchmarks are still running, and at most how much
+    /// longer they will take, if each uses its whole budget. Less if they reach
+    /// their accuracy goals first, as they may. Once Ctrl-C asks it to stop,
+    /// every benchmark still running is told its time is up
+    /// ([`Clock::expire`]), and wraps up with what it has.
+    pub(crate) fn run(mut self) -> Finished {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut live: Vec<usize> = (0..self.tasks.len()).collect();
+        let mut progress = Progress::new(self.tasks.len());
         let mut stopped = 0;
         while !live.is_empty() {
             self.shuffle(&mut live);
@@ -106,9 +106,9 @@ impl Scheduler {
                 .iter()
                 .map(|&i| self.tasks[i].clock.remaining())
                 .fold(Duration::ZERO, Duration::saturating_add);
-            observe(live.len(), at_most);
+            progress.show(live.len(), at_most);
             for &i in &live {
-                if stopped == 0 && stop() {
+                if stopped == 0 && interrupt::asked() {
                     for task in self.tasks.iter().filter(|t| t.result.is_none()) {
                         task.clock.expire();
                         stopped += 1;
@@ -192,7 +192,7 @@ mod tests {
         const N: usize = 5;
         const ROUNDS: usize = 4;
         let (scheduler, log) = scheduler_of(&[ROUNDS; N], 0x243f_6a88_85a3_08d3);
-        scheduler.run(|| false, |_, _| {});
+        scheduler.run();
         let log = log.borrow();
         assert_eq!(log.len(), N * (ROUNDS + 1));
         for round in log.chunks(N) {
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn the_starting_position_moves_between_rounds() {
         let (scheduler, log) = scheduler_of(&[20; 4], 0x9e37_79b9_7f4a_7c15);
-        scheduler.run(|| false, |_, _| {});
+        scheduler.run();
         let log = log.borrow();
         let firsts: Vec<usize> = log.chunks(4).map(|round| round[0]).collect();
         let distinct = {
@@ -222,7 +222,7 @@ mod tests {
     fn the_neighbour_order_varies_too() {
         const N: usize = 3;
         let (scheduler, log) = scheduler_of(&[40; N], 0x2545_f491_4f6c_dd1d);
-        scheduler.run(|| false, |_, _| {});
+        scheduler.run();
         let log = log.borrow();
         let mut predecessors: Vec<usize> = log
             .windows(2)
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn retiring_early_does_not_skip_a_neighbour() {
         let (scheduler, log) = scheduler_of(&[0, 3, 7], 0x2545_f491_4f6c_dd1d);
-        scheduler.run(|| false, |_, _| {});
+        scheduler.run();
         let log = log.borrow();
         let polls = |id: usize| log.iter().filter(|&&value| value == id).count();
         assert_eq!(polls(0), 1);
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn an_empty_scheduler_finishes() {
         let (scheduler, log) = scheduler_of(&[], 1);
-        scheduler.run(|| false, |_, _| {});
+        scheduler.run();
         assert!(log.borrow().is_empty());
     }
 
