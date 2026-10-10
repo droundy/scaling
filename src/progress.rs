@@ -35,22 +35,9 @@ impl Progress {
         self.wait = (self.wait * 2).min(LONGEST);
         self.next = elapsed + self.wait;
         eprintln!(
-            "[{}] {}/{} done, at most {} to go",
-            clock(elapsed),
+            "[{elapsed:.0?}] {}/{} done, at most {at_most:.0?} to go",
             self.total - live,
-            self.total,
-            clock(at_most)
+            self.total
         );
-    }
-}
-
-/// `45s`, `2m05s`, `1h02m05s`.
-fn clock(time: Duration) -> String {
-    let secs = time.as_secs_f64().round() as u64;
-    let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
-    match (hours, minutes) {
-        (0, 0) => format!("{seconds}s"),
-        (0, _) => format!("{minutes}m{seconds:02}s"),
-        _ => format!("{hours}h{minutes:02}m{seconds:02}s"),
     }
 }
