@@ -132,14 +132,8 @@ fn main() -> Result<(), scaling::RegistrationError> {
 }
 ```
 
-A run that goes on for more than a few seconds says so on stderr, every so
-often: how many benchmarks are done, and at most how long the rest can take
-(less, if they reach their accuracy goals sooner). Ctrl-C, or `SIGTERM`, stops
-a run where it is, with every benchmark still being measured giving the answer
-it has so far, marked `(limit)` if that is less precise than asked for.
-`run_and_print` prints them and exits with status 130; `run` returns the
-partial `Report`, and `Report::was_interrupted()` says so, for a check that
-should not judge half-measured numbers. A second Ctrl-C exits at once.
+A long run can be stopped with Ctrl-C, which prints what has been measured so
+far, with each answer less precise than asked for marked `(limit)`.
 
 To measure only part of what is registered, give the `Config` filters. Each
 takes a function from a name to whether to keep what it names:

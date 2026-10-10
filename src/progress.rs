@@ -9,8 +9,6 @@ const FIRST: Duration = Duration::from_secs(5);
 const LONGEST: Duration = Duration::from_secs(60);
 /// A run with this few left names them.
 const NAMED: usize = 3;
-/// What is at most this long to go says nothing worth hearing.
-const UNHELPFUL: Duration = Duration::from_secs(100 * 3600);
 
 pub(crate) struct Progress {
     started: Instant,
@@ -42,10 +40,12 @@ impl Progress {
 
 fn line(elapsed: Duration, sweep: &Sweep<'_>, names: &[String]) -> String {
     let done = sweep.total - sweep.live.len();
-    let mut line = format!("[{}] {done}/{} done", clock(elapsed), sweep.total);
-    if sweep.at_most < UNHELPFUL {
-        line += &format!(", at most {} to go", clock(sweep.at_most));
-    }
+    let mut line = format!(
+        "[{}] {done}/{} done, at most {} to go",
+        clock(elapsed),
+        sweep.total,
+        clock(sweep.at_most)
+    );
     if sweep.live.len() <= NAMED {
         let waiting: Vec<&str> = sweep.live.iter().map(|&i| names[i].as_str()).collect();
         line += &format!(": waiting for {}", waiting.join(", "));
