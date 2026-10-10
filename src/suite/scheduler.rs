@@ -86,16 +86,15 @@ impl Scheduler {
 
     /// Poll every benchmark once per round until all of them finish.
     ///
-    /// At the start of each round `observe` is given the benchmarks still
-    /// running, by the order they were added in, and at most how much longer
-    /// they will take, if each uses its whole budget. Less if they reach their
-    /// accuracy goals first, as they may. Once `stop` says yes, every
-    /// benchmark still running is told its time is up ([`Clock::expire`]),
-    /// and wraps up with what it has.
+    /// At the start of each round `observe` is given how many benchmarks are
+    /// still running, and at most how much longer they will take, if each uses
+    /// its whole budget. Less if they reach their accuracy goals first, as
+    /// they may. Once `stop` says yes, every benchmark still running is told
+    /// its time is up ([`Clock::expire`]), and wraps up with what it has.
     pub(crate) fn run(
         mut self,
         stop: impl Fn() -> bool,
-        mut observe: impl FnMut(&[usize], Duration),
+        mut observe: impl FnMut(usize, Duration),
     ) -> Finished {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -107,7 +106,7 @@ impl Scheduler {
                 .iter()
                 .map(|&i| self.tasks[i].clock.remaining())
                 .fold(Duration::ZERO, Duration::saturating_add);
-            observe(&live, at_most);
+            observe(live.len(), at_most);
             for &i in &live {
                 if stopped == 0 && stop() {
                     for task in self.tasks.iter().filter(|t| t.result.is_none()) {

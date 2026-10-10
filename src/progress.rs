@@ -6,18 +6,18 @@ use std::time::{Duration, Instant};
 /// saying it again. The wait doubles each time, up to [`LONGEST`].
 const FIRST: Duration = Duration::from_secs(5);
 const LONGEST: Duration = Duration::from_secs(60);
-/// A run with this few left names them.
-const NAMED: usize = 3;
 
 pub(crate) struct Progress {
+    total: usize,
     started: Instant,
     next: Duration,
     wait: Duration,
 }
 
 impl Progress {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(total: usize) -> Self {
         Progress {
+            total,
             started: Instant::now(),
             next: FIRST,
             wait: FIRST,
@@ -25,31 +25,23 @@ impl Progress {
     }
 
     /// Say how the run is going on stderr, if it has been long enough since
-    /// it last did.
-    pub(crate) fn show(&mut self, live: &[usize], at_most: Duration, names: &[String]) {
+    /// it last did. `live` is how many benchmarks are still running, and
+    /// `at_most` how much longer they can take.
+    pub(crate) fn show(&mut self, live: usize, at_most: Duration) {
         let elapsed = self.started.elapsed();
         if elapsed < self.next {
             return;
         }
         self.wait = (self.wait * 2).min(LONGEST);
         self.next = elapsed + self.wait;
-        eprintln!("{}", line(elapsed, live, at_most, names));
+        eprintln!(
+            "[{}] {}/{} done, at most {} to go",
+            clock(elapsed),
+            self.total - live,
+            self.total,
+            clock(at_most)
+        );
     }
-}
-
-fn line(elapsed: Duration, live: &[usize], at_most: Duration, names: &[String]) -> String {
-    let done = names.len() - live.len();
-    let mut line = format!(
-        "[{}] {done}/{} done, at most {} to go",
-        clock(elapsed),
-        names.len(),
-        clock(at_most)
-    );
-    if live.len() <= NAMED {
-        let waiting: Vec<&str> = live.iter().map(|&i| names[i].as_str()).collect();
-        line += &format!(": waiting for {}", waiting.join(", "));
-    }
-    line
 }
 
 /// `45s`, `2m05s`, `1h02m05s`.
