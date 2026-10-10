@@ -22,48 +22,42 @@ use std::sync::Arc;
 type Keep = Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>;
 
 /// What a [`Config`] has been told to leave out: for each kind of thing, one
-/// question about its name, or none when everything of that kind is kept.
+/// question about its name.
 ///
 /// Asking twice is asking for both, so a second question is joined to the
 /// first by `and`, and a name is kept when every question asked of its kind
-/// keeps it.
-#[derive(Clone, Default)]
+/// keeps it. Until one is asked, everything is kept.
+#[derive(Clone)]
 pub(crate) struct Filters {
-    groups: Option<Keep>,
-    candidates: Option<Keep>,
-    inputs: Option<Keep>,
+    groups: Keep,
+    candidates: Keep,
+    inputs: Keep,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Filters {
+            groups: Arc::new(|_| true),
+            candidates: Arc::new(|_| true),
+            inputs: Arc::new(|_| true),
+        }
+    }
 }
 
 impl fmt::Debug for Filters {
-    /// Which are set, since a closure shows nothing of itself.
+    /// Nothing of the questions, since a closure shows nothing of itself.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Filters")
-            .field("groups", &self.groups.is_some())
-            .field("candidates", &self.candidates.is_some())
-            .field("inputs", &self.inputs.is_some())
-            .finish()
+        f.debug_struct("Filters").finish_non_exhaustive()
     }
-}
-
-/// Whether `filter` keeps `name`: it does when there is no filter.
-fn keeps(filter: &Option<Keep>, name: &str) -> bool {
-    filter.as_ref().map_or(true, |keep| keep(name))
 }
 
 /// Ask `keep` as well as whatever `filter` already asks.
-fn and(filter: &mut Option<Keep>, keep: Keep) {
-    *filter = Some(match filter.take() {
-        None => keep,
-        Some(before) => Arc::new(move |name| before(name) && keep(name)),
-    });
+fn and(filter: &mut Keep, keep: Keep) {
+    let before = Arc::clone(filter);
+    *filter = Arc::new(move |name| before(name) && keep(name));
 }
 
 impl Filters {
-    /// Whether nothing has been filtered.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.groups.is_none() && self.candidates.is_none() && self.inputs.is_none()
-    }
-
     /// Take out of `plan` what these filters do not keep.
     ///
     /// A benchmark that stands alone, a scaling benchmark included, is a
@@ -72,14 +66,8 @@ impl Filters {
     /// no name. So it is asked of all three kinds of filter, by its own name
     /// for the first two and by `""` for the last.
     pub(crate) fn apply(&self, plan: &mut Plan) {
-        if self.is_empty() {
-            return;
-        }
-        plan.flat.retain(|r| {
-            keeps(&self.groups, &r.name)
-                && keeps(&self.candidates, &r.name)
-                && keeps(&self.inputs, "")
-        });
+        plan.flat
+            .retain(|r| (self.groups)(&r.name) && (self.candidates)(&r.name) && (self.inputs)(""));
         plan.lanes.retain_mut(|lane| self.narrow(lane));
     }
 
@@ -94,17 +82,17 @@ impl Filters {
     /// never what it is measured against. (A filter that keeps nothing but the
     /// baseline leaves the baseline, measured alone.)
     fn narrow(&self, lane: &mut Lane) -> bool {
-        if !keeps(&self.groups, lane.group) {
+        if !(self.groups)(lane.group) {
             return false;
         }
-        lane.inputs.retain(|input| keeps(&self.inputs, &input.name));
+        lane.inputs.retain(|input| (self.inputs)(&input.name));
         if lane.inputs.is_empty() {
             return false;
         }
         let mut kept: Vec<bool> = lane
             .candidates
             .iter()
-            .map(|c| keeps(&self.candidates, &c.name))
+            .map(|c| (self.candidates)(&c.name))
             .collect();
         if !kept.contains(&true) {
             return false;

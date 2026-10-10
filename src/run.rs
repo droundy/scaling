@@ -91,11 +91,7 @@ impl Config {
         let suite = self.assemble()?;
 
         if suite.is_empty() {
-            if self.filters.is_empty() {
-                eprintln!("There are no benchmarks to run!");
-            } else {
-                eprintln!("There are no benchmarks to run: the filters left none!");
-            }
+            eprintln!("There are no benchmarks to run!");
             return Ok(());
         }
         eprintln!(
