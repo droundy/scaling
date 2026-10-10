@@ -88,9 +88,28 @@ pub(crate) fn trimmed(v: &[f64]) -> Estimate {
 }
 
 /// The log of `a`'s time over `b`'s, round by round, estimated as by
-/// [`trimmed`]. Only for times that are all positive.
+/// [`trimmed`].
+///
+/// A round's time is the long lap less the short one, so it is not positive
+/// when something holds up the short lap for longer than the long lap's extra
+/// calls take - a preemption of several milliseconds - and for a benchmark
+/// whose work the optimiser deleted, whose times hover around zero. A round in
+/// which only one side is not positive is an outlier by construction, and
+/// counts as one: its log ratio is minus infinity if `a` is the one, plus
+/// infinity if `b` is, for the trim to cut off and the winsorising to keep
+/// from saying how far out it was. A round in which neither is positive says
+/// nothing, and is left out.
 fn log_ratio(a: &[f64], b: &[f64]) -> Estimate {
-    let v: Vec<f64> = a.iter().zip(b).map(|(x, y)| (x / y).ln()).collect();
+    let v: Vec<f64> = a
+        .iter()
+        .zip(b)
+        .filter_map(|(&x, &y)| match (x > 0.0, y > 0.0) {
+            (true, true) => Some((x / y).ln()),
+            (false, true) => Some(f64::NEG_INFINITY),
+            (true, false) => Some(f64::INFINITY),
+            (false, false) => None,
+        })
+        .collect();
     trimmed(&v)
 }
 
@@ -106,19 +125,15 @@ pub(crate) enum Paired {
 
 /// Compare `candidate` with `baseline`, which are each one time per round.
 ///
-/// By the ratio of their times, unless a time from either is not positive: a
-/// round's time is the long lap less the short one, so it is not positive
-/// only for a benchmark whose work the optimiser deleted, whose times hover
-/// around zero, and a ratio of those means nothing. Leaving out just the
-/// rounds it is undefined for would leave out the ones where one side came
-/// out low, and bias what is left, so the whole comparison is by difference
-/// instead.
+/// By the ratio of their times, unless there are more rounds without a
+/// positive time than the trim cuts off ([`log_ratio`] says what those are).
+/// Then the times hover around zero, as for a benchmark whose work the
+/// optimiser deleted, a ratio of them means nothing, and the whole comparison
+/// is by difference instead.
 pub(crate) fn paired(candidate: &[f64], baseline: &[f64]) -> Paired {
-    if candidate.iter().chain(baseline).all(|&t| t > 0.0) {
-        let ratio = log_ratio(candidate, baseline);
-        if ratio.df >= 1.0 && ratio.std_error.is_finite() {
-            return Paired::Log(ratio);
-        }
+    let ratio = log_ratio(candidate, baseline);
+    if ratio.df >= 1.0 && ratio.mean.is_finite() && ratio.std_error.is_finite() {
+        return Paired::Log(ratio);
     }
     let difference: Vec<f64> = candidate.iter().zip(baseline).map(|(a, b)| a - b).collect();
     Paired::Linear(trimmed(&difference))
