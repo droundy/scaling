@@ -388,24 +388,26 @@ impl Suite {
         );
     }
 
-    /// Measure every benchmark, interleaved, and report them together.
+    /// Run to the end, with nobody watching.
+    #[cfg(test)]
+    pub(crate) fn run(self) -> Report {
+        self.run_with(|| false, |_, _| {})
+    }
+
+    /// Measure every benchmark, interleaved, and report them together,
+    /// stopping early once `stop` says to, and telling `observe` how it is
+    /// going: at the start of each round, with the names of what was added,
+    /// in the order they were added. The report says how many benchmarks were
+    /// stopped before they were done.
     ///
     /// The family the Bonferroni correction covers is counted here. It can
     /// only be done at this point, once we know how many comparisons will be
     /// made.
-    pub(crate) fn run(self) -> Report {
-        self.run_with(|| false, |_, _| {}).0
-    }
-
-    /// [`Suite::run`], stopping early once `stop` says to, and telling
-    /// `observe` how it is going: at the start of each round, with the names
-    /// of what was added, in the order they were added. Also says how many
-    /// benchmarks were stopped before they were done.
     pub(crate) fn run_with(
         self,
         stop: impl Fn() -> bool,
         mut observe: impl FnMut(&Sweep<'_>, &[String]),
-    ) -> (Report, usize) {
+    ) -> Report {
         self.family.set(self.comparisons);
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
@@ -414,7 +416,9 @@ impl Suite {
         let names = &self.names;
         let finished = self.scheduler.run(stop, |sweep| observe(sweep, names));
         let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
-        (Report::new(entries, &self.lanes), finished.stopped)
+        let mut report = Report::new(entries, &self.lanes);
+        report.stopped = finished.stopped;
+        report
     }
 }
 
@@ -706,6 +710,8 @@ pub struct Report {
     /// Everything that can be asked for by name, in the order the entries
     /// were added and each entry's own name before its candidates'.
     addresses: Vec<Address>,
+    /// How many benchmarks were stopped before they were done.
+    stopped: usize,
 }
 
 /// One column of a group while it is being assembled.
@@ -932,6 +938,7 @@ impl Report {
             entries,
             groups,
             addresses: addressed.into_iter().flatten().collect(),
+            stopped: 0,
         }
     }
 }
@@ -1031,6 +1038,33 @@ fn own_addresses(name: &str, found: &Found, entry: usize) -> Vec<Address> {
 }
 
 impl Report {
+    /// Whether the run was stopped by Ctrl-C or `SIGTERM` before every
+    /// benchmark in it was done; see [`Config::run`](crate::Config::run).
+    ///
+    /// What is here is still what was measured, and an answer less precise
+    /// than asked for is marked `(limit)`, but the report is partial. A check
+    /// on the numbers, in CI or anywhere else, should ask this first. Once a
+    /// run has been interrupted so is every later one in the same process,
+    /// since the request to stop stands.
+    ///
+    /// ```no_run
+    /// use scaling::Config;
+    ///
+    /// let report = Config::default().run().expect("the registrations compose");
+    /// if report.was_interrupted() {
+    ///     // Not worth judging, and not a pass either.
+    ///     std::process::exit(130);
+    /// }
+    /// // ... judge the numbers ...
+    /// ```
+    pub fn was_interrupted(&self) -> bool {
+        self.stopped > 0
+    }
+
+    pub(crate) fn stopped(&self) -> usize {
+        self.stopped
+    }
+
     /// The measured groups, in the order of their group names, each as the
     /// name and the [`Group`], which prints itself as a table. A caller that
     /// wants another order can collect and sort. A standalone benchmark is a
