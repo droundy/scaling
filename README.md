@@ -39,20 +39,26 @@ fn main() -> Result<(), scaling::RegistrationError> {
 
 ```toml
 # Cargo.toml
+[dev-dependencies]
+scaling = "0.9"
+
 [[bench]]
 name = "bench"
 harness = false
 ```
 
-`cargo bench` then yields - module-qualified, `bench::` here because that is
-what `[[bench]] name = "bench"` makes `module_path!()` at the top of that
-file:
+`cargo bench` then prints each benchmark as a group of its own, in name order
+and module-qualified, `bench::` here because that is what
+`[[bench]] name = "bench"` makes `module_path!()` at the top of that file:
 
 ```none
-bench::fib_200:    71.716ns ± 0.057ns
-bench::fib_500:    262.75ns ± 0.14ns
-bench::reverse:     51.80ns ± 0.62ns
-bench::sort:        111.3ns ± 1.1ns
+bench::fib_200  27.99ns ± 0.04ns
+
+bench::fib_500  96.9ns ± 0.2ns
+
+bench::reverse  24.4ns ± 0.2ns
+
+bench::sort  42.2ns ± 0.4ns
 ```
 
 The `±` figure is the standard error of the reported time, in the same unit
@@ -77,7 +83,7 @@ fn fib_scaling(n: usize) -> usize { fib(n) }
 ```
 
 ```none
-fib scaling:  (0.5567 ± 0.0036)ns/N (R²=0.999)
+bench::fib_scaling  (0.279 ± 0.003)ns/N (R²=1.000)
 ```
 
 It works in two stages. The first climbs from small values of `N`, timing one call
@@ -150,13 +156,13 @@ fn main() -> Result<(), scaling::RegistrationError> {
 ```
 
 What is left is measured, and named, as it would have been in a full run. A
-benchmark that stands alone is a group of its own, with one candidate named
-the same, and the implicit input every group has when it declares none, whose
-name is empty: so the three filters are all asked of it. A group's baseline is what the others are
-compared with, so it is kept whenever any other candidate of its group is,
-whatever the candidate filter says of it. The multiple-comparison correction
-is for the comparisons the run holds, so a comparison filtered down to on its
-own is judged more leniently than among the others.
+benchmark that stands alone is a group of its own, with one candidate named the
+same, and the implicit input every group has when it declares none, whose name
+is empty: so the three filters are all asked of it. A group's baseline is what
+the others are compared with, so it is kept whenever any other candidate of its
+group is, whatever the candidate filter says of it. The multiple-comparison
+correction is for the comparisons the run holds, so a comparison filtered down
+to on its own is judged more leniently than among the others.
 
 `config.run()` hands back a [`Report`] instead of printing, for a script that
 wants to look at the numbers rather than show them. Nobody wrote the names down:
@@ -291,11 +297,10 @@ refusing to run. Each input's cells are a comparison; sharing a group with
 more than one input, they print together as a grid:
 
 ```none
-sorting  (Vec<u64>)  baseline: stable
-             reversed    sorted
-  stable    423.716ns  303.207ns
-  unstable  393.989ns  291.241ns
-                -7.0%     -3.9%
+sorting (Vec<u64>)  baseline: stable
+candidate       reversed            sorted
+stable       274ns ± 6ns   351.4ns ± 0.9ns
+unstable    -4.0% ± 0.4%      -7.3% ± 0.3%
 ```
 
 A group with just one input - the common case, and the only shape a plain
@@ -402,8 +407,8 @@ are several inputs and one or two metrics:
 ```none
 encode@text (String)  baseline: plain
 candidate               time          size
-plain       51.50ns ± 0.03ns          400B
-doubled       +205.6% ± 0.4%  800B (+100%)
+plain       26.56ns ± 0.12ns          400B
+doubled       +179.6% ± 1.0%  800B (+100%)
 ```
 
 ## Why measuring them together matters
@@ -423,26 +428,21 @@ knowable only once they have all been collected. (So a run holding a single
 comparison judges it more leniently — correctly, but it does mean a small run
 and a full one are not quite asking the same question.)
 
-What this buys is a **bound**, not an improvement. Reversing the declaration
-order of eight identical workloads moves an interleaved benchmark by
-0.15–0.45%, whatever the session; measured one after another instead, the
-same workloads move by anywhere from 0.10% to 1.19% depending on nothing but
-how much the machine happened to be drifting at the time. The typical case is
-a wash — the medians are 0.28% and 0.26%. The worst case is four times
-better. (Those figures were measured before samples were timed in laps, whose
-warm-up absorbs much of what the rest of the suite leaves behind; they have
-not been measured again.)
+What this buys is a **bound**, not an improvement. Eight identical workloads,
+measured at the default accuracy on a machine that was not quiesced, read a
+median of 1.3% apart within one interleaved suite and 1.5% apart when measured
+one after another, over 126 runs of each in 21 sessions: where nothing drifts,
+a wash. The difference is the worst case. In three of the sequential runs
+identical workloads read 67%, 88% and 132% apart, because the machine slowed
+down while they were being measured one at a time. No interleaved run was more
+than 3.1% apart, and the 25 that happened while the machine ran slower than
+usual were within 0.6%, since a slowdown reaches every benchmark in a suite
+alike.
 
-That is the trade the mechanism predicts: interleaving pays a floor it never
-gets back, because every sample starts on a cache the rest of the suite has
-been using, in exchange for a ceiling on drift. Where there is no drift, only
-the floor shows.
-
-So it will not make any single benchmark more reproducible — it averages
-drift in rather than out — and a suite's numbers are not comparable with a
-the same benchmark measured on its own. What it gives you is that the
-numbers within one suite, and across runs of it, were measured in the same
-machine.
+So it will not make any single benchmark more reproducible — it averages drift
+in rather than out — and a suite's numbers are not comparable with the same
+benchmark measured on its own. What it gives you is that the numbers within one
+suite, and across runs of it, were measured in the same machine.
 
 Each benchmark still gets the full time budget of its own, so a suite of `n`
 may take `n` times as long as one benchmark.
