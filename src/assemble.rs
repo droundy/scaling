@@ -1508,33 +1508,38 @@ mod pairing {
             })
             .run();
 
-        let a: std::collections::HashMap<u64, Vec<u64>> = seen_a.borrow().iter().cloned().collect();
-        let b: std::collections::HashMap<u64, Vec<u64>> = seen_b.borrow().iter().cloned().collect();
+        let (a, b) = (seen_a.borrow(), seen_b.borrow());
         assert!(!a.is_empty() && !b.is_empty(), "the comparison ran at all");
         assert!(
-            a.values()
-                .any(|v| v.len() != a.values().next().unwrap().len()),
+            a.iter().any(|(_, v)| v.len() != a[0].1.len()),
             "the generator must actually vary, or this asserts nothing",
         );
-        let shared: Vec<u64> = a.keys().filter(|t| b.contains_key(t)).copied().collect();
-        // Calibration probes each alternative on batches of its own; every
-        // round after that hands the one with fewer calls nothing but inputs
-        // the other also ran on. Rounds far outnumber probes.
+        let by_tag = |seen: &[(u64, Vec<u64>)]| -> std::collections::HashMap<u64, Vec<u64>> {
+            seen.iter().cloned().collect()
+        };
+        let (a_by_tag, b_by_tag) = (by_tag(&a), by_tag(&b));
+        // Calibration probes each alternative on batches of its own, ahead of
+        // every round. From the first input the two have in common, each
+        // round has the alternative with fewer calls on a prefix of what the
+        // other ran on: everything it ran on after that is something the
+        // other ran on too, and as the same value. (Which of the two has
+        // fewer calls is not asked; one of them must.)
+        let inside = |seen: &[(u64, Vec<u64>)],
+                      other: &std::collections::HashMap<u64, Vec<u64>>| {
+            seen.iter()
+                .position(|(tag, _)| other.contains_key(tag))
+                .is_some_and(|first| {
+                    seen[first..]
+                        .iter()
+                        .all(|(tag, v)| other.get(tag) == Some(v))
+                })
+        };
         assert!(
-            2 * shared.len() >= a.len().min(b.len()),
-            "only {} of {} inputs were shared, so the alternatives were \
-             mostly handed different draws",
-            shared.len(),
-            a.len().min(b.len()),
+            inside(&a, &b_by_tag) || inside(&b, &a_by_tag),
+            "in some round the alternatives were handed different draws, so \
+             their difference carries the gap between two draws as well as \
+             the one it meant to measure",
         );
-        for tag in shared {
-            assert_eq!(
-                a[&tag], b[&tag],
-                "input {tag} reached the two alternatives as different \
-                 values, so their difference carries the gap between two \
-                 draws as well as the one it meant to measure",
-            );
-        }
     }
 
     /// And the consequence: with the input shared, the paired error bar is

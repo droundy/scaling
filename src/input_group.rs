@@ -63,11 +63,17 @@ type CloneInput<I> = dyn Fn(&I) -> I + 'static;
 /// the per-iteration form costs 14%; this costs nothing measurable.
 ///
 /// Both methods take inputs already prepared rather than making their own,
-/// so that every alternative in a round is handed the *same* inputs. That is
-/// what makes the per-round differences genuinely paired: if each drew its
-/// own inputs and the cost varied with the input, the difference between two
-/// alternatives would carry the difference between two draws as well, and no
-/// amount of averaging distinguishes the two.
+/// so that the alternatives of a round are handed inputs from one batch.
+/// Those that run the same number of calls run on the *same* inputs, and
+/// so do all that go round one pool. That is what makes the per-round
+/// differences genuinely paired: if each drew its own inputs and the cost
+/// varied with the input, the difference between two alternatives would carry
+/// the difference between two draws as well, and no amount of averaging
+/// distinguishes the two. An alternative that runs more calls than another
+/// takes more of the batch, and its counted laps fall on other parts of it:
+/// the same distribution of inputs, but the draw no longer cancels from their
+/// ratio, and shows up as spread between rounds, which the standard error
+/// counts.
 pub(crate) trait Alternative<I> {
     /// Time `n` calls over `xs`, returning the total in nanoseconds. With
     /// fewer than `n` inputs the calls go round them again. For calibration,
@@ -299,8 +305,8 @@ impl Config {
     /// Start gathering alternatives that each need freshly generated input.
     ///
     /// One batch of inputs is generated per round. With multiple alternatives
-    /// it is cloned for each one, so they are measured on the same inputs and
-    /// none can leave anything behind for the next. That is why `I` must be
+    /// it is cloned for each one, so they are measured on inputs from the same
+    /// batch and none can leave anything behind for the next. That is why `I` must be
     /// [`Clone`] here, and why the clone should be faithful: an alternative
     /// handed a shallow copy sharing a buffer with the original is not being
     /// measured on its own input. A singleton group uses the generated batch
@@ -528,7 +534,7 @@ impl<I: 'static> InputGroup<I> {
     ///    among its members if that is longer, so that every member's laps
     ///    last about the same time.
     /// 2. **Sample.** Each round times every alternative once, in a fresh
-    ///    random order, as laps over the same inputs: a warm-up lap, then a
+    ///    random order, as laps over the round's inputs: a warm-up lap, then a
     ///    short and a long lap (see [`SHAPE`]). Each sample gives one
     ///    per-iteration time, the long lap less the short one.
     /// 3. **Compare** within each round: the log of each candidate's time
@@ -987,9 +993,10 @@ mod tests {
         );
     }
 
-    /// Every alternative in a round sees the same inputs, so when the cost
-    /// is driven by the input, the draw cancels out of the differences
-    /// rather than being noise each of them has to out-measure.
+    /// Alternatives that run the same number of calls in a round see the same
+    /// inputs, so when the cost is driven by the input, the draw cancels out
+    /// of the differences rather than being noise each of them has to
+    /// out-measure.
     ///
     /// What that buys is visible in the paired standard error against the
     /// combined one: about half, here. It only shows up when the batch is

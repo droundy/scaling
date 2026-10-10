@@ -196,6 +196,10 @@ with its own error bar rather than by subtracting two independent numbers.
 To give every candidate the same values the input is generated for each
 iteration and cloned for each candidate, so its type must be `Clone`; the
 generating and cloning are not timed, but they are paid for out of `max_time`.
+Candidates are timed for about as long as each other, so a quick one makes more
+calls than a slow one and takes more of the round's inputs: where the cost
+depends on the input, the part of it they do not share is not cancelled from
+their difference, but left in the error bar.
 
 Most of a comparison's candidates are not always of interest. When what is
 wanted is whether this release differs from the last, comparing it with
