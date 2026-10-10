@@ -58,7 +58,8 @@ bench::sort:        111.3ns ± 1.1ns
 The `±` figure is the standard error of the reported time, in the same unit
 as the time itself. Each benchmark keeps sampling until it is small enough
 (within 1% by default), so cheap-to-measure benchmarks finish quickly and
-noisy ones keep working until they have earned the precision.
+noisy ones keep working until they have earned the precision. A long run can
+be stopped with Ctrl-C, which prints what has been measured so far.
 
 Printing it absolutely rather than as a percentage is deliberate: to decide
 whether two results really differ you compare the gap between them against
@@ -131,9 +132,6 @@ fn main() -> Result<(), scaling::RegistrationError> {
         .run_and_print()
 }
 ```
-
-A long run can be stopped with Ctrl-C, which prints what has been measured so
-far, with each answer less precise than asked for marked `(limit)`.
 
 To measure only part of what is registered, give the `Config` filters. Each
 takes a function from a name to whether to keep what it names:
