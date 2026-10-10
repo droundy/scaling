@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["benchmark", "scaling"]
 categories = ["development-tools::profiling"]
 license = "MIT OR Apache-2.0"
-exclude = [".github", "prek.toml"]
+exclude = [".github", ".gitignore", "prek.toml"]
 # `#[expect]` was stabilized in Rust 1.81.
 rust-version = "1.81"
 
