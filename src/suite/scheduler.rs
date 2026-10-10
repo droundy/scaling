@@ -1,8 +1,11 @@
 use super::{Clock, Found};
+use crate::interrupt;
+use crate::progress::Progress;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::Duration;
 
 /// A `Waker` whose every operation is a no-op.
 fn noop_waker() -> Waker {
@@ -84,13 +87,33 @@ impl Scheduler {
     }
 
     /// Poll every benchmark once per round until all of them finish.
-    pub(crate) fn run(mut self) -> Vec<Found> {
+    ///
+    /// At the start of each round, says how it is going if it has been long
+    /// enough: how many benchmarks are still running, and at most how much
+    /// longer they will take, if each uses its whole budget. Less if they reach
+    /// their accuracy goals first, as they may. Once Ctrl-C asks it to stop,
+    /// every benchmark still running is told its time is up
+    /// ([`Clock::expire`]), and wraps up with what it has.
+    pub(crate) fn run(mut self) -> Finished {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut live: Vec<usize> = (0..self.tasks.len()).collect();
+        let mut progress = Progress::new(self.tasks.len());
+        let mut stopped = 0;
         while !live.is_empty() {
             self.shuffle(&mut live);
+            let at_most = live
+                .iter()
+                .map(|&i| self.tasks[i].clock.remaining())
+                .fold(Duration::ZERO, Duration::saturating_add);
+            progress.show(live.len(), at_most);
             for &i in &live {
+                if stopped == 0 && interrupt::asked() {
+                    for task in self.tasks.iter().filter(|t| t.result.is_none()) {
+                        task.clock.expire();
+                        stopped += 1;
+                    }
+                }
                 let task = &mut self.tasks[i];
                 task.clock.begin_poll();
                 if let Poll::Ready(value) = task.future.as_mut().poll(&mut cx) {
@@ -100,11 +123,23 @@ impl Scheduler {
             }
             live.retain(|&i| self.tasks[i].result.is_none());
         }
-        self.tasks
-            .into_iter()
-            .map(|t| t.result.expect("every task finished"))
-            .collect()
+        Finished {
+            found: self
+                .tasks
+                .into_iter()
+                .map(|t| t.result.expect("every task finished"))
+                .collect(),
+            stopped,
+        }
     }
+}
+
+/// What a run came to.
+pub(crate) struct Finished {
+    /// Each benchmark's result, in the order they were added.
+    pub(crate) found: Vec<Found>,
+    /// How many were still running when told to stop: zero if nobody was.
+    pub(crate) stopped: usize,
 }
 
 #[cfg(test)]

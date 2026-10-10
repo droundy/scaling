@@ -904,7 +904,8 @@ async fn measure_scaling(
     // Own-time rather than an `Instant`, because under interleaving the wall
     // clock covers every other benchmark's turns as well.
     let deadline = clock.spent() + budget;
-    let over_budget = |spent: f64| spent >= budget_ns || clock.spent() >= deadline;
+    let over_budget =
+        |spent: f64| spent >= budget_ns || clock.spent() >= deadline || clock.expired();
 
     let mut round = |acc: &mut Vec<Running>, spent: &mut f64| {
         for (i, &n) in sizes.iter().enumerate() {

@@ -44,6 +44,7 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
+use crate::interrupt;
 use crate::metrics::NO_METRICS;
 use crate::names::{self, Address, Kind, NameError};
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
@@ -81,6 +82,7 @@ pub(crate) struct Clock {
     poll_started: Cell<Option<Instant>>,
     spent: Cell<Duration>,
     max: Duration,
+    expired: Cell<bool>,
 }
 
 impl Clock {
@@ -89,6 +91,26 @@ impl Clock {
             poll_started: Cell::new(None),
             spent: Cell::new(Duration::ZERO),
             max,
+            expired: Cell::new(false),
+        }
+    }
+
+    /// Say that the time is up, whatever is left of it: the task wraps up
+    /// with what it has, as it does when it spends its whole budget.
+    pub(crate) fn expire(&self) {
+        self.expired.set(true);
+    }
+
+    pub(crate) fn expired(&self) -> bool {
+        self.expired.get()
+    }
+
+    /// At most how much more this task will spend. Less if it finishes early.
+    pub(crate) fn remaining(&self) -> Duration {
+        if self.expired() {
+            Duration::ZERO
+        } else {
+            self.max.saturating_sub(self.spent())
         }
     }
 
@@ -103,7 +125,7 @@ impl Clock {
     }
 
     pub(crate) fn exhausted(&self) -> bool {
-        self.spent() >= self.max
+        self.expired() || self.spent() >= self.max
     }
 
     pub(crate) fn budget(&self) -> Duration {
@@ -368,6 +390,10 @@ impl Suite {
 
     /// Measure every benchmark, interleaved, and report them together.
     ///
+    /// Says on stderr how it is going, and stops early, with what it has, if
+    /// Ctrl-C asks it to: the report says how many benchmarks were stopped
+    /// before they were done.
+    ///
     /// The family the Bonferroni correction covers is counted here. It can
     /// only be done at this point, once we know how many comparisons will be
     /// made.
@@ -377,9 +403,12 @@ impl Suite {
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
-        let results = self.scheduler.run();
-        let entries: Vec<(String, Found)> = self.names.into_iter().zip(results).collect();
-        Report::new(entries, &self.lanes)
+        let _listening = (!self.is_empty()).then(interrupt::Listen::start);
+        let finished = self.scheduler.run();
+        let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
+        let mut report = Report::new(entries, &self.lanes);
+        report.stopped = finished.stopped;
+        report
     }
 }
 
@@ -671,6 +700,8 @@ pub struct Report {
     /// Everything that can be asked for by name, in the order the entries
     /// were added and each entry's own name before its candidates'.
     addresses: Vec<Address>,
+    /// How many benchmarks were stopped before they were done.
+    stopped: usize,
 }
 
 /// One column of a group while it is being assembled.
@@ -897,6 +928,7 @@ impl Report {
             entries,
             groups,
             addresses: addressed.into_iter().flatten().collect(),
+            stopped: 0,
         }
     }
 }
@@ -996,6 +1028,33 @@ fn own_addresses(name: &str, found: &Found, entry: usize) -> Vec<Address> {
 }
 
 impl Report {
+    /// Whether the run was stopped by Ctrl-C before every benchmark in it was
+    /// done; see [`Config::run`](crate::Config::run).
+    ///
+    /// What is here is still what was measured, and an answer less precise
+    /// than asked for is marked `(limit)`, but the report is partial. A check
+    /// on the numbers, in CI or anywhere else, should ask this first. Once a
+    /// run has been interrupted so is every later one in the same process,
+    /// since the request to stop stands.
+    ///
+    /// ```no_run
+    /// use scaling::Config;
+    ///
+    /// let report = Config::default().run().expect("the registrations compose");
+    /// if report.was_interrupted() {
+    ///     // Not worth judging, and not a pass either.
+    ///     std::process::exit(130);
+    /// }
+    /// // ... judge the numbers ...
+    /// ```
+    pub fn was_interrupted(&self) -> bool {
+        self.stopped > 0
+    }
+
+    pub(crate) fn stopped(&self) -> usize {
+        self.stopped
+    }
+
     /// The measured groups, in the order of their group names, each as the
     /// name and the [`Group`], which prints itself as a table. A caller that
     /// wants another order can collect and sort. A standalone benchmark is a

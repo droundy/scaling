@@ -2,6 +2,7 @@
 //! [`Config::run`].
 
 use crate::assemble::Diagnostic;
+use crate::interrupt;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
 
@@ -76,9 +77,17 @@ impl Config {
     /// # What it prints where
     ///
     /// Results go to stdout, everything else to stderr: how many benchmarks
-    /// are about to run, and warnings about registrations that went unused. So
-    /// redirecting only stdout captures the results and nothing else, without
-    /// anybody having to remember to silence the rest.
+    /// are about to run, warnings about registrations that went unused, and
+    /// how the run is going, as [`Config::run`] describes. So redirecting only
+    /// stdout captures the results and nothing else, without anybody having to
+    /// remember to silence the rest.
+    ///
+    /// # Stopping early
+    ///
+    /// Ctrl-C stops a run where it is, as [`Config::run`] describes. This prints what the run has, says how many benchmarks were
+    /// stopped, and exits with status 130, as the process would have ended
+    /// without all this, so that `cargo bench && next-step` does not go on
+    /// after a partial run.
     ///
     /// # Errors
     ///
@@ -94,15 +103,24 @@ impl Config {
             eprintln!("There are no benchmarks to run!");
             return Ok(());
         }
+        let count = suite.len();
         eprintln!(
-            "measuring {} benchmark{}",
-            suite.len(),
-            if suite.len() == 1 { "" } else { "s" }
+            "measuring {count} benchmark{}",
+            if count == 1 { "" } else { "s" }
         );
 
         let report = suite.run();
 
         print!("{report}");
+        if report.was_interrupted() {
+            eprintln!(
+                "interrupted: {} of {count} benchmarks had finished, and {} were \
+                 stopped early; those not yet as precise as asked for are marked `(limit)`",
+                count - report.stopped(),
+                report.stopped()
+            );
+        }
+        interrupt::exit_if_asked();
 
         Ok(())
     }
@@ -127,6 +145,31 @@ impl Config {
     /// Registrations that are merely unused, such as an input no candidate takes,
     /// are not errors. A warning for each goes to stderr, as in
     /// [`run_and_print`], and the run goes ahead.
+    ///
+    /// # How it goes, and stopping early
+    ///
+    /// A run that goes on for more than a few seconds says how it is going on
+    /// stderr, now and then: how many benchmarks are done, and at most how
+    /// long the rest can take (less, if they reach their accuracy goals
+    /// sooner). Shorter runs say nothing.
+    ///
+    /// Ctrl-C stops the run where it is, and this returns what it has. Every benchmark still being measured stops with the answer so
+    /// far, marked `(limit)` if that is less precise than asked for, and
+    /// [`Report::was_interrupted`] says it happened, for a check that should
+    /// not judge numbers half-measured. This does not end the process; that is
+    /// the program's to do, and a second Ctrl-C does it at once. A benchmark
+    /// call that is already running finishes first.
+    ///
+    /// Once a run has been interrupted, so is every later one in the process:
+    /// the request to stop stands.
+    ///
+    /// The handler is set when the first run begins, through the `ctrlc`
+    /// crate, and stays. A program that already handles Ctrl-C, or ignores it
+    /// as the background jobs of a script do, keeps things as they are, and
+    /// its runs are never stopped early. A
+    /// `ctrlc::set_handler` of the program's own after a run has begun fails,
+    /// since there can be only one in a process. One Ctrl-C stops every run in
+    /// flight, as when tests call this from several threads.
     ///
     /// ```no_run
     /// use scaling::Config;

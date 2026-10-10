@@ -663,6 +663,12 @@ impl<I: 'static> InputGroup<I> {
             // instead of being only the one group's that is running.
             inputs.release();
             clock.yield_now().await;
+            // Told to stop, not merely out of budget: no round more, since
+            // the answer is wanted now and not when every other benchmark in
+            // the suite has had its turn.
+            if clock.expired() {
+                break rounds >= MIN_SAMPLES && estimate::all_precise(&cfg, &times, family, &rough);
+            }
         };
 
         // Nothing more is run on them, and what follows (the metrics) needs

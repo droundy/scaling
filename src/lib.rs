@@ -98,9 +98,12 @@ same shape can lay out differently. Nothing about it is configurable yet; a
 [`Group`] prints itself, so a caller can choose which groups to print and in
 what order (see [`Report::groups`]).
 
-A run prints nothing but how many benchmarks it is about to measure (on
-stderr) until all of them have finished. The suite is measured interleaved, so
-there are no partial results. To measure only some of what is registered, ask
+A run says how many benchmarks it is about to measure (on stderr) and, once it
+has gone on for a few seconds, how it is going (see [`Config::run`]); the
+results come only when all of them have finished. The suite is measured
+interleaved, so there are no partial results before then, unless Ctrl-C stops
+the run early (see [`Report::was_interrupted`]). To measure only some of what
+is registered, ask
 the [`Config`]: [`Config::filter_groups`], [`Config::filter_candidates`] and
 [`Config::filter_inputs`] each take a function from a name to whether to keep
 it. Leaving a benchmark out of the build altogether is what a feature gate is
@@ -514,9 +517,11 @@ mod estimate;
 mod filter;
 mod formatting;
 mod input_group;
+mod interrupt;
 mod laps;
 mod metrics;
 mod names;
+mod progress;
 pub mod quiet;
 /// Benchmarks registered from anywhere in a crate.
 ///
@@ -1119,7 +1124,8 @@ impl Config {
 }
 
 /// Pick a human-readable unit from a magnitude in nanoseconds, returning
-/// the divisor and its suffix.
+/// the divisor and its suffix. Minutes and hours only from two of them, so
+/// that a minute and a half is `90s` and not `1.5min`.
 fn unit_for(ns: f64) -> (f64, &'static str) {
     let magnitude = ns.abs();
     if magnitude < 1e3 {
@@ -1128,8 +1134,12 @@ fn unit_for(ns: f64) -> (f64, &'static str) {
         (1e3, "µs")
     } else if magnitude < 1e9 {
         (1e6, "ms")
-    } else {
+    } else if magnitude < 120e9 {
         (1e9, "s")
+    } else if magnitude < 7200e9 {
+        (60e9, "min")
+    } else {
+        (3600e9, "h")
     }
 }
 
