@@ -98,9 +98,12 @@ same shape can lay out differently. Nothing about it is configurable yet; a
 [`Group`] prints itself, so a caller can choose which groups to print and in
 what order (see [`Report::groups`]).
 
-A run prints nothing but how many benchmarks it is about to measure (on
-stderr) until all of them have finished. The suite is measured interleaved, so
-there are no partial results. To measure only some of what is registered, ask
+A run says how many benchmarks it is about to measure (on stderr) and, once it
+has gone on for a few seconds, how it is going (see [`Config::run`]); the
+results come only when all of them have finished. The suite is measured
+interleaved, so there are no partial results before then, unless Ctrl-C stops
+the run early (see [`Report::was_interrupted`]). To measure only some of what
+is registered, ask
 the [`Config`]: [`Config::filter_groups`], [`Config::filter_candidates`] and
 [`Config::filter_inputs`] each take a function from a name to whether to keep
 it. Leaving a benchmark out of the build altogether is what a feature gate is

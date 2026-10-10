@@ -1,6 +1,7 @@
 //! Saying how a long run is going.
 
 use crate::MetricValue;
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 /// How long a run goes before it first says anything, and then waits before
@@ -35,7 +36,10 @@ impl Progress {
         }
         self.wait = (self.wait * 2).min(LONGEST);
         self.next = elapsed + self.wait;
-        eprintln!(
+        // Not `eprintln!`, which panics if nobody is reading stderr, and a
+        // run that has gone this far is not worth losing for that.
+        let _ = writeln!(
+            io::stderr(),
             "[{:.2}] {}/{} done, at most {:.2} to go",
             MetricValue::time(elapsed),
             self.total - live,
