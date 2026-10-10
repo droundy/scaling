@@ -228,6 +228,13 @@ estimates. Without it, what a sample touches is still limited, by what its
 calls and its preparation can touch in their time, and what is not seen is
 memory reserved and never touched.
 
+The same limit shortens the timed stretch below a millisecond when inputs that
+are not pooled are slow to make next to a call: an input that takes 10µs to
+make, and a call of 10ns, are timed in stretches of a few hundred nanoseconds.
+The warm-up then absorbs less of what the neighbours left behind, and nothing
+in the output says that it happened. A candidate that takes `&I`, or an input
+declared `reuse_input`, avoids it.
+
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
 makes, and every pairing sharing a group and a type is measured, with no

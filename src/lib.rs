@@ -983,6 +983,12 @@ impl Config {
     /// a measurement is only as quick as its strictest comparison.
     ///
     /// The default is `0.1`, 10%.
+    ///
+    /// `fraction` must be above zero. Unlike the relative goal, this one has
+    /// no `0.0` that switches it off: `0.0` asks for a ratio known exactly,
+    /// which is never met, so a comparison with an `uninteresting` candidate
+    /// then runs until [`max_time`](Config::with_max_time) and is marked
+    /// `(limit)`.
     pub fn with_rough_error(mut self, fraction: f64) -> Self {
         self.target_rough_error = fraction;
         self
