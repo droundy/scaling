@@ -429,7 +429,7 @@ comparison judges it more leniently — correctly, but it does mean a small run
 and a full one are not quite asking the same question.)
 
 What this buys is a **bound**, not an improvement. Eight identical workloads,
-measured at the default accuracy on a machine that was not quiesced, read a
+measured at the default accuracy on a laptop that was not quiesced, read a
 median of 1.3% apart within one interleaved suite and 1.5% apart when measured
 one after another, over 126 runs of each in 21 sessions: where nothing drifts,
 a wash. The difference is the worst case. In three of the sequential runs
