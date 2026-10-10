@@ -61,7 +61,6 @@ mod scheduler;
 #[cfg(test)]
 pub(crate) use scheduler::block_on;
 use scheduler::Scheduler;
-pub(crate) use scheduler::Sweep;
 
 struct YieldOnce {
     yielded: bool,
@@ -408,9 +407,9 @@ impl Suite {
         let _listening = (!self.is_empty()).then(interrupt::Listen::start);
         let mut progress = Progress::new();
         let names = &self.names;
-        let finished = self
-            .scheduler
-            .run(interrupt::asked, |sweep| progress.show(sweep, names));
+        let finished = self.scheduler.run(interrupt::asked, |live, at_most| {
+            progress.show(live, at_most, names)
+        });
         let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
         let mut report = Report::new(entries, &self.lanes);
         report.stopped = finished.stopped;
@@ -1544,7 +1543,7 @@ mod tests {
                 }),
             );
         }
-        s.run(|| false, |_| {});
+        s.run(|| false, |_, _| {});
         assert!(
             busy.spent() >= Duration::from_millis(20),
             "busy spent {:?}",

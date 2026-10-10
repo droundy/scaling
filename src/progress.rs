@@ -1,6 +1,5 @@
 //! Saying how a long run is going.
 
-use crate::suite::Sweep;
 use std::time::{Duration, Instant};
 
 /// How long a run goes before it first says anything, and then waits before
@@ -27,27 +26,27 @@ impl Progress {
 
     /// Say how the run is going on stderr, if it has been long enough since
     /// it last did.
-    pub(crate) fn show(&mut self, sweep: &Sweep<'_>, names: &[String]) {
+    pub(crate) fn show(&mut self, live: &[usize], at_most: Duration, names: &[String]) {
         let elapsed = self.started.elapsed();
         if elapsed < self.next {
             return;
         }
         self.wait = (self.wait * 2).min(LONGEST);
         self.next = elapsed + self.wait;
-        eprintln!("{}", line(elapsed, sweep, names));
+        eprintln!("{}", line(elapsed, live, at_most, names));
     }
 }
 
-fn line(elapsed: Duration, sweep: &Sweep<'_>, names: &[String]) -> String {
-    let done = sweep.total - sweep.live.len();
+fn line(elapsed: Duration, live: &[usize], at_most: Duration, names: &[String]) -> String {
+    let done = names.len() - live.len();
     let mut line = format!(
         "[{}] {done}/{} done, at most {} to go",
         clock(elapsed),
-        sweep.total,
-        clock(sweep.at_most)
+        names.len(),
+        clock(at_most)
     );
-    if sweep.live.len() <= NAMED {
-        let waiting: Vec<&str> = sweep.live.iter().map(|&i| names[i].as_str()).collect();
+    if live.len() <= NAMED {
+        let waiting: Vec<&str> = live.iter().map(|&i| names[i].as_str()).collect();
         line += &format!(": waiting for {}", waiting.join(", "));
     }
     line
