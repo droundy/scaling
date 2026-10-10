@@ -1,32 +1,14 @@
-//! Measuring only some of what is registered: [`Config::filter_groups`],
-//! [`Config::filter_candidates`] and [`Config::filter_inputs`].
-//!
-//! A binary measures every benchmark registered anywhere in it, and a suite
-//! gives each its own time budget, so the cost of a run grows with how much
-//! there is. That is the wrong shape for working on one function.
-//!
-//! Choosing happens after registrations have been checked and paired up, on
-//! names the report already shows, so a benchmark is called the same thing
-//! whether or not others were left out, and a filter can never leave an
-//! orphan to warn about. Filtering is also after the contradictions are
-//! found: two benchmarks of one name are an error whether or not a filter
-//! would have dropped one, since a filter is something to change from run to
-//! run and the registrations are not.
+//! The filters on [`Config`]: measuring only some of what is registered.
 
 use crate::assemble::{Lane, Plan};
 use crate::Config;
 use std::fmt;
 use std::sync::Arc;
 
-/// A question about a name: whether to keep what it names.
 type Keep = Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>;
 
-/// What a [`Config`] has been told to leave out: for each kind of thing, one
-/// question about its name.
-///
-/// Asking twice is asking for both, so a second question is joined to the
-/// first by `and`, and a name is kept when every question asked of its kind
-/// keeps it. Until one is asked, everything is kept.
+/// One question about names for each kind of thing. Asking again joins the new
+/// question to the old by `and`.
 #[derive(Clone)]
 pub(crate) struct Filters {
     groups: Keep,
@@ -45,42 +27,29 @@ impl Default for Filters {
 }
 
 impl fmt::Debug for Filters {
-    /// Nothing of the questions, since a closure shows nothing of itself.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Filters").finish_non_exhaustive()
     }
 }
 
-/// Ask `keep` as well as whatever `filter` already asks.
 fn and(filter: &mut Keep, keep: Keep) {
     let before = Arc::clone(filter);
     *filter = Arc::new(move |name| before(name) && keep(name));
 }
 
 impl Filters {
-    /// Take out of `plan` what these filters do not keep.
-    ///
-    /// A benchmark that stands alone, a scaling benchmark included, is a
-    /// group of its own, as [`Report::groups`](crate::Report::groups) has it:
-    /// one candidate, named like the group, on the implicit input, which has
-    /// no name. So it is asked of all three kinds of filter, by its own name
-    /// for the first two and by `""` for the last.
+    /// Take out of `plan` what the filters do not keep. A benchmark that
+    /// stands alone is a group of one candidate on the unnamed implicit input,
+    /// so all three are asked of it.
     pub(crate) fn apply(&self, plan: &mut Plan) {
         plan.flat
             .retain(|r| (self.groups)(&r.name) && (self.candidates)(&r.name) && (self.inputs)(""));
         plan.lanes.retain_mut(|lane| self.narrow(lane));
     }
 
-    /// Narrow a lane to what is kept, and say whether anything is left.
-    ///
-    /// A lane is a group's candidates on one type of input, and it is left
-    /// with nothing to measure when no input of it is kept, or no candidate.
-    ///
-    /// The baseline is what the other candidates are compared with, so a
-    /// candidate filter that does not keep it still cannot remove it while a
-    /// candidate it does keep remains: the filter picks what is measured, and
-    /// never what it is measured against. (A filter that keeps nothing but the
-    /// baseline leaves the baseline, measured alone.)
+    /// Narrow a lane to what is kept, and say whether anything is left. The
+    /// baseline stays whenever another candidate does, since it is what the
+    /// others are compared with.
     fn narrow(&self, lane: &mut Lane) -> bool {
         if !(self.groups)(lane.group) {
             return false;
@@ -97,12 +66,9 @@ impl Filters {
         if !kept.contains(&true) {
             return false;
         }
-        // Baseline first, in a lane of several. In a lane of one the question
-        // was already asked of the one, and the answer was yes.
         kept[0] = true;
         retain_where(&mut lane.candidates, &kept);
-        // Empty when no metrics function was registered, and otherwise one
-        // for each candidate.
+        // Empty when no candidate has a metrics function.
         if !lane.metrics.is_empty() {
             retain_where(&mut lane.metrics, &kept);
         }
@@ -110,7 +76,6 @@ impl Filters {
     }
 }
 
-/// Keep the items whose place in `kept` says so.
 fn retain_where<T>(items: &mut Vec<T>, kept: &[bool]) {
     let mut places = kept.iter();
     items.retain(|_| *places.next().expect("one answer for each item"));

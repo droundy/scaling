@@ -458,9 +458,8 @@ impl Suite {
         // something registered went unused, and everything else still ran.
         let (mut fatal, warnings): (Vec<_>, Vec<_>) =
             problems.into_iter().partition(|p| p.is_fatal());
-        // After the errors were found, which are about what is registered and
-        // not about what this run measures, and before the allocator is asked
-        // for, which only what is measured needs.
+        // After the errors, which are about what is registered, and before the
+        // allocator check, which is about what is measured.
         self.cfg.filters.apply(&mut plan);
         // Said once for each function, however many candidates it serves.
         if !crate::alloc::installed() {
