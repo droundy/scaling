@@ -40,8 +40,9 @@ pub struct Timing {
     /// run past 4.3 billion iterations within its time budget, which a
     /// 32-bit `usize` could not hold.
     pub iterations: u64,
-    /// How many samples were taken (ie. how many times we allocated the
-    /// input and measured the time).
+    /// How many samples were taken: one for each round of measuring, which
+    /// times many iterations in laps. [`Timing::iterations`] says how many
+    /// ran in all.
     pub samples: usize,
     /// `true` if the benchmark ran out of time before reaching its accuracy
     /// target: the answer is real, just less precise than you asked for.
@@ -138,24 +139,83 @@ impl Timing {
     }
 }
 
-/// Run `f` once over every input in `xs`, and say how long that took in
-/// nanoseconds.
+/// Call `f` `n` times over `xs`, and say how long that took in nanoseconds.
 ///
 /// Only the calls are timed. [`crate::InputGroup`] prepares one batch of
 /// inputs and then hands the same batch - cloned - to each alternative in
 /// turn, so generating the inputs and timing the calls happen in different
 /// places, and the inputs are dropped only after the clock has stopped.
-pub(crate) fn time_loop<F, I, O>(f: &mut F, xs: &mut [I]) -> f64
+///
+/// With at least `n` inputs each call gets one of its own. With fewer, the
+/// calls go round them again from the start - which is what an alternative
+/// that leaves its input as it found it wants, and no other does. See
+/// [`run_calls`].
+pub(crate) fn time_loop<F, I, O>(f: &mut F, xs: &mut [I], n: usize) -> f64
 where
     F: FnMut(&mut I) -> O,
 {
     let start = Instant::now();
-    // We iterate over `&mut *xs` rather than draining it, because we don't
-    // want to drop the input values until after the clock has stopped.
-    for x in &mut *xs {
-        black_box(f(x));
-    }
+    run_calls(f, xs, n);
     start.elapsed().as_secs_f64() * 1e9
+}
+
+/// Call `f` `n` times over `xs`, in order, going back to the start of `xs`
+/// whenever it runs out.
+///
+/// We iterate over `&mut *xs` rather than draining it, because we don't
+/// want to drop the input values until after the clock has stopped. The
+/// wrap is a loop around loops, not a remainder in the call: asking each call
+/// which input is next would be a cost the function being timed does not have.
+fn run_calls<F, I, O>(f: &mut F, xs: &mut [I], n: usize)
+where
+    F: FnMut(&mut I) -> O,
+{
+    let mut left = n;
+    while left > 0 {
+        let take = left.min(xs.len());
+        assert!(take > 0, "calls to make, and no inputs to make them on");
+        for x in &mut xs[..take] {
+            black_box(f(x));
+        }
+        left -= take;
+    }
+}
+
+/// Run `f` over `xs` as consecutive laps of `laps[j]` calls each, and say
+/// how long each lap took in nanoseconds.
+///
+/// The clock is read between laps and nothing else happens there: the
+/// readings are kept as [`Instant`]s and turned into durations only after
+/// the last lap. Whatever a reading costs, or sets off, is a fixed cost
+/// added to each lap, which is why the sampling loop subtracts a short lap
+/// from a long one rather than trusting either alone. A lap of zero calls
+/// is allowed and comes back as (nearly) zero.
+///
+/// With at least as many inputs in `xs` as the laps use in all, each call has
+/// one of its own, and a lap picks up where the one before left off. With
+/// fewer, every lap starts again at the first input and goes round `xs` as
+/// often as it needs: the inputs are a pool, which only a function that
+/// leaves its input as it found it can be timed on.
+pub(crate) fn time_laps<F, I, O>(f: &mut F, xs: &mut [I], laps: [usize; 3]) -> [f64; 3]
+where
+    F: FnMut(&mut I) -> O,
+{
+    let own = xs.len() >= laps.iter().sum::<usize>();
+    let mut marks = [Instant::now(); 4];
+    let mut at = 0;
+    for (j, &n) in laps.iter().enumerate() {
+        if own {
+            for x in &mut xs[at..at + n] {
+                black_box(f(x));
+            }
+            at += n;
+        } else {
+            run_calls(f, xs, n);
+        }
+        marks[j + 1] = Instant::now();
+    }
+    let lap = |j: usize| (marks[j + 1] - marks[j]).as_secs_f64() * 1e9;
+    [lap(0), lap(1), lap(2)]
 }
 
 #[cfg(test)]
@@ -407,8 +467,11 @@ mod tests {
     fn a_slow_function_on_a_short_budget_still_gets_an_error_bar() {
         println!();
         // Short budgets can stop before the minimum sample count; the error bar
-        // should still be reported rather than turning into NaN.
-        let cfg = Config::default().with_max_time(Duration::from_millis(350));
+        // should still be reported rather than turning into NaN. A 100ms call
+        // costs two calls to calibrate (one of them untimed) and one a round,
+        // a call that long needing no warm-up, so this budget buys a few
+        // rounds and not the eight a stop would need.
+        let cfg = Config::default().with_max_time(Duration::from_millis(500));
         let stats = bench(&cfg, || thread::sleep(Duration::from_millis(100)));
         println!("{stats}");
         assert!(
@@ -432,8 +495,9 @@ mod tests {
     fn unreachable_target_is_flagged() {
         println!();
         // An impossible target plus a short budget should be reported as a short
-        // run, not a confident result.
-        let cfg = Config::relative(1e-9).with_max_time(Duration::from_millis(50));
+        // run, not a confident result. Short, but long enough for a good number
+        // of rounds: each one times eleven units of laps.
+        let cfg = Config::relative(1e-9).with_max_time(Duration::from_millis(300));
         let stats = bench(&cfg, variable_cost(1));
         println!("{stats}");
         assert!(stats.hit_limit);

@@ -543,6 +543,7 @@ fn unit_input() -> Named<Input> {
         type_id: TypeId::of::<()>,
         type_name: "()",
         make: || ErasedInput::new(()),
+        reuse: false,
     };
     Named {
         name: String::new(),
@@ -1469,54 +1470,76 @@ mod pairing {
     /// separately, where it can be.
     #[test]
     fn erasing_the_input_hands_both_alternatives_the_same_value() {
-        // What each alternative was given, round by round.
-        let seen_a: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
-        let seen_b: Rc<RefCell<Vec<Vec<u64>>>> = Rc::new(RefCell::new(Vec::new()));
+        // What each alternative was given, keyed by the order the input was
+        // generated in. Alternatives can run different numbers of calls a
+        // round - each runs laps of about the same *time*, so a faster one
+        // runs more - but every round they all start from the same batch, so
+        // whatever two of them both ran on must be one value.
+        type Seen = Rc<RefCell<Vec<(u64, Vec<u64>)>>>;
+        let seen_a: Seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_b: Seen = Rc::new(RefCell::new(Vec::new()));
         let (rec_a, rec_b) = (seen_a.clone(), seen_b.clone());
 
         let cfg = Config::relative(0.5).with_max_time(Duration::from_millis(50));
         let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        let mut generated = 0u64;
         let _ = cfg
             .input_group_make_input(move || {
+                generated += 1;
                 // Varying, so that "they saw the same thing" is a real
                 // claim rather than one a constant would satisfy.
                 let n = 4 + (rng.next() % 16) as usize;
-                ErasedInput::new(
+                ErasedInput::new((
+                    generated,
                     (0..n as u64)
                         .map(|x| x * 7 + n as u64)
                         .collect::<Vec<u64>>(),
-                )
+                ))
             })
             .add_input("a", move |e: &mut ErasedInput| {
-                let v = e.get_mut::<Vec<u64>>();
-                rec_a.borrow_mut().push(v.clone());
+                let (tag, v) = e.get_mut::<(u64, Vec<u64>)>();
+                rec_a.borrow_mut().push((*tag, v.clone()));
                 sum(v)
             })
             .add_input("b", move |e: &mut ErasedInput| {
-                let v = e.get_mut::<Vec<u64>>();
-                rec_b.borrow_mut().push(v.clone());
+                let (tag, v) = e.get_mut::<(u64, Vec<u64>)>();
+                rec_b.borrow_mut().push((*tag, v.clone()));
                 sum(v)
             })
             .run();
 
-        let a = seen_a.borrow();
-        let b = seen_b.borrow();
-        assert!(!a.is_empty(), "the comparison ran at all");
-        assert_eq!(a.len(), b.len(), "both alternatives ran equally often");
+        let (a, b) = (seen_a.borrow(), seen_b.borrow());
+        assert!(!a.is_empty() && !b.is_empty(), "the comparison ran at all");
         assert!(
-            a.iter().any(|v| v.len() != a[0].len()),
+            a.iter().any(|(_, v)| v.len() != a[0].1.len()),
             "the generator must actually vary, or this asserts nothing",
         );
-        // The alternatives run in a rotating order, so the *i*th value each
-        // saw is the *i*th one generated for both of them.
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x, y,
-                "on round {i} the two alternatives were handed different \
-                 inputs, so their difference carries the gap between two \
-                 draws as well as the one it meant to measure",
-            );
-        }
+        let by_tag = |seen: &[(u64, Vec<u64>)]| -> std::collections::HashMap<u64, Vec<u64>> {
+            seen.iter().cloned().collect()
+        };
+        let (a_by_tag, b_by_tag) = (by_tag(&a), by_tag(&b));
+        // Calibration probes each alternative on batches of its own, ahead of
+        // every round. From the first input the two have in common, each
+        // round has the alternative with fewer calls on a prefix of what the
+        // other ran on: everything it ran on after that is something the
+        // other ran on too, and as the same value. (Which of the two has
+        // fewer calls is not asked; one of them must.)
+        let inside = |seen: &[(u64, Vec<u64>)],
+                      other: &std::collections::HashMap<u64, Vec<u64>>| {
+            seen.iter()
+                .position(|(tag, _)| other.contains_key(tag))
+                .is_some_and(|first| {
+                    seen[first..]
+                        .iter()
+                        .all(|(tag, v)| other.get(tag) == Some(v))
+                })
+        };
+        assert!(
+            inside(&a, &b_by_tag) || inside(&b, &a_by_tag),
+            "in some round the alternatives were handed different draws, so \
+             their difference carries the gap between two draws as well as \
+             the one it meant to measure",
+        );
     }
 
     /// And the consequence: with the input shared, the paired error bar is
@@ -1693,6 +1716,7 @@ pub(crate) mod lane_tests {
             type_id: TypeId::of::<I>,
             type_name: ty,
             make: || ErasedInput::new(()),
+            reuse: false,
         }
     }
 

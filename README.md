@@ -196,6 +196,44 @@ with its own error bar rather than by subtracting two independent numbers.
 To give every candidate the same values the input is generated for each
 iteration and cloned for each candidate, so its type must be `Clone`; the
 generating and cloning are not timed, but they are paid for out of `max_time`.
+Candidates are timed for about as long as each other, so a quick one makes more
+calls than a slow one and takes more of the round's inputs: where the cost
+depends on the input, the part of it they do not share is not cancelled from
+their difference, but left in the error bar.
+
+Most of a comparison's candidates are not always of interest. When what is
+wanted is whether this release differs from the last, comparing it with
+`HashSet` too only needs to say roughly how much faster it is. Mark such a
+candidate `uninteresting`: it is shown as a size, with no verdict, is measured
+only to [`Config::with_rough_error`] (10% by default), and is left out of the
+count the multiple-comparison correction is made over. Every candidate that
+is counted makes the others harder to call a change, and a measurement lasts
+as long as its strictest comparison.
+
+That makes a quick candidate on a large input expensive: a timed stretch of a
+millisecond may need hundreds of thousands of inputs. A candidate that takes
+`&I` cannot change its input, so it is given a small pool of inputs instead,
+and its calls go round the pool. So is every candidate of an input declared
+`reuse_input`, where those that take `&mut I` promise to leave it as they found
+it. The pool is small enough to stay in cache, so such a candidate is timed on
+warm data; a candidate that takes `&mut I` from any other input is timed on a
+new one every call, cold. A comparison is one or the other throughout, since a
+candidate timed warm against one timed cold would measure that difference and
+not the functions': if any candidate of a group takes `&mut I` from an input
+that is not declared `reuse_input`, every candidate is timed on new inputs.
+When the input is large, and the pool and everything else would take too much
+memory, the timed stretch is made shorter instead; installing [`Allocator`]
+lets `scaling` see how much the inputs really take, and otherwise it
+estimates. Without it, what a sample touches is still limited, by what its
+calls and its preparation can touch in their time, and what is not seen is
+memory reserved and never touched.
+
+The same limit shortens the timed stretch below a millisecond when inputs that
+are not pooled are slow to make next to a call: an input that takes 10µs to
+make, and a call of 10ns, are timed in stretches of a few hundred nanoseconds.
+The warm-up then absorbs less of what the neighbours left behind, and nothing
+in the output says that it happened. A candidate that takes `&I`, or an input
+declared `reuse_input`, avoids it.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
@@ -348,7 +386,7 @@ Benchmarks run one after another are measured in different machines: the
 first on a cold package, the fiftieth on a warm one. Their numbers are not
 comparable with each other, nor with the same suite run tomorrow.
 
-A suite measures them interleaved instead — one sample each, in rotation —
+A suite measures them interleaved instead — one round each, in rotation —
 so every benchmark's samples spread across the whole session and all of them
 average the same drift.
 
@@ -365,7 +403,9 @@ order of eight identical workloads moves an interleaved benchmark by
 same workloads move by anywhere from 0.10% to 1.19% depending on nothing but
 how much the machine happened to be drifting at the time. The typical case is
 a wash — the medians are 0.28% and 0.26%. The worst case is four times
-better.
+better. (Those figures were measured before samples were timed in laps, whose
+warm-up absorbs much of what the rest of the suite leaves behind; they have
+not been measured again.)
 
 That is the trade the mechanism predicts: interleaving pays a floor it never
 gets back, because every sample starts on a cache the rest of the suite has
@@ -385,6 +425,40 @@ That budget is wall-clock time, and building inputs counts against it:
 `make_input`, `#[input]` functions, and the clones each candidate is handed.
 An input that is expensive next to the function it feeds leaves fewer
 samples, and so a wider `±`. If that happens, raise `max_time`.
+
+## Very fast functions, and where the code sits
+
+For a function that takes a few nanoseconds, where its code lands in memory is
+part of what is measured. The same source compiled into two places can run
+tens of percent apart, and `scaling` reports that faithfully, with a small
+`±`, because it is real in that binary. It is not noise that more sampling
+averages away, and it is not a difference in your code: it stays put for a
+given build and changes when the program is rebuilt. It matters most when
+comparing two versions of one function, such as a release against the next,
+where a gap of tens of percent can come from placement alone.
+
+Aligning every function to a cache line removes most of it. Put this in
+`.cargo/config.toml`:
+
+```toml
+[build]
+rustflags = ["-C", "llvm-args=-align-all-functions=6"]
+```
+
+In one test, on a quiet machine, 432 comparisons of a function against a copy
+of itself built from identical source as a separate crate (functions from 5ns
+to several microseconds, in a real benchmark suite), 105 were reported as
+changed, 48 of them by 10% or more and the largest by 99%; with this setting 9
+were, none by 10% or more and the largest by 8%. Two candidates calling the
+same function in one crate were not told apart in either build.
+
+It applies to everything the build compiles, and makes the code a little
+larger. It is an LLVM option, not part of Rust's stable interface, so its name
+could change, and it leaves a few percent of placement effects behind, about
+8% between separately built copies in that test. Before trusting a small
+difference between two versions, measure the old one against a second copy of
+itself, built the same way: if that shows a gap as large as the one you are
+looking at, the code did not change.
 
 ## Quiescing the machine (Linux)
 
