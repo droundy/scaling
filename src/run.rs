@@ -3,7 +3,6 @@
 
 use crate::assemble::Diagnostic;
 use crate::interrupt;
-use crate::progress::Progress;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
 
@@ -111,7 +110,7 @@ impl Config {
             if count == 1 { "" } else { "s" }
         );
 
-        let report = measure(suite);
+        let report = suite.run();
 
         print!("{report}");
         if report.was_interrupted() {
@@ -193,7 +192,7 @@ impl Config {
     ///
     /// [`run_and_print`]: Config::run_and_print
     pub fn run(&self) -> Result<Report, RegistrationError> {
-        Ok(measure(self.assemble()?))
+        Ok(self.assemble()?.run())
     }
 
     /// Discover everything registered and assemble it into a suite, ready to
@@ -218,16 +217,6 @@ impl Config {
         warn(&assembled.warnings);
         Ok(suite)
     }
-}
-
-/// Measure a suite, saying on stderr how it is going and stopping early if
-/// asked to by Ctrl-C.
-fn measure(suite: Suite) -> Report {
-    let _listening = (!suite.is_empty()).then(interrupt::Listen::start);
-    let mut progress = Progress::new();
-    suite.run_with(interrupt::asked, |sweep, names| {
-        progress.show(sweep, names);
-    })
 }
 
 /// Say on stderr what went unused.

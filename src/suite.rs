@@ -44,8 +44,10 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
+use crate::interrupt;
 use crate::metrics::NO_METRICS;
 use crate::names::{self, Address, Kind, NameError};
+use crate::progress::Progress;
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -388,33 +390,27 @@ impl Suite {
         );
     }
 
-    /// Run to the end, with nobody watching.
-    #[cfg(test)]
-    pub(crate) fn run(self) -> Report {
-        self.run_with(|| false, |_, _| {})
-    }
-
-    /// Measure every benchmark, interleaved, and report them together,
-    /// stopping early once `stop` says to, and telling `observe` how it is
-    /// going: at the start of each round, with the names of what was added,
-    /// in the order they were added. The report says how many benchmarks were
-    /// stopped before they were done.
+    /// Measure every benchmark, interleaved, and report them together.
+    ///
+    /// Says on stderr how it is going, and stops early, with what it has, if
+    /// Ctrl-C asks it to: the report says how many benchmarks were stopped
+    /// before they were done.
     ///
     /// The family the Bonferroni correction covers is counted here. It can
     /// only be done at this point, once we know how many comparisons will be
     /// made.
-    pub(crate) fn run_with(
-        self,
-        stop: impl Fn() -> bool,
-        mut observe: impl FnMut(&Sweep<'_>, &[String]),
-    ) -> Report {
+    pub(crate) fn run(self) -> Report {
         self.family.set(self.comparisons);
         // Claimed once for the whole session rather than once per benchmark.
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
+        let _listening = (!self.is_empty()).then(interrupt::Listen::start);
+        let mut progress = Progress::new();
         let names = &self.names;
-        let finished = self.scheduler.run(stop, |sweep| observe(sweep, names));
+        let finished = self
+            .scheduler
+            .run(interrupt::asked, |sweep| progress.show(sweep, names));
         let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
         let mut report = Report::new(entries, &self.lanes);
         report.stopped = finished.stopped;
