@@ -38,9 +38,9 @@ match scaling::quiet::status() {
 */
 
 pub use crate::cpus::CPUS_VAR;
-use crate::cpus::{
-    format_cpu_list, parse_cpu_list, pin_thread, reserved_cpus, CPUS_PATH, LOCK_HELD_VAR,
-};
+#[cfg(target_os = "linux")]
+use crate::cpus::{format_cpu_list, CPUS_PATH};
+use crate::cpus::{parse_cpu_list, pin_thread, reserved_cpus, LOCK_HELD_VAR};
 use std::fmt::{self, Display, Formatter};
 
 /// Set this to `1` to stop `scaling` pinning itself even when CPUs have
@@ -346,7 +346,7 @@ fn lock_reservation() -> Option<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpus::hold_reserved_cpus;
+    use crate::cpus::{format_cpu_list, hold_reserved_cpus};
 
     /// A benchmark nested inside another one's closure must not deadlock
     /// against itself, which a plain mutex would do.
