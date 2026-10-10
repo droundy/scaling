@@ -52,6 +52,7 @@ pub(crate) fn parse_cpu_list(list: &str) -> Result<Vec<usize>, String> {
 
 /// Render a set of CPU numbers as a Linux CPU list, collapsing runs
 /// (`[1, 3, 4, 5]` becomes `"1,3-5"`).
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn format_cpu_list(cpus: &[usize]) -> String {
     let mut sorted = cpus.to_vec();
     sorted.sort_unstable();

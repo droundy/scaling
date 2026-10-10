@@ -33,9 +33,30 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
       - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: -D warnings
         with:
           command: check
-          args: --all
+          args: --all --all-targets
+
+  # Some code only compiles on Linux, and what is only used by that code is
+  # dead anywhere else, which Linux cannot see.
+  check-macos:
+    name: Check (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: -D warnings
+        with:
+          command: check
+          args: --all --all-targets
 
   test:
     name: Test Suite
