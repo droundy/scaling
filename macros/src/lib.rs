@@ -232,6 +232,17 @@ impl Input {
     }
 }
 
+/// `ty` without the parentheses, and the invisible group `macro_rules!` puts
+/// round a `$t:ty` fragment, so that `&I` written through a macro is still
+/// seen as `&I`.
+fn peel(ty: &Type) -> &Type {
+    match ty {
+        Type::Group(group) => peel(&group.elem),
+        Type::Paren(paren) => peel(&paren.elem),
+        other => other,
+    }
+}
+
 fn input_kind(func: &ItemFn) -> syn::Result<Input> {
     let mut args = func.sig.inputs.iter();
     let first = match args.next() {
@@ -253,7 +264,7 @@ fn input_kind(func: &ItemFn) -> syn::Result<Input> {
         }
         FnArg::Typed(t) => t,
     };
-    match &*pat.ty {
+    match peel(&pat.ty) {
         Type::Reference(r) => Ok(Input::Ref((*r.elem).clone(), r.mutability.is_some())),
         other => Ok(Input::Owned(other.clone())),
     }
@@ -288,7 +299,7 @@ fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         return Repeatable::No;
     };
-    let Type::ImplTrait(imp) = &**ty else {
+    let Type::ImplTrait(imp) = peel(ty) else {
         return Repeatable::No;
     };
     for bound in &imp.bounds {
@@ -336,7 +347,7 @@ fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
     let syn::ReturnType::Type(_, ty) = &sig.output else {
         return None;
     };
-    let Type::ImplTrait(imp) = &**ty else {
+    let Type::ImplTrait(imp) = peel(ty) else {
         return None;
     };
     for bound in &imp.bounds {
@@ -1117,7 +1128,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             )),
         })
         .collect::<syn::Result<_>>()?;
-    let by_value = |ty: &Type| match ty {
+    let by_value = |ty: &Type| match peel(ty) {
         Type::Reference(r) => Err(syn::Error::new(
             r.span(),
             "a metrics function takes the output by value: `fn(out: T)`, or \
@@ -1127,7 +1138,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     };
     let (input, output): (Option<Type>, Type) = match params.as_slice() {
         [out] => (None, by_value(&out.ty)?),
-        [input, out] => match &*input.ty {
+        [input, out] => match peel(&input.ty) {
             Type::Reference(r) if r.mutability.is_none() => {
                 (Some((*r.elem).clone()), by_value(&out.ty)?)
             }
