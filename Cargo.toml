@@ -8,7 +8,9 @@ documentation = "https://docs.rs/scaling/"
 repository = "https://github.com/droundy/scaling"
 readme = "README.md"
 keywords = ["benchmark", "scaling"]
+categories = ["development-tools::profiling"]
 license = "MIT OR Apache-2.0"
+exclude = [".github", ".gitignore", "prek.toml"]
 # `#[expect]` was stabilized in Rust 1.81.
 rust-version = "1.81"
 
