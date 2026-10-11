@@ -116,11 +116,8 @@ impl Scheduler {
             // Once every benchmark has been calibrated there are results to
             // give, and a Ctrl-C stops the run with them. Before that it ends
             // the process, since nothing has been measured worth waiting for.
-            if let Some(listening) = listening.as_mut().filter(|l| !l.is_ready()) {
-                if calibrated == total {
-                    listening.ready();
-                    progress.calibrated();
-                }
+            if calibrated == total && listening.as_mut().is_some_and(|l| l.ready()) {
+                progress.calibrated();
             }
             progress.show(live.len(), at_most, calibrated);
             for &i in &live {

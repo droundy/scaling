@@ -97,7 +97,8 @@ impl Clock {
     }
 
     /// Say that this task has been calibrated: what it has to measure is
-    /// known, and what it measures from here on is results.
+    /// known, and what it measures from here on is results. Every kind of
+    /// task must say so: until all have, Ctrl-C ends the process.
     pub(crate) fn settle(&self) {
         self.settled.set(true);
     }

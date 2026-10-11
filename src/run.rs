@@ -85,9 +85,8 @@ impl Config {
     ///
     /// # Stopping early
     ///
-    /// Ctrl-C stops a run where it is, once every benchmark has been
-    /// calibrated, as [`Config::run`] describes. This prints what the run has,
-    /// says how many benchmarks were stopped, and
+    /// Ctrl-C is handled as [`Config::run`] describes. Where it stops the run,
+    /// this prints what the run has, says how many benchmarks were stopped, and
     /// exits with status 130, as the process would have ended without all
     /// this, so that `cargo bench && next-step` does not go on after a partial
     /// run.

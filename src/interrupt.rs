@@ -57,15 +57,15 @@ impl Listen {
     /// Every benchmark of the run has been calibrated, so there are results
     /// to give. Before this a Ctrl-C ends the process at once, since a run
     /// that has measured nothing has nothing worth waiting for.
-    pub(crate) fn ready(&mut self) {
-        if !self.ready {
-            self.ready = true;
-            READY.fetch_add(1, Ordering::SeqCst);
+    ///
+    /// Returns whether this is the first time it was said.
+    pub(crate) fn ready(&mut self) -> bool {
+        if self.ready {
+            return false;
         }
-    }
-
-    pub(crate) fn is_ready(&self) -> bool {
-        self.ready
+        self.ready = true;
+        READY.fetch_add(1, Ordering::SeqCst);
+        true
     }
 }
 

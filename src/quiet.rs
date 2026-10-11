@@ -180,8 +180,9 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
 ///
 /// #[scaling::bench]
 /// fn work() -> impl Fn() -> u64 {
-///     if !matches!(status(), Status::Pinned { .. }) {
-///         eprintln!("not on a quiet machine: {}", status());
+///     let status = status();
+///     if !matches!(status, Status::Pinned { .. }) {
+///         eprintln!("not on a quiet machine: {status}");
 ///     }
 ///     || (0..1000u64).sum()
 /// }
