@@ -289,6 +289,7 @@ async fn scaling_sweep(
     )
     .await;
     let sizes = choose_sizes(range, nmin);
+    clock.settle();
 
     // Each degree costs a size, and a fit needs more sizes than terms.
     let max_degree = MAX_DEGREE.min(sizes.len().saturating_sub(2));

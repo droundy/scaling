@@ -5,15 +5,16 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Once;
 
-/// How many runs are listening.
-static LISTENING: AtomicUsize = AtomicUsize::new(0);
+/// How many runs can be stopped with what they have: those in which every
+/// benchmark has been calibrated.
+static READY: AtomicUsize = AtomicUsize::new(0);
 static ASKED: AtomicBool = AtomicBool::new(false);
 static INSTALL: Once = Once::new();
 
 /// The status of a process ended by Ctrl-C, by the shell's convention.
 const STATUS: i32 = 130;
 
-/// Whether anyone has asked to stop since the first run began listening.
+/// Whether anyone has asked to stop since the first run began.
 pub(crate) fn asked() -> bool {
     ASKED.load(Ordering::SeqCst)
 }
@@ -26,17 +27,19 @@ pub(crate) fn exit_if_asked() {
 }
 
 /// A run that is listening for Ctrl-C, for as long as this is held.
-pub(crate) struct Listen(());
+pub(crate) struct Listen {
+    ready: bool,
+}
 
 impl Listen {
     pub(crate) fn start() -> Listen {
         INSTALL.call_once(|| {
             // A handler can be set once, and stays. So this one does what
             // Ctrl-C would have done, except for the first ask of a run that
-            // is listening. If the program already has a handler, it keeps it
-            // and a run is never asked to stop.
+            // is ready to be stopped. If the program already has a handler, it
+            // keeps it and a run is never asked to stop.
             let _ = ctrlc::try_set_handler(|| {
-                if LISTENING.load(Ordering::SeqCst) == 0 || ASKED.swap(true, Ordering::SeqCst) {
+                if READY.load(Ordering::SeqCst) == 0 || ASKED.swap(true, Ordering::SeqCst) {
                     std::process::exit(STATUS);
                 }
                 // Finishing what is running takes a while, and under `cargo`
@@ -48,13 +51,28 @@ impl Listen {
                 );
             });
         });
-        LISTENING.fetch_add(1, Ordering::SeqCst);
-        Listen(())
+        Listen { ready: false }
+    }
+
+    /// Every benchmark of the run has been calibrated, so there are results
+    /// to give. Before this a Ctrl-C ends the process at once, since a run
+    /// that has measured nothing has nothing worth waiting for.
+    pub(crate) fn ready(&mut self) {
+        if !self.ready {
+            self.ready = true;
+            READY.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready
     }
 }
 
 impl Drop for Listen {
     fn drop(&mut self) {
-        LISTENING.fetch_sub(1, Ordering::SeqCst);
+        if self.ready {
+            READY.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }

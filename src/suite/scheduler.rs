@@ -98,7 +98,9 @@ impl Scheduler {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut live: Vec<usize> = (0..self.tasks.len()).collect();
-        let mut progress = Progress::new(self.tasks.len());
+        let total = self.tasks.len();
+        let mut progress = Progress::new(total);
+        let mut listening = (total > 0).then(interrupt::Listen::start);
         let mut stopped = 0;
         while !live.is_empty() {
             self.shuffle(&mut live);
@@ -106,7 +108,21 @@ impl Scheduler {
                 .iter()
                 .map(|&i| self.tasks[i].clock.remaining())
                 .fold(Duration::ZERO, Duration::saturating_add);
-            progress.show(live.len(), at_most);
+            let calibrated = self
+                .tasks
+                .iter()
+                .filter(|t| t.result.is_some() || t.clock.settled())
+                .count();
+            // Once every benchmark has been calibrated there are results to
+            // give, and a Ctrl-C stops the run with them. Before that it ends
+            // the process, since nothing has been measured worth waiting for.
+            if let Some(listening) = listening.as_mut().filter(|l| !l.is_ready()) {
+                if calibrated == total {
+                    listening.ready();
+                    progress.calibrated();
+                }
+            }
+            progress.show(live.len(), at_most, calibrated);
             for &i in &live {
                 if stopped == 0 && interrupt::asked() {
                     for task in self.tasks.iter().filter(|t| t.result.is_none()) {

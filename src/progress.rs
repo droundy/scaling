@@ -29,7 +29,7 @@ impl Progress {
     /// Say how the run is going on stderr, if it has been long enough since
     /// it last did. `live` is how many benchmarks are still running, and
     /// `at_most` how much longer they can take.
-    pub(crate) fn show(&mut self, live: usize, at_most: Duration) {
+    pub(crate) fn show(&mut self, live: usize, at_most: Duration, calibrated: usize) {
         let elapsed = self.started.elapsed();
         if elapsed < self.next {
             return;
@@ -38,13 +38,32 @@ impl Progress {
         self.next = elapsed + self.wait;
         // Not `eprintln!`, which panics if nobody is reading stderr, and a
         // run that has gone this far is not worth losing for that.
+        let calibrating = if calibrated < self.total {
+            format!(", {calibrated}/{} calibrated", self.total)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             io::stderr(),
-            "[{:.2}] {}/{} done, at most {:.2} to go",
+            "[{:.2}] {}/{} done, at most {:.2} to go{calibrating}",
             MetricValue::time(elapsed),
             self.total - live,
             self.total,
             MetricValue::time(at_most)
         );
+    }
+
+    /// Say that every benchmark has been calibrated, so that Ctrl-C now stops
+    /// the run with what it has, where before it ended the process. Said only
+    /// of a run that has been going long enough to say anything.
+    pub(crate) fn calibrated(&mut self) {
+        let elapsed = self.started.elapsed();
+        if elapsed >= FIRST {
+            let _ = writeln!(
+                io::stderr(),
+                "[{:.2}] calibrated: Ctrl-C now stops the run and prints what it has",
+                MetricValue::time(elapsed)
+            );
+        }
     }
 }

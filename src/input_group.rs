@@ -619,6 +619,7 @@ impl<I: 'static> InputGroup<I> {
             e.reuse = pooled;
         }
         let cal = laps::calibrate(&mut inputs, &mut entries, clock).await;
+        clock.settle();
         inputs.release();
         let mut iterations = cal.probed.clone();
 
