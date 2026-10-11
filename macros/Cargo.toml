@@ -1,6 +1,6 @@
 [package]
 name = "scaling-macros"
-version = "0.9.0"
+version = "0.9.1"
 authors = ["David Roundy <daveroundy@gmail.com>"]
 description = "Attribute macros for the scaling benchmarking library"
 edition = "2021"
