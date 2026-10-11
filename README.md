@@ -514,12 +514,15 @@ quiet-bench run cargo test --release
 ```
 
 Benchmarks built against `scaling` **pin themselves to the reserved CPUs
-automatically** — `quiet-bench run` advertises the reservation in
-`SCALING_BENCH_CPUS`, and every benchmark in this crate honours it without
-any code change. Set `SCALING_NO_PIN=1` to opt out.
+automatically** when a run starts, without any code change: the reservation
+`quiet-bench reserve` leaves is enough. `quiet-bench run` also pins the
+command before it starts, which matters for programs that know nothing about
+`scaling`. Set `SCALING_NO_PIN=1` to opt out.
 
+`scaling::quiet::status()` says where benchmarks are running, and is best
+asked from inside one, where a run has already pinned the thread.
 `quiet-bench status` reports whether a reservation is in effect and whether
-this process is actually on it. When you're done:
+that process is on it. When you're done:
 
 ```bash
 sudo `which quiet-bench` restore
