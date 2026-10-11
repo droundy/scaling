@@ -1,6 +1,7 @@
 //! Hearing Ctrl-C while a run is going, so that it can stop early and print
 //! what it has.
 
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Once;
 
@@ -38,6 +39,13 @@ impl Listen {
                 if LISTENING.load(Ordering::SeqCst) == 0 || ASKED.swap(true, Ordering::SeqCst) {
                     std::process::exit(STATUS);
                 }
+                // Finishing what is running takes a while, and under `cargo`
+                // the shell may have its prompt back already, so say so now.
+                let _ = writeln!(
+                    io::stderr(),
+                    "Ctrl-C: finishing what is running, then the results so far; \
+                     Ctrl-C again to quit at once"
+                );
             });
         });
         LISTENING.fetch_add(1, Ordering::SeqCst);

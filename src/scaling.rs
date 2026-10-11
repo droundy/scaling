@@ -923,6 +923,15 @@ async fn measure_scaling(
         if i >= 2 && over_budget(spent) {
             break;
         }
+        // Told to stop before the second round: one round gives no standard
+        // error and so no fit, and finishing would make everyone wait for
+        // nothing.
+        if i < 2 && clock.expired() {
+            return Measured {
+                fit: None,
+                hit_limit: true,
+            };
+        }
         round(&mut acc, &mut spent);
         // One whole round per poll, never part of one. A round contributes a
         // sample at *every* size, and the fit compares those sizes against
