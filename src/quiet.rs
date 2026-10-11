@@ -91,10 +91,8 @@ pub enum Status {
         /// The reserved CPU list we are pinned to.
         cpus: String,
     },
-    /// CPUs are reserved, but this thread is not confined to them. Either no
-    /// run has started yet, and a run will pin the thread when it does, or
-    /// pinning was suppressed (see [`NO_PIN_VAR`]) or failed. Its `Display`
-    /// says which of the first two applies.
+    /// CPUs are reserved, but this thread is not confined to them: no run has
+    /// started yet, or pinning was suppressed (see [`NO_PIN_VAR`]) or failed.
     Reserved {
         /// The reserved CPU list.
         cpus: String,
@@ -170,15 +168,12 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
     pin_thread(0, cpus)
 }
 
-/// What `scaling` found when it looked for a quiesced environment: whether
-/// CPUs are reserved (see the module docs), and whether the thread asking is
-/// confined to them.
+/// Whether this thread is running on the CPUs `quiet-bench` reserved:
+/// [`Status::Pinned`] if so, and otherwise why not.
 ///
-/// To know whether a benchmark is being measured on a quiet machine, ask from
-/// inside it. A run has pinned the thread before its first benchmark, so
-/// [`Status::Pinned`] means yes, and anything else says why not. A benchmark
-/// function is called over and over, so ask in the setup of one that returns a
-/// closure, which runs once, and not in the part that is timed:
+/// Ask from inside a benchmark, where the run has already pinned the thread.
+/// Do it in the setup of one that returns a closure, which runs once, and not
+/// in the timed part:
 ///
 /// ```no_run
 /// use scaling::quiet::{status, Status};
@@ -186,21 +181,15 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
 /// #[scaling::bench]
 /// fn work() -> impl Fn() -> u64 {
 ///     if !matches!(status(), Status::Pinned { .. }) {
-///         eprintln!("not measured on a quiet machine: {}", status());
+///         eprintln!("not on a quiet machine: {}", status());
 ///     }
 ///     || (0..1000u64).sum()
 /// }
 /// ```
 ///
-/// Asked before a run starts, in `main` to tell the user what to expect, the
-/// thread is not pinned yet, since a run pins it when it starts. A reservation
-/// then shows as [`Status::Reserved`], and its `Display` says that benchmarks
-/// will be pinned: print that, and do not treat it as a problem. Asked after a
-/// run returns, the thread is still pinned.
-///
-/// It checks the reservation and this thread's CPUs, and nothing else: not
-/// that turbo is still off, or the governor still set, as `quiet-bench
-/// reserve` left them.
+/// Asked before a run starts, the thread is not pinned yet, so a reservation
+/// shows as [`Status::Reserved`] and its `Display` says benchmarks will be
+/// pinned.
 pub fn status() -> Status {
     if !cfg!(target_os = "linux") {
         return Status::Unsupported;
