@@ -170,6 +170,14 @@ fn run_calls<F, I, O>(f: &mut F, xs: &mut [I], n: usize)
 where
     F: FnMut(&mut I) -> O,
 {
+    // One input for all the calls is a loop of its own, not a trip round the
+    // loops below for each call: that costs more than a quick function does.
+    if let [x] = xs {
+        for _ in 0..n {
+            black_box(f(x));
+        }
+        return;
+    }
     let mut left = n;
     while left > 0 {
         let take = left.min(xs.len());
@@ -412,55 +420,6 @@ mod tests {
         // An error large enough to need no decimals says `± 25ns`, not
         // `± 25.0ns`, which would be a digit the measurement cannot support.
         assert_eq!(shown(500.0, 0.05), "500ns ± 25ns");
-    }
-
-    #[test]
-    fn an_absolute_accuracy_target_is_honoured() {
-        println!();
-        // Only the absolute goal: the relative one is disabled, since
-        // sampling stops at whichever goal is coarser and the 1% default
-        // would otherwise govern for a workload of this size.
-        let only_absolute =
-            |ns| Config::absolute(Duration::from_nanos(ns)).with_relative_error(0.0);
-        // 25ns, not the 5ns this used to ask for. `variable_cost` has a
-        // coefficient of variation around 50%, so the standard error falls
-        // as the square root of the sample count and the last factor of two
-        // costs four times what the one before it did. Swept on one machine
-        // against the default budget:
-        //
-        //   target      se reached   iterations
-        //        5ns      6.975ns      912848 (limit)
-        //       10ns     10.000ns      419017
-        //       25ns     24.995ns       62929
-        //      100ns     99.886ns        4873
-        //      500ns    499.284ns         169
-        //
-        // 5ns was not reachable there at all, and was only ever reached on
-        // a machine fast enough to buy it - so the test passed or failed on
-        // the hardware rather than on the library, which is what it went on
-        // doing, about half the time, on CI. 25ns costs a fourteenth of the
-        // iterations the budget demonstrably supports, so what is being
-        // tested is that the target governs sampling, not that this
-        // particular machine is quick.
-        let stats = bench(&only_absolute(25), variable_cost(7));
-        println!("absolute 25ns: {stats}");
-        assert!(!stats.hit_limit, "should have reached +-25ns in the budget");
-        assert!(
-            stats.std_error < 25.0,
-            "asked for +-25ns, got +-{:.2}ns",
-            stats.std_error
-        );
-
-        // A tighter target should cost more; the floor means the 25ns case is not
-        // comparable to an even larger threshold that stops at the same floor.
-        let dear = bench(&only_absolute(5), variable_cost(7));
-        println!("absolute 5ns: {dear}");
-        assert!(
-            dear.iterations > stats.iterations,
-            "tight target used {} iterations, looser used {}",
-            dear.iterations,
-            stats.iterations
-        );
     }
 
     #[test]

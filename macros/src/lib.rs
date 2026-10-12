@@ -65,6 +65,10 @@ struct Args {
     /// candidate measured on it. A candidate that takes `&I` cannot tell; one
     /// that takes `&mut I` is promising to put the input back as it found it.
     reuse_input: bool,
+    /// `build_once`, on an input: built a single time for each group that
+    /// takes it, and handed to every call of every candidate in the group to
+    /// read. It need not be `Clone`, and no candidate may take it by `&mut`.
+    build_once: bool,
     /// `uninteresting`: nobody asked whether this candidate differs from the
     /// baseline, only roughly by how much.
     uninteresting: bool,
@@ -90,6 +94,7 @@ impl syn::parse::Parse for Args {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
                 "reuse_input" => args.reuse_input = true,
+                "build_once" => args.build_once = true,
                 "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
                 "name" => {
@@ -169,7 +174,7 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, reuse_input, uninteresting, allocation, \
+                             name, group, baseline, reuse_input, build_once, uninteresting, allocation, \
                              input, make_input, nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -547,6 +552,16 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
+/// The error for `build_once` on a benchmark: it is the input that is built
+/// a single time.
+fn build_once_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "`build_once` belongs to `#[scaling::input(..)]`: it is the input that is built a \
+         single time, and every candidate measured on it reads that one value",
+    )
+}
+
 /// The error for `reuse_input` on a benchmark: it is a property of the input
 /// that every candidate sharing it has to agree to.
 fn reuse_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
@@ -574,6 +589,9 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     allocation_is_for_metrics(&args, &func)?;
     if args.reuse_input {
         return Err(reuse_input_is_for_the_input(func.sig.span()));
+    }
+    if args.build_once {
+        return Err(build_once_is_for_the_input(func.sig.span()));
     }
     if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
         return Err(syn::Error::new(
@@ -941,6 +959,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         reusing
     };
     let declared = kind.ty().cloned();
+    let mutates = matches!(kind, Input::Ref(_, true));
     let output = handed_on_output(&func);
 
     // One registration per listed type, or a single one at whatever the
@@ -981,6 +1000,11 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             .collect()
     };
 
+    let mutating = if mutates {
+        quote!(.mutating_input())
+    } else {
+        quote!()
+    };
     let mut out = quote! {
         #[allow(clippy::ptr_arg)]
         #func
@@ -1077,7 +1101,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     ::core::env!("CARGO_PKG_NAME"),
                     ::core::env!("CARGO_PKG_VERSION"),
                     #alt,
-                ) #metrics
+                ) #mutating #metrics
             }
         });
     }
@@ -1104,6 +1128,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     }
     if args.baseline
         || args.reuse_input
+        || args.build_once
         || args.uninteresting
         || args.input.is_some()
         || args.make_input.is_some()
@@ -1241,6 +1266,20 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if repeatable == Repeatable::OneArg {
         return Err(one_arg_rejected(func.sig.span()));
     }
+    if args.build_once && args.reuse_input {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`build_once` already has every candidate read one input for all its calls, \
+             which is what `reuse_input` says, so give only `build_once`",
+        ));
+    }
+    if args.build_once && repeatable == Repeatable::NoArg {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`build_once` runs the input function a single time, which is all the \
+             setup-once shape (`impl Fn()/FnMut() -> T`) is for - write a plain `-> T` input",
+        ));
+    }
     if !args.types.is_empty() && repeatable == Repeatable::NoArg {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -1337,10 +1376,17 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         }]
     };
 
-    let reusing = if args.reuse_input {
+    let reusing = if args.build_once {
+        quote!(.building_once())
+    } else if args.reuse_input {
         quote!(.reusing())
     } else {
         quote!()
+    };
+    let erase = if args.build_once {
+        quote!(built_once)
+    } else {
+        quote!(new)
     };
     let mut out = quote! { #func };
     for (n, Instantiation { name, ty, call }) in instantiations.into_iter().enumerate() {
@@ -1375,7 +1421,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
             quote! {
                 #[doc(hidden)]
                 fn #shim() -> ::scaling::registry::ErasedInput {
-                    ::scaling::registry::ErasedInput::new(#call)
+                    ::scaling::registry::ErasedInput::#erase(#call)
                 }
             }
         };

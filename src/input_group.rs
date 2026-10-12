@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::estimate::Paired;
+use crate::registry::ErasedInput;
 use std::fmt::{self, Display, Formatter};
 
 /// Never stop *voluntarily* on fewer rounds than this.
@@ -98,7 +99,8 @@ pub(crate) trait Alternative<I> {
 
     /// Run once on `input`, outside the timing, and compute the metrics from
     /// what it returned. `pristine` is the input as it was before the run,
-    /// when there is one to give.
+    /// when there is one to give; without one the metrics are given `input`
+    /// itself, which is what it was before if the alternative only reads it.
     fn measure(&mut self, _input: &mut I, _pristine: Option<&I>) -> Metrics {
         Metrics::new()
     }
@@ -166,7 +168,7 @@ where
         };
         // For the function to read, if it wants to build a metric from them.
         let provided = crate::alloc::provide(counted);
-        let mut metrics = (self.metrics)(pristine, output);
+        let mut metrics = (self.metrics)(pristine.or(Some(&*input)), output);
         drop(provided);
         metrics.resolve_allocation(counted);
         metrics
@@ -193,6 +195,8 @@ pub(crate) struct Inputs<I> {
     /// What an alternative that may change its input is handed, and may leave
     /// in any state.
     copy: Vec<I>,
+    /// Whether the input is built once and kept. See [`Inputs::built_once`].
+    once: bool,
 }
 
 impl<I> Inputs<I> {
@@ -202,7 +206,23 @@ impl<I> Inputs<I> {
             clone,
             master: Vec::new(),
             copy: Vec::new(),
+            once: false,
         }
+    }
+
+    /// An input built once: the group makes it the first time, and keeps it
+    /// for all its rounds and alternatives, which only read it. It is never
+    /// cloned.
+    fn built_once(make: Box<GenInput<I>>) -> Self {
+        Inputs {
+            once: true,
+            ..Inputs::new(make, None)
+        }
+    }
+
+    /// Whether the input is built once and only read.
+    pub(crate) fn is_built_once(&self) -> bool {
+        self.once
     }
 
     /// Whether an input can be copied.
@@ -217,11 +237,23 @@ impl<I> Inputs<I> {
 
     /// One input, which is not part of any round.
     pub(crate) fn make_one(&mut self) -> I {
+        assert!(
+            !self.is_built_once(),
+            "an input built once is not made again"
+        );
         (self.make)()
     }
 
     /// Make a fresh master of `n` inputs, reusing the last one's allocation.
+    /// An input built once is the master of one, and is made the first time
+    /// only.
     pub(crate) fn fill(&mut self, n: usize) {
+        if self.is_built_once() {
+            if self.master.is_empty() {
+                self.master.push((self.make)());
+            }
+            return;
+        }
         self.master.clear();
         self.master.reserve(n);
         for _ in 0..n {
@@ -237,6 +269,9 @@ impl<I> Inputs<I> {
     /// `clone_from`-ed into whatever the last alternative left behind, so
     /// that what an alternative did to its copy cannot reach the next.
     pub(crate) fn take(&mut self, n: usize, shared: bool) -> &mut [I] {
+        if self.is_built_once() {
+            return &mut self.master[..];
+        }
         if shared {
             return &mut self.master[..n];
         }
@@ -253,7 +288,13 @@ impl<I> Inputs<I> {
     ///
     /// `clear` alone would keep the allocation, which for a sample of
     /// hundreds of thousands of inputs is the part that matters.
+    ///
+    /// Not an input built once, which the group holds until it is done: making
+    /// it again is what it is built once to avoid.
     pub(crate) fn release(&mut self) {
+        if self.is_built_once() {
+            return;
+        }
         self.master = Vec::new();
         self.copy = Vec::new();
     }
@@ -327,6 +368,19 @@ impl Config {
         InputGroup {
             cfg: self.clone(),
             inputs: Inputs::new(Box::new(make_input), Some(Box::new(Clone::clone))),
+            entries: Vec::new(),
+        }
+    }
+
+    /// A group whose input is built once, by `make`, and read by every call of
+    /// every alternative. See [`Inputs::built_once`].
+    pub(crate) fn input_group_built_once(
+        &self,
+        make: fn() -> ErasedInput,
+    ) -> InputGroup<ErasedInput> {
+        InputGroup {
+            cfg: self.clone(),
+            inputs: Inputs::built_once(Box::new(make)),
             entries: Vec::new(),
         }
     }
@@ -413,7 +467,7 @@ impl<I: 'static> InputGroup<I> {
         M: FnMut(&I, O) -> Metrics + 'static,
     {
         assert!(
-            self.inputs.can_clone(),
+            self.inputs.can_clone() || self.inputs.is_built_once(),
             "metrics that read the input need an input that can be cloned"
         );
         self.entries.push(Entry::new(
@@ -610,11 +664,12 @@ impl<I: 'static> InputGroup<I> {
             "an input group needs at least one alternative, got {k}"
         );
         assert!(
-            k == 1 || inputs.can_clone(),
+            k == 1 || inputs.can_clone() || inputs.is_built_once(),
             "multiple alternatives need clonable shared inputs"
         );
         // Pooling changes what is measured, so it is all or none in a group.
-        let pooled = entries.iter().all(|e| e.reuse);
+        // An input built once is a pool of one for every alternative.
+        let pooled = inputs.is_built_once() || entries.iter().all(|e| e.reuse);
         for e in &mut entries {
             e.reuse = pooled;
         }
@@ -661,7 +716,8 @@ impl<I: 'static> InputGroup<I> {
             // One whole round per poll, never part of one. And nothing held
             // across the yield: every group in a suite waits here between
             // its rounds, so inputs kept would add up over all of them
-            // instead of being only the one group's that is running.
+            // instead of being only the one group's that is running. (An input
+            // built once is the exception: it is the group's only copy.)
             inputs.release();
             clock.yield_now().await;
             // Told to stop, not merely out of budget: no round more, since
@@ -736,6 +792,23 @@ impl<I: 'static> InputGroup<I> {
 fn measure_metrics<I>(entries: &mut [Entry<I>], inputs: &mut Inputs<I>) -> Vec<Metrics> {
     if !entries.iter().any(|e| e.alt.has_metrics()) {
         return Vec::new();
+    }
+    if inputs.is_built_once() {
+        // Every alternative only reads the one input, so each runs on it as
+        // it is and has no need of a copy.
+        inputs.fill(1);
+        let input = &mut inputs.take(1, true)[0];
+        let metrics = entries
+            .iter_mut()
+            .map(|e| {
+                if e.alt.has_metrics() {
+                    e.alt.measure(input, None)
+                } else {
+                    Metrics::new()
+                }
+            })
+            .collect();
+        return metrics;
     }
     let pristine = inputs.make_one();
     match inputs.cloner() {

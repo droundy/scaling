@@ -24,8 +24,10 @@ values. If every candidate takes `&I`, they go round a small pool of them (see
 [`bench`](macro@bench)), and the generator runs only as often as the pool
 holds: at most a lap's worth of calls, 1 ms of building and 8 MB. Otherwise
 each call is given a fresh clone of its own. That is why the input type must be
-`Clone` when a group has more than one candidate. Generating and cloning are
-never timed, only paid for out of [`max_time`](crate::Config::with_max_time). A
+`Clone` when a group has more than one candidate, unless it is declared
+`build_once` (see [`input`](macro@input)): each group then builds it once and
+every call reads that one value. Generating and cloning are never timed, only
+paid for out of [`max_time`](crate::Config::with_max_time). A
 setup-once candidate uses the shared input only when its returned closure is
 first built; later inputs are still generated, but that cached closure is
 called without them. Comparison candidates must take `&I` or `&mut I`; owned
@@ -625,6 +627,10 @@ pub use inventory;
 /// not what you want to know, and taking `&mut I` from an input that is not
 /// declared `reuse_input` measures it the other way.
 ///
+/// An input declared `build_once` goes further: each group that takes it builds
+/// it a single time, and every call of every candidate in the group is handed
+/// that one value, however large or slow to make it is.
+///
 /// A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
 /// setup-once benchmark: the function runs once and the closure it returns is
 /// what is timed.
@@ -681,12 +687,14 @@ pub use scaling_macros::bench_scaling;
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
 /// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
+/// | `build_once` | The input is built once for each group that takes it, and every call of every candidate in the group is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. A group holds its copy until it is done, so an input that feeds several groups is built, and held, once for each. As with `reuse_input` the input stays warm in cache, and a group is measured on that one value, so the error bars say nothing of other inputs the function might have made. Use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input`. |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
-/// type must be `Clone`. If every candidate takes `&I` it runs only as often as
-/// a small pool holds, up to 1 ms of building a round; otherwise each call is
-/// given a fresh clone. Building is never timed, only paid for out of
-/// `max_time`. A function returning `impl Fn() -> T` is set up once.
+/// type must be `Clone` unless it is declared `build_once`. If every candidate
+/// takes `&I` it runs only as often as a small pool holds, up to 1 ms of
+/// building a round; otherwise each call is given a fresh clone. Building is
+/// never timed, only paid for out of `max_time`. A function returning `impl
+/// Fn() -> T` is set up once.
 pub use scaling_macros::input;
 
 /// Computes extra numbers from what the candidates of a group returned, so

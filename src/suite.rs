@@ -530,7 +530,11 @@ impl Suite {
                 // One generator per input. Multiple candidates clone its
                 // values; a singleton uses them directly.
                 let make = input.reg.make;
-                let mut group = cfg.input_group_make_input(make);
+                let mut group = if input.reg.once {
+                    cfg.input_group_built_once(make)
+                } else {
+                    cfg.input_group_make_input(make)
+                };
                 for (n, c) in lane.candidates.iter().enumerate() {
                     // A candidate with a metrics function is added in the
                     // form that is run once more for it.
@@ -2076,6 +2080,7 @@ mod registered_by_hand {
             type_name: "Vec<u64>",
             make: make_input,
             reuse: false,
+            once: false,
         }
     }
 
@@ -2116,6 +2121,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_baseline,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2130,6 +2136,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_unstable,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2144,6 +2151,7 @@ mod registered_by_hand {
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
             add_alt: alt_slow,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2344,6 +2352,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        mutates_input: false,
         metrics: None,
     };
     static TWO_BASELINES_B: Candidate = Candidate {
@@ -2355,6 +2364,7 @@ mod bad_registrations {
         crate_name: "testcrate",
         crate_version: "1.0.0",
         add_alt: alt,
+        mutates_input: false,
         metrics: None,
     };
 
@@ -2467,6 +2477,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.9.0",
             add_alt: add_alt_new,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2481,6 +2492,7 @@ mod versions_and_rivals {
             crate_name: "mycrate",
             crate_version: "0.8.0",
             add_alt: add_alt_old,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2496,6 +2508,7 @@ mod versions_and_rivals {
             crate_name: "theircrate",
             crate_version: "0.1.0",
             add_alt: add_alt_new,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -2512,6 +2525,7 @@ mod versions_and_rivals {
             type_name: "Vec<u64>",
             make: make_data,
             reuse: false,
+            once: false,
         }
     }
 
@@ -2525,6 +2539,7 @@ mod versions_and_rivals {
             type_name: "Vec<u64>",
             make: make_data,
             reuse: false,
+            once: false,
         }
     }
 
