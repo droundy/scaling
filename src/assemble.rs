@@ -1037,15 +1037,18 @@ pub fn plan_with_metrics(
         lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
     }
 
+    // Said once for each candidate, however many inputs it would be measured
+    // on that are built once.
     for lane in &lanes {
-        for input in lane.inputs.iter().filter(|i| i.reg.once) {
-            for candidate in lane.candidates.iter().filter(|c| c.reg.mutates_input) {
-                problems.push(Diagnostic::MutatesBuiltOnce {
-                    group: lane.group.to_string(),
-                    candidate: candidate.name.clone(),
-                    input: input.name.clone(),
-                });
-            }
+        let Some(input) = lane.inputs.iter().find(|i| i.reg.once) else {
+            continue;
+        };
+        for candidate in lane.candidates.iter().filter(|c| c.reg.mutates_input) {
+            problems.push(Diagnostic::MutatesBuiltOnce {
+                group: lane.group.to_string(),
+                candidate: candidate.name.clone(),
+                input: input.name.clone(),
+            });
         }
     }
 

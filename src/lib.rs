@@ -24,7 +24,8 @@ its input may share a few instead: see [`bench`](macro@bench)). The shared
 input is generated for each iteration, a batch of them to a round, and cloned
 for each candidate, so every candidate in a round is measured on the same
 values. That is why the input
-type must be `Clone` when a group has more than one candidate, and the
+type must be `Clone` when a group has more than one candidate (unless it is
+declared `build_once`, see [`input`](macro@input)), and the
 generating and cloning are paid for out of [`max_time`](crate::Config::with_max_time), though they
 are not timed. A setup-once candidate uses the shared input only
 when its returned closure is first built; later inputs are still generated,
@@ -686,11 +687,12 @@ pub use scaling_macros::bench_scaling;
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
 /// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
-/// | `build_once` | The input is built once, for the whole run, and every call of every candidate is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. Groups that take it share the one copy, which is held until the last of them is done. As with `reuse_input` the input stays warm in cache, so use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input`. |
+/// | `build_once` | The input is built once, for the whole run, and every call of every candidate is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. Groups that take it share the one copy, which is dropped when the last of them is done. As with `reuse_input` the input stays warm in cache, and the whole run is measured on that one value, so the error bars say nothing of other inputs the function might have made. Use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input`. |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
-/// type must be `Clone`: it is generated for each iteration and cloned for each
-/// candidate. A function returning `impl Fn() -> T` is set up once.
+/// type must be `Clone` unless it is declared `build_once`: it is generated for
+/// each iteration and cloned for each candidate. A function returning `impl
+/// Fn() -> T` is set up once.
 pub use scaling_macros::input;
 
 /// Computes extra numbers from what the candidates of a group returned, so

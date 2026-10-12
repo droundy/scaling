@@ -530,7 +530,7 @@ impl Suite {
                             shared
                         }
                     };
-                    cfg.input_group_built_once(shared)
+                    cfg.input_group_built_once(&shared)
                 } else {
                     cfg.input_group_make_input(make)
                 };

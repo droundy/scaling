@@ -493,14 +493,10 @@ fn ty_id_and_name(ty: Option<&Type>) -> (TokenStream2, TokenStream2) {
 }
 
 /// The expression a shim uses to call `fname` on its input, or with none.
-///
-/// A function that takes `&I` is handed the input by `get`, which is all an
-/// input that is built once can give.
-fn call_expr(fname: &syn::Ident, ty: Option<&Type>, mutable: bool) -> TokenStream2 {
-    match (ty, mutable) {
-        (Some(ty), true) => quote!(#fname(__e.get_mut::<#ty>())),
-        (Some(ty), false) => quote!(#fname(__e.get::<#ty>())),
-        (None, _) => quote!(#fname()),
+fn call_expr(fname: &syn::Ident, ty: Option<&Type>) -> TokenStream2 {
+    match ty {
+        Some(ty) => quote!(#fname(__e.get_mut::<#ty>())),
+        None => quote!(#fname()),
     }
 }
 
@@ -556,8 +552,8 @@ fn reported_name(args: &Args, func: &ItemFn) -> TokenStream2 {
     }
 }
 
-/// The error for `reuse_input` on a benchmark: it is a property of the input
-/// that every candidate sharing it has to agree to.
+/// The error for `build_once` on a benchmark: it is the input that is built
+/// a single time.
 fn build_once_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     syn::Error::new(
         span,
@@ -566,6 +562,8 @@ fn build_once_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     )
 }
 
+/// The error for `reuse_input` on a benchmark: it is a property of the input
+/// that every candidate sharing it has to agree to.
 fn reuse_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     syn::Error::new(
         span,
@@ -1022,7 +1020,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     ) in instantiations.into_iter().enumerate()
     {
         let alt = format_ident!("__scaling_malt_{}_{}", fname, n);
-        let call = call_expr(fname, ty.as_ref(), mutates);
+        let call = call_expr(fname, ty.as_ref());
         let alt_body = if returns_repeatable_closure(&func.sig) == Repeatable::NoArg {
             let repeatable = repeatable_call(call.clone());
             quote! {

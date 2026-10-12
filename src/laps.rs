@@ -247,8 +247,6 @@ struct Limits {
     alone: bool,
     /// What one input takes, to size a pool by.
     input_bytes: usize,
-    /// See [`Calibration`]: the pool is the one input.
-    once: bool,
 }
 
 /// For each alternative, what one call and one input cost, found by timing
@@ -284,7 +282,6 @@ pub(crate) async fn calibrate<I>(
         .max(1),
         alone,
         input_bytes: bytes,
-        once,
     };
     let mut found = Calibration {
         per_call: Vec::new(),
@@ -322,7 +319,7 @@ async fn probe<I>(
         let started = Instant::now();
         // An alternative that reuses its inputs goes round a pool of them, so
         // a probe of any length needs no more than the pool.
-        let made = if limits.once {
+        let made = if inputs.is_built_once() {
             1
         } else if reuse {
             let affordable = if last_make > 0.0 {

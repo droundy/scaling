@@ -170,6 +170,14 @@ fn run_calls<F, I, O>(f: &mut F, xs: &mut [I], n: usize)
 where
     F: FnMut(&mut I) -> O,
 {
+    // One input for all the calls is a loop of its own, not a trip round the
+    // loops below for each call: that costs more than a quick function does.
+    if let [x] = xs {
+        for _ in 0..n {
+            black_box(f(x));
+        }
+        return;
+    }
     let mut left = n;
     while left > 0 {
         let take = left.min(xs.len());
