@@ -47,7 +47,7 @@ use super::*;
 use crate::interrupt;
 use crate::metrics::NO_METRICS;
 use crate::names::{self, Address, Kind, NameError};
-use crate::registry::{BuiltOnce, Candidate, Input, MetricsFn, Registered};
+use crate::registry::{Candidate, Input, MetricsFn, Registered};
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Formatter};
@@ -514,23 +514,13 @@ impl Suite {
             (r.reg.add)(&mut *self, &r.name);
         }
 
-        // Each input that is built once, for every group of the run taking it.
-        let mut once: Vec<(&'static Input, Rc<BuiltOnce>)> = Vec::new();
         for lane in &plan.lanes {
             for input in &lane.inputs {
                 // One generator per input. Multiple candidates clone its
                 // values; a singleton uses them directly.
                 let make = input.reg.make;
                 let mut group = if input.reg.once {
-                    let shared = match once.iter().find(|(reg, _)| std::ptr::eq(*reg, input.reg)) {
-                        Some((_, shared)) => Rc::clone(shared),
-                        None => {
-                            let shared = BuiltOnce::new(make);
-                            once.push((input.reg, Rc::clone(&shared)));
-                            shared
-                        }
-                    };
-                    cfg.input_group_built_once(&shared)
+                    cfg.input_group_built_once(make)
                 } else {
                     cfg.input_group_make_input(make)
                 };

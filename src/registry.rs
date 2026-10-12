@@ -12,9 +12,7 @@
 //! taken on faith.
 
 use std::any::{Any, TypeId};
-use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::rc::Rc;
 
 pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
@@ -142,9 +140,9 @@ inventory::collect!(Registered);
 /// the result does.
 ///
 /// The exception is an input built once ([`ErasedInput::built_once`]), which
-/// is not cloned for anyone: every call of every alternative is handed the
-/// one value, which only reads it, so there are no copies to make and no
-/// pairing to lose.
+/// is not cloned for anyone: every call of every alternative in its group is
+/// handed the one value, which only reads it, so there are no copies to make
+/// and no pairing to lose.
 pub struct ErasedInput {
     value: Box<dyn Any>,
     /// `I::clone`, monomorphised where `I` was still known. None for an input
@@ -210,81 +208,10 @@ impl ErasedInput {
 
 impl Clone for ErasedInput {
     fn clone(&self) -> Self {
-        let clone_fn = self
-            .clone_fn
-            .expect("an input built once is lent to one group at a time, not cloned");
+        let clone_fn = self.clone_fn.expect("an input built once is not cloned");
         ErasedInput {
             value: clone_fn(&*self.value),
             clone_fn: self.clone_fn,
-        }
-    }
-}
-
-/// An input built once, for every group of one run that takes it.
-///
-/// There is one copy however many groups take it. A group borrows it for a
-/// round and puts it back before it yields, so that at most one group holds
-/// it at a time: the scheduler runs one task at a time, and a round is never
-/// split by a yield. It is built when first borrowed, and dropped when the
-/// last group that takes it is done.
-pub(crate) struct BuiltOnce {
-    make: fn() -> ErasedInput,
-    value: RefCell<Option<ErasedInput>>,
-    /// Whether a group has it out at the moment.
-    lent: Cell<bool>,
-    /// How many groups have not finished with it.
-    holders: Cell<usize>,
-}
-
-/// A group's claim on a [`BuiltOnce`], which lets the input go when the last
-/// group's is dropped.
-pub(crate) struct Hold(Rc<BuiltOnce>);
-
-impl BuiltOnce {
-    pub(crate) fn new(make: fn() -> ErasedInput) -> Rc<Self> {
-        Rc::new(BuiltOnce {
-            make,
-            value: RefCell::new(None),
-            lent: Cell::new(false),
-            holders: Cell::new(0),
-        })
-    }
-
-    /// A group that takes this input.
-    pub(crate) fn hold(this: &Rc<Self>) -> Hold {
-        this.holders.set(this.holders.get() + 1);
-        Hold(Rc::clone(this))
-    }
-
-    /// The input, built now if it has not been. The group that borrows it
-    /// must [`give_back`](BuiltOnce::give_back) before it yields, which is
-    /// what lets groups that take turns share one value.
-    ///
-    /// # Panics
-    ///
-    /// If another borrower has not given it back, which a round that waits in
-    /// the middle would leave it to.
-    pub(crate) fn borrow(&self) -> ErasedInput {
-        assert!(
-            !self.lent.replace(true),
-            "an input built once was borrowed by two groups at a time"
-        );
-        let held = self.value.borrow_mut().take();
-        held.unwrap_or_else(self.make)
-    }
-
-    pub(crate) fn give_back(&self, value: ErasedInput) {
-        *self.value.borrow_mut() = Some(value);
-        self.lent.set(false);
-    }
-}
-
-impl Drop for Hold {
-    fn drop(&mut self) {
-        let holders = self.0.holders.get() - 1;
-        self.0.holders.set(holders);
-        if holders == 0 {
-            self.0.value.borrow_mut().take();
         }
     }
 }
@@ -574,15 +501,14 @@ pub struct Input {
     /// Called once for each timed iteration - a round makes a batch of them.
     /// With multiple candidates each value is cloned for each, so that all of
     /// them meet the same input; a singleton uses it directly. See
-    /// [`ErasedInput`]. An input built once is called once, the first time any
-    /// group asks.
+    /// [`ErasedInput`]. An input built once is called once for each group.
     pub(crate) make: fn() -> ErasedInput,
     /// Whether every candidate measured on this input is handed one input for
     /// many calls, which those that can change it promise to put back as they
     /// found it. See [`InputGroup::reusing_input`].
     pub(crate) reuse: bool,
-    /// Whether it is built once, for the whole run, and only read. See
-    /// [`Input::building_once`].
+    /// Whether each group that takes it builds it once and only reads it.
+    /// See [`Input::building_once`].
     pub(crate) once: bool,
 }
 
@@ -621,7 +547,7 @@ impl Input {
         self
     }
 
-    /// Say that this input is built once for the whole run, by
+    /// Say that this input is built once for each group that takes it, by
     /// [`ErasedInput::built_once`], and every call of every candidate measured
     /// on it is handed that one value to read. A candidate that takes `&mut
     /// I` cannot be, and assembly says so.

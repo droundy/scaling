@@ -399,7 +399,7 @@ impl Display for Diagnostic {
             } => write!(
                 f,
                 "in group `{group}`, `{candidate}` takes the input `{input}` by `&mut`, but it is \
-                 built once and shared, so it can only be read: take it by `&`, or declare \
+                 built once and handed to every call, so it can only be read: take it by `&`, or declare \
                  the input `reuse_input` in place of `build_once`, which lets a candidate \
                  promise to put its input back as it found it",
             ),

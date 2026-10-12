@@ -262,7 +262,7 @@ pub(crate) async fn calibrate<I>(
     entries: &mut [Entry<I>],
     clock: &Clock,
 ) -> Calibration {
-    // An input built once is one value held for the whole run: what a pool
+    // An input built once is one value the group holds: what a pool
     // or a sample of inputs may take does not come into it, and finding out
     // by making several would build it again for each.
     let once = inputs.is_built_once();

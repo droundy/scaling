@@ -65,9 +65,9 @@ struct Args {
     /// candidate measured on it. A candidate that takes `&I` cannot tell; one
     /// that takes `&mut I` is promising to put the input back as it found it.
     reuse_input: bool,
-    /// `build_once`, on an input: built a single time for the whole run, and
-    /// handed to every call of every candidate to read. It need not be
-    /// `Clone`, and no candidate may take it by `&mut`.
+    /// `build_once`, on an input: built a single time for each group that
+    /// takes it, and handed to every call of every candidate in the group to
+    /// read. It need not be `Clone`, and no candidate may take it by `&mut`.
     build_once: bool,
     /// `uninteresting`: nobody asked whether this candidate differs from the
     /// baseline, only roughly by how much.
