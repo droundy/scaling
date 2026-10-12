@@ -626,6 +626,10 @@ pub use inventory;
 /// not what you want to know, and taking `&mut I` from an input that is not
 /// declared `reuse_input` measures it the other way.
 ///
+/// An input declared `build_once` goes further: it is built a single time for
+/// the whole run, and every call of every candidate is handed that one value,
+/// however large or slow to make it is.
+///
 /// A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
 /// setup-once benchmark: the function runs once and the closure it returns is
 /// what is timed.
@@ -682,6 +686,7 @@ pub use scaling_macros::bench_scaling;
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
 /// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
+/// | `build_once` | The input is built once, for the whole run, and every call of every candidate is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. Groups that take it share the one copy, which is held until the last of them is done. As with `reuse_input` the input stays warm in cache, so use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input`. |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
 /// type must be `Clone`: it is generated for each iteration and cloned for each

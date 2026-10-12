@@ -297,6 +297,13 @@ pub enum Diagnostic {
     /// A metrics function counts allocations, but the program does not use
     /// the allocator that counts them, so every number would be zero.
     AllocatorNotInstalled { name: String },
+    /// A candidate that takes `&mut I` is measured on an input that is built
+    /// once, which every call of every candidate is handed to read.
+    MutatesBuiltOnce {
+        group: String,
+        candidate: String,
+        input: String,
+    },
 }
 
 impl Diagnostic {
@@ -384,6 +391,17 @@ impl Display for Diagnostic {
                  `scaling::Allocator` is not the global allocator, so it would \
                  count nothing - add `#[global_allocator] static ALLOC: \
                  scaling::Allocator = scaling::Allocator::new();`",
+            ),
+            Diagnostic::MutatesBuiltOnce {
+                group,
+                candidate,
+                input,
+            } => write!(
+                f,
+                "in group `{group}`, `{candidate}` takes the input `{input}` by `&mut`, but it is \
+                 built once and shared, so it can only be read: take it by `&`, or declare \
+                 the input `reuse_input` in place of `build_once`, which lets a candidate \
+                 promise to put its input back as it found it",
             ),
             Diagnostic::OrphanMetrics {
                 name,
@@ -544,6 +562,7 @@ fn unit_input() -> Named<Input> {
         type_name: "()",
         make: || ErasedInput::new(()),
         reuse: false,
+        once: false,
     };
     Named {
         name: String::new(),
@@ -1016,6 +1035,18 @@ pub fn plan_with_metrics(
     for lane in &mut lanes {
         let counts = &counts_by_group[lane.group];
         lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
+    }
+
+    for lane in &lanes {
+        for input in lane.inputs.iter().filter(|i| i.reg.once) {
+            for candidate in lane.candidates.iter().filter(|c| c.reg.mutates_input) {
+                problems.push(Diagnostic::MutatesBuiltOnce {
+                    group: lane.group.to_string(),
+                    candidate: candidate.name.clone(),
+                    input: input.name.clone(),
+                });
+            }
+        }
     }
 
     if !metrics.is_empty() {
@@ -1615,6 +1646,7 @@ pub(crate) mod lane_tests {
             crate_name,
             crate_version,
             add_alt: noop_alt,
+            mutates_input: false,
             metrics: None,
         }
     }
@@ -1717,6 +1749,7 @@ pub(crate) mod lane_tests {
             type_name: ty,
             make: || ErasedInput::new(()),
             reuse: false,
+            once: false,
         }
     }
 

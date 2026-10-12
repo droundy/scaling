@@ -12,7 +12,9 @@
 //! taken on faith.
 
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::{Rc, Weak};
 
 pub use crate::input_group::InputGroup;
 pub use crate::suite::Suite;
@@ -138,27 +140,54 @@ inventory::collect!(Registered);
 /// [`ErasedInput::new`] captures a clone function alongside the value, which
 /// works because it is generic: it knows `I` even though nothing that stores
 /// the result does.
+///
+/// The exception is an input built once ([`ErasedInput::built_once`]), which
+/// is not cloned for anyone: every call of every alternative is handed the
+/// one value, read-only, so there are no copies to make and no pairing to
+/// lose.
 pub struct ErasedInput {
-    value: Box<dyn Any>,
-    /// `I::clone`, monomorphised where `I` was still known.
-    clone_fn: fn(&dyn Any) -> Box<dyn Any>,
+    value: Value,
+}
+
+enum Value {
+    /// One of the round's inputs, which can be cloned for each alternative.
+    Owned {
+        value: Box<dyn Any>,
+        /// `I::clone`, monomorphised where `I` was still known.
+        clone_fn: fn(&dyn Any) -> Box<dyn Any>,
+    },
+    /// An input built once and shared by every call of every alternative, and
+    /// by every group that takes it. It is only ever read, so cloning it is
+    /// handing out another handle on the same value, and `I` need not be
+    /// `Clone`. See [`Input::building_once`].
+    Shared(Rc<dyn Any>),
 }
 
 impl ErasedInput {
     /// Erase `v`, remembering how to clone it.
     pub fn new<I: Any + Clone>(v: I) -> Self {
         ErasedInput {
-            value: Box::new(v),
-            // Written here rather than stored as a trait object because
-            // here is where `I` is known. A `dyn CloneAny` would need a
-            // trait, a blanket impl and a vtable to say the same thing.
-            clone_fn: |a| {
-                Box::new(
-                    a.downcast_ref::<I>()
-                        .expect("clone_fn sees its own I")
-                        .clone(),
-                )
+            value: Value::Owned {
+                value: Box::new(v),
+                // Written here rather than stored as a trait object because
+                // here is where `I` is known. A `dyn CloneAny` would need a
+                // trait, a blanket impl and a vtable to say the same thing.
+                clone_fn: |a| {
+                    Box::new(
+                        a.downcast_ref::<I>()
+                            .expect("clone_fn sees its own I")
+                            .clone(),
+                    )
+                },
             },
+        }
+    }
+
+    /// Erase `v`, an input that is built once and only read. It need not be
+    /// `Clone`: what is cloned is the handle, never the value.
+    pub fn built_once<I: Any>(v: I) -> Self {
+        ErasedInput {
+            value: Value::Shared(Rc::new(v)),
         }
     }
 
@@ -170,30 +199,82 @@ impl ErasedInput {
     /// group against the group's generator before anything runs, and reports
     /// a mismatch as a named error rather than a panic - so reaching this is
     /// a bug in assembly, not a mistake a caller can make.
+    ///
+    /// Also if the input is built once, which is only ever read: assembly
+    /// refuses a candidate that takes it by `&mut I`, and one that takes
+    /// `&I` asks for [`ErasedInput::get`].
     pub fn get_mut<I: Any>(&mut self) -> &mut I {
-        self.value
-            .downcast_mut::<I>()
-            .expect("input type was checked during assembly")
+        match &mut self.value {
+            Value::Owned { value, .. } => value,
+            Value::Shared(_) => panic!("an input that is built once is only read, not changed"),
+        }
+        .downcast_mut::<I>()
+        .expect("input type was checked during assembly")
     }
 
     /// The input, as the type it really is, for reading.
     ///
     /// # Panics
     ///
-    /// As [`ErasedInput::get_mut`].
+    /// As [`ErasedInput::get_mut`], when `I` is not the erased type.
     pub fn get<I: Any>(&self) -> &I {
-        self.value
-            .downcast_ref::<I>()
-            .expect("input type was checked during assembly")
+        match &self.value {
+            Value::Owned { value, .. } => &**value,
+            Value::Shared(value) => &**value,
+        }
+        .downcast_ref::<I>()
+        .expect("input type was checked during assembly")
     }
 }
 
 impl Clone for ErasedInput {
     fn clone(&self) -> Self {
         ErasedInput {
-            value: (self.clone_fn)(&*self.value),
-            clone_fn: self.clone_fn,
+            value: match &self.value {
+                Value::Owned { value, clone_fn } => Value::Owned {
+                    value: clone_fn(&**value),
+                    clone_fn: *clone_fn,
+                },
+                Value::Shared(value) => Value::Shared(Rc::clone(value)),
+            },
         }
+    }
+}
+
+/// An input built once, for every group of one run that takes it.
+///
+/// The value is built when a group first asks for it and kept for as long as
+/// some group holds it: one copy however many groups use it, and none once
+/// the last of them is done. Groups hold it across their yields, unlike the
+/// inputs they make a round at a time, since having to build it again is
+/// exactly what it is for.
+pub(crate) struct BuiltOnce {
+    make: fn() -> ErasedInput,
+    live: RefCell<Option<Weak<dyn Any>>>,
+}
+
+impl BuiltOnce {
+    pub(crate) fn new(make: fn() -> ErasedInput) -> Rc<Self> {
+        Rc::new(BuiltOnce {
+            make,
+            live: RefCell::new(None),
+        })
+    }
+
+    /// A handle on the value, which is built now if no group holds it.
+    pub(crate) fn get(&self) -> ErasedInput {
+        let held = self.live.borrow().as_ref().and_then(Weak::upgrade);
+        if let Some(value) = held {
+            return ErasedInput {
+                value: Value::Shared(value),
+            };
+        }
+        let built = (self.make)();
+        match &built.value {
+            Value::Shared(value) => *self.live.borrow_mut() = Some(Rc::downgrade(value)),
+            Value::Owned { .. } => panic!("an input that is built once is made with built_once"),
+        }
+        built
     }
 }
 
@@ -240,6 +321,9 @@ pub struct Candidate {
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
     pub(crate) add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
+    /// Whether it takes its input by `&mut I`, and so may not be measured on
+    /// one that is built once and shared. See [`Input::building_once`].
+    pub(crate) mutates_input: bool,
     /// How this candidate takes part in a [`MetricsFn`]: what it returns,
     /// and how to add itself so that what it returns is handed on. `None`
     /// for a candidate whose output cannot be handed on - one that returns a
@@ -272,8 +356,16 @@ impl Candidate {
             crate_name,
             crate_version,
             add_alt,
+            mutates_input: false,
             metrics: None,
         }
+    }
+
+    /// Say that this candidate takes its input by `&mut I`.
+    #[doc(hidden)]
+    pub const fn mutating_input(mut self) -> Self {
+        self.mutates_input = true;
+        self
     }
 
     /// Say how this candidate takes part in a [`MetricsFn`], when what it
@@ -471,12 +563,16 @@ pub struct Input {
     /// Called once for each timed iteration - a round makes a batch of them.
     /// With multiple candidates each value is cloned for each, so that all of
     /// them meet the same input; a singleton uses it directly. See
-    /// [`ErasedInput`].
+    /// [`ErasedInput`]. An input built once is called once, the first time any
+    /// group asks.
     pub(crate) make: fn() -> ErasedInput,
     /// Whether every candidate measured on this input is handed one input for
     /// many calls, which those that can change it promise to put back as they
     /// found it. See [`InputGroup::reusing_input`].
     pub(crate) reuse: bool,
+    /// Whether it is built once, for the whole run, and only read. See
+    /// [`Input::building_once`].
+    pub(crate) once: bool,
 }
 
 impl Input {
@@ -501,6 +597,7 @@ impl Input {
             type_name,
             make,
             reuse: false,
+            once: false,
         }
     }
 
@@ -510,6 +607,17 @@ impl Input {
     #[doc(hidden)]
     pub const fn reusing(mut self) -> Self {
         self.reuse = true;
+        self
+    }
+
+    /// Say that this input is built once for the whole run, by
+    /// [`ErasedInput::built_once`], and every call of every candidate measured
+    /// on it is handed that one value to read. A candidate that takes `&mut
+    /// I` cannot be, and assembly says so.
+    #[doc(hidden)]
+    pub const fn building_once(mut self) -> Self {
+        self.reuse = true;
+        self.once = true;
         self
     }
 }

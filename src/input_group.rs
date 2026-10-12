@@ -14,7 +14,9 @@
 
 use super::*;
 use crate::estimate::Paired;
+use crate::registry::{BuiltOnce, ErasedInput};
 use std::fmt::{self, Display, Formatter};
+use std::rc::Rc;
 
 /// Never stop *voluntarily* on fewer rounds than this.
 ///
@@ -193,6 +195,9 @@ pub(crate) struct Inputs<I> {
     /// What an alternative that may change its input is handed, and may leave
     /// in any state.
     copy: Vec<I>,
+    /// Whether the one input is built once and kept, for every round and every
+    /// alternative, which only read it. See [`Inputs::built_once`].
+    once: bool,
 }
 
 impl<I> Inputs<I> {
@@ -202,7 +207,24 @@ impl<I> Inputs<I> {
             clone,
             master: Vec::new(),
             copy: Vec::new(),
+            once: false,
         }
+    }
+
+    /// An input built once: `make` hands out a handle on a value that is
+    /// built when first asked for and shared, so the group makes it a single
+    /// time, and holds it, instead of making a batch every round and letting
+    /// it go at every yield.
+    fn built_once(make: Box<GenInput<I>>, clone: Box<CloneInput<I>>) -> Self {
+        Inputs {
+            once: true,
+            ..Inputs::new(make, Some(clone))
+        }
+    }
+
+    /// Whether the input is built once and only read.
+    pub(crate) fn is_built_once(&self) -> bool {
+        self.once
     }
 
     /// Whether an input can be copied.
@@ -221,7 +243,15 @@ impl<I> Inputs<I> {
     }
 
     /// Make a fresh master of `n` inputs, reusing the last one's allocation.
+    /// An input built once is the master of one, and is made the first time
+    /// only.
     pub(crate) fn fill(&mut self, n: usize) {
+        if self.once {
+            if self.master.is_empty() {
+                self.master.push((self.make)());
+            }
+            return;
+        }
         self.master.clear();
         self.master.reserve(n);
         for _ in 0..n {
@@ -237,6 +267,9 @@ impl<I> Inputs<I> {
     /// `clone_from`-ed into whatever the last alternative left behind, so
     /// that what an alternative did to its copy cannot reach the next.
     pub(crate) fn take(&mut self, n: usize, shared: bool) -> &mut [I] {
+        if self.once {
+            return &mut self.master[..];
+        }
         if shared {
             return &mut self.master[..n];
         }
@@ -253,7 +286,13 @@ impl<I> Inputs<I> {
     ///
     /// `clear` alone would keep the allocation, which for a sample of
     /// hundreds of thousands of inputs is the part that matters.
+    ///
+    /// Not an input built once, which is held until the group is done with
+    /// it: making it again is what it is built once to avoid.
     pub(crate) fn release(&mut self) {
+        if self.once {
+            return;
+        }
         self.master = Vec::new();
         self.copy = Vec::new();
     }
@@ -327,6 +366,17 @@ impl Config {
         InputGroup {
             cfg: self.clone(),
             inputs: Inputs::new(Box::new(make_input), Some(Box::new(Clone::clone))),
+            entries: Vec::new(),
+        }
+    }
+
+    /// A group whose input is built once, for the whole run, and shared with
+    /// every other group that takes it. See [`BuiltOnce`].
+    pub(crate) fn input_group_built_once(&self, input: Rc<BuiltOnce>) -> InputGroup<ErasedInput> {
+        let first = Rc::clone(&input);
+        InputGroup {
+            cfg: self.clone(),
+            inputs: Inputs::built_once(Box::new(move || first.get()), Box::new(Clone::clone)),
             entries: Vec::new(),
         }
     }
@@ -614,7 +664,8 @@ impl<I: 'static> InputGroup<I> {
             "multiple alternatives need clonable shared inputs"
         );
         // Pooling changes what is measured, so it is all or none in a group.
-        let pooled = entries.iter().all(|e| e.reuse);
+        // An input built once is a pool of one for every alternative.
+        let pooled = inputs.is_built_once() || entries.iter().all(|e| e.reuse);
         for e in &mut entries {
             e.reuse = pooled;
         }
@@ -660,7 +711,9 @@ impl<I: 'static> InputGroup<I> {
             // One whole round per poll, never part of one. And nothing held
             // across the yield: every group in a suite waits here between
             // its rounds, so inputs kept would add up over all of them
-            // instead of being only the one group's that is running.
+            // instead of being only the one group's that is running. (An
+            // input built once is the exception, and one copy for all of
+            // them, which is why it is built once.)
             inputs.release();
             clock.yield_now().await;
             // Told to stop, not merely out of budget: no round more, since

@@ -147,6 +147,9 @@ pub(crate) struct Calibration {
     input_bytes: usize,
     /// How many inputs one sample may use when each call has one of its own.
     input_cap: usize,
+    /// Whether the one input is built once and shared by every call, so that
+    /// the pool every alternative goes round is that input alone.
+    once: bool,
     /// How many iterations each alternative's probes ran, which count towards
     /// [`Timing::iterations`](crate::Timing::iterations) even though their
     /// timings are discarded.
@@ -244,6 +247,8 @@ struct Limits {
     alone: bool,
     /// What one input takes, to size a pool by.
     input_bytes: usize,
+    /// See [`Calibration`]: the pool is the one input.
+    once: bool,
 }
 
 /// For each alternative, what one call and one input cost, found by timing
@@ -259,7 +264,11 @@ pub(crate) async fn calibrate<I>(
     entries: &mut [Entry<I>],
     clock: &Clock,
 ) -> Calibration {
-    let bytes = input_bytes(inputs);
+    // An input built once is one value held for the whole run: what a pool
+    // or a sample of inputs may take does not come into it, and finding out
+    // by making several would build it again for each.
+    let once = inputs.is_built_once();
+    let bytes = if once { 0 } else { input_bytes(inputs) };
     let alone = entries.len() == 1;
     let copies = if alone { 1 } else { 2 };
     let limits = Limits {
@@ -275,12 +284,14 @@ pub(crate) async fn calibrate<I>(
         .max(1),
         alone,
         input_bytes: bytes,
+        once,
     };
     let mut found = Calibration {
         per_call: Vec::new(),
         prep: Vec::new(),
         input_bytes: bytes,
         input_cap: limits.input_cap,
+        once,
         probed: Vec::new(),
     };
     for entry in entries.iter_mut() {
@@ -311,7 +322,9 @@ async fn probe<I>(
         let started = Instant::now();
         // An alternative that reuses its inputs goes round a pool of them, so
         // a probe of any length needs no more than the pool.
-        let made = if reuse {
+        let made = if limits.once {
+            1
+        } else if reuse {
             let affordable = if last_make > 0.0 {
                 (MAX_POOL_PREPARATION_NS / last_make) as usize
             } else {
@@ -434,11 +447,15 @@ pub(crate) fn plan(cal: &Calibration, reuse: &[bool]) -> Vec<Plan> {
                 } else {
                     usize::MAX
                 };
-                let pool = wanted
-                    .saturating_mul(units)
-                    .min(pool_limit(cal.input_bytes))
-                    .min(by_time)
-                    .max(1);
+                let pool = if cal.once {
+                    1
+                } else {
+                    wanted
+                        .saturating_mul(units)
+                        .min(pool_limit(cal.input_bytes))
+                        .min(by_time)
+                        .max(1)
+                };
                 Plan {
                     laps: shape.map(|s| s * wanted),
                     inputs: pool,
