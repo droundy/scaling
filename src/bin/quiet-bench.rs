@@ -134,9 +134,22 @@ backticks; or copy it to /usr/local/bin to type the short form.
 
     // ------------------------------------------------------------- status
 
+    /// What `status` found, in terms of this process: the library's own wording
+    /// is about benchmarks, which a run will pin, and not about the shell
+    /// asking.
+    fn describe(s: &Status) -> String {
+        match s {
+            Status::Reserved { cpus, affinity } => format!(
+                "CPU(s) {cpus} are reserved but this process may run on {affinity}; \
+                 start it with `quiet-bench run` to pin it"
+            ),
+            other => other.to_string(),
+        }
+    }
+
     fn cmd_status() -> i32 {
         let s = status();
-        println!("{s}");
+        println!("{}", describe(&s));
         match s {
             Status::Pinned { .. } => 0,
             // Not an error: `status` answers a question, and "no" is a valid

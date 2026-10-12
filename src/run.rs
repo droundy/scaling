@@ -5,6 +5,7 @@ use crate::assemble::Diagnostic;
 use crate::interrupt;
 use crate::{Config, Report, Suite};
 use std::fmt::{self, Display, Formatter};
+use std::io::{self, Write};
 
 /// Why [`Config::run`] measured nothing: what is registered cannot be run as
 /// written. Two benchmarks may share a name, a group may have two baselines, or
@@ -84,10 +85,17 @@ impl Config {
     ///
     /// # Stopping early
     ///
-    /// Ctrl-C stops a run where it is, as [`Config::run`] describes. This prints what the run has, says how many benchmarks were
-    /// stopped, and exits with status 130, as the process would have ended
-    /// without all this, so that `cargo bench && next-step` does not go on
-    /// after a partial run.
+    /// Ctrl-C is handled as [`Config::run`] describes. Where it stops the run,
+    /// this prints what the run has, says how many benchmarks were stopped, and
+    /// exits with status 130, as the process would have ended without all
+    /// this, so that `cargo bench && next-step` does not go on after a partial
+    /// run.
+    ///
+    /// Under `cargo bench`, Ctrl-C reaches cargo as well as the benchmark, and
+    /// cargo exits at once, so the shell can show its prompt before the
+    /// results are printed, a few seconds later. Wait for them, or run the
+    /// executable that `cargo bench --no-run` names, which the shell waits
+    /// for.
     ///
     /// # Errors
     ///
@@ -111,15 +119,19 @@ impl Config {
 
         let report = suite.run();
 
-        print!("{report}");
+        // Before the table, so that results which arrive after the shell has
+        // its prompt back say what they are. An unreadable stderr must not
+        // cost the table.
         if report.was_interrupted() {
-            eprintln!(
+            let _ = writeln!(
+                io::stderr(),
                 "interrupted: {} of {count} benchmarks had finished, and {} were \
                  stopped early; those not yet as precise as asked for are marked `(limit)`",
                 count - report.stopped(),
                 report.stopped()
             );
         }
+        print!("{report}");
         interrupt::exit_if_asked();
 
         Ok(())
@@ -149,16 +161,22 @@ impl Config {
     /// # How it goes, and stopping early
     ///
     /// A run that goes on for more than a few seconds says how it is going on
-    /// stderr, now and then: how many benchmarks are done, and at most how
-    /// long the rest can take (less, if they reach their accuracy goals
-    /// sooner). Shorter runs say nothing.
+    /// stderr, now and then: how many benchmarks are done, at most how long
+    /// the rest can take (less, if they reach their accuracy goals sooner),
+    /// and how many have been calibrated. Shorter runs say nothing.
     ///
-    /// Ctrl-C stops the run where it is, and this returns what it has. Every benchmark still being measured stops with the answer so
-    /// far, marked `(limit)` if that is less precise than asked for, and
-    /// [`Report::was_interrupted`] says it happened, for a check that should
-    /// not judge numbers half-measured. This does not end the process; that is
-    /// the program's to do, and a second Ctrl-C does it at once. A benchmark
-    /// call that is already running finishes first.
+    /// Ctrl-C stops the run where it is, and this returns what it has, once every
+    /// benchmark has been calibrated, which the progress says when it happens.
+    /// Before that nothing has been measured worth keeping, and Ctrl-C ends the
+    /// process as it always did. A line on stderr says so at once, since
+    /// finishing takes a moment. Every benchmark still being measured stops with
+    /// the answer so far, marked `(limit)` if that is less precise than asked
+    /// for, and [`Report::was_interrupted`] says it happened, for a check that
+    /// should not judge numbers half-measured. A group that is stopped does not
+    /// compute its metrics, and a scaling benchmark that is stopped before its
+    /// second round has found no law. This does not end the process; that is the
+    /// program's to do, and a second Ctrl-C does it at once. A benchmark call
+    /// that is already running finishes first.
     ///
     /// Once a run has been interrupted, so is every later one in the process:
     /// the request to stop stands.
@@ -166,10 +184,10 @@ impl Config {
     /// The handler is set when the first run begins, through the `ctrlc`
     /// crate, and stays. A program that already handles Ctrl-C, or ignores it
     /// as the background jobs of a script do, keeps things as they are, and
-    /// its runs are never stopped early. A
-    /// `ctrlc::set_handler` of the program's own after a run has begun fails,
-    /// since there can be only one in a process. One Ctrl-C stops every run in
-    /// flight, as when tests call this from several threads.
+    /// its runs are never stopped early. A `ctrlc::set_handler` of the
+    /// program's own after a run has begun fails, since there can be only one
+    /// in a process. One Ctrl-C stops every run in flight, as when tests call
+    /// this from several threads.
     ///
     /// ```no_run
     /// use scaling::Config;

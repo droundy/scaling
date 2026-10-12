@@ -21,18 +21,20 @@ that is what it is for, and [`exclusive`] makes concurrent benchmarks take
 turns rather than collide. Set [`NO_PIN_VAR`] to `1` to opt out.
 
 Pinning affects only the thread running the benchmark, and happens at most
-once per thread. Nothing here does anything at all on non-Linux platforms,
-or when no reservation exists - the normal case for an ordinary `cargo
-bench` on a developer machine.
+once per thread, when a run starts: [`Config::run`](crate::Config::run) and
+[`Config::run_and_print`](crate::Config::run_and_print) do it before the first
+benchmark. Nothing here does anything at all on non-Linux platforms, or when
+no reservation exists - the normal case for an ordinary `cargo bench` on a
+developer machine.
 
-Use [`status`] to find out what happened:
+Use [`status`] to find out where benchmarks will run:
 
 ```
 match scaling::quiet::status() {
     scaling::quiet::Status::Pinned { cpus } => {
         println!("running on reserved CPU(s) {cpus}");
     }
-    other => println!("not pinned: {other}"),
+    other => println!("{other}"),
 }
 ```
 */
@@ -46,6 +48,11 @@ use std::fmt::{self, Display, Formatter};
 /// Set this to `1` to stop `scaling` pinning itself even when CPUs have
 /// been reserved.
 pub const NO_PIN_VAR: &str = "SCALING_NO_PIN";
+
+/// Whether [`NO_PIN_VAR`] says not to pin.
+fn pinning_disabled() -> bool {
+    std::env::var(NO_PIN_VAR).map(|v| v == "1").unwrap_or(false)
+}
 
 /// Is the machine-wide lock already held on our behalf by an ancestor?
 fn lock_held_by_ancestor() -> bool {
@@ -83,8 +90,8 @@ pub enum Status {
         /// The reserved CPU list we are pinned to.
         cpus: String,
     },
-    /// CPUs are reserved, but this thread is not confined to them - pinning
-    /// was suppressed, or failed.
+    /// CPUs are reserved, but this thread is not confined to them: no run has
+    /// started yet, or pinning was suppressed (see [`NO_PIN_VAR`]) or failed.
     Reserved {
         /// The reserved CPU list.
         cpus: String,
@@ -102,9 +109,15 @@ impl Display for Status {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             Status::Pinned { cpus } => write!(f, "pinned to reserved CPU(s) {cpus}"),
+            Status::Reserved { cpus, affinity } if pinning_disabled() => write!(
+                f,
+                "CPU(s) {cpus} are reserved, but {NO_PIN_VAR}=1 turns pinning off, \
+                 so benchmarks may run on {affinity}"
+            ),
             Status::Reserved { cpus, affinity } => write!(
                 f,
-                "CPU(s) {cpus} are reserved but this thread may run on {affinity}"
+                "CPU(s) {cpus} are reserved: benchmarks will be pinned to them when a \
+                 run starts, though this thread is not pinned yet and may run on {affinity}"
             ),
             Status::NotQuiesced => write!(
                 f,
@@ -154,8 +167,12 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
     pin_thread(0, cpus)
 }
 
-/// What `scaling` found when it looked for a quiesced environment. See the
-/// module docs.
+/// Whether this thread is running on the CPUs `quiet-bench` reserved:
+/// [`Status::Pinned`] if so, and otherwise why not.
+///
+/// Asked before a run starts, the thread is not pinned yet, so a reservation
+/// shows as [`Status::Reserved`] and its `Display` says benchmarks will be
+/// pinned.
 pub fn status() -> Status {
     if !cfg!(target_os = "linux") {
         return Status::Unsupported;
@@ -206,7 +223,7 @@ pub(crate) fn pin_if_reserved() {
         if !cfg!(target_os = "linux") {
             return;
         }
-        if std::env::var(NO_PIN_VAR).map(|v| v == "1").unwrap_or(false) {
+        if pinning_disabled() {
             return;
         }
         let cpus = match reserved_cpus() {
