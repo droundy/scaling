@@ -27,8 +27,7 @@ benchmark. Nothing here does anything at all on non-Linux platforms, or when
 no reservation exists - the normal case for an ordinary `cargo bench` on a
 developer machine.
 
-Use [`status`] to find out where benchmarks are running, from inside one or
-before the run starts:
+Use [`status`] to find out where benchmarks will run:
 
 ```
 match scaling::quiet::status() {
@@ -170,23 +169,6 @@ pub(crate) fn pin_current_thread(cpus: &[usize]) -> Result<(), std::io::Error> {
 
 /// Whether this thread is running on the CPUs `quiet-bench` reserved:
 /// [`Status::Pinned`] if so, and otherwise why not.
-///
-/// Ask from inside a benchmark, where the run has already pinned the thread.
-/// Do it in the setup of one that returns a closure, which runs once, and not
-/// in the timed part:
-///
-/// ```no_run
-/// use scaling::quiet::{status, Status};
-///
-/// #[scaling::bench]
-/// fn work() -> impl Fn() -> u64 {
-///     let status = status();
-///     if !matches!(status, Status::Pinned { .. }) {
-///         eprintln!("not on a quiet machine: {status}");
-///     }
-///     || (0..1000u64).sum()
-/// }
-/// ```
 ///
 /// Asked before a run starts, the thread is not pinned yet, so a reservation
 /// shows as [`Status::Reserved`] and its `Display` says benchmarks will be
