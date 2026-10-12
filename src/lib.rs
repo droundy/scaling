@@ -17,20 +17,19 @@ fn count(bytes: &[u8]) -> usize { bytes.len() }
 fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
 ```
 
-For comparisons, candidates use the group's shared `#[scaling::input]`
-instead of `input =` or `make_input =` on the candidate. Ordinarily every
-timed iteration is given an input of its own (a function that cannot change
-its input may share a few instead: see [`bench`](macro@bench)). The shared
-input is generated for each iteration, a batch of them to a round, and cloned
-for each candidate, so every candidate in a round is measured on the same
-values. That is why the input
-type must be `Clone` when a group has more than one candidate, and the
-generating and cloning are paid for out of [`max_time`](crate::Config::with_max_time), though they
-are not timed. A setup-once candidate uses the shared input only
-when its returned closure is first built; later inputs are still generated,
-but that cached closure is called without them. Comparison candidates must
-take `&I` or `&mut I`; owned inputs are currently supported only by
-standalone benchmarks.
+For comparisons, candidates use the group's shared `#[scaling::input]` instead
+of `input =` or `make_input =` on the candidate. The shared input is generated
+a batch to a round, so every candidate in a round is measured on the same
+values. If every candidate takes `&I`, they go round a small pool of them (see
+[`bench`](macro@bench)), and the generator runs only as often as the pool
+holds: at most a lap's worth of calls, 1 ms of building and 8 MB. Otherwise
+each call is given a fresh clone of its own. That is why the input type must be
+`Clone` when a group has more than one candidate. Generating and cloning are
+never timed, only paid for out of [`max_time`](crate::Config::with_max_time). A
+setup-once candidate uses the shared input only when its returned closure is
+first built; later inputs are still generated, but that cached closure is
+called without them. Comparison candidates must take `&I` or `&mut I`; owned
+inputs are currently supported only by standalone benchmarks.
 
 A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
 setup-once benchmark: the function runs once, then the returned closure is
@@ -684,8 +683,10 @@ pub use scaling_macros::bench_scaling;
 /// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
-/// type must be `Clone`: it is generated for each iteration and cloned for each
-/// candidate. A function returning `impl Fn() -> T` is set up once.
+/// type must be `Clone`. If every candidate takes `&I` it runs only as often as
+/// a small pool holds, up to 1 ms of building a round; otherwise each call is
+/// given a fresh clone. Building is never timed, only paid for out of
+/// `max_time`. A function returning `impl Fn() -> T` is set up once.
 pub use scaling_macros::input;
 
 /// Computes extra numbers from what the candidates of a group returned, so

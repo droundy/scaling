@@ -619,6 +619,7 @@ impl<I: 'static> InputGroup<I> {
             e.reuse = pooled;
         }
         let cal = laps::calibrate(&mut inputs, &mut entries, clock).await;
+        clock.settle();
         inputs.release();
         let mut iterations = cal.probed.clone();
 
@@ -711,7 +712,13 @@ impl<I: 'static> InputGroup<I> {
                 difference
             });
         }
-        let metrics = measure_metrics(&mut entries, &mut inputs);
+        // Told to stop: what the metrics add is not worth the wait, and a
+        // group with none measured reads as one without.
+        let metrics = if clock.expired() {
+            Vec::new()
+        } else {
+            measure_metrics(&mut entries, &mut inputs)
+        };
         Timings {
             names: entries.into_iter().map(|e| e.name).collect(),
             timings,
@@ -819,7 +826,8 @@ impl Timings {
 
     /// What each candidate produced besides a time, one record for each, in the
     /// order of [`names`](Timings::names). The slice is empty, rather than full
-    /// of empty records, when no candidate computed anything.
+    /// of empty records, when no candidate computed anything, or when the run
+    /// was stopped before they could.
     ///
     /// To read one candidate's record by its name, ask the report:
     /// [`Report::metrics`].

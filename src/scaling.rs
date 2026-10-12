@@ -289,6 +289,7 @@ async fn scaling_sweep(
     )
     .await;
     let sizes = choose_sizes(range, nmin);
+    clock.settle();
 
     // Each degree costs a size, and a fit needs more sizes than terms.
     let max_degree = MAX_DEGREE.min(sizes.len().saturating_sub(2));
@@ -922,6 +923,15 @@ async fn measure_scaling(
     for i in 0..INITIAL_REPEATS {
         if i >= 2 && over_budget(spent) {
             break;
+        }
+        // Told to stop before the second round: one round gives no standard
+        // error and so no fit, and finishing would make everyone wait for
+        // nothing.
+        if i < 2 && clock.expired() {
+            return Measured {
+                fit: None,
+                hit_limit: true,
+            };
         }
         round(&mut acc, &mut spent);
         // One whole round per poll, never part of one. A round contributes a

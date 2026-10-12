@@ -64,8 +64,9 @@ bench::sort  42.2ns ± 0.4ns
 The `±` figure is the standard error of the reported time, in the same unit
 as the time itself. Each benchmark keeps sampling until it is small enough
 (within 1% by default), so cheap-to-measure benchmarks finish quickly and
-noisy ones keep working until they have earned the precision. A long run can
-be stopped with Ctrl-C, which prints what has been measured so far.
+noisy ones keep working until they have earned the precision. Once a long run
+reports that it has calibrated, Ctrl-C stops it and prints what has been
+measured so far.
 
 Printing it absolutely rather than as a percentage is deliberate: to decide
 whether two results really differ you compare the gap between them against
@@ -514,12 +515,14 @@ quiet-bench run cargo test --release
 ```
 
 Benchmarks built against `scaling` **pin themselves to the reserved CPUs
-automatically** — `quiet-bench run` advertises the reservation in
-`SCALING_BENCH_CPUS`, and every benchmark in this crate honours it without
-any code change. Set `SCALING_NO_PIN=1` to opt out.
+automatically** when a run starts, without any code change: the reservation
+`quiet-bench reserve` leaves is enough. `quiet-bench run` also pins the
+command before it starts, which matters for programs that know nothing about
+`scaling`. Set `SCALING_NO_PIN=1` to opt out.
 
 `quiet-bench status` reports whether a reservation is in effect and whether
-this process is actually on it. When you're done:
+that process is on it; `scaling::quiet::status()` does the same from inside a
+benchmark. When you're done:
 
 ```bash
 sudo `which quiet-bench` restore

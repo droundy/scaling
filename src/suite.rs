@@ -44,7 +44,6 @@
 //! A general executor would be the wrong tool, not merely a heavy one.
 
 use super::*;
-use crate::interrupt;
 use crate::metrics::NO_METRICS;
 use crate::names::{self, Address, Kind, NameError};
 use crate::registry::{Candidate, Input, MetricsFn, Registered};
@@ -83,6 +82,7 @@ pub(crate) struct Clock {
     spent: Cell<Duration>,
     max: Duration,
     expired: Cell<bool>,
+    settled: Cell<bool>,
 }
 
 impl Clock {
@@ -92,7 +92,19 @@ impl Clock {
             spent: Cell::new(Duration::ZERO),
             max,
             expired: Cell::new(false),
+            settled: Cell::new(false),
         }
+    }
+
+    /// Say that this task has been calibrated: what it has to measure is
+    /// known, and what it measures from here on is results. Every kind of
+    /// task must say so: until all have, Ctrl-C ends the process.
+    pub(crate) fn settle(&self) {
+        self.settled.set(true);
+    }
+
+    pub(crate) fn settled(&self) -> bool {
+        self.settled.get()
     }
 
     /// Say that the time is up, whatever is left of it: the task wraps up
@@ -403,7 +415,6 @@ impl Suite {
         // The guard is re-entrant within a thread, so the benchmarks' own
         // claims - taken when they are run individually - cost nothing here.
         let _machine = Machine::claim();
-        let _listening = (!self.is_empty()).then(interrupt::Listen::start);
         let finished = self.scheduler.run();
         let entries: Vec<(String, Found)> = self.names.into_iter().zip(finished.found).collect();
         let mut report = Report::new(entries, &self.lanes);
