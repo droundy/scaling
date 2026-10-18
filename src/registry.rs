@@ -510,6 +510,9 @@ pub struct Input {
     /// Whether each group that takes it builds it once and only reads it.
     /// See [`Input::building_once`].
     pub(crate) once: bool,
+    /// Whether every call is given a new input, even when every candidate
+    /// takes `&I`, and so could be given a pool. See [`Input::fresh`].
+    pub(crate) fresh: bool,
 }
 
 impl Input {
@@ -535,6 +538,7 @@ impl Input {
             make,
             reuse: false,
             once: false,
+            fresh: false,
         }
     }
 
@@ -554,6 +558,15 @@ impl Input {
     #[doc(hidden)]
     pub const fn building_once(mut self) -> Self {
         self.once = true;
+        self
+    }
+
+    /// Say that every call measured on this input is given a new one, even
+    /// when every candidate takes `&I` and could be handed a pool. A pool is
+    /// timed on warm inputs, in a pattern a processor can learn.
+    #[doc(hidden)]
+    pub const fn fresh(mut self) -> Self {
+        self.fresh = true;
         self
     }
 }

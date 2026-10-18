@@ -23,7 +23,8 @@ a batch to a round, so every candidate in a round is measured on the same
 values. If every candidate takes `&I`, they go round a small pool of them (see
 [`bench`](macro@bench)), and the generator runs only as often as the pool
 holds: at most a lap's worth of calls, 1 ms of building and 8 MB. Otherwise
-each call is given a fresh clone of its own. That is why the input type must be
+each call is given a fresh clone of its own, as `fresh_input` on the input asks
+for always. That is why the input type must be
 `Clone` when a group has more than one candidate, unless it is declared
 `build_once` (see [`input`](macro@input)): each group then builds it once and
 every call reads that one value. Generating and cloning are never timed, only
@@ -621,15 +622,20 @@ pub use inventory;
 /// in which any candidate takes `&mut I` from an input not declared
 /// `reuse_input` is timed on new inputs throughout.
 ///
-/// What is measured then is a function on inputs that stay in cache, and a
-/// pool of a few thousand inputs, whose pattern a processor can start to
-/// learn. For a function whose speed depends on the input being new that is
-/// not what you want to know, and taking `&mut I` from an input that is not
-/// declared `reuse_input` measures it the other way.
+/// What is measured then is a function on inputs that stay in cache, going
+/// round a pool whose pattern a processor can learn. The pool holds as many
+/// inputs as a lap's worth of calls, 65,536 inputs and 8 MB allow, and as 1 ms
+/// of building each round pays for, so when an input is costly to make it can
+/// be a few dozen. For a function whose speed depends on the input being new,
+/// above all branchy code on random data, that is not what you want to know:
+/// it can run faster than it would on new data, by enough to change which
+/// candidate wins. Declare the input `fresh_input` (see
+/// [`input`](macro@input)) to have every call given a new one.
 ///
 /// An input declared `build_once` goes further: each group that takes it builds
 /// it a single time, and every call of every candidate in the group is handed
-/// that one value, however large or slow to make it is.
+/// that one value, however large or slow to make it is. A processor learns a
+/// single input completely, so the same warning applies to it, more strongly.
 ///
 /// A function returning `impl Fn() -> O` or `impl FnMut() -> O` is a
 /// setup-once benchmark: the function runs once and the closure it returns is
@@ -687,7 +693,8 @@ pub use scaling_macros::bench_scaling;
 /// | `types(A, B)` | A function generic in the type it makes is registered once for each listed type. Not with `sizes`. |
 /// | `sizes(1, 2)` | The function takes the size and is registered once for each, named with `@size` and shown in order of size. Not with `types`. |
 /// | `reuse_input` | Every candidate measured on this input is given one input for many calls, not a new one for each. A candidate that takes `&I` cannot tell; one that takes `&mut I` promises to put the input back as it found it. If it does not, the calls after the first are not measured on the input they were meant to be, and neither are the other candidates, which see the same inputs. See [`bench`](macro@bench). |
-/// | `build_once` | The input is built once for each group that takes it, and every call of every candidate in the group is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. A group holds its copy until it is done, so an input that feeds several groups is built, and held, once for each. As with `reuse_input` the input stays warm in cache, and a group is measured on that one value, so the error bars say nothing of other inputs the function might have made. Use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input`. |
+/// | `build_once` | The input is built once for each group that takes it, and every call of every candidate in the group is handed that one value to read. It need not be `Clone`, and a candidate that takes `&mut I` is an error. A group holds its copy until it is done, so an input that feeds several groups is built, and held, once for each. As with `reuse_input` the input stays warm in cache, and a group is measured on that one value, so the error bars say nothing of other inputs the function might have made, and a branch predictor that learns the one input can change which candidate wins. Use it for an input that is costly to make, not for a function whose speed depends on the input being new. Not with `reuse_input` or `fresh_input`. |
+/// | `fresh_input` | Every call is given a new input, made and cloned for it, even when every candidate takes `&I` and could be given a pool. Use it for a function whose speed depends on the input being new, such as branchy code on random data, where a pool can be learned by the processor. Inputs are then made and held for every call, so a lap of a quick function is shorter and its time less steady. Not with `reuse_input` or `build_once`. |
 ///
 /// The function takes no argument (or the size) and returns the input, whose
 /// type must be `Clone` unless it is declared `build_once`. If every candidate

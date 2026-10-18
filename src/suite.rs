@@ -546,6 +546,9 @@ impl Suite {
                 if input.reg.reuse {
                     group = group.all_reusing_input();
                 }
+                if input.reg.fresh {
+                    group = group.all_fresh_input();
+                }
                 let name = lane.entry_name(input);
                 self.add_input_group(&name, group);
             }
@@ -2081,6 +2084,7 @@ mod registered_by_hand {
             make: make_input,
             reuse: false,
             once: false,
+            fresh: false,
         }
     }
 
@@ -2526,6 +2530,7 @@ mod versions_and_rivals {
             make: make_data,
             reuse: false,
             once: false,
+            fresh: false,
         }
     }
 
@@ -2540,6 +2545,7 @@ mod versions_and_rivals {
             make: make_data,
             reuse: false,
             once: false,
+            fresh: false,
         }
     }
 

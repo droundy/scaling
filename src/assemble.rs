@@ -563,6 +563,7 @@ fn unit_input() -> Named<Input> {
         make: || ErasedInput::new(()),
         reuse: false,
         once: false,
+        fresh: false,
     };
     Named {
         name: String::new(),
@@ -1753,6 +1754,7 @@ pub(crate) mod lane_tests {
             make: || ErasedInput::new(()),
             reuse: false,
             once: false,
+            fresh: false,
         }
     }
 

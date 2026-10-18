@@ -552,6 +552,17 @@ impl<I: 'static> InputGroup<I> {
         self
     }
 
+    /// Say that every alternative added so far is given a new input for every
+    /// call, even those that take it by `&I` and could be given a pool. For a
+    /// group whose input is declared to be made anew, which a function whose
+    /// speed depends on the input being new needs.
+    pub fn all_fresh_input(mut self) -> Self {
+        for e in &mut self.entries {
+            e.reuse = false;
+        }
+        self
+    }
+
     /// How many comparisons with the baseline are tested for a change: the
     /// alternatives after it that are of interest. This is what the
     /// multiple-comparison correction counts.

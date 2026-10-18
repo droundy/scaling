@@ -69,6 +69,10 @@ struct Args {
     /// takes it, and handed to every call of every candidate in the group to
     /// read. It need not be `Clone`, and no candidate may take it by `&mut`.
     build_once: bool,
+    /// `fresh_input`, on an input: every call is given a new input, even when
+    /// every candidate takes `&I`. Without it a group of `&I` candidates goes
+    /// round a small pool of inputs.
+    fresh_input: bool,
     /// `uninteresting`: nobody asked whether this candidate differs from the
     /// baseline, only roughly by how much.
     uninteresting: bool,
@@ -95,6 +99,7 @@ impl syn::parse::Parse for Args {
                 "baseline" => args.baseline = true,
                 "reuse_input" => args.reuse_input = true,
                 "build_once" => args.build_once = true,
+                "fresh_input" => args.fresh_input = true,
                 "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
                 "name" => {
@@ -174,7 +179,8 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, reuse_input, build_once, uninteresting, allocation, \
+                             name, group, baseline, reuse_input, build_once, fresh_input, uninteresting, \
+                             allocation, \
                              input, make_input, nmin, types(..), sizes(..)",
                         ),
                     ))
@@ -562,6 +568,16 @@ fn build_once_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     )
 }
 
+/// The error for `fresh_input` on a benchmark: it is the input that is made
+/// anew for every call.
+fn fresh_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        "`fresh_input` belongs to `#[scaling::input(..)]`: it is the input that is made anew \
+         for every call, whatever the candidates measured on it take",
+    )
+}
+
 /// The error for `reuse_input` on a benchmark: it is a property of the input
 /// that every candidate sharing it has to agree to.
 fn reuse_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
@@ -592,6 +608,9 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     }
     if args.build_once {
         return Err(build_once_is_for_the_input(func.sig.span()));
+    }
+    if args.fresh_input {
+        return Err(fresh_input_is_for_the_input(func.sig.span()));
     }
     if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
         return Err(syn::Error::new(
@@ -1129,6 +1148,7 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if args.baseline
         || args.reuse_input
         || args.build_once
+        || args.fresh_input
         || args.uninteresting
         || args.input.is_some()
         || args.make_input.is_some()
@@ -1273,6 +1293,13 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
              which is what `reuse_input` says, so give only `build_once`",
         ));
     }
+    if args.fresh_input && (args.reuse_input || args.build_once) {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`fresh_input` makes a new input for every call, and `reuse_input` and \
+             `build_once` each have one input serve many calls, so give only one of them",
+        ));
+    }
     if args.build_once && repeatable == Repeatable::NoArg {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -1380,6 +1407,8 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         quote!(.building_once())
     } else if args.reuse_input {
         quote!(.reusing())
+    } else if args.fresh_input {
+        quote!(.fresh())
     } else {
         quote!()
     };
