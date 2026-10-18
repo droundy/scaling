@@ -98,14 +98,6 @@ impl syn::parse::Parse for Args {
                 "baseline" => args.baseline = true,
                 "reusable" => args.reusable = true,
                 "restores_input" => args.restores_input = true,
-                "reuse_input" => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        "`reuse_input` is split in two: mark the input `reusable` if one value \
-                         can serve many calls, and a candidate that takes `&mut I` \
-                         `restores_input` if it puts the input back as it found it",
-                    ))
-                }
                 "build_once" => args.build_once = true,
                 "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
