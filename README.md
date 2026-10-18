@@ -244,16 +244,15 @@ is counted makes the others harder to call a change, and a measurement lasts
 as long as its strictest comparison.
 
 That makes a quick candidate on a large input expensive: a timed stretch of a
-millisecond may need hundreds of thousands of inputs. A candidate that takes
-`&I` cannot change its input, so it is given a small pool of inputs instead,
-and its calls go round the pool. So is every candidate of an input declared
-`reuse_input`, where those that take `&mut I` promise to leave it as they found
-it. The pool is small enough to stay in cache, so such a candidate is timed on
-warm data; a candidate that takes `&mut I` from any other input is timed on a
-new one every call, cold. A comparison is one or the other throughout, since a
-candidate timed warm against one timed cold would measure that difference and
-not the functions': if any candidate of a group takes `&mut I` from an input
-that is not declared `reuse_input`, every candidate is timed on new inputs.
+millisecond may need hundreds of thousands of inputs, since every call is given
+a new one. An input declared `reusable`, because one value is as good as
+another, lets candidates that leave it as they found it (those that take `&I`,
+and those that take `&mut I` and say `restores_input`) go round a small pool
+instead. The pool is small enough to stay in cache, and short enough for a
+processor to learn, so do not declare an input `reusable` when the function's
+speed depends on it being new, as branchy code on random data does. A
+comparison is one or the other throughout, since a candidate timed warm against
+one timed cold would measure that difference and not the functions'.
 When the input is large, and the pool and everything else would take too much
 memory, the timed stretch is made shorter instead; installing [`Allocator`]
 lets `scaling` see how much the inputs really take, and otherwise it
@@ -261,12 +260,11 @@ estimates. Without it, what a sample touches is still limited, by what its
 calls and its preparation can touch in their time, and what is not seen is
 memory reserved and never touched.
 
-The same limit shortens the timed stretch below a millisecond when inputs that
-are not pooled are slow to make next to a call: an input that takes 10µs to
-make, and a call of 10ns, are timed in stretches of a few hundred nanoseconds.
-The warm-up then absorbs less of what the neighbours left behind, and nothing
-in the output says that it happened. A candidate that takes `&I`, or an input
-declared `reuse_input`, avoids it.
+The same limit shortens the timed stretch below a millisecond when inputs are
+slow to make next to a call: an input that takes 10µs to make, and a call of
+10ns, are timed in stretches of a few hundred nanoseconds. The warm-up then
+absorbs less of what the neighbours left behind, and nothing in the output says
+that it happened. A `reusable` input avoids it.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it

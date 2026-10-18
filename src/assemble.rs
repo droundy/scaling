@@ -297,9 +297,19 @@ pub enum Diagnostic {
     /// A metrics function counts allocations, but the program does not use
     /// the allocator that counts them, so every number would be zero.
     AllocatorNotInstalled { name: String },
-    /// A candidate that takes `&mut I` is measured on an input that is built
-    /// once, which every call of every candidate is handed to read.
+    /// A candidate that takes `&mut I` without promising to restore it is
+    /// measured on an input that is built once, which every call of every
+    /// candidate is handed.
     MutatesBuiltOnce {
+        group: String,
+        candidate: String,
+        input: String,
+    },
+    /// An input is reusable, but a candidate measured on it takes `&mut I`
+    /// without promising to restore it, so the group is given a new input for
+    /// every call after all. Not an error, since that is a correct way to
+    /// measure, but not what the input asked for.
+    NotReused {
         group: String,
         candidate: String,
         input: String,
@@ -322,6 +332,7 @@ impl Diagnostic {
             Diagnostic::OrphanCandidate { .. }
                 | Diagnostic::OrphanInput { .. }
                 | Diagnostic::OrphanMetrics { .. }
+                | Diagnostic::NotReused { .. }
         )
     }
 }
@@ -399,9 +410,17 @@ impl Display for Diagnostic {
             } => write!(
                 f,
                 "in group `{group}`, `{candidate}` takes the input `{input}` by `&mut`, but it is \
-                 built once and handed to every call, so it can only be read: take it by `&`, or declare \
-                 the input `reuse_input` in place of `build_once`, which lets a candidate \
-                 promise to put its input back as it found it",
+                 built once and handed to every call: take it by `&`, or mark `{candidate}` \
+                 `restores_input` if it puts the input back as it found it",
+            ),
+            Diagnostic::NotReused {
+                group,
+                candidate,
+                input,
+            } => write!(
+                f,
+                "in group `{group}`, the input `{input}` is reusable, but `{candidate}` takes it \
+                 by `&mut` without `restores_input`, so every call is given a new input",
             ),
             Diagnostic::OrphanMetrics {
                 name,
@@ -561,7 +580,7 @@ fn unit_input() -> Named<Input> {
         type_id: TypeId::of::<()>,
         type_name: "()",
         make: || ErasedInput::new(()),
-        reuse: false,
+        reusable: false,
         once: false,
     };
     Named {
@@ -1037,18 +1056,26 @@ pub fn plan_with_metrics(
         lane.needs_type_suffix = lane.inputs.iter().any(|i| counts[&i.name] > 1);
     }
 
-    // Said once for each candidate, however many inputs it would be measured
-    // on that are built once.
+    // Said once for each candidate that may change its input, however many
+    // inputs it would be measured on that are built once, or reusable.
     for lane in &lanes {
-        let Some(input) = lane.inputs.iter().find(|i| i.reg.once) else {
-            continue;
-        };
+        let once = lane.inputs.iter().find(|i| i.reg.once);
+        let reusable = lane.inputs.iter().find(|i| i.reg.reusable);
         for candidate in lane.candidates.iter().filter(|c| c.reg.mutates_input) {
-            problems.push(Diagnostic::MutatesBuiltOnce {
-                group: lane.group.to_string(),
-                candidate: candidate.name.clone(),
-                input: input.name.clone(),
-            });
+            let (group, candidate) = (lane.group.to_string(), candidate.name.clone());
+            if let Some(input) = once {
+                problems.push(Diagnostic::MutatesBuiltOnce {
+                    group,
+                    candidate,
+                    input: input.name.clone(),
+                });
+            } else if let Some(input) = reusable {
+                problems.push(Diagnostic::NotReused {
+                    group,
+                    candidate,
+                    input: input.name.clone(),
+                });
+            }
         }
     }
 
@@ -1751,7 +1778,7 @@ pub(crate) mod lane_tests {
             type_id: TypeId::of::<I>,
             type_name: ty,
             make: || ErasedInput::new(()),
-            reuse: false,
+            reusable: false,
             once: false,
         }
     }
