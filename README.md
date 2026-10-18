@@ -40,7 +40,7 @@ fn main() -> Result<(), scaling::RegistrationError> {
 ```toml
 # Cargo.toml
 [dev-dependencies]
-scaling = "0.9"
+scaling = "0.10"
 
 [[bench]]
 name = "bench"
