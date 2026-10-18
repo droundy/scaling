@@ -20,8 +20,8 @@ fn consume(bytes: Vec<u8>) -> usize { bytes.len() }
 For comparisons, candidates use the group's shared `#[scaling::input]` instead
 of `input =` or `make_input =` on the candidate. The shared input is generated
 a batch to a round, and each call is given a new input of its own, cloned so
-that every candidate in a round is measured on the same values. That is why the
-input type must be `Clone` when a group has more than one candidate. An input
+that every candidate in a round draws from the same batch. That is why the
+input type must be `Clone`. An input
 declared `reusable`, because one value is as good as another, lets candidates
 that leave it as they found it go round a small pool instead (see
 [`bench`](macro@bench)), and one declared `build_once` is built once for each
@@ -600,7 +600,7 @@ pub use inventory;
 /// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
 /// | `uninteresting` | Needs `group`. Nobody asked whether this candidate differs from the baseline, only roughly by how much. It is shown as a size with no verdict, measured only to [`Config::with_rough_error`], and left out of the multiple-comparison count, so the comparisons that are of interest are judged less strictly for it. Not the baseline. |
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
-/// | `reusable` | Needs `input` or `make_input`, and not `group`, where it belongs to the [`input`](macro@input). One value may serve many calls, because it is not a random draw that needs averaging over, so the calls go round a small pool. The function must take `&I`, or `&mut I` with `restores_input`. See below. |
+/// | `reusable` | Needs `input` or `make_input`, and not `group`, where it belongs to the [`input`](macro@input). One value may serve many calls, because it is not a random draw that needs averaging over, so the calls go round a small pool. The function must take `&I`, or `&mut I` with `restores_input`, and not be set up once (`-> impl Fn() -> O`), which is handed its input only then. See below. |
 /// | `restores_input` | For a function that takes `&mut I`: a promise to put the input back as it found it, so that a reusable input can be reused. See below. |
 ///
 /// The input can be taken as `&I` or `&mut I`, or by value (`I`) in a
@@ -610,7 +610,8 @@ pub use inventory;
 ///
 /// Every call is ordinarily handed an input of its own, made and cloned before
 /// the timing starts, so that a function on random inputs is measured over many
-/// draws of them, and every candidate on the same draws. For a quick function on
+/// draws of them, every candidate in a round drawing from the same batch. For a
+/// quick function on
 /// an input that is slow to make, that is most of the work and most of the
 /// memory: a lap of a millisecond may need hundreds of thousands of inputs held
 /// at once.
@@ -627,11 +628,14 @@ pub use inventory;
 /// the functions'. So if any candidate takes `&mut I` without `restores_input`,
 /// every call in the group is given a new input, and a warning says so.
 ///
-/// What is measured on a pool is a function on inputs that stay in cache, going
-/// round a pattern a processor can learn. The pool holds as many inputs as a
-/// lap's worth of calls, 65,536 inputs and 8 MB allow, and as 1 ms of building
-/// each round pays for, so when an input is costly to make it can be a few
-/// dozen. For a function whose speed depends on the input being new, above all
+/// What is measured on a pool is a function on warm inputs, going round a
+/// pattern a processor can learn. The pool holds as many inputs as a sample has
+/// calls, up to 65,536 and 8 MB, and as 1 ms of building each round pays for,
+/// so when an input is costly to make it can be a few dozen. The 8 MB counts
+/// what an input owns on the heap only when [`Allocator`] is installed; without
+/// it an input is taken to be its own size and a little more, so a pool of
+/// inputs that own large buffers can be far bigger, held back only by the time
+/// to build it. For a function whose speed depends on the input being new, above all
 /// branchy code on random data, that is not what you want to know: it can run
 /// faster than it would on new data, by enough to change which candidate wins.
 /// Do not declare such an input `reusable`.

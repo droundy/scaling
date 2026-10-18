@@ -1062,7 +1062,9 @@ pub fn plan_with_metrics(
         let once = lane.inputs.iter().find(|i| i.reg.once);
         let reusable = lane.inputs.iter().find(|i| i.reg.reusable);
         for candidate in lane.candidates.iter().filter(|c| c.reg.mutates_input) {
-            let (group, candidate) = (lane.group.to_string(), candidate.name.clone());
+            // The registered name, which is what the attribute goes on, not
+            // one with a version told apart.
+            let (group, candidate) = (lane.group.to_string(), candidate.reg.name.to_string());
             if let Some(input) = once {
                 problems.push(Diagnostic::MutatesBuiltOnce {
                     group,

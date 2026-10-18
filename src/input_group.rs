@@ -515,8 +515,9 @@ impl<I: 'static> InputGroup<I> {
     /// on the input they were meant to be.
     ///
     /// It takes effect only when the input is reusable too, which is the
-    /// input's to say, and every alternative of the group says it: an alternative run on a pool is timed on warm inputs and laps of its
-    /// own length, and compared with one that is not it would measure the
+    /// input's to say, and every alternative of the group says it: an
+    /// alternative run on a pool is timed on warm inputs and laps of its own
+    /// length, and compared with one that is not it would measure the
     /// difference between the two ways of being run, not between the
     /// functions.
     pub fn reusing_input(mut self) -> Self {

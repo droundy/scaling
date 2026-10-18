@@ -248,11 +248,12 @@ millisecond may need hundreds of thousands of inputs, since every call is given
 a new one. An input declared `reusable`, because one value is as good as
 another, lets candidates that leave it as they found it (those that take `&I`,
 and those that take `&mut I` and say `restores_input`) go round a small pool
-instead. The pool is small enough to stay in cache, and short enough for a
-processor to learn, so do not declare an input `reusable` when the function's
-speed depends on it being new, as branchy code on random data does. A
-comparison is one or the other throughout, since a candidate timed warm against
-one timed cold would measure that difference and not the functions'.
+instead. It takes all of a group's candidates: if one may change its input,
+every candidate is given new inputs and a warning says so, since a candidate
+timed warm against one timed cold would measure that difference and not the
+functions'. A pool is gone round often enough for a processor to learn it, and
+stays in cache when it is small, so do not declare an input `reusable` when the
+function's speed depends on it being new, as branchy code on random data does.
 When the input is large, and the pool and everything else would take too much
 memory, the timed stretch is made shorter instead; installing [`Allocator`]
 lets `scaling` see how much the inputs really take, and otherwise it
@@ -264,7 +265,8 @@ The same limit shortens the timed stretch below a millisecond when inputs are
 slow to make next to a call: an input that takes 10µs to make, and a call of
 10ns, are timed in stretches of a few hundred nanoseconds. The warm-up then
 absorbs less of what the neighbours left behind, and nothing in the output says
-that it happened. A `reusable` input avoids it.
+that it happened. A `reusable` input that every candidate leaves as it found it
+avoids it.
 
 Candidates and inputs are registered independently and neither names the
 other - a candidate says what type it takes, an input says what type it
