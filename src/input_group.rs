@@ -670,17 +670,13 @@ impl<I: 'static> InputGroup<I> {
         // Pooling changes what is measured, so it is all or none in a group.
         // An input built once is a pool of one for every alternative.
         let pooled = inputs.is_built_once() || entries.iter().all(|e| e.reuse);
-        for e in &mut entries {
-            e.reuse = pooled;
-        }
-        let cal = laps::calibrate(&mut inputs, &mut entries, clock).await;
+        let cal = laps::calibrate(&mut inputs, &mut entries, pooled, clock).await;
         clock.settle();
         inputs.release();
         let mut iterations = cal.probed.clone();
 
-        let reuse: Vec<bool> = entries.iter().map(|e| e.reuse).collect();
         let rough: Vec<bool> = entries.iter().map(|e| !e.interesting).collect();
-        let plans = laps::plan(&cal, &reuse);
+        let plans = laps::plan(&cal);
         let most_inputs = plans.iter().map(|p| p.inputs).max().unwrap_or(1);
         // Each alternative's time per iteration, in every round so far.
         let mut times: Vec<Vec<f64>> = vec![Vec::new(); k];
@@ -694,10 +690,11 @@ impl<I: 'static> InputGroup<I> {
             shuffle(&mut order, &mut rng);
             for &i in &order {
                 let plan = &plans[i];
-                // An alternative that leaves its input as it found it is run
-                // on the round's own inputs, and the others, which are handed
-                // a copy to do as they like with, still find them untouched.
-                let xs = inputs.take(plan.inputs, k == 1 || reuse[i]);
+                // A lone alternative, or a group that goes round a pool, runs
+                // on the round's own inputs. Otherwise each alternative is
+                // handed a copy to do as it likes with, and the next still
+                // finds them untouched.
+                let xs = inputs.take(plan.inputs, k == 1 || pooled);
                 let timed = entries[i].alt.laps(xs, plan.laps);
                 times[i].push(estimate::per_iteration(timed, plan.laps));
                 iterations[i] += plan.calls() as u64;
