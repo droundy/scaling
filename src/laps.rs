@@ -149,7 +149,7 @@ pub(crate) struct Calibration {
     input_cap: usize,
     /// Whether the group goes round a pool. It is all its alternatives or
     /// none of them: see [`calibrate`].
-    pooled: bool,
+    reuses_inputs: bool,
     /// Whether the one input is built once and shared by every call, so that
     /// the pool every alternative goes round is that input alone.
     once: bool,
@@ -184,7 +184,7 @@ impl Calibration {
     fn affords(&self, shape: [usize; 3]) -> bool {
         let units: usize = shape.iter().sum();
         // A pool needs one input however long the laps are.
-        self.pooled
+        self.reuses_inputs
             || (self.input_cap >= units && self.group_prep() * units as f64 <= MAX_PREPARATION_NS)
     }
 }
@@ -242,7 +242,7 @@ struct Limits {
     /// inputs and needs no clone.
     alone: bool,
     /// Whether the group goes round a pool.
-    pooled: bool,
+    reuses_inputs: bool,
     /// What one input takes, to size a pool by.
     input_bytes: usize,
 }
@@ -256,14 +256,14 @@ struct Limits {
 /// is interleaved like everything else - and holds no inputs across the
 /// yield, for the reason given at the round's own.
 ///
-/// `pooled` says whether the group goes round a pool of inputs, which is all
-/// its alternatives or none: one timed on a pool is timed on warm inputs and
-/// laps of its own length, and compared with one that is not it would measure
-/// the difference between the two ways of being run.
+/// `reuses_inputs` says whether the group goes round a pool of inputs, which
+/// is all its alternatives or none: one timed on a pool is timed on warm
+/// inputs and laps of its own length, and compared with one that is not it
+/// would measure the difference between the two ways of being run.
 pub(crate) async fn calibrate<I>(
     inputs: &mut Inputs<I>,
     entries: &mut [Entry<I>],
-    pooled: bool,
+    reuses_inputs: bool,
     clock: &Clock,
 ) -> Calibration {
     // An input built once is one value the group holds: what a pool
@@ -285,7 +285,7 @@ pub(crate) async fn calibrate<I>(
         }
         .max(1),
         alone,
-        pooled,
+        reuses_inputs,
         input_bytes: bytes,
     };
     let mut found = Calibration {
@@ -293,7 +293,7 @@ pub(crate) async fn calibrate<I>(
         prep: Vec::new(),
         input_bytes: bytes,
         input_cap: limits.input_cap,
-        pooled,
+        reuses_inputs,
         once,
         probed: Vec::new(),
     };
@@ -313,7 +313,7 @@ async fn probe<I>(
     limits: &Limits,
     clock: &Clock,
 ) -> Probe {
-    let pooled = limits.pooled;
+    let reuses_inputs = limits.reuses_inputs;
     let mut n = 1usize;
     let mut ran = 0u64;
     let mut warm = true;
@@ -327,7 +327,7 @@ async fn probe<I>(
         // the pool, however long its probe.
         let made = if inputs.is_built_once() {
             1
-        } else if pooled {
+        } else if reuses_inputs {
             let affordable = if last_make > 0.0 {
                 (MAX_POOL_PREPARATION_NS / last_make) as usize
             } else {
@@ -340,7 +340,7 @@ async fn probe<I>(
         inputs.fill(made);
         let timed_ns = entry
             .alt
-            .batch(inputs.take(made, limits.alone || pooled), n);
+            .batch(inputs.take(made, limits.alone || reuses_inputs), n);
         let total_ns = started.elapsed().as_secs_f64() * 1e9;
         let made_ns = (total_ns - timed_ns).max(0.0);
         last_make = made_ns / made as f64;
@@ -349,7 +349,7 @@ async fn probe<I>(
             // The untimed first call: run, and not believed.
             continue;
         }
-        let at_limit = if pooled {
+        let at_limit = if reuses_inputs {
             n >= MAX_REUSED_CALLS
         } else {
             n >= limits.input_cap
@@ -357,7 +357,7 @@ async fn probe<I>(
         // Inputs that are slow to make end the growth when making them has
         // cost as much as a sample may spend on it. A pool is made once and
         // gone round, so its probes are not bounded this way.
-        let too_dear = !pooled && made_ns >= MAX_PREPARATION_NS;
+        let too_dear = !reuses_inputs && made_ns >= MAX_PREPARATION_NS;
         let mut finished = timed_ns >= limits.target_ns
             || total_ns >= limits.probe_ceiling_ns
             || at_limit
@@ -379,7 +379,7 @@ async fn probe<I>(
         // a sample may spend on that.
         let by_time = (limits.target_ns / timed_ns.max(1.0)).clamp(2.0, 100.0);
         let by_ceiling = (limits.probe_ceiling_ns / total_ns.max(1.0)).max(1.0);
-        let by_making = if pooled {
+        let by_making = if reuses_inputs {
             f64::INFINITY
         } else {
             (MAX_PREPARATION_NS / made_ns.max(1.0)).max(1.0)
@@ -387,7 +387,7 @@ async fn probe<I>(
         let growth = by_time.min(by_ceiling).min(by_making);
         n = ((n as f64 * growth).ceil() as usize)
             .max(n + 1)
-            .min(if pooled {
+            .min(if reuses_inputs {
                 MAX_REUSED_CALLS
             } else {
                 limits.input_cap
@@ -444,7 +444,7 @@ pub(crate) fn plan(cal: &Calibration) -> Vec<Plan> {
             // Floored so that a call the optimiser has deleted cannot ask for
             // an endless lap.
             let wanted = (lap_ns / per_call.max(0.1)).round().max(1.0) as usize;
-            if cal.pooled {
+            if cal.reuses_inputs {
                 let by_time = if own_make > 0.0 {
                     (MAX_POOL_PREPARATION_NS / own_make) as usize
                 } else {

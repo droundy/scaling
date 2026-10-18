@@ -313,7 +313,7 @@ pub(crate) struct Entry<I> {
     pub(crate) alt: Box<dyn Alternative<I>>,
     /// Whether the alternative leaves its input as it found it, so that one
     /// input can serve many calls. See [`InputGroup::reusing_input`].
-    pub(crate) reuse: bool,
+    pub(crate) can_reuse: bool,
     /// Whether anyone wants to know if it differs from the baseline, or only
     /// roughly by how much. See [`InputGroup::uninteresting`].
     pub(crate) interesting: bool,
@@ -326,7 +326,7 @@ impl<I: 'static> Entry<I> {
         Entry {
             name: name.to_string(),
             alt: Box::new(alt),
-            reuse: false,
+            can_reuse: false,
             interesting: true,
         }
     }
@@ -521,7 +521,7 @@ impl<I: 'static> InputGroup<I> {
     /// functions. In a group where one alternative cannot be pooled, none is.
     pub fn reusing_input(mut self) -> Self {
         if let Some(last) = self.entries.last_mut() {
-            last.reuse = true;
+            last.can_reuse = true;
         }
         self
     }
@@ -547,7 +547,7 @@ impl<I: 'static> InputGroup<I> {
     /// sharing it makes.
     pub fn all_reusing_input(mut self) -> Self {
         for e in &mut self.entries {
-            e.reuse = true;
+            e.can_reuse = true;
         }
         self
     }
@@ -669,8 +669,8 @@ impl<I: 'static> InputGroup<I> {
         );
         // Pooling changes what is measured, so it is all or none in a group.
         // An input built once is a pool of one for every alternative.
-        let pooled = inputs.is_built_once() || entries.iter().all(|e| e.reuse);
-        let cal = laps::calibrate(&mut inputs, &mut entries, pooled, clock).await;
+        let reuses_inputs = inputs.is_built_once() || entries.iter().all(|e| e.can_reuse);
+        let cal = laps::calibrate(&mut inputs, &mut entries, reuses_inputs, clock).await;
         clock.settle();
         inputs.release();
         let mut iterations = cal.probed.clone();
@@ -694,7 +694,7 @@ impl<I: 'static> InputGroup<I> {
                 // on the round's own inputs. Otherwise each alternative is
                 // handed a copy to do as it likes with, and the next still
                 // finds them untouched.
-                let xs = inputs.take(plan.inputs, k == 1 || pooled);
+                let xs = inputs.take(plan.inputs, k == 1 || reuses_inputs);
                 let timed = entries[i].alt.laps(xs, plan.laps);
                 times[i].push(estimate::per_iteration(timed, plan.laps));
                 iterations[i] += plan.calls() as u64;
