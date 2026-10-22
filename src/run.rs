@@ -78,7 +78,8 @@ impl Config {
     /// # What it prints where
     ///
     /// Results go to stdout, everything else to stderr: how many benchmarks
-    /// are about to run, warnings about registrations that went unused, and
+    /// are about to run, warnings about registrations that went unused or
+    /// inputs that could not be reused, and
     /// how the run is going, as [`Config::run`] describes. So redirecting only
     /// stdout captures the results and nothing else, without anybody having to
     /// remember to silence the rest.
@@ -213,7 +214,7 @@ impl Config {
     }
 
     /// Discover everything registered and assemble it into a suite, ready to
-    /// run, saying on stderr what went unused.
+    /// run, saying on stderr what assembly warns about.
     ///
     /// Shared by [`Config::run_and_print`] and [`Config::run`] so that the two
     /// cannot drift: what `run` hands back is what `run_and_print` would have
@@ -236,7 +237,8 @@ impl Config {
     }
 }
 
-/// Say on stderr what went unused.
+/// Say on stderr what assembly warned about: what went unused, and what could
+/// not be reused.
 fn warn(warnings: &[Diagnostic]) {
     for warning in warnings {
         eprintln!("warning: {warning}");

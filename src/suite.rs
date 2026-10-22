@@ -294,9 +294,9 @@ impl Suite {
         self.add_input_group(name, group);
     }
 
-    /// Like [`Suite::add_input`], for a function that leaves its input as it
-    /// found it, so that one clone can serve many calls. See
-    /// [`InputGroup::reusing_input`].
+    /// Like [`Suite::add_input`], for an input that is reusable and a
+    /// function that leaves it as it found it, so that one clone can serve
+    /// many calls. See [`InputGroup::reusable_input`].
     #[doc(hidden)]
     pub fn add_input_reusing<F, I, O>(&mut self, name: &str, input: I, f: F)
     where
@@ -306,8 +306,9 @@ impl Suite {
         self.add_make_input_reusing(name, move || input.clone(), f)
     }
 
-    /// Like [`Suite::add_make_input`], for a function that leaves its input
-    /// as it found it. See [`InputGroup::reusing_input`].
+    /// Like [`Suite::add_make_input`], for an input that is reusable and a
+    /// function that leaves it as it found it. See
+    /// [`InputGroup::reusable_input`].
     #[doc(hidden)]
     pub fn add_make_input_reusing<G, F, I, O>(&mut self, name: &str, make_input: G, f: F)
     where
@@ -318,6 +319,7 @@ impl Suite {
         let group = self
             .cfg
             .input_group_make_input_uncloned(make_input)
+            .reusable_input()
             .add_input(name, f)
             .reusing_input();
         self.add_input_group(name, group);
@@ -543,8 +545,8 @@ impl Suite {
                         _ => (c.reg.add_alt)(group, &c.name),
                     };
                 }
-                if input.reg.reuse {
-                    group = group.all_reusing_input();
+                if input.reg.reusable {
+                    group = group.reusable_input();
                 }
                 let name = lane.entry_name(input);
                 self.add_input_group(&name, group);
@@ -2079,7 +2081,7 @@ mod registered_by_hand {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_input,
-            reuse: false,
+            reusable: false,
             once: false,
         }
     }
@@ -2524,7 +2526,7 @@ mod versions_and_rivals {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_data,
-            reuse: false,
+            reusable: false,
             once: false,
         }
     }
@@ -2538,7 +2540,7 @@ mod versions_and_rivals {
             type_id: TypeId::of::<Vec<u64>>,
             type_name: "Vec<u64>",
             make: make_data,
-            reuse: false,
+            reusable: false,
             once: false,
         }
     }

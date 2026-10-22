@@ -195,6 +195,9 @@ pub(crate) struct Inputs<I> {
     /// What an alternative that may change its input is handed, and may leave
     /// in any state.
     copy: Vec<I>,
+    /// Whether one value may serve many calls. See
+    /// [`InputGroup::reusable_input`].
+    reusable: bool,
     /// Whether the input is built once and kept. See [`Inputs::built_once`].
     once: bool,
 }
@@ -206,6 +209,7 @@ impl<I> Inputs<I> {
             clone,
             master: Vec::new(),
             copy: Vec::new(),
+            reusable: false,
             once: false,
         }
     }
@@ -223,6 +227,11 @@ impl<I> Inputs<I> {
     /// Whether the input is built once and only read.
     pub(crate) fn is_built_once(&self) -> bool {
         self.once
+    }
+
+    /// Whether one value may serve many calls.
+    pub(crate) fn is_reusable(&self) -> bool {
+        self.reusable || self.once
     }
 
     /// Whether an input can be copied.
@@ -313,7 +322,7 @@ pub(crate) struct Entry<I> {
     pub(crate) alt: Box<dyn Alternative<I>>,
     /// Whether the alternative leaves its input as it found it, so that one
     /// input can serve many calls. See [`InputGroup::reusing_input`].
-    pub(crate) reuse: bool,
+    pub(crate) can_reuse: bool,
     /// Whether anyone wants to know if it differs from the baseline, or only
     /// roughly by how much. See [`InputGroup::uninteresting`].
     pub(crate) interesting: bool,
@@ -326,7 +335,7 @@ impl<I: 'static> Entry<I> {
         Entry {
             name: name.to_string(),
             alt: Box::new(alt),
-            reuse: false,
+            can_reuse: false,
             interesting: true,
         }
     }
@@ -496,32 +505,24 @@ impl<I: 'static> InputGroup<I> {
     }
 
     /// Say that the alternative added last leaves its input as it found it,
-    /// so that the same input can serve many of its calls.
-    ///
-    /// Without this every call is handed an input of its own, made and
-    /// cloned for it, and a lap of a quick function on an input that is slow
-    /// to make needs a great many of them. With it, the alternative is run on
-    /// a small pool of inputs and its calls go round the pool again and
-    /// again, so a lap costs a pool's worth of inputs however long it is.
+    /// so that, if the input is reusable, one value can serve many of its
+    /// calls.
     ///
     /// A function that takes its input by `&I` cannot change it, and so
     /// always qualifies. One that takes `&mut I` is promising to put the
     /// input back as it found it: if it does not, the later calls, and the
-    /// other alternatives which are handed copies of the same inputs, are
-    /// not measured on the input they were meant to be.
+    /// other alternatives which are handed the same inputs, are not measured
+    /// on the input they were meant to be.
     ///
-    /// What is measured then is the function on inputs that stay in cache,
-    /// with a pattern of inputs short enough for the machine to learn;
-    /// where that matters, leave it off.
-    ///
-    /// It takes effect only when every alternative of the group says it: an
+    /// It takes effect only when the input is reusable too, which is the
+    /// input's to say, and every alternative of the group says it: an
     /// alternative run on a pool is timed on warm inputs and laps of its own
     /// length, and compared with one that is not it would measure the
     /// difference between the two ways of being run, not between the
-    /// functions. In a group where one alternative cannot be pooled, none is.
+    /// functions.
     pub fn reusing_input(mut self) -> Self {
         if let Some(last) = self.entries.last_mut() {
-            last.reuse = true;
+            last.can_reuse = true;
         }
         self
     }
@@ -541,14 +542,21 @@ impl<I: 'static> InputGroup<I> {
         self
     }
 
-    /// Say that every alternative added so far leaves its input as it found
-    /// it, as [`InputGroup::reusing_input`] says of one. For a group whose
-    /// input is declared to be reused, which is a promise every candidate
-    /// sharing it makes.
-    pub fn all_reusing_input(mut self) -> Self {
-        for e in &mut self.entries {
-            e.reuse = true;
-        }
+    /// Say that one value of the input may serve many calls without biasing
+    /// the result, because it is not a random draw that needs averaging over.
+    ///
+    /// Without this every call is handed an input of its own, made and cloned
+    /// for it, and a lap of a quick function on an input that is slow to make
+    /// needs a great many of them. With it, and when every alternative leaves
+    /// its input as it found it ([`InputGroup::reusing_input`]), the group is
+    /// run on a small pool of inputs and its calls go round the pool again and
+    /// again, so a lap costs a pool's worth of inputs however long it is.
+    ///
+    /// What is measured then is the function on inputs that stay in cache, in
+    /// a pattern short enough for the machine to learn; where that matters,
+    /// leave it off.
+    pub(crate) fn reusable_input(mut self) -> Self {
+        self.inputs.reusable = true;
         self
     }
 
@@ -667,20 +675,19 @@ impl<I: 'static> InputGroup<I> {
             k == 1 || inputs.can_clone() || inputs.is_built_once(),
             "multiple alternatives need clonable shared inputs"
         );
-        // Pooling changes what is measured, so it is all or none in a group.
-        // An input built once is a pool of one for every alternative.
-        let pooled = inputs.is_built_once() || entries.iter().all(|e| e.reuse);
-        for e in &mut entries {
-            e.reuse = pooled;
-        }
-        let cal = laps::calibrate(&mut inputs, &mut entries, clock).await;
+        // Reuse needs the input to allow it and every alternative to leave it
+        // as it found it, and changes what is measured, so it is all or none
+        // in a group. An input built once is a pool of one for every
+        // alternative.
+        let reuses_inputs =
+            inputs.is_built_once() || (inputs.is_reusable() && entries.iter().all(|e| e.can_reuse));
+        let cal = laps::calibrate(&mut inputs, &mut entries, reuses_inputs, clock).await;
         clock.settle();
         inputs.release();
         let mut iterations = cal.probed.clone();
 
-        let reuse: Vec<bool> = entries.iter().map(|e| e.reuse).collect();
         let rough: Vec<bool> = entries.iter().map(|e| !e.interesting).collect();
-        let plans = laps::plan(&cal, &reuse);
+        let plans = laps::plan(&cal);
         let most_inputs = plans.iter().map(|p| p.inputs).max().unwrap_or(1);
         // Each alternative's time per iteration, in every round so far.
         let mut times: Vec<Vec<f64>> = vec![Vec::new(); k];
@@ -694,10 +701,11 @@ impl<I: 'static> InputGroup<I> {
             shuffle(&mut order, &mut rng);
             for &i in &order {
                 let plan = &plans[i];
-                // An alternative that leaves its input as it found it is run
-                // on the round's own inputs, and the others, which are handed
-                // a copy to do as they like with, still find them untouched.
-                let xs = inputs.take(plan.inputs, k == 1 || reuse[i]);
+                // A lone alternative, or a group that goes round a pool, runs
+                // on the round's own inputs. Otherwise each alternative is
+                // handed a copy to do as it likes with, and the next still
+                // finds them untouched.
+                let xs = inputs.take(plan.inputs, k == 1 || reuses_inputs);
                 let timed = entries[i].alt.laps(xs, plan.laps);
                 times[i].push(estimate::per_iteration(timed, plan.laps));
                 iterations[i] += plan.calls() as u64;

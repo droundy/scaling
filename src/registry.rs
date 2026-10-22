@@ -259,8 +259,9 @@ pub struct Candidate {
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
     pub(crate) add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
-    /// Whether it takes its input by `&mut I`, and so may not be measured on
-    /// one that is built once and shared. See [`Input::building_once`].
+    /// Whether it takes its input by `&mut I` without promising to put it back
+    /// (`restores_input`), and so may leave it changed: it is then given a new
+    /// input for every call, and cannot be measured on one that is built once.
     pub(crate) mutates_input: bool,
     /// How this candidate takes part in a [`MetricsFn`]: what it returns,
     /// and how to add itself so that what it returns is handed on. `None`
@@ -299,7 +300,8 @@ impl Candidate {
         }
     }
 
-    /// Say that this candidate takes its input by `&mut I`.
+    /// Say that this candidate takes its input by `&mut I` and may leave it
+    /// changed.
     #[doc(hidden)]
     pub const fn mutating_input(mut self) -> Self {
         self.mutates_input = true;
@@ -503,10 +505,11 @@ pub struct Input {
     /// them meet the same input; a singleton uses it directly. See
     /// [`ErasedInput`]. An input built once is called once for each group.
     pub(crate) make: fn() -> ErasedInput,
-    /// Whether every candidate measured on this input is handed one input for
-    /// many calls, which those that can change it promise to put back as they
-    /// found it. See [`InputGroup::reusing_input`].
-    pub(crate) reuse: bool,
+    /// Whether one value may serve many calls without biasing the result,
+    /// because it is not a random draw that needs averaging over. It is
+    /// reused only if every candidate leaves it as it found it: see
+    /// [`InputGroup::reusing_input`].
+    pub(crate) reusable: bool,
     /// Whether each group that takes it builds it once and only reads it.
     /// See [`Input::building_once`].
     pub(crate) once: bool,
@@ -533,24 +536,23 @@ impl Input {
             type_id,
             type_name,
             make,
-            reuse: false,
+            reusable: false,
             once: false,
         }
     }
 
-    /// Say that every candidate measured on this input is handed one input
-    /// for many calls: a function that takes `&I` cannot tell, and one that
-    /// takes `&mut I` is promising to put it back.
+    /// Say that one value of this input may serve many calls. It does when
+    /// every candidate in a group leaves it as it found it.
     #[doc(hidden)]
-    pub const fn reusing(mut self) -> Self {
-        self.reuse = true;
+    pub const fn reusable(mut self) -> Self {
+        self.reusable = true;
         self
     }
 
     /// Say that this input is built once for each group that takes it, by
     /// [`ErasedInput::built_once`], and every call of every candidate measured
-    /// on it is handed that one value to read. A candidate that takes `&mut
-    /// I` cannot be, and assembly says so.
+    /// on it is handed that one value. A candidate that takes `&mut I` and
+    /// does not promise to restore it cannot be, and assembly says so.
     #[doc(hidden)]
     pub const fn building_once(mut self) -> Self {
         self.once = true;
