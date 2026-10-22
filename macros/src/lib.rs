@@ -61,13 +61,16 @@ struct Args {
     /// to. Empty means none - a plain standalone registration.
     groups: Vec<LitStr>,
     baseline: bool,
-    /// `reuse_input`, on an input: one input serves many calls of every
-    /// candidate measured on it. A candidate that takes `&I` cannot tell; one
-    /// that takes `&mut I` is promising to put the input back as it found it.
-    reuse_input: bool,
+    /// `reusable`, on an input or a standalone benchmark's own: one value may
+    /// serve many calls without biasing the result, because it is not a
+    /// random draw that needs averaging over.
+    reusable: bool,
+    /// `restores_input`, on a benchmark that takes `&mut I`: a promise to put
+    /// the input back as it found it, so that a reusable input can be reused.
+    restores_input: bool,
     /// `build_once`, on an input: built a single time for each group that
-    /// takes it, and handed to every call of every candidate in the group to
-    /// read. It need not be `Clone`, and no candidate may take it by `&mut`.
+    /// takes it, and handed to every call of every candidate in the group. It
+    /// need not be `Clone`, and every candidate has to leave it as it found it.
     build_once: bool,
     /// `uninteresting`: nobody asked whether this candidate differs from the
     /// baseline, only roughly by how much.
@@ -93,7 +96,8 @@ impl syn::parse::Parse for Args {
             match key.to_string().as_str() {
                 // A bare word, no value.
                 "baseline" => args.baseline = true,
-                "reuse_input" => args.reuse_input = true,
+                "reusable" => args.reusable = true,
+                "restores_input" => args.restores_input = true,
                 "build_once" => args.build_once = true,
                 "uninteresting" => args.uninteresting = true,
                 "allocation" => args.allocation = true,
@@ -174,8 +178,9 @@ impl syn::parse::Parse for Args {
                         key.span(),
                         format!(
                             "unknown option `{other}`; expected one of \
-                             name, group, baseline, reuse_input, build_once, uninteresting, allocation, \
-                             input, make_input, nmin, types(..), sizes(..)",
+                             name, group, baseline, reusable, restores_input, build_once, \
+                             uninteresting, allocation, input, make_input, nmin, types(..), \
+                             sizes(..)",
                         ),
                     ))
                 }
@@ -329,15 +334,38 @@ fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
     Repeatable::No
 }
 
-/// Whether one input can serve many calls of a function: it takes the input
-/// by `&I`, so cannot change it, and is not a setup function (`-> impl
-/// FnMut() -> O`), which is handed its input once, to build what it
-/// returns, and so has nothing to reuse.
-///
-/// (An input declared `reuse_input` is reused by all its candidates, which
-/// is settled where they are assembled.)
-fn reuses_input(kind: &Input, sig: &syn::Signature) -> bool {
-    matches!(kind, Input::Ref(_, false)) && returns_repeatable_closure(sig) == Repeatable::No
+/// Whether a function leaves its input as it found it, so that one input can
+/// serve many of its calls: it takes it by `&I`, or by `&mut I` with the
+/// promise `restores_input`. Whether an input is reused is also up to the
+/// input, which has to be `reusable`.
+fn can_reuse(kind: &Input, restores_input: bool) -> bool {
+    match kind {
+        Input::Ref(_, mutable) => !mutable || restores_input,
+        Input::None | Input::Owned(_) => false,
+    }
+}
+
+/// `restores_input` is a promise about an input taken by `&mut I`, and an
+/// error on anything else.
+fn check_restores_input(args: &Args, kind: &Input, span: proc_macro2::Span) -> syn::Result<()> {
+    if !args.restores_input {
+        return Ok(());
+    }
+    let what = match kind {
+        Input::Ref(_, true) => return Ok(()),
+        Input::Ref(_, false) => {
+            "takes its input by `&I`, so cannot change it and has nothing to restore"
+        }
+        Input::Owned(_) => "takes its input by value, and consumes it",
+        Input::None => "takes no input",
+    };
+    Err(syn::Error::new(
+        span,
+        format!(
+            "`restores_input` promises to put back an input taken by `&mut I`, and this \
+             benchmark {what}"
+        ),
+    ))
 }
 
 /// If `sig` is the `NoArg` setup-once shape - `impl Fn() -> O` or `impl
@@ -562,15 +590,14 @@ fn build_once_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     )
 }
 
-/// The error for `reuse_input` on a benchmark: it is a property of the input
-/// that every candidate sharing it has to agree to.
-fn reuse_input_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
+/// The error for `reusable` on a candidate: whether one value can serve many
+/// calls is up to the input, which knows whether it is a random draw.
+fn reusable_is_for_the_input(span: proc_macro2::Span) -> syn::Error {
     syn::Error::new(
         span,
-        "`reuse_input` belongs to `#[scaling::input(..)]`, since it is every candidate \
-         sharing the input that has to agree to it: a candidate that takes `&mut I` is \
-         promising to put the input back as it found it. A candidate that takes `&I` \
-         reuses its input anyway, and needs nothing said",
+        "`reusable` belongs to the group's `#[scaling::input(..)]`: whether one value can \
+         serve many calls is up to the input, which knows whether it is a random draw. A \
+         candidate that takes `&mut I` and puts it back can say `restores_input`",
     )
 }
 
@@ -587,8 +614,12 @@ fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
 
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
     allocation_is_for_metrics(&args, &func)?;
-    if args.reuse_input {
-        return Err(reuse_input_is_for_the_input(func.sig.span()));
+    if let (Flavour::Scaling, true) = (&flavour, args.reusable || args.restores_input) {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "a scaling benchmark builds a new input for each size, so `reusable` and \
+             `restores_input` do not apply",
+        ));
     }
     if args.build_once {
         return Err(build_once_is_for_the_input(func.sig.span()));
@@ -671,8 +702,36 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
             let kind = input_kind(&func)?;
             let owned = matches!(kind, Input::Owned(_));
             let repeatable_kind = returns_repeatable_closure(&func.sig);
-            let reuse = reuses_input(&kind, &func.sig);
             let repeatable = repeatable_kind == Repeatable::NoArg;
+            check_restores_input(&args, &kind, func.sig.span())?;
+            // A standalone benchmark is its own input and its own candidate,
+            // so both halves of reuse are said here, and a mismatch is known
+            // now rather than at assembly.
+            if args.reusable {
+                let not = if args.input.is_none() && args.make_input.is_none() {
+                    Some("has no `input =` or `make_input =`")
+                } else if repeatable {
+                    Some("is set up once, and is handed its input only then")
+                } else if owned {
+                    Some("consumes its input")
+                } else if !can_reuse(&kind, args.restores_input) {
+                    Some(
+                        "takes its input by `&mut I` - say `restores_input` as well if it puts \
+                         it back as it found it",
+                    )
+                } else {
+                    None
+                };
+                if let Some(not) = not {
+                    return Err(syn::Error::new(
+                        func.sig.span(),
+                        format!(
+                            "`reusable` lets one input serve many calls, and this benchmark {not}"
+                        ),
+                    ));
+                }
+            }
+            let reuse = args.reusable;
             if repeatable && args.make_input.is_some() {
                 return Err(syn::Error::new(
                     func.sig.span(),
@@ -947,8 +1006,12 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
              cannot be both",
         ));
     }
+    if args.reusable {
+        return Err(reusable_is_for_the_input(func.sig.span()));
+    }
+    check_restores_input(&args, &kind, func.sig.span())?;
     // What is said of the candidate once it is added to the group.
-    let reusing = if reuses_input(&kind, &func.sig) {
+    let reusing = if can_reuse(&kind, args.restores_input) {
         quote!(.reusing_input())
     } else {
         quote!()
@@ -959,7 +1022,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         reusing
     };
     let declared = kind.ty().cloned();
-    let mutates = matches!(kind, Input::Ref(_, true));
+    let mutates = matches!(kind, Input::Ref(_, true)) && !args.restores_input;
     let output = handed_on_output(&func);
 
     // One registration per listed type, or a single one at whatever the
@@ -1127,7 +1190,8 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
         ));
     }
     if args.baseline
-        || args.reuse_input
+        || args.reusable
+        || args.restores_input
         || args.build_once
         || args.uninteresting
         || args.input.is_some()
@@ -1266,11 +1330,18 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
     if repeatable == Repeatable::OneArg {
         return Err(one_arg_rejected(func.sig.span()));
     }
-    if args.build_once && args.reuse_input {
+    if args.restores_input {
         return Err(syn::Error::new(
             func.sig.span(),
-            "`build_once` already has every candidate read one input for all its calls, \
-             which is what `reuse_input` says, so give only `build_once`",
+            "`restores_input` belongs to a `#[scaling::bench]` candidate: it is that \
+             candidate's promise to put back an input it takes by `&mut I`",
+        ));
+    }
+    if args.build_once && args.reusable {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`build_once` is already reusable, one value serving every call, so give only \
+             `build_once`",
         ));
     }
     if args.build_once && repeatable == Repeatable::NoArg {
@@ -1378,8 +1449,8 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
 
     let reusing = if args.build_once {
         quote!(.building_once())
-    } else if args.reuse_input {
-        quote!(.reusing())
+    } else if args.reusable {
+        quote!(.reusable())
     } else {
         quote!()
     };
