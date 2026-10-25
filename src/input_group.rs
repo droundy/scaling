@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::estimate::Paired;
+use crate::formatting::text_width;
 use crate::registry::ErasedInput;
 use std::fmt::{self, Display, Formatter};
 
@@ -960,7 +961,7 @@ impl Timings {
 
 impl Display for Timings {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let width = self.names.iter().map(|n| n.len()).max().unwrap_or(0);
+        let width = self.names.iter().map(|n| text_width(n)).max().unwrap_or(0);
         writeln!(
             f,
             "{:width$}  {}  (baseline)",
