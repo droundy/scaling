@@ -302,36 +302,44 @@ enum Repeatable {
     OneArg,
 }
 
+/// The `Fn(..)` or `FnMut(..)` bound that makes a return type a setup
+/// function's: the first such bound of an `impl Trait` it is written as,
+/// which says what the returned closure takes and what it gives back. `None`
+/// for any other return type.
+///
+/// The one place that reads this off a signature, so that what counts as a
+/// setup function cannot differ between the places that ask.
+fn closure_bound(sig: &syn::Signature) -> Option<&syn::ParenthesizedGenericArguments> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    let Type::ImplTrait(imp) = peel(ty) else {
+        return None;
+    };
+    imp.bounds.iter().find_map(|bound| {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return None;
+        };
+        let last = trait_bound.path.segments.last()?;
+        if last.ident != "Fn" && last.ident != "FnMut" {
+            return None;
+        }
+        match &last.arguments {
+            syn::PathArguments::Parenthesized(args) => Some(args),
+            _ => None,
+        }
+    })
+}
+
 /// Not `impl FnOnce() -> O`, and not more than one argument: a `FnOnce`
 /// cannot be called more than the one time setup-once's whole point is to
 /// avoid, and nothing here has a second argument to feed.
 fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
-        return Repeatable::No;
-    };
-    let Type::ImplTrait(imp) = peel(ty) else {
-        return Repeatable::No;
-    };
-    for bound in &imp.bounds {
-        let syn::TypeParamBound::Trait(trait_bound) = bound else {
-            continue;
-        };
-        let Some(last) = trait_bound.path.segments.last() else {
-            continue;
-        };
-        if last.ident != "Fn" && last.ident != "FnMut" {
-            continue;
-        }
-        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
-            continue;
-        };
-        return match p.inputs.len() {
-            0 => Repeatable::NoArg,
-            1 => Repeatable::OneArg,
-            _ => Repeatable::No,
-        };
+    match closure_bound(sig).map(|bound| bound.inputs.len()) {
+        Some(0) => Repeatable::NoArg,
+        Some(1) => Repeatable::OneArg,
+        _ => Repeatable::No,
     }
-    Repeatable::No
 }
 
 /// Whether a function leaves its input as it found it, so that one input can
@@ -377,34 +385,11 @@ fn check_restores_input(args: &Args, kind: &Input, span: proc_macro2::Span) -> s
 /// function always takes no arguments, so there is no `OneArg` shape to
 /// speak of.
 fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
-        return None;
-    };
-    let Type::ImplTrait(imp) = peel(ty) else {
-        return None;
-    };
-    for bound in &imp.bounds {
-        let syn::TypeParamBound::Trait(trait_bound) = bound else {
-            continue;
-        };
-        let Some(last) = trait_bound.path.segments.last() else {
-            continue;
-        };
-        if last.ident != "Fn" && last.ident != "FnMut" {
-            continue;
-        }
-        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
-            continue;
-        };
-        if !p.inputs.is_empty() {
-            return None;
-        }
-        return match &p.output {
-            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
-            syn::ReturnType::Default => None,
-        };
+    let bound = closure_bound(sig).filter(|bound| bound.inputs.is_empty())?;
+    match &bound.output {
+        syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+        syn::ReturnType::Default => None,
     }
-    None
 }
 
 /// The rejection for a setup function whose returned closure itself takes an
