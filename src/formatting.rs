@@ -3,6 +3,13 @@ use std::collections::BTreeSet;
 
 const MAX_TABLE_WIDTH: usize = 100;
 
+/// How many columns `text` takes when padded to a width: its characters,
+/// which is what `{:>width$}` counts, and not its bytes, of which `±` and `µ`
+/// are two.
+pub(crate) fn text_width(text: &str) -> usize {
+    text.chars().count()
+}
+
 /// A group as its table. `figures` is how many significant figures to show
 /// the metrics to, and the default if there is none; timings always show the
 /// digits their error justifies.
@@ -213,8 +220,8 @@ fn table_width(
 ) -> usize {
     let label_width = rows
         .iter()
-        .map(String::len)
-        .chain(std::iter::once(row_heading.len()))
+        .map(|row| text_width(row))
+        .chain(std::iter::once(text_width(row_heading)))
         .max()
         .unwrap_or(0);
     label_width
@@ -223,10 +230,10 @@ fn table_width(
             .iter()
             .enumerate()
             .map(|(column, label)| {
-                label.len().max(
+                text_width(label).max(
                     values
                         .iter()
-                        .map(|row| row[column].len())
+                        .map(|row| text_width(&row[column]))
                         .max()
                         .unwrap_or(0),
                 ) + 2
@@ -243,18 +250,18 @@ fn format_matrix(
 ) -> String {
     let label_width = rows
         .iter()
-        .map(String::len)
-        .chain(std::iter::once(row_heading.len()))
+        .map(|row| text_width(row))
+        .chain(std::iter::once(text_width(row_heading)))
         .max()
         .unwrap_or(0);
     let widths: Vec<usize> = columns
         .iter()
         .enumerate()
         .map(|(column, label)| {
-            label.len().max(
+            text_width(label).max(
                 values
                     .iter()
-                    .map(|row| row[column].len())
+                    .map(|row| text_width(&row[column]))
                     .max()
                     .unwrap_or(0),
             ) + 2
@@ -301,14 +308,29 @@ fn render_long(name: &str, group: &Group, columns: &[usize], figures: Option<usi
             ));
         }
     }
-    let candidate_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(9).max(9);
-    let type_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(4).max(4);
-    let input_width = rows.iter().map(|row| row.2.len()).max().unwrap_or(5).max(5);
+    let candidate_width = rows
+        .iter()
+        .map(|row| text_width(row.0))
+        .max()
+        .unwrap_or(9)
+        .max(9);
+    let type_width = rows
+        .iter()
+        .map(|row| text_width(row.1))
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let input_width = rows
+        .iter()
+        .map(|row| text_width(row.2))
+        .max()
+        .unwrap_or(5)
+        .max(5);
     let measurement_width = if group.metrics.is_empty() {
         0
     } else {
         rows.iter()
-            .map(|row| row.3.len())
+            .map(|row| text_width(&row.3))
             .max()
             .unwrap_or(0)
             .max(11)
@@ -319,10 +341,10 @@ fn render_long(name: &str, group: &Group, columns: &[usize], figures: Option<usi
         .enumerate()
         .map(|(i, metric)| {
             rows.iter()
-                .map(|row| row.4[i].len())
+                .map(|row| text_width(&row.4[i]))
                 .max()
                 .unwrap_or(0)
-                .max(metric.name.len())
+                .max(text_width(&metric.name))
         })
         .collect();
     let title = with_baseline(name.to_string(), group, columns);
@@ -593,10 +615,10 @@ mod tests {
         let shown = render_group("sorting", &group);
         expect![[r#"
             sorting (Vec<u64>)  baseline: stable
-            candidate         reversed           shuffled
-            stable      22.0ns ± 0.2ns   12.00ns ± 0.12ns
-            unstable     -47.6% ± 0.6%           (< 0.5%)
-            crazy             (< 0.3%)      -15.8% ± 1.0%
+            candidate        reversed          shuffled
+            stable     22.0ns ± 0.2ns  12.00ns ± 0.12ns
+            unstable    -47.6% ± 0.6%          (< 0.5%)
+            crazy            (< 0.3%)     -15.8% ± 1.0%
         "#]]
         .assert_eq(&shown);
     }
@@ -619,15 +641,15 @@ mod tests {
         let shown = render_group("sorting", &group);
         expect![[r#"
             sorting (Vec<u64>)
-            input                                            sort
-            input_0_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_1_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_2_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_3_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_4_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_5_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_6_with_a_long_descriptive_name   22.0ns ± 0.2ns
-            input_7_with_a_long_descriptive_name   22.0ns ± 0.2ns
+            input                                           sort
+            input_0_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_1_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_2_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_3_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_4_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_5_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_6_with_a_long_descriptive_name  22.0ns ± 0.2ns
+            input_7_with_a_long_descriptive_name  22.0ns ± 0.2ns
         "#]]
         .assert_eq(&shown);
     }
@@ -788,10 +810,10 @@ mod tests {
         let shown = render_group("serialize", &serializers());
         expect![[r#"
             serialize@mesh (Mesh)  baseline: json
-            candidate              time           size         ratio
-            json         81.2ns ± 0.8ns        1.90MiB         0.310
-            postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
-            bincode     -59.98% ± 0.15%  783KiB (-60%)             -
+            candidate             time           size         ratio
+            json        81.2ns ± 0.8ns        1.90MiB         0.310
+            postcard   -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)
+            bincode    -59.98% ± 0.15%  783KiB (-60%)             -
         "#]]
         .assert_eq(&shown);
     }
@@ -822,15 +844,15 @@ mod tests {
         let shown = render_group("serialize", &group);
         expect![[r#"
             serialize@mesh (Mesh)  baseline: json
-            candidate              time           size         ratio  another_metric_0
-            json         81.2ns ± 0.8ns        1.90MiB         0.310                 0
-            postcard    -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)                 1
-            bincode     -59.98% ± 0.15%  783KiB (-60%)             -                 2
+            candidate             time           size         ratio  another_metric_0
+            json        81.2ns ± 0.8ns        1.90MiB         0.310                 0
+            postcard   -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)                 1
+            bincode    -59.98% ± 0.15%  783KiB (-60%)             -                 2
 
             serialize@log (Log)  baseline: json
-            candidate             time         size  ratio  another_metric_0
-            json        40.0ns ± 0.4ns      2.00KiB      -                 -
-            postcard     -25.0% ± 0.3%  512B (-75%)      -                 -
+            candidate            time         size  ratio  another_metric_0
+            json       40.0ns ± 0.4ns      2.00KiB      -                 -
+            postcard    -25.0% ± 0.3%  512B (-75%)      -                 -
         "#]]
         .assert_eq(&shown);
     }
@@ -842,15 +864,15 @@ mod tests {
         let shown = render_group("serialize", &group);
         expect![[r#"
             serialize@mesh (Mesh)  baseline: json
-            metric                       json          postcard           bincode
-            time               81.2ns ± 0.8ns   -61.08% ± 0.15%   -59.98% ± 0.15%
-            size                      1.90MiB     737KiB (-62%)     783KiB (-60%)
-            ratio                       0.310      0.520 (+68%)                 -
-            another_metric_0                0                 1                 2
-            another_metric_1               10         11 (+10%)         12 (+20%)
-            another_metric_2               20        21 (+5.0%)         22 (+10%)
-            another_metric_3               30        31 (+3.3%)        32 (+6.7%)
-            another_metric_4               40        41 (+2.5%)        42 (+5.0%)
+            metric                      json         postcard          bincode
+            time              81.2ns ± 0.8ns  -61.08% ± 0.15%  -59.98% ± 0.15%
+            size                     1.90MiB    737KiB (-62%)    783KiB (-60%)
+            ratio                      0.310     0.520 (+68%)                -
+            another_metric_0               0                1                2
+            another_metric_1              10        11 (+10%)        12 (+20%)
+            another_metric_2              20       21 (+5.0%)        22 (+10%)
+            another_metric_3              30       31 (+3.3%)       32 (+6.7%)
+            another_metric_4              40       41 (+2.5%)       42 (+5.0%)
         "#]]
         .assert_eq(&shown);
     }
@@ -865,10 +887,10 @@ mod tests {
         let shown = render_group("serialize", &group);
         expect![[r#"
             serialize  baseline: json_with_a_name_that_is_far_too_long_for_a_column
-            candidate                                               type  input  measurement                size         ratio  another_metric_0  another_metric_1  another_metric_2  another_metric_3  another_metric_4
-            json_with_a_name_that_is_far_too_long_for_a_column      Mesh  mesh   81.2ns ± 0.8ns          1.90MiB         0.310                 0                10                20                30                40
-            postcard_with_a_name_that_is_far_too_long_for_a_column  Mesh  mesh   -61.08% ± 0.15%   737KiB (-62%)  0.520 (+68%)                 1         11 (+10%)        21 (+5.0%)        31 (+3.3%)        41 (+2.5%)
-            bincode_with_a_name_that_is_far_too_long_for_a_column   Mesh  mesh   -59.98% ± 0.15%   783KiB (-60%)             -                 2         12 (+20%)         22 (+10%)        32 (+6.7%)        42 (+5.0%)
+            candidate                                               type  input  measurement               size         ratio  another_metric_0  another_metric_1  another_metric_2  another_metric_3  another_metric_4
+            json_with_a_name_that_is_far_too_long_for_a_column      Mesh  mesh   81.2ns ± 0.8ns         1.90MiB         0.310                 0                10                20                30                40
+            postcard_with_a_name_that_is_far_too_long_for_a_column  Mesh  mesh   -61.08% ± 0.15%  737KiB (-62%)  0.520 (+68%)                 1         11 (+10%)        21 (+5.0%)        31 (+3.3%)        41 (+2.5%)
+            bincode_with_a_name_that_is_far_too_long_for_a_column   Mesh  mesh   -59.98% ± 0.15%  783KiB (-60%)             -                 2         12 (+20%)         22 (+10%)        32 (+6.7%)        42 (+5.0%)
         "#]].assert_eq(&shown);
     }
 
@@ -897,16 +919,16 @@ mod tests {
         let shown = render_group("serialize", &serializers_on_two_inputs());
         expect![[r#"
             serialize (Mesh)  baseline: json
-            candidate              mesh              log
-            json         81.2ns ± 0.8ns   40.0ns ± 0.4ns
-              size              1.90MiB          2.00KiB
-              ratio               0.310                -
-            postcard    -61.08% ± 0.15%    -25.0% ± 0.3%
-              size        737KiB (-62%)      512B (-75%)
-              ratio        0.520 (+68%)                -
-            bincode     -59.98% ± 0.15%                -
-              size        783KiB (-60%)                -
-              ratio                   -                -
+            candidate             mesh             log
+            json        81.2ns ± 0.8ns  40.0ns ± 0.4ns
+              size             1.90MiB         2.00KiB
+              ratio              0.310               -
+            postcard   -61.08% ± 0.15%   -25.0% ± 0.3%
+              size       737KiB (-62%)     512B (-75%)
+              ratio       0.520 (+68%)               -
+            bincode    -59.98% ± 0.15%               -
+              size       783KiB (-60%)               -
+              ratio                  -               -
         "#]]
         .assert_eq(&shown);
     }
@@ -918,13 +940,13 @@ mod tests {
         let shown = render_group("serialize", &group);
         expect![[r#"
             serialize (Mesh)  baseline: json
-            candidate              mesh              log
-            json         81.2ns ± 0.8ns   40.0ns ± 0.4ns
-              size              1.90MiB          2.00KiB
-            postcard    -61.08% ± 0.15%    -25.0% ± 0.3%
-              size        737KiB (-62%)      512B (-75%)
-            bincode     -59.98% ± 0.15%                -
-              size        783KiB (-60%)                -
+            candidate             mesh             log
+            json        81.2ns ± 0.8ns  40.0ns ± 0.4ns
+              size             1.90MiB         2.00KiB
+            postcard   -61.08% ± 0.15%   -25.0% ± 0.3%
+              size       737KiB (-62%)     512B (-75%)
+            bincode    -59.98% ± 0.15%               -
+              size       783KiB (-60%)               -
         "#]]
         .assert_eq(&shown);
     }
@@ -997,8 +1019,8 @@ mod tests {
         let shown = render_group("lonely", &group);
         expect![[r#"
             lonely
-            candidate             time  allocations
-            lonely      22.0ns ± 0.2ns            3
+            candidate            time  allocations
+            lonely     22.0ns ± 0.2ns            3
         "#]]
         .assert_eq(&shown);
     }

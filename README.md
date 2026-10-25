@@ -299,9 +299,9 @@ more than one input, they print together as a grid:
 
 ```none
 sorting (Vec<u64>)  baseline: stable
-candidate       reversed            sorted
-stable       274ns ± 6ns   351.4ns ± 0.9ns
-unstable    -4.0% ± 0.4%      -7.3% ± 0.3%
+candidate      reversed           sorted
+stable      274ns ± 6ns  351.4ns ± 0.9ns
+unstable   -4.0% ± 0.4%     -7.3% ± 0.3%
 ```
 
 A group with just one input - the common case, and the only shape a plain
@@ -407,9 +407,9 @@ are several inputs and one or two metrics:
 
 ```none
 encode@text (String)  baseline: plain
-candidate               time          size
-plain       26.56ns ± 0.12ns          400B
-doubled       +179.6% ± 1.0%  800B (+100%)
+candidate              time          size
+plain      26.56ns ± 0.12ns          400B
+doubled      +179.6% ± 1.0%  800B (+100%)
 ```
 
 ## Why measuring them together matters
