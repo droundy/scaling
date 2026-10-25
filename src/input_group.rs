@@ -892,19 +892,6 @@ impl Timings {
         }
     }
 
-    /// Attaches what each candidate produced besides a time, one record per
-    /// candidate in the order they were added.
-    #[allow(dead_code)] // until a run computes any
-    pub(crate) fn with_metrics(mut self, metrics: Vec<Metrics>) -> Self {
-        assert_eq!(
-            metrics.len(),
-            self.timings.len(),
-            "one record of metrics per alternative"
-        );
-        self.metrics = metrics;
-        self
-    }
-
     /// What each candidate produced besides a time, one record for each, in the
     /// order of [`names`](Timings::names). The slice is empty, rather than full
     /// of empty records, when no candidate computed anything, or when the run
