@@ -25,6 +25,48 @@ pub(crate) fn noop_alt(set: InputGroup<ErasedInput>, _: &str) -> InputGroup<Eras
     set
 }
 
+/// Where a copy of a crate sits, for telling two copies of one version apart.
+///
+/// A crate name and version say which release a registration came from, and a
+/// crate compared with its own `main` has the same ones in both copies. What
+/// differs is where cargo built each from, and whether it is the package the
+/// user asked cargo to build: the code under test, as against the baseline it
+/// is compared with. Both are known only when the crate is compiled, so the
+/// macros pass them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    /// `env!("CARGO_MANIFEST_DIR")`: the directory of the crate's source.
+    pub(crate) dir: &'static str,
+    /// Whether cargo was asked to build this package (`CARGO_PRIMARY_PACKAGE`
+    /// is set), rather than building it for another package that uses it.
+    pub(crate) primary: bool,
+}
+
+impl Place {
+    /// What a registration says when it does not say: no directory and not
+    /// primary, so that all of them look alike.
+    pub(crate) const UNKNOWN: Place = Place::new("", false);
+
+    /// What generated code passes to `placed`.
+    #[doc(hidden)]
+    pub const fn new(dir: &'static str, primary: bool) -> Self {
+        Place { dir, primary }
+    }
+
+    /// Whether cargo fetched this copy, from git or a registry, rather than it
+    /// being a directory the user keeps: the layout cargo uses is
+    /// `.../git/checkouts/<name>/<rev>` and `.../registry/src/<index>/<name>`.
+    pub(crate) fn fetched(&self) -> bool {
+        let parts: Vec<&str> = self.dir.split(['/', '\\']).collect();
+        parts.windows(2).any(|pair| {
+            matches!(
+                (pair[0], pair[1]),
+                ("git", "checkouts") | ("registry", "src")
+            )
+        })
+    }
+}
+
 /// One registered benchmark.
 ///
 /// Submitted by [`inventory::submit!`] from wherever the benchmark is
@@ -49,6 +91,8 @@ pub struct Registered {
     /// versions of one crate - an old one pulled in as a dev-dependency to
     /// compare against.
     pub(crate) crate_version: &'static str,
+    /// Where that crate was built from. See [`Place`].
+    pub(crate) place: Place,
     /// Adds itself with [`Suite::add`], [`Suite::add_input`],
     /// [`Suite::add_make_input`], [`Suite::add_scaling`] or
     /// [`Suite::add_scaling_gen`] - which one, and any input generator or
@@ -105,8 +149,16 @@ impl Registered {
             name,
             crate_name,
             crate_version,
+            place: Place::UNKNOWN,
             add,
         }
+    }
+
+    /// Say where the crate this is registered from was built. See [`Place`].
+    #[doc(hidden)]
+    pub const fn placed(mut self, place: Place) -> Self {
+        self.place = place;
+        self
     }
 }
 
@@ -256,6 +308,7 @@ pub struct Candidate {
     pub(crate) is_baseline: bool,
     pub(crate) crate_name: &'static str,
     pub(crate) crate_version: &'static str,
+    pub(crate) place: Place,
     /// One alternative of the input group this candidate belongs to,
     /// including when it is the only candidate in the group.
     pub(crate) add_alt: fn(InputGroup<ErasedInput>, &str) -> InputGroup<ErasedInput>,
@@ -294,10 +347,18 @@ impl Candidate {
             is_baseline,
             crate_name,
             crate_version,
+            place: Place::UNKNOWN,
             add_alt,
             mutates_input: false,
             metrics: None,
         }
+    }
+
+    /// Say where the crate this is registered from was built. See [`Place`].
+    #[doc(hidden)]
+    pub const fn placed(mut self, place: Place) -> Self {
+        self.place = place;
+        self
     }
 
     /// Say that this candidate takes its input by `&mut I` and may leave it
@@ -357,6 +418,7 @@ impl fmt::Debug for Candidate {
             .field("is_baseline", &self.is_baseline)
             .field("crate_name", &self.crate_name)
             .field("crate_version", &self.crate_version)
+            .field("place", &self.place)
             .finish()
     }
 }
@@ -390,6 +452,7 @@ pub struct MetricsFn {
     pub(crate) input_type_name: &'static str,
     pub(crate) crate_name: &'static str,
     pub(crate) crate_version: &'static str,
+    pub(crate) place: Place,
     /// Whether the candidate's run is counted for its allocations, which the
     /// function can then ask to show. Needs [`crate::Allocator`]
     /// to be the global allocator.
@@ -421,9 +484,17 @@ impl MetricsFn {
             input_type_name: "",
             crate_name,
             crate_version,
+            place: Place::UNKNOWN,
             allocation: false,
             eval,
         }
+    }
+
+    /// Say where the crate this is registered from was built. See [`Place`].
+    #[doc(hidden)]
+    pub const fn placed(mut self, place: Place) -> Self {
+        self.place = place;
+        self
     }
 
     /// Say that the function also reads the input, of this type.
@@ -470,6 +541,7 @@ impl fmt::Debug for MetricsFn {
             .field("input_type_name", &self.input_type_name)
             .field("crate_name", &self.crate_name)
             .field("crate_version", &self.crate_version)
+            .field("place", &self.place)
             .field("allocation", &self.allocation)
             .finish()
     }
@@ -496,6 +568,7 @@ pub struct Input {
     /// the assembly code.
     pub(crate) crate_name: &'static str,
     pub(crate) crate_version: &'static str,
+    pub(crate) place: Place,
     /// The type it produces, which is what candidates are paired to it on.
     pub(crate) type_id: fn() -> TypeId,
     /// That type as the source spells it, for diagnostics.
@@ -533,12 +606,20 @@ impl Input {
             name,
             crate_name,
             crate_version,
+            place: Place::UNKNOWN,
             type_id,
             type_name,
             make,
             reusable: false,
             once: false,
         }
+    }
+
+    /// Say where the crate this is registered from was built. See [`Place`].
+    #[doc(hidden)]
+    pub const fn placed(mut self, place: Place) -> Self {
+        self.place = place;
+        self
     }
 
     /// Say that one value of this input may serve many calls. It does when
@@ -665,6 +746,7 @@ mod tests {
             name: "registry-selftest::alpha",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add: add_alpha,
         }
     }
@@ -674,6 +756,7 @@ mod tests {
             name: "registry-selftest::beta",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add: add_beta,
         }
     }

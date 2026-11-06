@@ -259,10 +259,22 @@ fn current(v: &mut Vec<u64>) { my_crate::sort(v) }
 
 `baseline` names the released version, so the report reads the way a
 regression check should: the code being written is measured *against* what
-already shipped, not the other way around. There is one sharp edge: it stops
-working if two different
-versions of `scaling` itself ever end up anywhere in the dependency graph,
-since registration is keyed on the literal monomorphized type `inventory`
+already shipped, not the other way around.
+
+Benchmarks the crate registers for itself, behind a feature as above, take
+part the same way: the copy under `my_crate_previous` registers them too, and
+each is reported as `name@<version>`. A copy at the *same* version, as the tip
+of your default branch is until the next release, is told apart by its
+directory instead: `name@0.1.0#6b0b7fb` for a git checkout, which cargo
+names for the revision, and `name@0.1.0#my-crate` for your own tree. Of two
+copies of one version, the newer is the one cargo was asked to build - the
+package you ran `cargo bench` for - and so the older is the baseline. If
+neither is, the one in your own tree is newer than one cargo fetched, and
+after that the later directory is.
+
+There is one sharp edge: it stops working if two different versions of
+`scaling` itself ever end up anywhere in the dependency graph, since
+registration is keyed on the literal monomorphized type `inventory`
 collects, and two `scaling` versions split the registry silently rather
 than erroring.
 
