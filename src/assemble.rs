@@ -76,16 +76,18 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// How new this copy of its crate is, for putting copies of one crate in
-    /// order. By version first. Two copies of one version - a crate and its
-    /// own `main`, say - are ordered by what the user would call the newer: the
-    /// one cargo was asked to build, the code under test, over one it built
+    /// How new this copy of its crate is, for putting copies in order. By
+    /// version first, then by crate name, so that rivals at one version come
+    /// out the same way every time. Two copies of one version - a crate and
+    /// its own `main`, say - are ordered by what the user would call the newer:
+    /// the one cargo was asked to build, the code under test, over one it built
     /// for another package; then one in the user's own tree over one cargo
     /// fetched; and, so that it is settled whatever the layout, by directory.
     /// Equal only for a copy and itself.
-    fn newness(&self) -> (Version, bool, bool, &'static str) {
+    fn newness(&self) -> (Version, &'static str, bool, bool, &'static str) {
         (
             Version::parse(self.crate_version),
+            self.crate_name,
             self.place.primary,
             !self.place.fetched(),
             self.place.dir,
@@ -727,11 +729,12 @@ fn lanes_for_group(
         let key = (n.reg.type_name, n.reg.name);
         match best.get(&key) {
             // Same copy of a crate: not redundancy, a genuine duplicate - two
-            // registrations of one input, from the same source. Silently keeping either would be exactly the
-            // "regardless of origin" collapse this diagnostic exists to
-            // catch, so it is reported rather than resolved. `held` is left
-            // as it is, matching how the candidate duplicate check below
-            // reports every extra claimant rather than only the first.
+            // registrations of one input, from the same source. Silently
+            // keeping either would be exactly the "regardless of origin"
+            // collapse this diagnostic exists to catch, so it is reported
+            // rather than resolved. `held` is left as it is, matching how the
+            // candidate duplicate check below reports every extra claimant
+            // rather than only the first.
             Some(held)
                 if held.origin.crate_name == n.origin.crate_name
                     && held.origin.newness() == n.origin.newness() =>
