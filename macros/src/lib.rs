@@ -302,36 +302,44 @@ enum Repeatable {
     OneArg,
 }
 
+/// The `Fn(..)` or `FnMut(..)` bound that makes a return type a setup
+/// function's: the first such bound of an `impl Trait` it is written as,
+/// which says what the returned closure takes and what it gives back. `None`
+/// for any other return type.
+///
+/// The one place that reads this off a signature, so that what counts as a
+/// setup function cannot differ between the places that ask.
+fn closure_bound(sig: &syn::Signature) -> Option<&syn::ParenthesizedGenericArguments> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    let Type::ImplTrait(imp) = peel(ty) else {
+        return None;
+    };
+    imp.bounds.iter().find_map(|bound| {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return None;
+        };
+        let last = trait_bound.path.segments.last()?;
+        if last.ident != "Fn" && last.ident != "FnMut" {
+            return None;
+        }
+        match &last.arguments {
+            syn::PathArguments::Parenthesized(args) => Some(args),
+            _ => None,
+        }
+    })
+}
+
 /// Not `impl FnOnce() -> O`, and not more than one argument: a `FnOnce`
 /// cannot be called more than the one time setup-once's whole point is to
 /// avoid, and nothing here has a second argument to feed.
 fn returns_repeatable_closure(sig: &syn::Signature) -> Repeatable {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
-        return Repeatable::No;
-    };
-    let Type::ImplTrait(imp) = peel(ty) else {
-        return Repeatable::No;
-    };
-    for bound in &imp.bounds {
-        let syn::TypeParamBound::Trait(trait_bound) = bound else {
-            continue;
-        };
-        let Some(last) = trait_bound.path.segments.last() else {
-            continue;
-        };
-        if last.ident != "Fn" && last.ident != "FnMut" {
-            continue;
-        }
-        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
-            continue;
-        };
-        return match p.inputs.len() {
-            0 => Repeatable::NoArg,
-            1 => Repeatable::OneArg,
-            _ => Repeatable::No,
-        };
+    match closure_bound(sig).map(|bound| bound.inputs.len()) {
+        Some(0) => Repeatable::NoArg,
+        Some(1) => Repeatable::OneArg,
+        _ => Repeatable::No,
     }
-    Repeatable::No
 }
 
 /// Whether a function leaves its input as it found it, so that one input can
@@ -377,34 +385,11 @@ fn check_restores_input(args: &Args, kind: &Input, span: proc_macro2::Span) -> s
 /// function always takes no arguments, so there is no `OneArg` shape to
 /// speak of.
 fn repeatable_output(sig: &syn::Signature) -> Option<Type> {
-    let syn::ReturnType::Type(_, ty) = &sig.output else {
-        return None;
-    };
-    let Type::ImplTrait(imp) = peel(ty) else {
-        return None;
-    };
-    for bound in &imp.bounds {
-        let syn::TypeParamBound::Trait(trait_bound) = bound else {
-            continue;
-        };
-        let Some(last) = trait_bound.path.segments.last() else {
-            continue;
-        };
-        if last.ident != "Fn" && last.ident != "FnMut" {
-            continue;
-        }
-        let syn::PathArguments::Parenthesized(p) = &last.arguments else {
-            continue;
-        };
-        if !p.inputs.is_empty() {
-            return None;
-        }
-        return match &p.output {
-            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
-            syn::ReturnType::Default => None,
-        };
+    let bound = closure_bound(sig).filter(|bound| bound.inputs.is_empty())?;
+    match &bound.output {
+        syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+        syn::ReturnType::Default => None,
     }
-    None
 }
 
 /// The rejection for a setup function whose returned closure itself takes an
@@ -612,9 +597,56 @@ fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
+/// A `#[bench]` or `#[bench_scaling]`: refuse a mistaken combination of
+/// options, hand a candidate of a group on, and register anything else.
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
-    allocation_is_for_metrics(&args, &func)?;
-    if let (Flavour::Scaling, true) = (&flavour, args.reusable || args.restores_input) {
+    check_options(&args, &func, &flavour)?;
+
+    // `Flavour::Scaling` was already refused a group, so any group here
+    // belongs to a `#[bench]`, which is a candidate rather than a
+    // standalone registration.
+    if !args.groups.is_empty() {
+        return expand_candidate(args, func);
+    }
+
+    let body = match flavour {
+        Flavour::Flat => flat_body(&args, &func)?,
+        Flavour::Scaling => scaling_body(&args, &func)?,
+    };
+    let name = reported_name(&args, &func);
+    let shim = format_ident!("__scaling_shim_{}", func.sig.ident);
+    Ok(quote! {
+        // The input argument's type is not a borrow chosen for convenience,
+        // it is the declared input type the registry keys the benchmark on -
+        // so `clippy::ptr_arg`'s advice to take `&mut [T]` instead of
+        // `&mut Vec<T>` would change what is being registered. Every caller
+        // writing an input benchmark would otherwise meet that warning on
+        // correct code.
+        #[allow(clippy::ptr_arg)]
+        #func
+        #[doc(hidden)]
+        fn #shim(
+            __adder: &mut ::scaling::registry::Suite,
+            __name: &str,
+        ) {
+            #body;
+        }
+        ::scaling::inventory::submit! {
+            ::scaling::registry::Registered::new(
+                #name,
+                ::core::env!("CARGO_PKG_NAME"),
+                ::core::env!("CARGO_PKG_VERSION"),
+                #shim,
+            )
+        }
+    })
+}
+
+/// Refuse the options that a `#[bench]` or `#[bench_scaling]` was given and
+/// does not take, or that do not go together, before anything is written.
+fn check_options(args: &Args, func: &ItemFn, flavour: &Flavour) -> syn::Result<()> {
+    allocation_is_for_metrics(args, func)?;
+    if let (Flavour::Scaling, true) = (flavour, args.reusable || args.restores_input) {
         return Err(syn::Error::new(
             func.sig.span(),
             "a scaling benchmark builds a new input for each size, so `reusable` and \
@@ -624,14 +656,14 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     if args.build_once {
         return Err(build_once_is_for_the_input(func.sig.span()));
     }
-    if let (Flavour::Flat, Some(n)) = (&flavour, &args.nmin) {
+    if let (Flavour::Flat, Some(n)) = (flavour, &args.nmin) {
         return Err(syn::Error::new(
             n.span(),
             "`nmin` belongs to `#[scaling::bench_scaling]`, which measures how a \
              benchmark grows with N",
         ));
     }
-    if let (Flavour::Scaling, Some(input)) = (&flavour, &args.input) {
+    if let (Flavour::Scaling, Some(input)) = (flavour, &args.input) {
         return Err(syn::Error::new(
             input.span(),
             "`input` fixes one value regardless of size, but a scaling benchmark \
@@ -649,7 +681,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
     // A scaling benchmark measures how one function grows with N, which is
     // not something a comparison compares - so it never takes a group,
     // regardless of `input`/`make_input`.
-    if let (Flavour::Scaling, Some(g)) = (&flavour, args.groups.first()) {
+    if let (Flavour::Scaling, Some(g)) = (flavour, args.groups.first()) {
         return Err(syn::Error::new(
             g.span(),
             "a scaling benchmark measures how one function grows with N, which is \
@@ -685,289 +717,248 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
              reported against, so it needs a `group` to be the baseline of",
         ));
     }
+    Ok(())
+}
 
-    // `Flavour::Scaling` was already rejected above, so any group here
-    // belongs to a `#[bench]`, which is a candidate rather than a
-    // standalone registration.
-    if !args.groups.is_empty() {
-        return expand_candidate(args, func);
+/// `reusable` on a standalone benchmark, which is its own input and its own
+/// candidate, so both halves of reuse are said on it. A mismatch between them
+/// is known now rather than at assembly.
+fn check_reusable_standalone(
+    args: &Args,
+    func: &ItemFn,
+    kind: &Input,
+    owned: bool,
+    repeatable: bool,
+) -> syn::Result<()> {
+    if !args.reusable {
+        return Ok(());
     }
-
-    let name = reported_name(&args, &func);
-    let fname = &func.sig.ident;
-    let shim = format_ident!("__scaling_shim_{}", fname);
-
-    let registration = match flavour {
-        Flavour::Flat => {
-            let kind = input_kind(&func)?;
-            let owned = matches!(kind, Input::Owned(_));
-            let repeatable_kind = returns_repeatable_closure(&func.sig);
-            let repeatable = repeatable_kind == Repeatable::NoArg;
-            check_restores_input(&args, &kind, func.sig.span())?;
-            // A standalone benchmark is its own input and its own candidate,
-            // so both halves of reuse are said here, and a mismatch is known
-            // now rather than at assembly.
-            if args.reusable {
-                let not = if args.input.is_none() && args.make_input.is_none() {
-                    Some("has no `input =` or `make_input =`")
-                } else if repeatable {
-                    Some("is set up once, and is handed its input only then")
-                } else if owned {
-                    Some("consumes its input")
-                } else if !can_reuse(&kind, args.restores_input) {
-                    Some(
-                        "takes its input by `&mut I` - say `restores_input` as well if it puts \
-                         it back as it found it",
-                    )
-                } else {
-                    None
-                };
-                if let Some(not) = not {
-                    return Err(syn::Error::new(
-                        func.sig.span(),
-                        format!(
-                            "`reusable` lets one input serve many calls, and this benchmark {not}"
-                        ),
-                    ));
-                }
-            }
-            let reuse = args.reusable;
-            if repeatable && args.make_input.is_some() {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "`make_input` rebuilds its value for every timed call, but a setup \
-                     function that returns `impl Fn()/FnMut() -> O` only ever runs \
-                     once - use `input = <value>` instead, which this evaluates once, \
-                     for exactly that reason",
-                ));
-            }
-            if repeatable_kind == Repeatable::OneArg {
-                return Err(one_arg_rejected(func.sig.span()));
-            }
-            let body = match (&args.input, &args.make_input) {
-                // The setup function itself runs once: `input` is given to
-                // it there, not cloned/regenerated per call the way
-                // `Suite::add_input`/`add_make_input` would. Routing this
-                // through `Suite::add_input` instead would still type-check - the lazy
-                // `get_or_insert_with` below only ever uses the first of the
-                // many clones it would hand out - but it would pay to build
-                // every one of those unused clones first, for nothing.
-                //
-                // The `!owned` arm below always passes `&mut __input`, same
-                // reasoning as the ordinary `&I`/`&mut I` arms further down:
-                // an ordinary reference downgrades from `&mut` at the call
-                // site. Setup reading `v` to configure what it returns (`*v`,
-                // `v.clone()`, …) compiles as ordinary safe code; a setup
-                // that instead tries to have the returned closure keep
-                // borrowing `v` itself is rejected by the compiler right
-                // there, at its own definition (E0700, "hidden type captures
-                // lifetime that does not appear in bounds") - the borrow
-                // only lasts this one call, and nothing here needs it to
-                // last longer.
-                (Some(input), None) if repeatable && owned => {
-                    quote! {
-                        {
-                            let mut __action = ::core::option::Option::None;
-                            __adder.add(__name, move || {
-                                (__action.get_or_insert_with(|| #fname(#input)))()
-                            })
-                        }
-                    }
-                }
-                (Some(input), None) if repeatable => {
-                    quote! {
-                        {
-                            let mut __input = #input;
-                            let mut __action = ::core::option::Option::None;
-                            __adder.add(__name, move || {
-                                (__action.get_or_insert_with(|| #fname(&mut __input)))()
-                            })
-                        }
-                    }
-                }
-                // `|__v| #fname(__v)`, not `#fname` passed directly: `Suite`
-                // always hands out `&mut I`, and a named function's own type
-                // does not satisfy a generic `FnMut(&mut I)` bound merely
-                // because Rust would reborrow `&mut I` as `&I` at an
-                // ordinary call site - that coercion only applies to an
-                // actual call expression, which this closure body gives it.
-                (Some(input), None) if !owned && reuse => {
-                    quote!(__adder.add_input_reusing(__name, #input, |__v| #fname(__v)))
-                }
-                (Some(input), None) if !owned => {
-                    quote!(__adder.add_input(__name, #input, |__v| #fname(__v)))
-                }
-                (None, Some(gen)) if !owned && reuse => {
-                    quote!(__adder.add_make_input_reusing(__name, #gen, |__v| #fname(__v)))
-                }
-                (None, Some(gen)) if !owned => {
-                    quote!(__adder.add_make_input(__name, #gen, |__v| #fname(__v)))
-                }
-                // The function consumes its input, so `Suite` - which only
-                // ever hands out `&mut I` - cannot call it directly. See
-                // `take_and_call` for the `Option`/`.take()` trick that
-                // works around that.
-                (Some(input), None) => {
-                    let take = take_and_call(fname);
-                    quote! {
-                        __adder.add_input(
-                            __name,
-                            ::core::option::Option::Some(#input),
-                            #take,
-                        )
-                    }
-                }
-                (None, Some(gen)) => {
-                    let take = take_and_call(fname);
-                    quote! {
-                        __adder.add_make_input(
-                            __name,
-                            {
-                                let mut __gen = #gen;
-                                move || ::core::option::Option::Some(__gen())
-                            },
-                            #take,
-                        )
-                    }
-                }
-                (None, None) => {
-                    // No input declared, so the function must take none.
-                    if !matches!(kind, Input::None) {
-                        return Err(syn::Error::new(
-                            func.sig.inputs.span(),
-                            "this benchmark takes an input, so say where it comes from: \
-                             `input = <value>` clones one per iteration, `make_input = \
-                             <closure>` builds a fresh one",
-                        ));
-                    }
-                    if repeatable {
-                        // Setup runs once, lazily - on first call, which is
-                        // `__action` stays a
-                        // concrete (if unnameable) type the whole way
-                        // through: `impl Trait` is not `Box<dyn Trait>`, so
-                        // nothing here is a dynamic call - every call after
-                        // the first is a direct call through the same
-                        // monomorphized closure, exactly like any other
-                        // benchmark's timed call.
-                        quote! {
-                            {
-                                let mut __action = ::core::option::Option::None;
-                                __adder.add(__name, move || {
-                                    (__action.get_or_insert_with(#fname))()
-                                })
-                            }
-                        }
-                    } else {
-                        quote!(__adder.add(__name, #fname))
-                    }
-                }
-                (Some(_), Some(_)) => unreachable!("checked above"),
-            };
-            quote! {
-                #[doc(hidden)]
-                fn #shim(
-                    __adder: &mut ::scaling::registry::Suite,
-                    __name: &str,
-                ) {
-                    #body;
-                }
-                ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered::new(
-                        #name,
-                        ::core::env!("CARGO_PKG_NAME"),
-                        ::core::env!("CARGO_PKG_VERSION"),
-                        #shim,
-                    )
-                }
-            }
-        }
-        Flavour::Scaling => {
-            let nmin = args.nmin.as_ref().ok_or_else(|| {
-                syn::Error::new(
-                    func.sig.span(),
-                    "a scaling benchmark needs `nmin = <literal>`, the size to start \
-                     climbing from",
-                )
-            })?;
-            let repeatable = returns_repeatable_closure(&func.sig);
-            if repeatable == Repeatable::OneArg {
-                return Err(one_arg_rejected(func.sig.span()));
-            }
-            if repeatable == Repeatable::NoArg && args.make_input.is_some() {
-                return Err(syn::Error::new(
-                    func.sig.span(),
-                    "this setup function's returned closure takes no argument, so \
-                     `make_input`'s value - rebuilt fresh on every timed call, unlike \
-                     setup itself - has nowhere to go. Drop `make_input` if the setup \
-                     function alone (built from `n`) is everything the benchmark \
-                     needs; if the input it builds needs to persist across calls at \
-                     the same size, cache it inside `make_input`'s own closure - see \
-                     the module docs for the pattern",
-                ));
-            }
-            let body = match &args.make_input {
-                // Wrapped for the same reason as the flat case above.
-                Some(gen) if !matches!(input_kind(&func)?, Input::Owned(_)) => {
-                    quote!(__adder.add_scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
-                }
-                Some(gen) => {
-                    let take = take_and_call(fname);
-                    quote! {
-                        __adder.add_scaling_gen(
-                            __name,
-                            {
-                                let mut __gen = #gen;
-                                move |__n: usize| ::core::option::Option::Some(__gen(__n))
-                            },
-                            #take,
-                            #nmin,
-                        )
-                    }
-                }
-                None if repeatable == Repeatable::NoArg => {
-                    quote! {
-                        {
-                            let mut __cache: ::std::collections::HashMap<usize, _> =
-                                ::std::collections::HashMap::new();
-                            __adder.add_scaling(__name, move |__n: usize| {
-                                (__cache.entry(__n).or_insert_with(|| #fname(__n)))()
-                            }, #nmin)
-                        }
-                    }
-                }
-                None => quote!(__adder.add_scaling(__name, #fname, #nmin)),
-            };
-            quote! {
-                #[doc(hidden)]
-                fn #shim(
-                    __adder: &mut ::scaling::registry::Suite,
-                    __name: &str,
-                ) {
-                    #body;
-                }
-                ::scaling::inventory::submit! {
-                    ::scaling::registry::Registered::new(
-                        #name,
-                        ::core::env!("CARGO_PKG_NAME"),
-                        ::core::env!("CARGO_PKG_VERSION"),
-                        #shim,
-                    )
-                }
-            }
-        }
+    let not = if args.input.is_none() && args.make_input.is_none() {
+        Some("has no `input =` or `make_input =`")
+    } else if repeatable {
+        Some("is set up once, and is handed its input only then")
+    } else if owned {
+        Some("consumes its input")
+    } else if !can_reuse(kind, args.restores_input) {
+        Some(
+            "takes its input by `&mut I` - say `restores_input` as well if it puts \
+             it back as it found it",
+        )
+    } else {
+        None
     };
+    match not {
+        Some(not) => Err(syn::Error::new(
+            func.sig.span(),
+            format!("`reusable` lets one input serve many calls, and this benchmark {not}"),
+        )),
+        None => Ok(()),
+    }
+}
 
-    Ok(quote! {
-        // The input argument's type is not a borrow chosen for convenience,
-        // it is the declared input type the registry keys the benchmark on -
-        // so `clippy::ptr_arg`'s advice to take `&mut [T]` instead of
-        // `&mut Vec<T>` would change what is being registered. Every caller
-        // writing an input benchmark would otherwise meet that warning on
-        // correct code.
-        #[allow(clippy::ptr_arg)]
-        #func
-        #registration
-    })
+/// The call on `__adder` that adds a standalone `#[bench]` to a suite, which
+/// depends on where its input comes from and on how its function takes it.
+fn flat_body(args: &Args, func: &ItemFn) -> syn::Result<TokenStream2> {
+    let fname = &func.sig.ident;
+    let kind = input_kind(func)?;
+    let owned = matches!(kind, Input::Owned(_));
+    let repeatable_kind = returns_repeatable_closure(&func.sig);
+    let repeatable = repeatable_kind == Repeatable::NoArg;
+    check_restores_input(args, &kind, func.sig.span())?;
+    check_reusable_standalone(args, func, &kind, owned, repeatable)?;
+    let reuse = args.reusable;
+    if repeatable && args.make_input.is_some() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "`make_input` rebuilds its value for every timed call, but a setup \
+             function that returns `impl Fn()/FnMut() -> O` only ever runs \
+             once - use `input = <value>` instead, which this evaluates once, \
+             for exactly that reason",
+        ));
+    }
+    if repeatable_kind == Repeatable::OneArg {
+        return Err(one_arg_rejected(func.sig.span()));
+    }
+    let body = match (&args.input, &args.make_input) {
+        // The setup function itself runs once: `input` is given to
+        // it there, not cloned/regenerated per call the way
+        // `Suite::add_input`/`add_make_input` would. Routing this
+        // through `Suite::add_input` instead would still type-check - the lazy
+        // `get_or_insert_with` below only ever uses the first of the
+        // many clones it would hand out - but it would pay to build
+        // every one of those unused clones first, for nothing.
+        //
+        // The `!owned` arm below always passes `&mut __input`, same
+        // reasoning as the ordinary `&I`/`&mut I` arms further down:
+        // an ordinary reference downgrades from `&mut` at the call
+        // site. Setup reading `v` to configure what it returns (`*v`,
+        // `v.clone()`, …) compiles as ordinary safe code; a setup
+        // that instead tries to have the returned closure keep
+        // borrowing `v` itself is rejected by the compiler right
+        // there, at its own definition (E0700, "hidden type captures
+        // lifetime that does not appear in bounds") - the borrow
+        // only lasts this one call, and nothing here needs it to
+        // last longer.
+        (Some(input), None) if repeatable && owned => {
+            quote! {
+                {
+                    let mut __action = ::core::option::Option::None;
+                    __adder.add(__name, move || {
+                        (__action.get_or_insert_with(|| #fname(#input)))()
+                    })
+                }
+            }
+        }
+        (Some(input), None) if repeatable => {
+            quote! {
+                {
+                    let mut __input = #input;
+                    let mut __action = ::core::option::Option::None;
+                    __adder.add(__name, move || {
+                        (__action.get_or_insert_with(|| #fname(&mut __input)))()
+                    })
+                }
+            }
+        }
+        // `|__v| #fname(__v)`, not `#fname` passed directly: `Suite`
+        // always hands out `&mut I`, and a named function's own type
+        // does not satisfy a generic `FnMut(&mut I)` bound merely
+        // because Rust would reborrow `&mut I` as `&I` at an
+        // ordinary call site - that coercion only applies to an
+        // actual call expression, which this closure body gives it.
+        (Some(input), None) if !owned && reuse => {
+            quote!(__adder.add_input_reusing(__name, #input, |__v| #fname(__v)))
+        }
+        (Some(input), None) if !owned => {
+            quote!(__adder.add_input(__name, #input, |__v| #fname(__v)))
+        }
+        (None, Some(gen)) if !owned && reuse => {
+            quote!(__adder.add_make_input_reusing(__name, #gen, |__v| #fname(__v)))
+        }
+        (None, Some(gen)) if !owned => {
+            quote!(__adder.add_make_input(__name, #gen, |__v| #fname(__v)))
+        }
+        // The function consumes its input, so `Suite` - which only
+        // ever hands out `&mut I` - cannot call it directly. See
+        // `take_and_call` for the `Option`/`.take()` trick that
+        // works around that.
+        (Some(input), None) => {
+            let take = take_and_call(fname);
+            quote! {
+                __adder.add_input(
+                    __name,
+                    ::core::option::Option::Some(#input),
+                    #take,
+                )
+            }
+        }
+        (None, Some(gen)) => {
+            let take = take_and_call(fname);
+            quote! {
+                __adder.add_make_input(
+                    __name,
+                    {
+                        let mut __gen = #gen;
+                        move || ::core::option::Option::Some(__gen())
+                    },
+                    #take,
+                )
+            }
+        }
+        (None, None) => {
+            // No input declared, so the function must take none.
+            if !matches!(kind, Input::None) {
+                return Err(syn::Error::new(
+                    func.sig.inputs.span(),
+                    "this benchmark takes an input, so say where it comes from: \
+                     `input = <value>` clones one per iteration, `make_input = \
+                     <closure>` builds a fresh one",
+                ));
+            }
+            if repeatable {
+                // Setup runs once, lazily, on the first call. `__action`
+                // stays a concrete (if unnameable) type the whole way
+                // through: `impl Trait` is not `Box<dyn Trait>`, so
+                // nothing here is a dynamic call - every call after
+                // the first is a direct call through the same
+                // monomorphized closure, exactly like any other
+                // benchmark's timed call.
+                quote! {
+                    {
+                        let mut __action = ::core::option::Option::None;
+                        __adder.add(__name, move || {
+                            (__action.get_or_insert_with(#fname))()
+                        })
+                    }
+                }
+            } else {
+                quote!(__adder.add(__name, #fname))
+            }
+        }
+        (Some(_), Some(_)) => unreachable!("checked above"),
+    };
+    Ok(body)
+}
+
+/// The call on `__adder` that adds a `#[bench_scaling]` to a suite.
+fn scaling_body(args: &Args, func: &ItemFn) -> syn::Result<TokenStream2> {
+    let fname = &func.sig.ident;
+    let nmin = args.nmin.as_ref().ok_or_else(|| {
+        syn::Error::new(
+            func.sig.span(),
+            "a scaling benchmark needs `nmin = <literal>`, the size to start \
+             climbing from",
+        )
+    })?;
+    let repeatable = returns_repeatable_closure(&func.sig);
+    if repeatable == Repeatable::OneArg {
+        return Err(one_arg_rejected(func.sig.span()));
+    }
+    if repeatable == Repeatable::NoArg && args.make_input.is_some() {
+        return Err(syn::Error::new(
+            func.sig.span(),
+            "this setup function's returned closure takes no argument, so \
+             `make_input`'s value - rebuilt fresh on every timed call, unlike \
+             setup itself - has nowhere to go. Drop `make_input` if the setup \
+             function alone (built from `n`) is everything the benchmark \
+             needs; if the input it builds needs to persist across calls at \
+             the same size, cache it inside `make_input`'s own closure - see \
+             the module docs for the pattern",
+        ));
+    }
+    let body = match &args.make_input {
+        // Wrapped for the same reason as the flat case above.
+        Some(gen) if !matches!(input_kind(func)?, Input::Owned(_)) => {
+            quote!(__adder.add_scaling_gen(__name, #gen, |__v| #fname(__v), #nmin))
+        }
+        Some(gen) => {
+            let take = take_and_call(fname);
+            quote! {
+                __adder.add_scaling_gen(
+                    __name,
+                    {
+                        let mut __gen = #gen;
+                        move |__n: usize| ::core::option::Option::Some(__gen(__n))
+                    },
+                    #take,
+                    #nmin,
+                )
+            }
+        }
+        None if repeatable == Repeatable::NoArg => {
+            quote! {
+                {
+                    let mut __cache: ::std::collections::HashMap<usize, _> =
+                        ::std::collections::HashMap::new();
+                    __adder.add_scaling(__name, move |__n: usize| {
+                        (__cache.entry(__n).or_insert_with(|| #fname(__n)))()
+                    }, #nmin)
+                }
+            }
+        }
+        None => quote!(__adder.add_scaling(__name, #fname, #nmin)),
+    };
+    Ok(body)
 }
 
 // Documented where it is re-exported, in the `scaling` crate.
