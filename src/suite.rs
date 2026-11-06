@@ -180,15 +180,6 @@ pub(crate) enum Found {
     Timing(Timings),
 }
 
-impl Display for Found {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Found::Scaling(s) => write!(f, "{s}"),
-            Found::Timing(c) => write!(f, "{c}"),
-        }
-    }
-}
-
 /// One cell of a [`Group`]: what a candidate measured on one input.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Measurement {
@@ -197,15 +188,6 @@ pub(crate) enum Measurement {
     /// A timing. In a comparison, every candidate but the baseline carries
     /// its [`Difference`] from the baseline.
     Timing(Timing),
-}
-
-impl Display for Measurement {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            Measurement::Scaling(s) => write!(f, "{s}"),
-            Measurement::Timing(timing) => write!(f, "{timing}"),
-        }
-    }
 }
 
 pub struct Suite {
@@ -2073,17 +2055,15 @@ mod registered_by_hand {
     }
 
     inventory::submit! {
-        Input {
-            groups: &["e2e-sort"],
-            name: "data",
-            crate_name: env!("CARGO_PKG_NAME"),
-            crate_version: env!("CARGO_PKG_VERSION"),
-            type_id: TypeId::of::<Vec<u64>>,
-            type_name: "Vec<u64>",
-            make: make_input,
-            reusable: false,
-            once: false,
-        }
+        Input::new(
+            &["e2e-sort"],
+            "data",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            TypeId::of::<Vec<u64>>,
+            "Vec<u64>",
+            make_input,
+        )
     }
 
     fn alt_baseline(set: InputGroup<ErasedInput>, name: &str) -> InputGroup<ErasedInput> {
@@ -2518,31 +2498,27 @@ mod versions_and_rivals {
     // And both versions of our crate register the same input, which is
     // redundant: they are meant to build the same data.
     inventory::submit! {
-        Input {
-            groups: &["mixing"],
-            name: "data",
-            crate_name: "mycrate",
-            crate_version: "0.9.0",
-            type_id: TypeId::of::<Vec<u64>>,
-            type_name: "Vec<u64>",
-            make: make_data,
-            reusable: false,
-            once: false,
-        }
+        Input::new(
+            &["mixing"],
+            "data",
+            "mycrate",
+            "0.9.0",
+            TypeId::of::<Vec<u64>>,
+            "Vec<u64>",
+            make_data,
+        )
     }
 
     inventory::submit! {
-        Input {
-            groups: &["mixing"],
-            name: "data",
-            crate_name: "mycrate",
-            crate_version: "0.8.0",
-            type_id: TypeId::of::<Vec<u64>>,
-            type_name: "Vec<u64>",
-            make: make_data,
-            reusable: false,
-            once: false,
-        }
+        Input::new(
+            &["mixing"],
+            "data",
+            "mycrate",
+            "0.8.0",
+            TypeId::of::<Vec<u64>>,
+            "Vec<u64>",
+            make_data,
+        )
     }
 
     fn run() -> (Assembled, Report) {

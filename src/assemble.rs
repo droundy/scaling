@@ -572,17 +572,9 @@ impl Lane {
 /// The unit input every group with candidates but no declared `#[input]`
 /// implicitly takes - see [`Lane::inputs`].
 fn unit_input() -> Named<Input> {
-    static UNIT: Input = Input {
-        groups: &[],
-        name: "",
-        crate_name: "",
-        crate_version: "",
-        type_id: TypeId::of::<()>,
-        type_name: "()",
-        make: || ErasedInput::new(()),
-        reusable: false,
-        once: false,
-    };
+    static UNIT: Input = Input::new(&[], "", "", "", TypeId::of::<()>, "()", || {
+        ErasedInput::new(())
+    });
     Named {
         name: String::new(),
         reg: &UNIT,
@@ -1772,17 +1764,15 @@ pub(crate) mod lane_tests {
         crate_name: &'static str,
         crate_version: &'static str,
     ) -> Input {
-        Input {
+        Input::new(
             groups,
             name,
             crate_name,
             crate_version,
-            type_id: TypeId::of::<I>,
-            type_name: ty,
-            make: || ErasedInput::new(()),
-            reusable: false,
-            once: false,
-        }
+            TypeId::of::<I>,
+            ty,
+            || ErasedInput::new(()),
+        )
     }
 
     pub(crate) fn inp<I: 'static>(
