@@ -253,10 +253,13 @@ pub(crate) fn resolve_versions<T: 'static>(
     out
 }
 
-/// Give each suffix that another shares the fewest trailing components of its
-/// directory that tell it from them: `0.10.0#6b0b7fb` and `0.10.0#mylib`, for a
-/// git checkout and a copy in the user's tree. Left alone if no length does,
-/// which is a copy registered twice.
+/// Tell the copies that share a suffix apart by where they sit: the fewest
+/// trailing components of their directories that do it, leaving off any they
+/// all end in, such as where a crate sits in its repository. That is
+/// `6b0b7fb` and `mylib` for a git checkout and a copy in the user's tree, in
+/// place of the version if it is the same for all the suffixes, and
+/// `0.10.0#6b0b7fb` after it if it tells some other copy apart. Left alone if
+/// no length does, which is a copy registered twice.
 fn add_places(suffixes: &mut [String], dirs: &[&str]) {
     let shared: Vec<usize> = (0..suffixes.len())
         .filter(|&i| (0..suffixes.len()).any(|j| j != i && suffixes[j] == suffixes[i]))
@@ -269,7 +272,18 @@ fn add_places(suffixes: &mut [String], dirs: &[&str]) {
                 .collect()
         })
         .collect();
-    let tail = |i: usize, depth: usize| parts[i][parts[i].len().saturating_sub(depth)..].join("/");
+    // Always leaving one, so that every copy has something to be called.
+    let shortest = shared.iter().map(|&i| parts[i].len()).min().unwrap_or(0);
+    let common = (0..shortest.saturating_sub(1))
+        .take_while(|&n| {
+            let nth_last = |i: usize| parts[i][parts[i].len() - 1 - n];
+            shared.iter().all(|&i| nth_last(i) == nth_last(shared[0]))
+        })
+        .count();
+    let tail = |i: usize, depth: usize| {
+        let kept = &parts[i][..parts[i].len() - common];
+        kept[kept.len().saturating_sub(depth)..].join("/")
+    };
     let longest = shared.iter().map(|&i| parts[i].len()).max().unwrap_or(0);
     let Some(depth) = (1..=longest).find(|&depth| {
         shared.iter().all(|&i| {
@@ -280,8 +294,13 @@ fn add_places(suffixes: &mut [String], dirs: &[&str]) {
     }) else {
         return;
     };
+    let alike = suffixes.windows(2).all(|pair| pair[0] == pair[1]);
     for &i in &shared {
-        suffixes[i] = format!("{}#{}", suffixes[i], tail(i, depth));
+        suffixes[i] = if alike {
+            tail(i, depth)
+        } else {
+            format!("{}#{}", suffixes[i], tail(i, depth))
+        };
     }
 }
 
@@ -2240,7 +2259,7 @@ mod version_tests {
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(names, ["sort@0.9.0#6b0b7fb", "sort@0.9.0#mylib"]);
+        assert_eq!(names, ["sort@6b0b7fb", "sort@mylib"]);
         assert_eq!(lanes[0].inputs.len(), 1);
         assert_eq!(lanes[0].inputs[0].origin.place, primary);
     }
@@ -2260,12 +2279,13 @@ mod version_tests {
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
         let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(lanes[0].candidates[0].name, "sort@0.9.0#6b0b7fb");
+        assert_eq!(lanes[0].candidates[0].name, "sort@6b0b7fb");
     }
 
     /// Otherwise the later directory is the newer - the whole directory, not
     /// the part of it a name carries - and a name carries as much of the
-    /// directory as it takes to tell the copies apart.
+    /// directory as it takes to tell the copies apart, leaving off the end
+    /// they share, as a crate in a subdirectory of a repository does.
     #[test]
     fn otherwise_the_later_directory_is_newer() {
         let cs = leak_c(vec![
@@ -2277,8 +2297,37 @@ mod version_tests {
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
         let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(lanes[0].candidates[0].name, "sort@0.9.0#b/mylib");
-        assert_eq!(lanes[0].candidates[1].name, "sort@0.9.0#a/mylib");
+        assert_eq!(lanes[0].candidates[0].name, "sort@b");
+        assert_eq!(lanes[0].candidates[1].name, "sort@a");
+    }
+
+    /// A version that tells some of the copies apart stays in their names,
+    /// with the directory after it, where one that is the same for all of
+    /// them was put in the directory's place.
+    #[test]
+    fn a_version_that_tells_some_copies_apart_stays_in_the_name() {
+        let cs = leak_c(vec![
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0")
+                .placed(Place::new("/home/me/src/mylib", false)),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(Place::new(
+                "/home/me/.cargo/git/checkouts/mylib-1a2b/6b0b7fb",
+                false,
+            )),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.8.0"),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut names: Vec<&str> = lanes[0]
+            .candidates
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["sort@0.8.0", "sort@0.9.0#6b0b7fb", "sort@0.9.0#mylib"]
+        );
     }
 
     /// What counts as a copy cargo fetched is the layout of its own cache,
