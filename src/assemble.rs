@@ -230,7 +230,7 @@ pub(crate) fn resolve_versions<T: 'static>(
             .collect();
         // Copies of one crate at one version have all of that in common, and
         // are told apart by where they sit.
-        let places: Vec<&str> = sharers.iter().map(|(_, o)| o.place.dir).collect();
+        let places: Vec<Place> = sharers.iter().map(|(_, o)| o.place).collect();
         add_places(&mut suffixes, &places);
         for ((reg, origin), suffix) in sharers.into_iter().zip(suffixes) {
             // Two registrations of one name from one copy really are
@@ -253,55 +253,77 @@ pub(crate) fn resolve_versions<T: 'static>(
     out
 }
 
-/// Tell the copies that share a suffix apart by where they sit: the fewest
-/// trailing components of their directories that do it, leaving off any they
-/// all end in, such as where a crate sits in its repository. That is
-/// `6b0b7fb` and `mylib` for a git checkout and a copy in the user's tree, in
-/// place of the version if it is the same for all the suffixes, and
-/// `0.10.0#6b0b7fb` after it if it tells some other copy apart. Left alone if
-/// no length does, which is a copy registered twice.
-fn add_places(suffixes: &mut [String], dirs: &[&str]) {
+/// Tell the copies that share a suffix apart by where they came from: `git`,
+/// `registry` or `local`, for the one copy of its kind. Several of a kind are
+/// told apart by their directories instead, which the next function sorts out.
+/// Either is put in place of the version if that is the same for all the
+/// suffixes, and after it, as `0.10.0#git`, if it tells some other copy apart.
+fn add_places(suffixes: &mut [String], places: &[Place]) {
     let shared: Vec<usize> = (0..suffixes.len())
         .filter(|&i| (0..suffixes.len()).any(|j| j != i && suffixes[j] == suffixes[i]))
         .collect();
-    let parts: Vec<Vec<&str>> = dirs
+    let (alone, crowded): (Vec<usize>, Vec<usize>) = shared.iter().partition(|&&i| {
+        let of_a_kind =
+            |&&j: &&usize| suffixes[j] == suffixes[i] && places[j].kind() == places[i].kind();
+        shared.iter().filter(of_a_kind).count() == 1
+    });
+    let mut labels: Vec<(usize, String)> = alone
         .iter()
-        .map(|dir| {
-            dir.split(['/', '\\'])
+        .map(|&i| (i, places[i].kind().to_string()))
+        .collect();
+    labels.extend(directory_tails(&crowded, suffixes, places));
+    let alike = suffixes.windows(2).all(|pair| pair[0] == pair[1]);
+    for (i, label) in labels {
+        suffixes[i] = if alike {
+            label
+        } else {
+            format!("{}#{label}", suffixes[i])
+        };
+    }
+}
+
+/// The fewest trailing components of their directories that tell the copies
+/// that share a suffix apart, leaving off any they all end in, such as where a
+/// crate sits in its repository: `6b0b7fb` and `7c1d2e3` for two git
+/// checkouts. Nothing if no length does, which is a copy registered twice.
+fn directory_tails(
+    crowded: &[usize],
+    suffixes: &[String],
+    places: &[Place],
+) -> Vec<(usize, String)> {
+    let parts: Vec<Vec<&str>> = places
+        .iter()
+        .map(|place| {
+            place
+                .dir
+                .split(['/', '\\'])
                 .filter(|part| !part.is_empty())
                 .collect()
         })
         .collect();
     // Always leaving one, so that every copy has something to be called.
-    let shortest = shared.iter().map(|&i| parts[i].len()).min().unwrap_or(0);
+    let shortest = crowded.iter().map(|&i| parts[i].len()).min().unwrap_or(0);
     let common = (0..shortest.saturating_sub(1))
         .take_while(|&n| {
             let nth_last = |i: usize| parts[i][parts[i].len() - 1 - n];
-            shared.iter().all(|&i| nth_last(i) == nth_last(shared[0]))
+            crowded.iter().all(|&i| nth_last(i) == nth_last(crowded[0]))
         })
         .count();
     let tail = |i: usize, depth: usize| {
         let kept = &parts[i][..parts[i].len() - common];
         kept[kept.len().saturating_sub(depth)..].join("/")
     };
-    let longest = shared.iter().map(|&i| parts[i].len()).max().unwrap_or(0);
+    let longest = crowded.iter().map(|&i| parts[i].len()).max().unwrap_or(0);
     let Some(depth) = (1..=longest).find(|&depth| {
-        shared.iter().all(|&i| {
-            shared
+        crowded.iter().all(|&i| {
+            crowded
                 .iter()
                 .all(|&j| i == j || suffixes[i] != suffixes[j] || tail(i, depth) != tail(j, depth))
         })
     }) else {
-        return;
+        return Vec::new();
     };
-    let alike = suffixes.windows(2).all(|pair| pair[0] == pair[1]);
-    for &i in &shared {
-        suffixes[i] = if alike {
-            tail(i, depth)
-        } else {
-            format!("{}#{}", suffixes[i], tail(i, depth))
-        };
-    }
+    crowded.iter().map(|&i| (i, tail(i, depth))).collect()
 }
 
 /// Something wrong with a set of registrations.
@@ -2259,7 +2281,7 @@ mod version_tests {
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(names, ["sort@6b0b7fb", "sort@mylib"]);
+        assert_eq!(names, ["sort@git", "sort@local"]);
         assert_eq!(lanes[0].inputs.len(), 1);
         assert_eq!(lanes[0].inputs[0].origin.place, primary);
     }
@@ -2279,7 +2301,7 @@ mod version_tests {
         let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
         let (lanes, problems) = lanes(&cs, &is);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(lanes[0].candidates[0].name, "sort@6b0b7fb");
+        assert_eq!(lanes[0].candidates[0].name, "sort@git");
     }
 
     /// Otherwise the later directory is the newer - the whole directory, not
@@ -2302,8 +2324,8 @@ mod version_tests {
     }
 
     /// A version that tells some of the copies apart stays in their names,
-    /// with the directory after it, where one that is the same for all of
-    /// them was put in the directory's place.
+    /// with where they sit after it, where one that is the same for all of
+    /// them was put in that place.
     #[test]
     fn a_version_that_tells_some_copies_apart_stays_in_the_name() {
         let cs = leak_c(vec![
@@ -2324,30 +2346,57 @@ mod version_tests {
             .map(|c| c.name.as_str())
             .collect();
         names.sort_unstable();
-        assert_eq!(
-            names,
-            ["sort@0.8.0", "sort@0.9.0#6b0b7fb", "sort@0.9.0#mylib"]
-        );
+        assert_eq!(names, ["sort@0.8.0", "sort@0.9.0#git", "sort@0.9.0#local"]);
     }
 
-    /// What counts as a copy cargo fetched is the layout of its own cache,
+    /// Several copies of one kind are told apart by their directories, and a
+    /// copy of a kind there is only one of is still named for it.
+    #[test]
+    fn several_copies_of_a_kind_are_told_apart_by_directory() {
+        let cs = leak_c(vec![
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0")
+                .placed(Place::new("/home/me/src/mylib", false)),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(Place::new(
+                "/home/me/.cargo/git/checkouts/mylib-1a2b/6b0b7fb",
+                false,
+            )),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(Place::new(
+                "/home/me/.cargo/git/checkouts/mylib-1a2b/7c1d2e3",
+                false,
+            )),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut names: Vec<&str> = lanes[0]
+            .candidates
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["sort@6b0b7fb", "sort@7c1d2e3", "sort@local"]);
+    }
+
+    /// Where a copy came from is read from the layout of cargo's own cache,
     /// whichever way the path is written.
     #[test]
-    fn cargos_own_directories_are_the_fetched_ones() {
-        for dir in [
-            "/h/.cargo/git/checkouts/mylib-1a2b/6b0b7fb",
-            "/h/.cargo/registry/src/index.crates.io-6f17d22bba15001f/mylib-0.9.0",
-            "C:\\Users\\me\\.cargo\\git\\checkouts\\mylib-1a2b\\6b0b7fb",
+    fn cargos_own_directories_say_where_a_copy_came_from() {
+        for (dir, kind) in [
+            ("/h/.cargo/git/checkouts/mylib-1a2b/6b0b7fb", "git"),
+            (
+                "/h/.cargo/registry/src/index.crates.io-6f17d22bba15001f/mylib-0.9.0",
+                "registry",
+            ),
+            (
+                "C:\\Users\\me\\.cargo\\git\\checkouts\\mylib-1a2b\\6b0b7fb",
+                "git",
+            ),
+            ("/home/me/src/mylib", "local"),
+            ("/home/me/git/mylib", "local"),
+            ("/home/me/registry/mylib", "local"),
+            ("", "local"),
         ] {
-            assert!(Place::new(dir, false).fetched(), "{dir}");
-        }
-        for dir in [
-            "/home/me/src/mylib",
-            "/home/me/git/mylib",
-            "/home/me/registry/mylib",
-            "",
-        ] {
-            assert!(!Place::new(dir, false).fetched(), "{dir}");
+            assert_eq!(Place::new(dir, false).kind(), kind, "{dir}");
         }
     }
 

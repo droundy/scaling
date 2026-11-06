@@ -272,15 +272,17 @@ Benchmarks the crate registers for itself, behind a feature as above, take
 part the same way: the copy under `my_crate_previous` registers them too, and
 each is reported as `name@<version>`. Where the copies each mark `baseline`,
 the older version is the baseline. A copy at the *same* version, as the tip
-of your default branch is until the next release, is told apart by its
-directory instead: `name@6b0b7fb` for a git checkout, which cargo names for
-the revision, and `name@my-crate` for your own tree, leaving off the folders
-within a repository that both end in. Of two copies of one version, the
-newer is the one cargo was asked to build - the package you ran `cargo bench`
-for - and so the older is the baseline. If neither is, the one in your own
-tree is newer than one cargo fetched, and after that the later directory is.
-The title of the group's table names the baseline that was used, as
-`baseline: sum@6b0b7fb`.
+of your default branch is until the next release, is told apart by where it
+came from instead: `name@git` for a checkout cargo fetched from git,
+`name@registry` for one from a registry, and `name@local` for one in your own
+tree. Where there are several of a kind, their directories tell them apart:
+`name@6b0b7fb` for a git checkout, which cargo names for the revision, and
+`name@my-crate` for your own tree, leaving off the folders within a
+repository that they all end in. Of two copies of one version, the newer is
+the one cargo was asked to build - the package you ran `cargo bench` for - and
+so the older is the baseline. If neither is, the one in your own tree is newer
+than one cargo fetched, and after that the later directory is. The title of
+the group's table names the baseline that was used, as `baseline: sum@git`.
 
 There is one sharp edge: it stops working if two different versions of
 `scaling` itself ever end up anywhere in the dependency graph, since
