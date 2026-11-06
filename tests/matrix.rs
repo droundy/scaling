@@ -180,7 +180,7 @@ fn the_declared_baseline_wins_over_alphabetical_order() {
     assert!(against.contains(&"thrice"), "{against:?}");
 }
 
-// ---- a matrix with a Design A candidate: setup runs once per (candidate,
+// ---- a matrix with a setup-once candidate: setup runs once per (candidate,
 // input) pairing, not every timed call ----
 
 #[scaling::bench(group = "stateful", baseline)]
@@ -199,10 +199,10 @@ fn stateful_data() -> Vec<u64> {
     (0..300u64).collect()
 }
 
-/// The Design A candidate above measures alongside an ordinary one, just
+/// The setup-once candidate above measures alongside an ordinary one, just
 /// like any other pairing in this matrix.
 #[test]
-fn a_design_a_candidate_is_measured_like_any_other() {
+fn a_setup_once_candidate_is_measured_like_any_other() {
     let report = run();
     let cmps = report
         .comparison("stateful@data")
