@@ -250,7 +250,7 @@ of several that each mark `baseline` is the baseline, and the newest of
 several copies of an input is the one used. Versions are compared as three
 numbers, `major.minor.patch`, so `0.10.0` is newer than `0.9.0`. Anything
 after a `-` or `+` is ignored, so `1.0.0-rc.1` and `1.0.0` are the same
-version, and a version that does not parse counts as `0.0.0`.
+version, and a part that is missing or does not parse counts as `0`.
 
 Either way, what you get is the *actual function definitions* of that
 version, not a cached timing - so write the comparison the ordinary way,
