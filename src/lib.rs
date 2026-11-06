@@ -245,6 +245,13 @@ The `package = ".."` rename is what lets a crate depend on an older copy of
 itself: the old copy gets a name that the crate's own code does not already
 use.
 
+Copies of a crate are put in order by version wherever it matters: the older
+of several that each mark `baseline` is the baseline, and the newest of
+several copies of an input is the one used. Versions are compared as three
+numbers, `major.minor.patch`, so `0.10.0` is newer than `0.9.0`. Anything
+after a `-` or `+` is ignored, so `1.0.0-rc.1` and `1.0.0` are the same
+version, and a part that is missing or does not parse counts as `0`.
+
 Either way, what you get is the *actual function definitions* of that
 version, not a cached timing - so write the comparison the ordinary way,
 the released crate's public API on one side and your own on the other:
