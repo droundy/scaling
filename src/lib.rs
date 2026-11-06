@@ -263,14 +263,16 @@ already shipped, not the other way around.
 
 Benchmarks the crate registers for itself, behind a feature as above, take
 part the same way: the copy under `my_crate_previous` registers them too, and
-each is reported as `name@<version>`. A copy at the *same* version, as the tip
+each is reported as `name@<version>`. Where the copies each mark `baseline`,
+the older version is the baseline. A copy at the *same* version, as the tip
 of your default branch is until the next release, is told apart by its
 directory instead: `name@0.1.0#6b0b7fb` for a git checkout, which cargo
 names for the revision, and `name@0.1.0#my-crate` for your own tree. Of two
 copies of one version, the newer is the one cargo was asked to build - the
 package you ran `cargo bench` for - and so the older is the baseline. If
 neither is, the one in your own tree is newer than one cargo fetched, and
-after that the later directory is.
+after that the later directory is. The title of the group's table names the
+baseline that was used, as `baseline: sum@0.1.0#6b0b7fb`.
 
 There is one sharp edge: it stops working if two different versions of
 `scaling` itself ever end up anywhere in the dependency graph, since
@@ -609,7 +611,7 @@ pub use inventory;
 /// | `input = <expr>` | Each iteration is given a clone of this value, so its type must be `Clone`. Not with `make_input`, and not with `group`. |
 /// | `make_input = <closure>` | Each iteration is given a value this builds. Not with `input`, and not with `group`. |
 /// | `group = "name"` or `group("a", "b")` | Makes it one candidate of a comparison, in one group or several at once. It is measured on every [`input`](macro@input) of its group that has its input type. |
-/// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. |
+/// | `baseline` | Needs `group`. The candidate the others are reported against; with none marked, the first by name is used. Where several copies of a crate mark the same one, the oldest copy is the baseline. |
 /// | `uninteresting` | Needs `group`. Nobody asked whether this candidate differs from the baseline, only roughly by how much. It is shown as a size with no verdict, measured only to [`Config::with_rough_error`], and left out of the multiple-comparison count, so the comparisons that are of interest are judged less strictly for it. Not the baseline. |
 /// | `types(A, B)` | Needs `group`. A candidate generic in its input is registered once for each listed type. |
 /// | `reusable` | Needs `input` or `make_input`, and not `group`, where it belongs to the [`input`](macro@input). One value may serve many calls, because it is not a random draw that needs averaging over, so the calls go round a small pool. The function must take `&I`, or `&mut I` with `restores_input`, and not be set up once (`-> impl Fn() -> O`), which is handed its input only then. See below. |

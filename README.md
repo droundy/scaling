@@ -210,7 +210,10 @@ numbers themselves are reachable by name, as above.
 `group = "name"` for one group, or `group("a", "b")` to belong to several at
 once without those groups being compared with each other. `baseline` says
 which candidate the others are reported against; with none marked, the
-first by name is used, and the report says which it was.
+first by name is used, and the report says which it was. If several copies of
+a crate register the same candidate and each marks it `baseline`, the oldest
+copy is the baseline (see "Comparing against your own history" in the crate
+docs).
 
 ```rust
 #[scaling::input(group = "sorting")]
