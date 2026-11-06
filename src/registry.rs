@@ -53,17 +53,26 @@ impl Place {
         Place { dir, primary }
     }
 
-    /// Whether cargo fetched this copy, from git or a registry, rather than it
-    /// being a directory the user keeps: the layout cargo uses is
-    /// `.../git/checkouts/<name>/<rev>` and `.../registry/src/<index>/<name>`.
-    pub(crate) fn fetched(&self) -> bool {
+    /// Where the copy came from: `git` or `registry` if cargo fetched it, by
+    /// the layout of its cache, `.../git/checkouts/<name>/<rev>` and
+    /// `.../registry/src/<index>/<name>`, and `local` if it is a directory the
+    /// user keeps.
+    pub(crate) fn kind(&self) -> &'static str {
         let parts: Vec<&str> = self.dir.split(['/', '\\']).collect();
-        parts.windows(2).any(|pair| {
-            matches!(
-                (pair[0], pair[1]),
-                ("git", "checkouts") | ("registry", "src")
-            )
-        })
+        for pair in parts.windows(2) {
+            match (pair[0], pair[1]) {
+                ("git", "checkouts") => return "git",
+                ("registry", "src") => return "registry",
+                _ => {}
+            }
+        }
+        "local"
+    }
+
+    /// Whether cargo fetched this copy, rather than it being a directory the
+    /// user keeps.
+    pub(crate) fn fetched(&self) -> bool {
+        self.kind() != "local"
     }
 }
 
