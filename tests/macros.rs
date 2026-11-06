@@ -113,9 +113,9 @@ fn scales_with_fresh_input(v: &mut Vec<u64>) -> u64 {
     v.iter().fold(0u64, |a, x| a.wrapping_add(*x))
 }
 
-// ---- the same, but only reading its generated input. Named to share no
-// suffix with any other registration here - see the comment on the
-// scales_with_fresh_input rename a few commits back for why that matters ----
+// ---- the same, but only reading its generated input. Its name must not end
+// with the name of another registration looked up below: the test finds a
+// registration by `ends_with` and takes the first match ----
 
 #[scaling::bench_scaling(nmin = 8, make_input = |n: usize| (0..n as u64).collect::<Vec<u64>>())]
 fn scales_by_reading(v: &Vec<u64>) -> u64 {
@@ -173,7 +173,7 @@ fn thrice(v: &mut Vec<u64>) {
     v.sort();
 }
 
-// ---- a group with a Design A member: setup runs once, not every call, even
+// ---- a group with a setup-once member: setup runs once, not every call, even
 // though the group's shared input is still regenerated and cloned every
 // round like any other member's ----
 
@@ -195,7 +195,7 @@ fn sum_it_stateful(v: &mut Vec<u64>) -> impl FnMut() -> u64 {
 
 // ---- a group whose own shared input generator uses the setup-once shape:
 // the expensive part builds once, ever; the returned closure still runs as
-// often as an ordinary #[bench_input] function would ----
+// often as an ordinary #[input] function would ----
 
 #[scaling::input(group = "caching")]
 fn caching_data() -> impl FnMut() -> Vec<u64> {
@@ -318,13 +318,13 @@ fn every_written_benchmark_is_found_and_measured() {
 
     let counting = report
         .comparison("counting@counting_data")
-        .expect("the group with a Design A member ran");
+        .expect("the group with a setup-once member ran");
     assert_eq!(counting.timings().len(), 2);
     assert_eq!(counting.against_baseline().count(), 1);
 
     let caching = report
         .comparison("caching@caching_data")
-        .expect("the group with a Design A bench_input ran");
+        .expect("the group with a setup-once input ran");
     assert_eq!(caching.timings().len(), 2);
     assert_eq!(caching.against_baseline().count(), 1);
 
