@@ -2010,7 +2010,7 @@ mod comparison_config {
 #[cfg(test)]
 mod registered_by_hand {
     use super::*;
-    use crate::registry::{Candidate, ErasedInput, Input};
+    use crate::registry::{Candidate, ErasedInput, Input, Place};
     use std::any::TypeId;
     use std::time::Duration;
 
@@ -2027,6 +2027,7 @@ mod registered_by_hand {
             name: "e2e::flat",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add: add_flat,
         }
     }
@@ -2043,6 +2044,7 @@ mod registered_by_hand {
             name: "e2e::scaling",
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add: add_scaling,
         }
     }
@@ -2102,6 +2104,7 @@ mod registered_by_hand {
             is_baseline: true,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add_alt: alt_baseline,
             mutates_input: false,
             metrics: None,
@@ -2117,6 +2120,7 @@ mod registered_by_hand {
             is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add_alt: alt_unstable,
             mutates_input: false,
             metrics: None,
@@ -2132,6 +2136,7 @@ mod registered_by_hand {
             is_baseline: false,
             crate_name: env!("CARGO_PKG_NAME"),
             crate_version: env!("CARGO_PKG_VERSION"),
+            place: Place::UNKNOWN,
             add_alt: alt_slow,
             mutates_input: false,
             metrics: None,
@@ -2299,7 +2304,7 @@ mod registered_by_hand {
 #[cfg(test)]
 mod bad_registrations {
     use super::*;
-    use crate::registry::{Candidate, ErasedInput};
+    use crate::registry::{Candidate, ErasedInput, Place};
 
     fn add(adder: &mut Suite, name: &str) {
         adder.add(name, || (0..16u64).sum::<u64>());
@@ -2314,12 +2319,14 @@ mod bad_registrations {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
+        place: Place::UNKNOWN,
         add,
     };
     static COLLIDES_2: Registered = Registered {
         name: "collides",
         crate_name: "testcrate",
         crate_version: "1.0.0",
+        place: Place::UNKNOWN,
         add,
     };
 
@@ -2333,6 +2340,7 @@ mod bad_registrations {
         is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
+        place: Place::UNKNOWN,
         add_alt: alt,
         mutates_input: false,
         metrics: None,
@@ -2345,6 +2353,7 @@ mod bad_registrations {
         is_baseline: true,
         crate_name: "testcrate",
         crate_version: "1.0.0",
+        place: Place::UNKNOWN,
         add_alt: alt,
         mutates_input: false,
         metrics: None,
@@ -2414,7 +2423,7 @@ mod versions_and_rivals {
     #![allow(clippy::ptr_arg)]
 
     use super::*;
-    use crate::registry::{Candidate, ErasedInput, Input};
+    use crate::registry::{Candidate, ErasedInput, Input, Place};
     use std::any::TypeId;
 
     fn work(v: &[u64], rounds: usize) -> u64 {
@@ -2458,6 +2467,7 @@ mod versions_and_rivals {
             is_baseline: true,
             crate_name: "mycrate",
             crate_version: "0.9.0",
+            place: Place::UNKNOWN,
             add_alt: add_alt_new,
             mutates_input: false,
             metrics: None,
@@ -2473,6 +2483,7 @@ mod versions_and_rivals {
             is_baseline: true,
             crate_name: "mycrate",
             crate_version: "0.8.0",
+            place: Place::UNKNOWN,
             add_alt: add_alt_old,
             mutates_input: false,
             metrics: None,
@@ -2489,6 +2500,7 @@ mod versions_and_rivals {
             is_baseline: false,
             crate_name: "theircrate",
             crate_version: "0.1.0",
+            place: Place::UNKNOWN,
             add_alt: add_alt_new,
             mutates_input: false,
             metrics: None,

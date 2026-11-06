@@ -597,9 +597,23 @@ fn allocation_is_for_metrics(args: &Args, func: &ItemFn) -> syn::Result<()> {
     Ok(())
 }
 
+/// What a registration says about where its crate was built from: the
+/// directory of its source, and whether cargo was asked to build it. That is
+/// what tells a crate's `main` from the code being tested when both are at
+/// one version (`scaling::registry::Place`).
+fn place() -> TokenStream2 {
+    quote! {
+        .placed(::scaling::registry::Place::new(
+            ::core::env!("CARGO_MANIFEST_DIR"),
+            ::core::option_env!("CARGO_PRIMARY_PACKAGE").is_some(),
+        ))
+    }
+}
+
 /// A `#[bench]` or `#[bench_scaling]`: refuse a mistaken combination of
 /// options, hand a candidate of a group on, and register anything else.
 fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream2> {
+    let place = place();
     check_options(&args, &func, &flavour)?;
 
     // `Flavour::Scaling` was already refused a group, so any group here
@@ -637,7 +651,7 @@ fn expand(args: Args, func: ItemFn, flavour: Flavour) -> syn::Result<TokenStream
                 ::core::env!("CARGO_PKG_NAME"),
                 ::core::env!("CARGO_PKG_VERSION"),
                 #shim,
-            )
+            ) #place
         }
     })
 }
@@ -981,6 +995,7 @@ fn groups_array(groups: &[LitStr]) -> TokenStream2 {
 /// A `#[bench]` naming one or more groups - see `expand`, which dispatches
 /// here once it has confirmed as much.
 fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    let place = place();
     let groups = groups_array(&args.groups);
     let fname = &func.sig.ident;
     let reported = name_or_bare(&args.name, fname);
@@ -1155,7 +1170,7 @@ fn expand_candidate(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     ::core::env!("CARGO_PKG_NAME"),
                     ::core::env!("CARGO_PKG_VERSION"),
                     #alt,
-                ) #mutating #metrics
+                ) #place #mutating #metrics
             }
         });
     }
@@ -1173,6 +1188,7 @@ pub fn metrics(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    let place = place();
     if args.groups.is_empty() {
         return Err(syn::Error::new(
             func.sig.span(),
@@ -1288,12 +1304,13 @@ fn expand_metrics(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                 ::core::env!("CARGO_PKG_NAME"),
                 ::core::env!("CARGO_PKG_VERSION"),
                 #shim,
-            ) #reads_input #counts_allocations
+            ) #place #reads_input #counts_allocations
         }
     })
 }
 
 fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
+    let place = place();
     allocation_is_for_metrics(&args, &func)?;
     if args.uninteresting {
         return Err(syn::Error::new(
@@ -1498,7 +1515,7 @@ fn expand_input(args: Args, func: ItemFn) -> syn::Result<TokenStream2> {
                     ::core::any::TypeId::of::<#ty>,
                     #ty_name,
                     #shim,
-                ) #reusing
+                ) #place #reusing
             }
         });
     }

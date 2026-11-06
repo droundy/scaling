@@ -15,7 +15,7 @@
 //! benchmark, a machine claim, or a linker.
 
 use crate::names;
-use crate::registry::{Candidate, ErasedInput, Input, MetricsFn, Registered};
+use crate::registry::{Candidate, ErasedInput, Input, MetricsFn, Place, Registered};
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
@@ -72,11 +72,26 @@ impl Version {
 pub struct Origin {
     pub crate_name: &'static str,
     pub crate_version: &'static str,
+    pub place: Place,
 }
 
 impl Origin {
-    fn version(&self) -> Version {
-        Version::parse(self.crate_version)
+    /// How new this copy of its crate is, for putting copies in order. By
+    /// version first, then by crate name, so that rivals at one version come
+    /// out the same way every time. Two copies of one version - a crate and
+    /// its own `main`, say - are ordered by what the user would call the newer:
+    /// the one cargo was asked to build, the code under test, over one it built
+    /// for another package; then one in the user's own tree over one cargo
+    /// fetched; and, so that it is settled whatever the layout, by directory.
+    /// Equal only for a copy and itself.
+    fn newness(&self) -> (Version, &'static str, bool, bool, &'static str) {
+        (
+            Version::parse(self.crate_version),
+            self.crate_name,
+            self.place.primary,
+            !self.place.fetched(),
+            self.place.dir,
+        )
     }
 }
 
@@ -156,20 +171,19 @@ pub(crate) fn resolve_versions<T: 'static>(
         if latest_per_crate {
             // Newest of each crate, so rivals all survive and only a crate's
             // own strictly older copies are dropped. Ties within one crate -
-            // two registrations at the same version - are kept rather than
-            // one silently winning: a real version difference is exactly one
-            // crate replacing an older copy of itself, but an equal version
-            // is not that, it is the same crate registering one name twice.
-            // Collapsing it here, the same way an older copy is dropped,
-            // would hide precisely the duplicate the fallthrough below - and
-            // the ordinary "keep every version" path below - exists to
-            // report.
+            // two registrations of one copy - are kept rather than one
+            // silently winning: an older copy is exactly one crate replacing
+            // an earlier version of itself, but a tie is not that, it is the
+            // same crate registering one name twice. Collapsing it here, the
+            // same way an older copy is dropped, would hide precisely the
+            // duplicate the fallthrough below - and the ordinary "keep every
+            // version" path below - exists to report.
             let mut newest: BTreeMap<&'static str, Vec<(&'static T, Origin)>> = BTreeMap::new();
             for (reg, origin) in sharers {
                 let held = newest.entry(origin.crate_name).or_default();
                 match held.first() {
                     None => held.push((reg, origin)),
-                    Some((_, held_origin)) => match origin.version().cmp(&held_origin.version()) {
+                    Some((_, held_origin)) => match origin.newness().cmp(&held_origin.newness()) {
                         std::cmp::Ordering::Greater => {
                             held.clear();
                             held.push((reg, origin));
@@ -202,19 +216,28 @@ pub(crate) fn resolve_versions<T: 'static>(
         crates.dedup();
         let crate_alone_is_enough = crates.len() == n;
         let one_crate = crates.len() == 1;
-        for (reg, origin) in sharers {
-            let suffix = if crate_alone_is_enough {
-                origin.crate_name.to_string()
-            } else if one_crate {
-                origin.crate_version.to_string()
-            } else {
-                format!("{}-{}", origin.crate_name, origin.crate_version)
-            };
-            // Two registrations of one name from one crate at one version
-            // really are duplicates. They fall through here with the same
-            // suffix as each other, so they stay sharing a name and the
-            // duplicate check downstream reports them - which is what should
-            // happen, since nothing distinguishes them.
+        let mut suffixes: Vec<String> = sharers
+            .iter()
+            .map(|(_, origin)| {
+                if crate_alone_is_enough {
+                    origin.crate_name.to_string()
+                } else if one_crate {
+                    origin.crate_version.to_string()
+                } else {
+                    format!("{}-{}", origin.crate_name, origin.crate_version)
+                }
+            })
+            .collect();
+        // Copies of one crate at one version have all of that in common, and
+        // are told apart by where they sit.
+        let places: Vec<&str> = sharers.iter().map(|(_, o)| o.place.dir).collect();
+        add_places(&mut suffixes, &places);
+        for ((reg, origin), suffix) in sharers.into_iter().zip(suffixes) {
+            // Two registrations of one name from one copy really are
+            // duplicates. They fall through here with the same suffix as each
+            // other, so they stay sharing a name and the duplicate check
+            // downstream reports them - which is what should happen, since
+            // nothing distinguishes them.
             let full = if suffix.is_empty() {
                 name.to_string()
             } else {
@@ -228,6 +251,38 @@ pub(crate) fn resolve_versions<T: 'static>(
         }
     }
     out
+}
+
+/// Give each suffix that another shares the fewest trailing components of its
+/// directory that tell it from them: `0.10.0#6b0b7fb` and `0.10.0#mylib`, for a
+/// git checkout and a copy in the user's tree. Left alone if no length does,
+/// which is a copy registered twice.
+fn add_places(suffixes: &mut [String], dirs: &[&str]) {
+    let shared: Vec<usize> = (0..suffixes.len())
+        .filter(|&i| (0..suffixes.len()).any(|j| j != i && suffixes[j] == suffixes[i]))
+        .collect();
+    let parts: Vec<Vec<&str>> = dirs
+        .iter()
+        .map(|dir| {
+            dir.split(['/', '\\'])
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .collect();
+    let tail = |i: usize, depth: usize| parts[i][parts[i].len().saturating_sub(depth)..].join("/");
+    let longest = shared.iter().map(|&i| parts[i].len()).max().unwrap_or(0);
+    let Some(depth) = (1..=longest).find(|&depth| {
+        shared.iter().all(|&i| {
+            shared
+                .iter()
+                .all(|&j| i == j || suffixes[i] != suffixes[j] || tail(i, depth) != tail(j, depth))
+        })
+    }) else {
+        return;
+    };
+    for &i in &shared {
+        suffixes[i] = format!("{}#{}", suffixes[i], tail(i, depth));
+    }
 }
 
 /// Something wrong with a set of registrations.
@@ -581,6 +636,7 @@ fn unit_input() -> Named<Input> {
         origin: Origin {
             crate_name: "",
             crate_version: "",
+            place: Place::UNKNOWN,
         },
     }
 }
@@ -626,6 +682,7 @@ fn lanes_for_group(
                 Origin {
                     crate_name: c.crate_name,
                     crate_version: c.crate_version,
+                    place: c.place,
                 },
             )
         },
@@ -645,6 +702,7 @@ fn lanes_for_group(
                 Origin {
                     crate_name: i.crate_name,
                     crate_version: i.crate_version,
+                    place: i.place,
                 },
             )
         },
@@ -661,17 +719,16 @@ fn lanes_for_group(
     for n in named_i {
         let key = (n.reg.type_name, n.reg.name);
         match best.get(&key) {
-            // Same crate, same version: not redundancy, a genuine
-            // duplicate - two registrations of one input, from the same
-            // source. Silently keeping either would be exactly the
-            // "regardless of origin" collapse this diagnostic exists to
-            // catch, so it is reported rather than resolved. `held` is left
-            // as it is, matching how the candidate duplicate check below
-            // reports every extra claimant rather than only the first.
+            // Same copy of a crate: not redundancy, a genuine duplicate - two
+            // registrations of one input, from the same source. Silently
+            // keeping either would be exactly the "regardless of origin"
+            // collapse this diagnostic exists to catch, so it is reported
+            // rather than resolved. `held` is left as it is, matching how the
+            // candidate duplicate check below reports every extra claimant
+            // rather than only the first.
             Some(held)
                 if held.origin.crate_name == n.origin.crate_name
-                    && Version::parse(held.origin.crate_version)
-                        == Version::parse(n.origin.crate_version) =>
+                    && held.origin.newness() == n.origin.newness() =>
             {
                 problems.push(Diagnostic::DuplicateMatrixEntry {
                     matrix: group.to_string(),
@@ -679,12 +736,10 @@ fn lanes_for_group(
                     name: n.reg.name.to_string(),
                 });
             }
-            // A different crate, or an older version of this one: this is
-            // the intended case the comment above describes - genuinely
+            // A different crate, or an older copy of this one: this is the
+            // intended case the comment above describes - genuinely
             // redundant, so keep the newest and say nothing.
-            Some(held)
-                if Version::parse(held.origin.crate_version)
-                    >= Version::parse(n.origin.crate_version) => {}
+            Some(held) if held.origin.newness() >= n.origin.newness() => {}
             _ => {
                 best.insert(key, n);
             }
@@ -824,10 +879,11 @@ fn lanes_for_group(
         // functions claiming it within one crate at one version is not that:
         // it is a plain contradiction, and resolving it by version would
         // silently pick one and hide the mistake.
-        let mut per_origin: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        let mut per_origin: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
         for i in &claimants {
+            let origin = &cs[*i].origin;
             *per_origin
-                .entry((cs[*i].origin.crate_name, cs[*i].origin.crate_version))
+                .entry((origin.crate_name, origin.crate_version, origin.place.dir))
                 .or_insert(0) += 1;
         }
         let contradicts_itself = per_origin.values().any(|n| *n > 1);
@@ -877,7 +933,7 @@ fn oldest_claimant<T: 'static>(cs: &[Named<T>], claimants: &[usize]) -> usize {
     claimants
         .iter()
         .copied()
-        .min_by_key(|i| Version::parse(cs[*i].origin.crate_version))
+        .min_by_key(|i| cs[*i].origin.newness())
         .expect("claimants is non-empty")
 }
 
@@ -968,6 +1024,7 @@ pub fn plan_with_metrics(
                 Origin {
                     crate_name: r.crate_name,
                     crate_version: r.crate_version,
+                    place: r.place,
                 },
             )
         },
@@ -1118,10 +1175,15 @@ fn pair_metrics(
                         metrics[i].crate_name == first.crate_name && metrics[i].name == first.name
                     });
                     if same_function {
-                        several
-                            .iter()
-                            .copied()
-                            .max_by_key(|&i| Version::parse(metrics[i].crate_version))
+                        several.iter().copied().max_by_key(|&i| {
+                            let m = metrics[i];
+                            Origin {
+                                crate_name: m.crate_name,
+                                crate_version: m.crate_version,
+                                place: m.place,
+                            }
+                            .newness()
+                        })
                     } else {
                         problems.push(Diagnostic::AmbiguousMetrics {
                             group: lane.group.to_string(),
@@ -1180,6 +1242,7 @@ mod tests {
             name,
             crate_name: "testcrate",
             crate_version: "1.0.0",
+            place: Place::UNKNOWN,
             add: noop_flat,
         }
     }
@@ -1669,6 +1732,7 @@ pub(crate) mod lane_tests {
             is_baseline,
             crate_name,
             crate_version,
+            place: Place::UNKNOWN,
             add_alt: noop_alt,
             mutates_input: false,
             metrics: None,
@@ -1713,6 +1777,7 @@ pub(crate) mod lane_tests {
             input_type_name: input.map_or("", |(_, name)| name),
             crate_name: "testcrate",
             crate_version,
+            place: Place::UNKNOWN,
             allocation: false,
             eval: |_, _| crate::Metrics::new(),
         }
@@ -2152,6 +2217,91 @@ mod version_tests {
         );
     }
 
+    /// A crate compared with its own `main` has the same version in both
+    /// copies. They are told apart by where they sit: the copy cargo was asked
+    /// to build is the new code, so the other is the baseline, and the new
+    /// code's input is the one used.
+    #[test]
+    fn copies_of_one_version_are_told_apart_by_where_they_sit() {
+        let fetched = Place::new("/home/me/.cargo/git/checkouts/mylib-1a2b/6b0b7fb", false);
+        let primary = Place::new("/home/me/src/mylib", true);
+        let cs = leak_c(vec![
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(primary),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(fetched),
+        ]);
+        let is = leak_i(vec![
+            inp_from::<u8>("m", "i", "u8", "mylib", "0.9.0").placed(primary),
+            inp_from::<u8>("m", "i", "u8", "mylib", "0.9.0").placed(fetched),
+        ]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        let names: Vec<&str> = lanes[0]
+            .candidates
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["sort@0.9.0#6b0b7fb", "sort@0.9.0#mylib"]);
+        assert_eq!(lanes[0].inputs.len(), 1);
+        assert_eq!(lanes[0].inputs[0].origin.place, primary);
+    }
+
+    /// Without a primary, a copy in the user's own tree is newer than one
+    /// cargo fetched.
+    #[test]
+    fn without_a_primary_a_local_copy_is_newer_than_a_fetched_one() {
+        let cs = leak_c(vec![
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0")
+                .placed(Place::new("/home/me/src/mylib", false)),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0").placed(Place::new(
+                "/home/me/.cargo/git/checkouts/mylib-1a2b/6b0b7fb",
+                false,
+            )),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes[0].candidates[0].name, "sort@0.9.0#6b0b7fb");
+    }
+
+    /// Otherwise the later directory is the newer - the whole directory, not
+    /// the part of it a name carries - and a name carries as much of the
+    /// directory as it takes to tell the copies apart.
+    #[test]
+    fn otherwise_the_later_directory_is_newer() {
+        let cs = leak_c(vec![
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0")
+                .placed(Place::new("/z/a/mylib", false)),
+            cand_from::<u8>("m", "sort", "u8", true, "mylib", "0.9.0")
+                .placed(Place::new("/a/b/mylib", false)),
+        ]);
+        let is = leak_i(vec![inp::<u8>("m", "i", "u8")]);
+        let (lanes, problems) = lanes(&cs, &is);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(lanes[0].candidates[0].name, "sort@0.9.0#b/mylib");
+        assert_eq!(lanes[0].candidates[1].name, "sort@0.9.0#a/mylib");
+    }
+
+    /// What counts as a copy cargo fetched is the layout of its own cache,
+    /// whichever way the path is written.
+    #[test]
+    fn cargos_own_directories_are_the_fetched_ones() {
+        for dir in [
+            "/h/.cargo/git/checkouts/mylib-1a2b/6b0b7fb",
+            "/h/.cargo/registry/src/index.crates.io-6f17d22bba15001f/mylib-0.9.0",
+            "C:\\Users\\me\\.cargo\\git\\checkouts\\mylib-1a2b\\6b0b7fb",
+        ] {
+            assert!(Place::new(dir, false).fetched(), "{dir}");
+        }
+        for dir in [
+            "/home/me/src/mylib",
+            "/home/me/git/mylib",
+            "/home/me/registry/mylib",
+            "",
+        ] {
+            assert!(!Place::new(dir, false).fetched(), "{dir}");
+        }
+    }
+
     /// Redundant inputs are dropped rather than measured twice.
     ///
     /// Two versions of one implementation are worth comparing; two versions
@@ -2298,6 +2448,7 @@ mod review_regressions {
                     Origin {
                         crate_name: c.crate_name,
                         crate_version: c.crate_version,
+                        place: Place::UNKNOWN,
                     },
                 )
             },
@@ -2408,6 +2559,7 @@ mod review_regressions {
             name,
             crate_name: "mycrate",
             crate_version: version,
+            place: Place::UNKNOWN,
             add: |a, n| {
                 a.add(n, || ());
             },
