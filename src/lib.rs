@@ -554,6 +554,7 @@ pub mod quiet;
 /// code rather than written by hand, and their shapes are not yet stable.
 #[doc(hidden)]
 pub mod registry;
+mod rng;
 mod run;
 mod scaling;
 mod suite;
@@ -1270,30 +1271,27 @@ impl Running {
 /// Helpers shared by both modules' tests.
 #[cfg(test)]
 pub(crate) mod testutil {
-    pub struct XorShift(pub u64);
-    impl XorShift {
-        pub fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
+    pub(crate) use crate::rng::XorShift;
 
-        /// Uniform on `[0, 1)`, from the top 53 bits - as many as an `f64`
-        /// mantissa holds.
-        fn uniform01(&mut self) -> f64 {
-            (self.next() >> 11) as f64 / (1u64 << 53) as f64
-        }
-
+    /// Noise for synthetic measurements, drawn from a [`XorShift`].
+    pub(crate) trait Jitter {
         /// A relative jitter drawn from `[-rel, rel)`, roughly triangular
         /// rather than flat: the sum of two independent uniforms concentrates
         /// near zero the way real measurement noise does, instead of every
         /// value in range being equally likely.
-        pub fn jitter(&mut self, rel: f64) -> f64 {
-            (self.uniform01() + self.uniform01() - 1.0) * rel
+        fn jitter(&mut self, rel: f64) -> f64;
+    }
+
+    impl Jitter for XorShift {
+        fn jitter(&mut self, rel: f64) -> f64 {
+            (uniform01(self) + uniform01(self) - 1.0) * rel
         }
+    }
+
+    /// Uniform on `[0, 1)`, from the top 53 bits - as many as an `f64`
+    /// mantissa holds.
+    fn uniform01(rng: &mut XorShift) -> f64 {
+        (rng.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 
     /// Is the machine quiet enough for a timing assertion to mean anything?
