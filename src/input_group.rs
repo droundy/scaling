@@ -16,6 +16,7 @@ use super::*;
 use crate::estimate::Paired;
 use crate::formatting::text_width;
 use crate::registry::ErasedInput;
+use crate::rng::XorShift;
 use std::fmt::{self, Display, Formatter};
 
 /// Never stop *voluntarily* on fewer rounds than this.
@@ -693,13 +694,14 @@ impl<I: 'static> InputGroup<I> {
         // Each alternative's time per iteration, in every round so far.
         let mut times: Vec<Vec<f64>> = vec![Vec::new(); k];
         let mut order: Vec<usize> = (0..k).collect();
-        let mut rng: u64 = (0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1;
+        let mut rng =
+            XorShift((0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1);
         let mut rounds = 0usize;
         let mut next_look = MIN_SAMPLES;
 
         let precise_enough = loop {
             inputs.fill(most_inputs);
-            shuffle(&mut order, &mut rng);
+            rng.shuffle(&mut order);
             for &i in &order {
                 let plan = &plans[i];
                 // A lone alternative, or a group that goes round a pool, runs
@@ -841,17 +843,6 @@ fn measure_metrics<I>(entries: &mut [Entry<I>], inputs: &mut Inputs<I>) -> Vec<M
                 .map(|e| e.alt.measure(&mut input, None))
                 .collect()
         }
-    }
-}
-
-/// Put `order` into a fresh uniformly random order, Fisher-Yates, drawing
-/// from the xorshift state `rng`.
-fn shuffle(order: &mut [usize], rng: &mut u64) {
-    for i in (1..order.len()).rev() {
-        *rng ^= *rng << 13;
-        *rng ^= *rng >> 7;
-        *rng ^= *rng << 17;
-        order.swap(i, (*rng % (i as u64 + 1)) as usize);
     }
 }
 

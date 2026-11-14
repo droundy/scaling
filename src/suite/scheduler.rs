@@ -1,6 +1,7 @@
 use super::{Clock, Found};
 use crate::interrupt;
 use crate::progress::Progress;
+use crate::rng::XorShift;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -49,8 +50,8 @@ pub(crate) struct Task {
 /// Round-robin over a set of benchmarks, one sample each per round.
 pub(crate) struct Scheduler {
     tasks: Vec<Task>,
-    /// Xorshift state for the per-round starting offset.
-    seed: u64,
+    /// Draws the per-round order of the benchmarks.
+    rng: XorShift,
 }
 
 impl Scheduler {
@@ -59,7 +60,7 @@ impl Scheduler {
             tasks: Vec::new(),
             // Zero is a fixed point of xorshift, and would leave every round
             // starting at position zero.
-            seed: seed | 1,
+            rng: XorShift(seed | 1),
         }
     }
 
@@ -69,21 +70,6 @@ impl Scheduler {
             clock,
             result: None,
         });
-    }
-
-    fn next_rand(&mut self) -> u64 {
-        self.seed ^= self.seed << 13;
-        self.seed ^= self.seed >> 7;
-        self.seed ^= self.seed << 17;
-        self.seed
-    }
-
-    /// Put `live` into a fresh uniformly random order, Fisher-Yates.
-    fn shuffle(&mut self, live: &mut [usize]) {
-        for i in (1..live.len()).rev() {
-            let j = (self.next_rand() % (i as u64 + 1)) as usize;
-            live.swap(i, j);
-        }
     }
 
     /// Poll every benchmark once per round until all of them finish.
@@ -103,7 +89,7 @@ impl Scheduler {
         let mut listening = (total > 0).then(interrupt::Listen::start);
         let mut stopped = 0;
         while !live.is_empty() {
-            self.shuffle(&mut live);
+            self.rng.shuffle(&mut live);
             let at_most = live
                 .iter()
                 .map(|&i| self.tasks[i].clock.remaining())
