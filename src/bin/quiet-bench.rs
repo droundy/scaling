@@ -361,9 +361,6 @@ backticks; or copy it to /usr/local/bin to type the short form.
 
         let _ = fs::remove_file(STATE_PATH);
         let _ = fs::remove_file(CPUS_PATH);
-        // Remove the wrapper the older shell implementation installed, so a
-        // machine set up with that script is fully cleaned up by this one.
-        let _ = fs::remove_file("/usr/local/bin/bench");
 
         println!("restored: {restored} settings put back, {moved} tasks unpinned");
         Ok(0)
