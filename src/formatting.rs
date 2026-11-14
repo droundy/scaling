@@ -224,8 +224,9 @@ fn table_width(
         .chain(std::iter::once(text_width(row_heading)))
         .max()
         .unwrap_or(0);
+    // Each column's width has the two spaces before its values in it, so
+    // nothing is added after the labels: the table is exactly this wide.
     label_width
-        + 2
         + columns
             .iter()
             .enumerate()
@@ -652,6 +653,30 @@ mod tests {
             input_7_with_a_long_descriptive_name  22.0ns ± 0.2ns
         "#]]
         .assert_eq(&shown);
+    }
+
+    /// A grid exactly as wide as the page stays a grid: only one wider than
+    /// `MAX_TABLE_WIDTH` is turned on its side, or broken into a line to each
+    /// cell.
+    #[test]
+    fn a_grid_exactly_the_width_of_the_page_stays_upright() {
+        let group = Group {
+            name: String::new(),
+            candidates: vec!["sort".into()],
+            // The row heading takes 9 columns. The input's column takes its
+            // 89-character name, plus the 2 spaces before its time: 91 in all,
+            // and 9 + 91 = 100.
+            inputs: vec![TypedInput {
+                name: "x".repeat(89),
+                type_name: String::new(),
+            }],
+            measurements: vec![vec![Some(timing(22.0))]],
+            baselines: vec![None],
+            metrics: Vec::new(),
+        };
+        let shown = render_group("sorting", &group);
+        let widest = shown.lines().map(|line| line.chars().count()).max();
+        assert_eq!(widest, Some(100), "{shown}");
     }
 
     #[test]
