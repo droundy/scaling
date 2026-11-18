@@ -1,0 +1,9 @@
+[package]
+name = "scaling-wasm-registrar"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Benchmarks registered in a dependency, for the wasm check in ../runner"
+
+[dependencies]
+scaling = { path = "../.." }

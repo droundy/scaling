@@ -1,6 +1,7 @@
 //! Hearing Ctrl-C while a run is going, so that it can stop early and print
 //! what it has.
 
+#[cfg(not(target_family = "wasm"))]
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Once;
@@ -38,6 +39,7 @@ impl Listen {
             // Ctrl-C would have done, except for the first ask of a run that
             // is ready to be stopped. If the program already has a handler, it
             // keeps it and a run is never asked to stop.
+            #[cfg(not(target_family = "wasm"))]
             let _ = ctrlc::try_set_handler(|| {
                 if READY.load(Ordering::SeqCst) == 0 || ASKED.swap(true, Ordering::SeqCst) {
                     std::process::exit(STATUS);

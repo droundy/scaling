@@ -110,6 +110,12 @@ impl Config {
 
         if suite.is_empty() {
             eprintln!("There are no benchmarks to run!");
+            #[cfg(target_family = "wasm")]
+            eprintln!(
+                "(If benchmarks are registered in a dependency crate, the wasm linker \
+                 drops them unless the program refers to a static in that crate; see \
+                 \"Running under WebAssembly\" in the README.)"
+            );
             return Ok(());
         }
         let count = suite.len();

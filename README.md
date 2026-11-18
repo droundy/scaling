@@ -534,6 +534,52 @@ sudo `which quiet-bench` restore
 Everything here is Linux-only and entirely optional; on other platforms, and
 when no reservation is active, benchmarks simply run normally.
 
+## Running under WebAssembly
+
+Benchmarks build for `wasm32-wasip1` and run under node's WASI, which measures
+the code as a wasm engine runs it (V8, in node's case). Ctrl-C handling and
+CPU quiescing are not available there; everything else, including
+`#[scaling::bench]` registration, is the same.
+
+```bash
+rustup target add wasm32-wasip1
+cargo bench --target wasm32-wasip1
+```
+
+This repository's [`.cargo/config.toml`](.cargo/config.toml) sets a runner,
+[`.cargo/wasi-runner.cjs`](.cargo/wasi-runner.cjs), which is about fifteen lines
+of node (version 22 or later is known to work). Copy both into your own
+project to do the same. Three things to know:
+
+- **Benchmarks in dependency crates are dropped by the wasm linker.** If a
+  crate registers benchmarks but the benchmark program only links it with
+  `use that_crate as _;`, `wasm-ld` leaves out its object files, since nothing
+  references them, and the run says "There are no benchmarks to run!". (Native
+  linking keeps them.) Benchmarks in the program's own crate are not affected.
+  Two things fix it, both shown, and checked on every change, by
+  [`wasm/registrar`](wasm/registrar) and [`wasm/runner`](wasm/runner):
+  - Give the crate a `pub static` and refer to it from the program, as in
+    `std::hint::black_box(&that_crate::ANCHOR);`. A static, not a function:
+    a small function is copied into the caller, which leaves the crate
+    unreferenced.
+  - Build the crate as one codegen unit,
+    `[profile.release.package.that_crate] codegen-units = 1` in the workspace
+    `Cargo.toml`, for whichever profile you build with. The anchor
+    keeps only the object file it is in, and a crate built as several has
+    registrations in the others.
+- **Use one copy of `scaling`.** Crates that register benchmarks depend on
+  `scaling` and `scaling-macros` themselves; until a release has this
+  support, patch both to the same source (`[patch.crates-io]`), or the program
+  has two registries.
+- **Inputs can differ from native.** Anything that depends on pointer width
+  differs on a 32-bit target, for example `rand`'s `SmallRng`, which is a
+  different algorithm there. Use a portable generator such as `StdRng` when
+  comparing wasm against native.
+
+`wasm32-unknown-unknown` is not supported:
+`std::time::Instant` panics there, and nothing runs the constructors that
+register benchmarks.
+
 ## License
 
 Licensed under either of
