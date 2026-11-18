@@ -103,3 +103,13 @@ jobs:
         with:
           command: bench
           args: --target wasm32-wasip1 --bench registered
+      # Benchmarks registered in a dependency, which a wasm linker drops
+      # unless the program refers to the crate. The native run is the control.
+      - uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --release -p scaling-wasm-runner
+      - uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --release --target wasm32-wasip1 -p scaling-wasm-runner

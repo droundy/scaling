@@ -1,0 +1,10 @@
+[package]
+name = "scaling-wasm-runner"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Runs benchmarks from a dependency, and fails if they are not all found"
+
+[dependencies]
+scaling = { path = "../.." }
+scaling-wasm-registrar = { path = "../registrar" }

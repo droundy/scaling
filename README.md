@@ -555,10 +555,18 @@ project to do the same. Three things to know:
   crate registers benchmarks but the benchmark program only links it with
   `use that_crate as _;`, `wasm-ld` leaves out its object files, since nothing
   references them, and the run says "There are no benchmarks to run!". (Native
-  linking keeps them.) Reference something from the same module as the
-  registrations, for example
-  `std::hint::black_box(that_crate::some_fn as fn(u64) -> u64);`, once per
-  crate. Benchmarks in the program's own crate are not affected.
+  linking keeps them.) Benchmarks in the program's own crate are not affected.
+  Two things fix it, both shown, and checked on every change, by
+  [`wasm/registrar`](wasm/registrar) and [`wasm/runner`](wasm/runner):
+  - Give the crate a `pub static` and refer to it from the program, as in
+    `std::hint::black_box(&that_crate::ANCHOR);`. A static, not a function:
+    a small function is copied into the caller, which leaves the crate
+    unreferenced.
+  - Build the crate as one codegen unit,
+    `[profile.release.package.that_crate] codegen-units = 1` in the workspace
+    `Cargo.toml`, for whichever profile you build with. The anchor
+    keeps only the object file it is in, and a crate built as several has
+    registrations in the others.
 - **Use one copy of `scaling`.** Crates that register benchmarks depend on
   `scaling` and `scaling-macros` themselves; until a release has this
   support, patch both to the same source (`[patch.crates-io]`), or the program

@@ -113,7 +113,7 @@ impl Config {
             #[cfg(target_family = "wasm")]
             eprintln!(
                 "(If benchmarks are registered in a dependency crate, the wasm linker \
-                 drops them unless the program uses something from the same module; see \
+                 drops them unless the program refers to a static in that crate; see \
                  \"Running under WebAssembly\" in the README.)"
             );
             return Ok(());
