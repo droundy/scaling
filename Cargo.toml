@@ -14,13 +14,16 @@ exclude = [".github", ".gitignore", "prek.toml"]
 # `#[expect]` was stabilized in Rust 1.81.
 rust-version = "1.81"
 
+# Ctrl-C handling needs signals, which a wasm target does not have.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ctrlc = "3.5"
+
 # Only used to set CPU affinity, which only exists on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [dependencies]
 inventory = "0.3.21"
-ctrlc = "3.5"
 # Pinned exactly: the macros write struct literals of this crate's registration
 # types into the user's crate, so a macros release that is not this crate's
 # own would not compile against it. Bump the two versions together.

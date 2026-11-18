@@ -76,3 +76,30 @@ jobs:
         with:
           command: test
           args: --all
+
+  # Benchmarks are meant to run under wasm as well, through node's WASI, so
+  # build them for it and run the registered ones.
+  wasm:
+    name: WebAssembly (WASI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: wasm32-wasip1
+          override: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: -D warnings
+        with:
+          command: check
+          args: --target wasm32-wasip1 --benches
+      - uses: actions-rs/cargo@v1
+        with:
+          command: bench
+          args: --target wasm32-wasip1 --bench registered
