@@ -42,9 +42,8 @@ members = [".", "macros", "wasm/registrar", "wasm/runner"]
 name = "registered"
 harness = false
 
-# One codegen unit for the crate that registers benchmarks for `wasm/runner`.
-# A wasm linker keeps an object file of a library only if something refers to
-# it, and the runner refers to one static, so that must be the only object
-# file holding registrations. See that crate.
+# One codegen unit for the crate that registers benchmarks for `wasm/runner`,
+# so its anchor keeps them all on wasm; see "Running under WebAssembly" in the
+# README. `bench` inherits it. Unoptimized builds have not been seen to need it.
 [profile.release.package.scaling-wasm-registrar]
 codegen-units = 1

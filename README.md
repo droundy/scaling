@@ -546,10 +546,13 @@ rustup target add wasm32-wasip1
 cargo bench --target wasm32-wasip1
 ```
 
-This repository's [`.cargo/config.toml`](.cargo/config.toml) sets a runner,
-[`.cargo/wasi-runner.cjs`](.cargo/wasi-runner.cjs), which is about fifteen lines
-of node (version 22 or later is known to work). Copy both into your own
-project to do the same. Three things to know:
+This repository's
+[`.cargo/config.toml`](https://github.com/droundy/scaling/blob/main/.cargo/config.toml)
+sets a runner,
+[`.cargo/wasi-runner.cjs`](https://github.com/droundy/scaling/blob/main/.cargo/wasi-runner.cjs),
+a short node script (version 22 or later is known to work).
+Copy both into your own project, keeping the script executable, to do the
+same. Three things to know:
 
 - **Benchmarks in dependency crates are dropped by the wasm linker.** If a
   crate registers benchmarks but the benchmark program only links it with
@@ -557,16 +560,20 @@ project to do the same. Three things to know:
   references them, and the run says "There are no benchmarks to run!". (Native
   linking keeps them.) Benchmarks in the program's own crate are not affected.
   Two things fix it, both shown, and checked on every change, by
-  [`wasm/registrar`](wasm/registrar) and [`wasm/runner`](wasm/runner):
+  [`wasm/registrar`](https://github.com/droundy/scaling/tree/main/wasm/registrar)
+  and [`wasm/runner`](https://github.com/droundy/scaling/tree/main/wasm/runner):
   - Give the crate a `pub static` and refer to it from the program, as in
     `std::hint::black_box(&that_crate::ANCHOR);`. A static, not a function:
     a small function is copied into the caller, which leaves the crate
     unreferenced.
   - Build the crate as one codegen unit,
     `[profile.release.package.that_crate] codegen-units = 1` in the workspace
-    `Cargo.toml`, for whichever profile you build with. The anchor
-    keeps only the object file it is in, and a crate built as several has
-    registrations in the others.
+    `Cargo.toml`, for whichever profile you build with (`cargo bench` uses
+    `release`'s). The anchor keeps only the object file it is in, and a crate
+    built as several has registrations in the others.
+
+  A linker flag such as `--whole-archive` cannot do this instead: rustc puts
+  `-C link-arg`s after the libraries, where they no longer apply to them.
 - **Use one copy of `scaling`.** Crates that register benchmarks depend on
   `scaling` and `scaling-macros` themselves; until a release has this
   support, patch both to the same source (`[patch.crates-io]`), or the program

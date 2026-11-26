@@ -21,7 +21,7 @@ fn in_the_runner() -> u64 {
     (0..130u64).fold(0, |a, x| a.wrapping_mul(37).wrapping_add(x))
 }
 
-/// Every benchmark this program should find, by the end of its name.
+/// Every benchmark this program should find, by the last segments of its name.
 const EXPECTED: [&str; 4] = [
     "in_the_runner",
     "at_the_root",
@@ -51,7 +51,12 @@ fn main() -> ExitCode {
     let missing: Vec<&str> = EXPECTED
         .iter()
         .copied()
-        .filter(|want| !found.iter().any(|name| name.ends_with(want)))
+        .filter(|want| {
+            !found.iter().any(|name| {
+                name.strip_suffix(want)
+                    .is_some_and(|rest| rest.is_empty() || rest.ends_with("::"))
+            })
+        })
         .collect();
     if missing.is_empty() {
         println!(

@@ -1,2 +1,2 @@
 [target.wasm32-wasip1]
-runner = ["node", "--no-warnings", ".cargo/wasi-runner.cjs"]
+runner = ".cargo/wasi-runner.cjs"
