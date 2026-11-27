@@ -110,6 +110,23 @@ impl Config {
 
         if suite.is_empty() {
             eprintln!("There are no benchmarks to run!");
+            // Only when nothing is registered at all: an empty suite with
+            // registrations is what the filters left.
+            #[cfg(target_family = "wasm")]
+            let nothing_registered = {
+                use crate::registry::{Candidate, Registered};
+                inventory::iter::<Registered>().next().is_none()
+                    && inventory::iter::<Candidate>().next().is_none()
+            };
+            #[cfg(target_family = "wasm")]
+            if nothing_registered {
+                eprintln!(
+                    "(If benchmarks are registered in a dependency crate, the wasm \
+                     linker drops them unless the program refers to a static in that \
+                     crate, built as one codegen unit; see \"Running under \
+                     WebAssembly\" in the scaling README.)"
+                );
+            }
             return Ok(());
         }
         let count = suite.len();
@@ -189,6 +206,9 @@ impl Config {
     /// program's own after a run has begun fails, since there can be only one
     /// in a process. One Ctrl-C stops every run in flight, as when tests call
     /// this from several threads.
+    ///
+    /// On wasm, which has no signals, no handler is set: Ctrl-C ends the
+    /// process at once, and a run is never stopped early.
     ///
     /// ```no_run
     /// use scaling::Config;

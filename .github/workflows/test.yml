@@ -76,3 +76,42 @@ jobs:
         with:
           command: test
           args: --all
+
+  # Benchmarks are meant to run under wasm as well, through node's WASI, so
+  # build them for it and run the registered ones.
+  wasm:
+    name: WebAssembly (WASI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: wasm32-wasip1
+          override: true
+      # Not 20 or 22: on GitHub's runners their WASI segfaults now and then
+      # part way through a write to stderr, on Intel and AMD alike.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions-rs/cargo@v1
+        env:
+          RUSTFLAGS: -D warnings
+        with:
+          command: check
+          args: --target wasm32-wasip1 --workspace --all-targets
+      - uses: actions-rs/cargo@v1
+        with:
+          command: bench
+          args: --target wasm32-wasip1 --bench registered
+      # Benchmarks registered in a dependency, which a wasm linker drops
+      # unless the program refers to the crate. The native run is the control.
+      - uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --release -p scaling-wasm-runner
+      - uses: actions-rs/cargo@v1
+        with:
+          command: run
+          args: --release --target wasm32-wasip1 -p scaling-wasm-runner
