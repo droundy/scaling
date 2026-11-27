@@ -90,9 +90,11 @@ jobs:
           toolchain: stable
           target: wasm32-wasip1
           override: true
+      # Not 20 or 22: on GitHub's runners their WASI segfaults now and then
+      # part way through a write to stderr, on Intel and AMD alike.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       - uses: actions-rs/cargo@v1
         env:
           RUSTFLAGS: -D warnings

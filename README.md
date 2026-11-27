@@ -550,7 +550,9 @@ This repository's
 [`.cargo/config.toml`](https://github.com/droundy/scaling/blob/main/.cargo/config.toml)
 sets a runner,
 [`.cargo/wasi-runner.cjs`](https://github.com/droundy/scaling/blob/main/.cargo/wasi-runner.cjs),
-a short node script (version 22 or later is known to work).
+a short node script. Use node 24 or later: under 20 and 22 the program
+segfaults now and then part way through printing, much like
+[nodejs/node#51303](https://github.com/nodejs/node/issues/51303).
 Copy both into your own project, keeping the script executable, to do the
 same. Three things to know:
 
